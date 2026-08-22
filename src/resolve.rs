@@ -30937,8 +30937,10 @@ impl<'a> Checker<'a> {
     }
 
     /// The access path an expression denotes: a root name followed by property segments through
-    /// plain (`.`) and safe (`?.`) member reads. `None` for anything else (a call result, an
-    /// indexed read, a temporary) — a proof on it says nothing about a later re-read.
+    /// plain (`.`) and safe (`?.`) member reads. A checked cast preserves the operand's path; a
+    /// safe cast does not, because its null result does not prove the operand null. `None` for
+    /// anything else (a call result, an indexed read, a temporary) — a proof on it says nothing
+    /// about a later re-read.
     fn expr_access_path(&self, e: ExprId) -> Option<NarrowPath> {
         match self.file.expr(e) {
             Expr::Name(n) => Some(NarrowPath::root_only(n)),
@@ -30956,6 +30958,11 @@ impl<'a> Checker<'a> {
                 path.segments.push(name.clone());
                 Some(path)
             }
+            Expr::As {
+                operand,
+                nullable: false,
+                ..
+            } => self.expr_access_path(*operand),
             _ => None,
         }
     }
@@ -31226,32 +31233,7 @@ impl<'a> Checker<'a> {
         // The target is computed before the stability gate so a DECLINED proof can still name it.
         let site = self.span(cond);
         let stable_ty = self.stable_path_ty(scope, &path, site);
-        let tt = self.type_ref_ty_silent(scope, &ty);
-        let runtime_tt =
-            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
-                .unwrap_or(tt);
-        let runtime_tt = stable_ty
-            .map(|declared| {
-                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
-                    &self.fed_source(),
-                    runtime_tt,
-                    declared,
-                )
-            })
-            .unwrap_or(runtime_tt);
-        // `is T?` accepts null, so its narrowing remains nullable.
-        let narrowed = if ty.nullable() {
-            (runtime_tt != Ty::Error).then_some(Ty::nullable(runtime_tt.non_null()))
-        } else if runtime_tt.is_reference() {
-            Some(runtime_tt)
-        } else {
-            // A non-null primitive (`is Int`/`is Double`/`is Char`): narrow to the primitive so a
-            // later USE unboxes — the lowerer's read paths coerce a reference slot to the narrowed
-            // primitive (checkcast wrapper + unbox), and a boxed-FP `==` reached this way conforms
-            // with IEEE semantics. Unsigned (`is UInt`) stays unnarrowed: its value-box unbox to the
-            // `kotlin.UInt` type isn't modeled (krusty erases unsigned to `int`).
-            (tt.is_numeric_or_char() || tt == Ty::Boolean).then_some(tt)
-        };
+        let narrowed = self.proven_narrowed_ty(scope, stable_ty, &ty);
         // Only stable values smart-cast soundly — a `var`/computed property could change.
         if stable_ty.is_none() {
             if let Some(narrowed) = narrowed {
@@ -31276,11 +31258,128 @@ impl<'a> Checker<'a> {
         } else {
             crate::trace_compiler!(
                 "smartcast",
-                "condition expression={} path={path:?} rejected: target={tt:?}",
+                "condition expression={} path={path:?} rejected: target={:?}",
                 cond.0,
+                self.type_ref_ty_silent(scope, &ty),
             );
         }
         out
+    }
+
+    /// The type a passed type proof (`is T` / `as T`) narrows a stable path to. A nullable target
+    /// accepts null, so the proven type remains nullable.
+    fn proven_narrowed_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        declared: Option<Ty>,
+        ty: &TypeRef,
+    ) -> Option<Ty> {
+        let tt = self.type_ref_ty_silent(scope, ty);
+        let runtime_tt =
+            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
+                .unwrap_or(tt);
+        let runtime_tt = declared
+            .map(|declared| {
+                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
+                    &self.fed_source(),
+                    runtime_tt,
+                    declared,
+                )
+            })
+            .unwrap_or(runtime_tt);
+        if ty.nullable() {
+            return (runtime_tt != Ty::Error).then_some(Ty::nullable(runtime_tt.non_null()));
+        }
+        if runtime_tt.is_reference() {
+            Some(runtime_tt)
+        } else {
+            // A non-null primitive (`is Int`/`as Double`): narrow to the primitive so a
+            // later USE unboxes — the lowerer's read paths coerce a reference slot to the narrowed
+            // primitive (checkcast wrapper + unbox), and a boxed-FP `==` reached this way conforms
+            // with IEEE semantics. Unsigned (`is UInt`) stays unnarrowed: its value-box unbox to the
+            // `kotlin.UInt` type isn't modeled (krusty erases unsigned to `int`).
+            (tt.is_numeric_or_char() || tt == Ty::Boolean).then_some(tt)
+        }
+    }
+
+    /// The cast facts an evaluated expression proves regardless of the boolean value it computes:
+    /// a non-null `x as T` that ran without throwing proves the stable `x` is a `T` on every path
+    /// past the evaluation. Only subexpressions certain to have run when `e` ran are descended
+    /// into — the rhs of `&&`/`||`/`?:`, a safe call's selector side, branches, and
+    /// lambda bodies are conditional, and `as?` yields null instead of throwing, so it proves
+    /// nothing.
+    fn as_cast_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        out: &mut Vec<(NarrowPath, Ty)>,
+    ) {
+        match self.file.expr(e).clone() {
+            Expr::As {
+                operand,
+                ty,
+                nullable,
+            } => {
+                self.as_cast_narrowings(scope, operand, out);
+                if nullable {
+                    return;
+                }
+                let Some(path) = self.expr_access_path(operand) else {
+                    return;
+                };
+                let site = self.span(e);
+                let Some(stable_ty) = self.stable_path_ty(scope, &path, site) else {
+                    return;
+                };
+                let narrowed = self.proven_narrowed_ty(scope, Some(stable_ty), &ty);
+                if let Some(narrowed) = narrowed {
+                    crate::trace_compiler!(
+                        "smartcast",
+                        "as-cast expression={} path={path:?} target={narrowed:?}",
+                        e.0,
+                    );
+                    out.push((path, narrowed));
+                }
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                self.as_cast_narrowings(scope, lhs, out);
+                if !matches!(op, BinOp::And | BinOp::Or) {
+                    self.as_cast_narrowings(scope, rhs, out);
+                }
+            }
+            Expr::Elvis { lhs, .. } => self.as_cast_narrowings(scope, lhs, out),
+            Expr::Unary { operand, .. } | Expr::NotNull { operand } | Expr::Is { operand, .. } => {
+                self.as_cast_narrowings(scope, operand, out)
+            }
+            Expr::Member { receiver, .. } | Expr::SafeCall { receiver, .. } => {
+                self.as_cast_narrowings(scope, receiver, out)
+            }
+            Expr::Index { array, indices } => {
+                self.as_cast_narrowings(scope, array, out);
+                for index in indices {
+                    self.as_cast_narrowings(scope, index, out);
+                }
+            }
+            Expr::Call { callee, args } => {
+                self.as_cast_narrowings(scope, callee, out);
+                for arg in args {
+                    self.as_cast_narrowings(scope, arg, out);
+                }
+            }
+            Expr::InRange {
+                value, start, end, ..
+            } => {
+                self.as_cast_narrowings(scope, value, out);
+                self.as_cast_narrowings(scope, start, out);
+                self.as_cast_narrowings(scope, end, out);
+            }
+            Expr::RangeTo { lo, hi, .. } => {
+                self.as_cast_narrowings(scope, lo, out);
+                self.as_cast_narrowings(scope, hi, out);
+            }
+            Expr::If { cond, .. } => self.as_cast_narrowings(scope, cond, out),
+            _ => {}
+        }
     }
 
     fn condition_narrowings(
@@ -31351,6 +31450,9 @@ impl<'a> Checker<'a> {
         }
         self.contract_condition_narrowings(scope, cond, truth, out, declined);
         out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
+        // A condition known to have been evaluated (a leaf reached above, or the whole condition)
+        // also proves the casts that ran inside it, whatever its boolean outcome.
+        self.as_cast_narrowings(scope, cond, out);
     }
 
     /// Bring the narrowings a condition proves into scope for a guarded region. The single
