@@ -56,6 +56,22 @@ fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
+fn assert_frontends_accept(sources: &[(&str, &str)]) {
+    let result = common::compiler_diagnostics(sources, &[common::stdlib_jar()]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, "")
+    );
+    let source_text = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&source_text),
+        Vec::<String>::new()
+    );
+}
+
 fn assert_accepted_and_runs(src: &str, stem: &str) {
     let (reference_code, reference_diagnostics) = common::kotlinc_source_result(stem, src);
     assert_eq!((reference_code, reference_diagnostics.as_str()), (0, ""));
@@ -64,6 +80,11 @@ fn assert_accepted_and_runs(src: &str, stem: &str) {
         Vec::<String>::new()
     );
     assert_eq!(run(src, stem), "OK");
+}
+
+fn assert_accepted_and_runs_files(sources: &[(&str, &str)], stem: &str) {
+    assert_frontends_accept(sources);
+    common::expect_box_ok_files_with_stdlib(sources, stem);
 }
 
 #[test]
@@ -547,6 +568,143 @@ fun f(value: Any?): Int {
         common::front_end_diagnostics_with_stdlib(src),
         ["unresolved reference 'length'.".to_string()]
     );
+}
+
+#[test]
+fn member_call_on_class_typed_receiver_substitutes_both_class_and_member_parameters() {
+    let src = r#"
+interface MyMap<K, V> {
+    fun descendantKeys(key: K): Set<K>
+}
+
+fun interface MyFactory<K, E> {
+    fun convert(element: K): List<E>
+
+    fun <V> createMap(): MyMap<K, V> = TODO()
+}
+
+class SetImpl<K, E>(convertor: MyFactory<K, E>) {
+    private val map = convertor.createMap<Nothing?>()
+
+    fun descendants(element: K): Set<K> {
+        return map.descendantKeys(element)
+    }
+}
+"#;
+    assert_frontends_accept(&[("MixedClassMemberParams.kt", src)]);
+}
+
+#[test]
+fn inferred_member_properties_keep_direct_and_nested_classifier_parameters() {
+    const DECLARATIONS: &str = r#"
+interface Values<T> {
+    fun direct(): T
+    fun nested(): List<T>
+}
+
+class Holder<T>(values: Values<T>) {
+    val direct = values.direct()
+    val nested = values.nested()
+}
+
+class StringValues : Values<String> {
+    override fun direct(): String = "OK"
+    override fun nested(): List<String> = listOf("OK")
+}
+"#;
+    const USE: &str = r#"
+fun box(): String {
+    val holder = Holder<String>(StringValues())
+    val direct: String = holder.direct
+    val nested: List<String> = holder.nested
+    return if (direct == "OK" && nested.single() == "OK") "OK" else "FAIL"
+}
+"#;
+
+    assert_accepted_and_runs_files(
+        &[("Declarations.kt", DECLARATIONS), ("Use.kt", USE)],
+        "InferredDirectAndNestedProperties",
+    );
+}
+
+#[test]
+fn inferred_member_property_erasure_respects_classifier_bounds() {
+    let source = r#"
+interface Producer<T> {
+    fun produce(): T
+}
+
+class ReferenceBound<T : CharSequence>(producer: Producer<T>) {
+    private val value = producer.produce()
+
+    fun current(): T = value
+    fun length(): Int = value.length
+}
+
+class NullableBound<T : CharSequence?>(producer: Producer<T>) {
+    private val value = producer.produce()
+
+    fun current(): T = value
+}
+
+class StringProducer : Producer<String> {
+    override fun produce(): String = "OK"
+}
+
+class NullableProducer : Producer<String?> {
+    override fun produce(): String? = null
+}
+
+fun box(): String {
+    val reference = ReferenceBound<String>(StringProducer())
+    val nullable = NullableBound<String?>(NullableProducer())
+    return if (reference.length() == 2 && nullable.current() == null) "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(source, "InferredPropertyBounds");
+}
+
+#[test]
+fn inferred_direct_nullable_parameter_property_round_trips() {
+    let source = r#"
+interface Values<T> {
+    fun nullable(): T?
+}
+
+class IntValues : Values<Int> {
+    override fun nullable(): Int? = 41
+}
+
+class Holder<T>(values: Values<T>) {
+    private val value = values.nullable()
+
+    fun current(): T? = value
+}
+
+fun box(): String {
+    val value: Int? = Holder<Int>(IntValues()).current()
+    return if (value == 41) "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(source, "InferredNullableParameterProperty");
+}
+
+#[test]
+fn inferred_member_property_keeps_a_captured_outer_parameter() {
+    let source = r#"
+interface Producer<T> { fun produce(): T }
+
+class Outer<T> {
+    inner class Holder(producer: Producer<T>) {
+        private val value = producer.produce()
+
+        fun current(): T = value
+    }
+}
+
+fun read(holder: Outer<String>.Holder): String = holder.current()
+"#;
+    assert_frontends_accept(&[("InferredCapturedParameterProperty.kt", source)]);
 }
 
 #[test]

@@ -91,11 +91,9 @@ fun read(): Int {\n\
     return n\n\
 }\n";
     let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("type mismatch")),
-        "direct nullable type-parameter specialization must remain a checked skip; got {diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["initializer type mismatch: expected 'Int', actual 'Int?'.".to_string()]
     );
 }
 

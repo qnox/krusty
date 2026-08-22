@@ -2006,6 +2006,25 @@ impl ClassSig {
         bindings
     }
 
+    fn erased_type_parameter_bindings(&self) -> HashMap<String, Ty> {
+        self.type_parameter_bindings(Ty::obj_name(self.internal))
+            .into_iter()
+            .map(|(parameter, bound)| {
+                let erased = if bound == Ty::Error || matches!(bound, Ty::Nullable(_)) {
+                    Ty::obj("kotlin/Any")
+                } else {
+                    let head = bound.erased_recv();
+                    if head.is_reference() {
+                        head
+                    } else {
+                        Ty::obj("kotlin/Any")
+                    }
+                };
+                (parameter, erased)
+            })
+            .collect()
+    }
+
     pub(crate) fn has_no_arg_constructor(&self) -> bool {
         (self.has_primary_ctor
             && (self.ctor_params.is_empty()
@@ -7497,8 +7516,9 @@ fn collect_signatures_with_cp_impl(
                     init_scope.extend(
                         c.props
                             .iter()
-                            .zip(&ctor_params)
-                            .map(|(p, &ty)| (p.name.clone(), ty, p.is_var)),
+                            // Property inference keeps the classifier's parameter identities.
+                            .zip(&ctor_param_shapes)
+                            .map(|(p, &(ty, _))| (p.name.clone(), ty, p.is_var)),
                     );
                     let implicit_classifier = file.decls.iter().find_map(|&owner| {
                         let Decl::Class(owner) = file.decl(owner) else {
@@ -12272,21 +12292,36 @@ fn publish_top_level_property_type(
     }
 }
 
-/// Write a resolved member property type into its owner's signature — the declared property and the
-/// backing-field entry, which are the two records a later read consults.
+/// Publish a resolved member property type to its semantic template and erased declaration slots.
 fn publish_member_property_type(table: &mut SymbolTable, owner: TypeName, name: &str, ty: Ty) {
     let Some(signature) = table.class_by_type_name_mut(owner) else {
         return;
     };
+    let classifier_parameters = signature
+        .type_parameters
+        .type_params
+        .iter()
+        .chain(signature.captured_type_parameters.type_params.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let physical = if ty_mentions_param(ty, &classifier_parameters) {
+        signature
+            .generic_property_shapes
+            .insert(name.to_string(), ty);
+        let erasure = signature.erased_type_parameter_bindings();
+        crate::symbol_resolver::ty_subst(ty, &erasure)
+    } else {
+        ty
+    };
     if let Some(property) = signature.declared_props.get_mut(name) {
-        property.ty = ty;
+        property.ty = physical;
     }
     if let Some(backing) = signature
         .props
         .iter_mut()
         .find(|(property_name, _, _)| property_name == name)
     {
-        backing.1 = ty;
+        backing.1 = physical;
     }
 }
 
