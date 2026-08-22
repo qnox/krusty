@@ -7240,10 +7240,10 @@ impl<'a> Parser<'a> {
             }
             return self.parse_prefix();
         }
-        // `throw <expr>` — a soft keyword; raises an exception (bottom type `Nothing`).
+        // A jump operand is a full expression, including an elvis chain.
         if self.at(TokenKind::Ident) && self.keyword_text("throw") {
             self.bump(); // 'throw'
-            let operand = self.parse_bp(0);
+            let operand = self.parse_expr();
             let end = self.file.expr_spans[operand.0 as usize];
             return self
                 .file
@@ -7306,7 +7306,7 @@ impl<'a> Parser<'a> {
             ) {
                 None
             } else {
-                Some(self.parse_bp(0))
+                Some(self.parse_expr())
             };
             let end = value
                 .map(|v| self.file.expr_spans[v.0 as usize])
@@ -10103,6 +10103,24 @@ typealias Box<@Marker T> = List<T>
         assert_eq!(
             tree("fun g(x: Int, y: Int): Int = -x as Int * y"),
             "(fun g (param x Int) (param y Int) :Int (* (as (neg x) Int) y))\n"
+        );
+    }
+
+    #[test]
+    fn throw_operand_includes_the_elvis_chain() {
+        assert_eq!(
+            tree("fun fail(e: Throwable): Nothing = throw e.cause ?: e"),
+            "(fun fail (param e Throwable) :Nothing (throw (?: (. e cause) e)))\n"
+        );
+    }
+
+    #[test]
+    fn expression_position_return_operand_includes_the_elvis_chain() {
+        assert_eq!(
+            tree(
+                "fun choose(a: String?, b: String?): String { a ?: return b ?: \"fallback\"; return a }"
+            ),
+            "(fun choose (param a String) (param b String) :String (block (?: a (return (?: b \"fallback\"))) (return a)))\n"
         );
     }
 
