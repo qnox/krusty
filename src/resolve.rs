@@ -31769,6 +31769,9 @@ impl<'a> Checker<'a> {
             Expr::FloatLit(value) => AnnotationValue::Float(*value),
             Expr::BoolLit(value) => AnnotationValue::Boolean(*value),
             Expr::CharLit(value) => AnnotationValue::Char(*value),
+            Expr::Binary { op: BinOp::Add, .. } => {
+                AnnotationValue::String(self.fold_annotation_string(e)?)
+            }
             Expr::AnnotationArrayLiteral(elements) => {
                 // The DECLARED element type decides what these expressions fold to, which is why
                 // the parser retained the literal instead of picking an array factory.
@@ -31812,6 +31815,131 @@ impl<'a> Checker<'a> {
             _ => self.folded_library_constant(e, expected)?,
         };
         Some(value)
+    }
+
+    /// Fold a compile-time constant concatenation to its Kotlin string value.
+    fn fold_annotation_string(&self, e: ExprId) -> Option<crate::kt_string::KtString> {
+        self.fold_annotation_string_at_depth(e, 0)
+    }
+
+    fn fold_annotation_string_at_depth(
+        &self,
+        e: ExprId,
+        depth: u32,
+    ) -> Option<crate::kt_string::KtString> {
+        if depth > 64 {
+            return None;
+        }
+        match self.file.expr(e) {
+            Expr::StringLit(value) => Some(value.clone()),
+            Expr::Binary {
+                op: BinOp::Add,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let left = self.fold_annotation_string_at_depth(*lhs, depth + 1)?;
+                let right = self.fold_annotation_string_at_depth(*rhs, depth + 1)?;
+                let mut buf = crate::kt_string::KtStringBuf::new();
+                buf.push_kt(&left);
+                buf.push_kt(&right);
+                Some(buf.finish())
+            }
+            _ => {
+                let literal;
+                let constant = match self.resolved_constants.get(&e) {
+                    Some(constant) => constant,
+                    None => {
+                        literal =
+                            source_literal_constant(self.file, e, self.expr_types[e.0 as usize])?;
+                        &literal
+                    }
+                };
+                Self::annotation_constant_string(constant)
+            }
+        }
+    }
+
+    fn annotation_constant_string(
+        constant: &crate::libraries::LibraryConst,
+    ) -> Option<crate::kt_string::KtString> {
+        use crate::libraries::LibConst;
+
+        let ty = constant.ty.non_null();
+        let text = match &constant.value {
+            LibConst::Str(value) => return Some(value.clone()),
+            LibConst::Int(value) if ty == Ty::Boolean => (*value != 0).to_string(),
+            LibConst::Int(value) if ty == Ty::Char => {
+                let mut text = crate::kt_string::KtStringBuf::new();
+                text.push_unit(*value as u16);
+                return Some(text.finish());
+            }
+            LibConst::Int(value) if ty == Ty::UInt => (*value as u32).to_string(),
+            LibConst::Int(value) => value.to_string(),
+            LibConst::Long(value) if ty == Ty::ULong => (*value as u64).to_string(),
+            LibConst::Long(value) => value.to_string(),
+            LibConst::Float(value) => Self::kotlin_float_string(*value as f64, true),
+            LibConst::Double(value) => Self::kotlin_float_string(*value, false),
+        };
+        Some(crate::kt_string::KtString::from(text))
+    }
+
+    fn kotlin_float_string(value: f64, float: bool) -> String {
+        if value.is_nan() {
+            return "NaN".to_string();
+        }
+        if value == f64::INFINITY {
+            return "Infinity".to_string();
+        }
+        if value == f64::NEG_INFINITY {
+            return "-Infinity".to_string();
+        }
+        let mut text = if float {
+            format!("{:?}", value as f32)
+        } else {
+            format!("{value:?}")
+        };
+        let magnitude = value.abs();
+        if magnitude != 0.0
+            && (magnitude < 1.0e-3 || magnitude >= 1.0e7)
+            && text.find(['e', 'E']).is_none()
+        {
+            return Self::fixed_to_kotlin_scientific(&text);
+        }
+        if let Some(exponent) = text.find(['e', 'E']) {
+            let exponent_text = text[exponent + 1..].trim_start_matches('+').to_string();
+            text.truncate(exponent);
+            if text.find('.').is_none() {
+                text.push_str(".0");
+            }
+            text.push('E');
+            text.push_str(&exponent_text);
+        } else if text.find('.').is_none() {
+            text.push_str(".0");
+        }
+        text
+    }
+
+    fn fixed_to_kotlin_scientific(text: &str) -> String {
+        let (sign, unsigned) = text
+            .strip_prefix('-')
+            .map_or(("", text), |unsigned| ("-", unsigned));
+        let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let (mut digits, exponent) = if integer != "0" {
+            (
+                format!("{}{}", integer.trim_start_matches('0'), fraction),
+                integer.trim_start_matches('0').len() as i32 - 1,
+            )
+        } else {
+            let leading = fraction.bytes().take_while(|digit| *digit == b'0').count();
+            (fraction[leading..].to_string(), -(leading as i32) - 1)
+        };
+        digits.truncate(digits.trim_end_matches('0').len());
+        let first = digits.remove(0);
+        if digits.is_empty() {
+            digits.push('0');
+        }
+        format!("{sign}{first}.{digits}E{exponent}")
     }
 
     /// A resolved compile-time constant read (`const val`), whatever expression shape reached it.
@@ -39716,6 +39844,16 @@ impl<'a> Checker<'a> {
                             if ty == Ty::Error && self.property_inference_failed(&property.property)
                             {
                                 self.silent_error_exprs.insert(e);
+                            }
+                            if property.property.is_const {
+                                if let Some(constant) = property
+                                    .property
+                                    .source_key
+                                    .and_then(|key| self.syms.source_props.get(&key))
+                                    .and_then(|signature| signature.compile_time_constant.clone())
+                                {
+                                    self.resolved_constants.insert(e, constant);
+                                }
                             }
                             self.expr_lowers
                                 .insert(e, ExprLowering::TopLevelPropertyGet(property));
