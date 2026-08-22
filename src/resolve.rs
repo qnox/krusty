@@ -809,7 +809,6 @@ fn register_top_level_function_conflict(
 }
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
-pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
 /// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`has_reified_type_params`/`is_abstract`/
@@ -42567,16 +42566,16 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn record_extension_call_from_callables(
+    /// Select one receiver's extension rung without committing it.
+    fn select_extension_rung(
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
         rt: Ty,
-        name: &str,
         type_args: &[Ty],
         expected: Option<Ty>,
         callables: &crate::libraries::Callables,
-    ) -> Option<Ty> {
+    ) -> ExtensionRungSelection {
         let CallArgs {
             call: e,
             args,
@@ -42600,17 +42599,24 @@ impl<'a> Checker<'a> {
             expected,
             overloads.clone(),
         );
-        self.record_extension_selection(
-            scope,
-            call_args,
-            rt,
-            name,
-            type_args,
-            ExtensionRungSelection {
-                selection,
-                overloads,
-            },
-        )
+        ExtensionRungSelection {
+            selection,
+            overloads,
+        }
+    }
+
+    fn record_extension_call_from_callables(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
+        rt: Ty,
+        name: &str,
+        type_args: &[Ty],
+        expected: Option<Ty>,
+        callables: &crate::libraries::Callables,
+    ) -> Option<Ty> {
+        let rung = self.select_extension_rung(scope, call_args, rt, type_args, expected, callables);
+        self.record_extension_selection(scope, call_args, rt, name, type_args, rung)
     }
 
     /// Finish an extension rung whose candidates have already been ranked. This function only
@@ -43558,21 +43564,18 @@ impl<'a> Checker<'a> {
         self.receiver_member_accessible(visibility, owner, selected.receiver)
     }
 
+    /// Return `None` when this receiver has no applicable member or extension.
     fn this_member_call_ret(
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
         receiver: ImplicitReceiver,
-        rt: Ty,
         name: &str,
         expected: Option<Ty>,
+        retained: &mut Option<MemberMappingFailure>,
     ) -> Option<Ty> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let rt = self.apply_postponed_call_bindings(rt);
+        let CallArgs { call, args, .. } = call_args;
+        let rt = self.apply_postponed_call_bindings(receiver.ty);
         let type_args = self.resolved_explicit_type_args(scope, call);
         let mut extension_rung = None;
         if rt == Ty::String || matches!(rt, Ty::Obj(..)) {
@@ -43584,20 +43587,39 @@ impl<'a> Checker<'a> {
                 MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => {
                     return Some(Ty::Error);
                 }
-                MemberSlotCall::ExtensionRung { extension, .. } => extension_rung = Some(extension),
+                MemberSlotCall::ExtensionRung {
+                    extension,
+                    member_mapping_failure,
+                } => {
+                    if extension.selection.is_none() {
+                        if let Some(failure) = member_mapping_failure {
+                            retained.get_or_insert(*failure);
+                        }
+                    }
+                    extension_rung = Some(extension);
+                }
             }
         }
-        let call_args = CallArgs {
-            call,
-            args,
-            arg_tys,
-        };
-        let ret = match extension_rung {
-            Some(extension) => {
-                self.record_extension_selection(scope, call_args, rt, name, &type_args, extension)
+        let rung = match extension_rung {
+            Some(extension) => extension,
+            None => {
+                let callables = self.resolver().receiver_callables(rt, name);
+                self.select_extension_rung(scope, call_args, rt, &type_args, expected, &callables)
             }
-            None => self.record_extension_call(scope, call_args, rt, name, &type_args, expected),
         };
+        if rung.selection.is_none() {
+            if let Some((failure, candidate)) = self.unanimous_callable_mapping_failure(
+                scope,
+                call,
+                args,
+                &type_args,
+                &rung.overloads,
+            ) {
+                retained.get_or_insert(MemberMappingFailure { failure, candidate });
+            }
+            return None;
+        }
+        let ret = self.record_extension_selection(scope, call_args, rt, name, &type_args, rung);
         if let Some(ret) = ret {
             self.mark_implicit_receiver_selection(call, receiver);
             return Some(ret);
@@ -53878,6 +53900,7 @@ impl<'a> Checker<'a> {
                 // the same name: the receiver is a closer scope, so kotlinc binds the member. Attempt it
                 // FIRST — `this_member_call_ret` returns `None` when no member matches the arguments, so a
                 // genuine top-level call (no such member) still falls through to `module_top` below.
+                let mut retained_receiver_call_failure = None;
                 for implicit_receiver in self.implicit_receivers(scope) {
                     if let Some(ret) = self.this_member_call_ret(
                         scope,
@@ -53887,9 +53910,9 @@ impl<'a> Checker<'a> {
                             arg_tys: &arg_tys,
                         },
                         implicit_receiver,
-                        implicit_receiver.ty,
                         &fname,
                         expected,
+                        &mut retained_receiver_call_failure,
                     ) {
                         return ret;
                     }
@@ -54126,6 +54149,10 @@ impl<'a> Checker<'a> {
                     },
                     candidates,
                 ) {
+                    return Ty::Error;
+                }
+                if let Some(retained) = retained_receiver_call_failure {
+                    self.report_retained_member_mapping_failure(call, &fname, args, retained);
                     return Ty::Error;
                 }
                 if let Some((arguments, candidates, class_name, internal)) =
