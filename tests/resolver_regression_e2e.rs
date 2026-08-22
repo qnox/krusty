@@ -1889,3 +1889,191 @@ class MutBox<T>(var v: T) {
         ["unresolved reference 'getOrDefault'.".to_string()]
     );
 }
+
+#[test]
+fn inapplicable_receiver_extension_descends_to_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = if ("abc".f(2) == 1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerImportDescent");
+}
+
+#[test]
+fn inapplicable_receiver_member_descends_to_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+class C {
+    fun min(): Int = 9
+    fun f(endOffset: Int): Int = min(endOffset, 1)
+}
+fun box(): String = if (C().f(3) == 1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerMemberImportDescent");
+}
+
+#[test]
+fn type_inapplicable_receiver_extension_descends_to_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+fun CharSequence.min(a: String, b: String): Int = a.length + b.length
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = if ("abc".f(3) == 1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerTypeImportDescent");
+}
+
+#[test]
+fn inapplicable_nearer_receiver_descends_to_outer_receiver() {
+    let src = r#"
+fun String.pick(): Int = 9
+class Outer {
+    fun pick(value: Int): Int = 100 + value
+    fun result(): Int = with("") { pick(1) }
+}
+fun box(): String = if (Outer().result() == 101) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerOuterReceiverDescent");
+}
+
+#[test]
+fn applicable_receiver_extension_beats_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+fun CharSequence.min(a: Int, b: Int): Int = 1000 + a + b
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = if ("abc".f(3) == 1004) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerExtensionWins");
+}
+
+#[test]
+fn applicable_receiver_member_beats_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+class C {
+    fun min(a: Int, b: Int): Int = 500 + a + b
+    fun f(endOffset: Int): Int = min(endOffset, 1)
+}
+fun box(): String = if (C().f(3) == 504) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerMemberWins");
+}
+
+#[test]
+fn inapplicable_receiver_extension_without_import_keeps_arity_diagnostic() {
+    let src = r#"
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = "abc".f(2).toString()
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ReceiverTowerRetainedFailure", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [
+            ObservedDiagnostic {
+                file: "ReceiverTowerRetainedFailure.kt".to_string(),
+                line: 2,
+                column: 43,
+                message: "return type mismatch: expected 'Int', actual 'Char'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "ReceiverTowerRetainedFailure.kt".to_string(),
+                line: 2,
+                column: 47,
+                message: "too many arguments for 'fun CharSequence.min(): Char'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "ReceiverTowerRetainedFailure.kt".to_string(),
+                line: 2,
+                column: 58,
+                message: "too many arguments for 'fun CharSequence.min(): Char'.".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "too many arguments: expected at most 0".to_string(),
+            "too many arguments: expected at most 0".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn inapplicable_receiver_member_without_later_candidate_keeps_arity_diagnostic() {
+    let src = r#"
+class C {
+    fun min(): Int = 9
+    fun f(endOffset: Int): Int = min(endOffset, 1)
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ReceiverTowerMemberFailure", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [
+            ObservedDiagnostic {
+                file: "ReceiverTowerMemberFailure.kt".to_string(),
+                line: 4,
+                column: 38,
+                message: "too many arguments for 'fun min(): Int'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "ReceiverTowerMemberFailure.kt".to_string(),
+                line: 4,
+                column: 49,
+                message: "too many arguments for 'fun min(): Int'.".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "too many arguments: expected at most 0".to_string(),
+            "too many arguments: expected at most 0".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn later_inapplicable_import_owns_the_terminal_diagnostic() {
+    let sources = [
+        (
+            "Library.kt",
+            r#"
+package other
+fun choose(value: String): Int = value.length
+"#,
+        ),
+        (
+            "Main.kt",
+            r#"
+import other.choose
+fun CharSequence.choose(): Int = 0
+fun CharSequence.f(): Int = choose(1)
+"#,
+        ),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    assert_eq!(result.reference_code, 1);
+    assert_eq!(
+        reference_errors(&result.reference_stderr),
+        [ObservedDiagnostic {
+            file: "Main.kt".to_string(),
+            line: 4,
+            column: 36,
+            message: "argument type mismatch: actual type is 'Int', but 'String' was expected."
+                .to_string(),
+        }]
+    );
+    let source_text = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&source_text),
+        ["argument type mismatch: actual type is 'Int', but 'String' was expected.".to_string()]
+    );
+}

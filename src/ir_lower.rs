@@ -14,16 +14,15 @@ use crate::ast::{
     FunBody, FunDecl, Stmt, TemplatePart,
 };
 use crate::frontend::{
-    function_import_scope, AdaptedRefArgument, AnonymousObjectCapture,
-    AnonymousObjectCaptureSource, CallableReferenceBinding, CallableReferenceTarget,
-    CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
-    ExprLowering, FrontendClassModel, FrontendSymbols, FrontendTypeInfo, FunctionImportScope,
-    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InvokeKind, LambdaCapture,
-    LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
-    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
-    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
-    SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    AdaptedRefArgument, AnonymousObjectCapture, AnonymousObjectCaptureSource,
+    CallableReferenceBinding, CallableReferenceTarget, CompoundAssignmentTarget, CtorDefaultValue,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendClassModel,
+    FrontendSymbols, FrontendTypeInfo, ImplicitPropertyWriteTarget, ImplicitReceiverSelection,
+    IncDecSite, InvokeKind, LambdaCapture, LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin,
+    ResolvedCall, ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
+    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
+    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrAnnotationConstruction, IrBinOp, IrCatch, IrClass,
@@ -187,7 +186,6 @@ fn lower_file_at_reporting_impl(
     runtime: &dyn TargetRuntime,
     bail: &std::cell::RefCell<String>,
 ) -> Option<IrFile> {
-    let source_ext_scope = function_import_scope(file, syms);
     let mut lo = Lower {
         afile: file,
         file_index,
@@ -195,7 +193,6 @@ fn lower_file_at_reporting_impl(
         syms,
         runtime,
         bail,
-        source_ext_scope,
         ir: IrFile::with_package(file.package.clone()),
         fun_ids: HashMap::new(),
         fun_ids_by_decl: HashMap::new(),
@@ -5805,7 +5802,6 @@ pub(crate) struct Lower<'a> {
     /// Caller-owned sink for the reason `lower_file_at` last returned `None` — a survey/box-corpus
     /// diagnostic, plus the internal `deep*`-phase refinement (formerly the `BAIL_REASON` thread-local).
     bail: &'a std::cell::RefCell<String>,
-    source_ext_scope: FunctionImportScope,
     ir: IrFile,
     /// Top-level function ids keyed by (name, parameter types) so overloads (same name,
     /// different params) each map to their own compiled method.
@@ -13231,27 +13227,6 @@ impl<'a> Lower<'a> {
         self.info.ty(receiver)
     }
 
-    /// Return an extension only when receiver, name, and arity identify one declaration.
-    fn unique_ext_fun_id_by_arity(&self, receiver: Ty, name: &str, arity: usize) -> Option<u32> {
-        let overloads =
-            self.syms
-                .ext_fun_overloads_in_import_scope(receiver, name, &self.source_ext_scope);
-        let mut matches = overloads
-            .iter()
-            .filter(|signature| signature.params.len() == arity);
-        let signature = matches.next()?;
-        if matches.next().is_some() {
-            return None;
-        }
-        self.ext_fun_id_by_sig
-            .get(&(
-                receiver.erased_recv(),
-                name.to_string(),
-                signature.params.clone(),
-            ))
-            .copied()
-    }
-
     /// An arithmetic operator member of a primitive numeric type called by its METHOD name
     /// (`a.plus(b)`, `a.times(b)`, … — valid Kotlin, identical to `a + b`). The checker already typed it;
     /// lower it to the same `PrimitiveBinOp` the operator form produces (with mixed-operand promotion and
@@ -18851,20 +18826,16 @@ impl<'a> Lower<'a> {
             let call = self.coerce_to_static(call, ret, physical_ret);
             return Some(self.wrap_arg_prelude(call, prelude));
         }
-        // A MODULE MustInline (reified) extension reached through an IMPLICIT receiver: splice it
-        // exactly like the qualified `recv.name(args)` path, with the already-lowered receiver
-        // value bound as `this`, and bail on decline — its facade method embeds the reified name
-        // markers (`ldc T`) and is never a legal direct target. Deliberately NOT widened to every
-        // CanInline extension: those have a correct direct-call fallback below, and the splice
-        // path is not yet exercised for their inline-lambda argument shapes from this channel.
-        if let Some(target) = self.info.resolved_calls.get(&e).cloned().filter(|target| {
-            matches!(
-                target,
-                ResolvedCall::Extension(extension)
-                    if extension.source.is_some_and(|(file, _)| file == self.file_index)
-                        && extension.callable.inline.must_inline()
-            )
-        }) {
+        let target = self.info.resolved_calls.get(&e).cloned()?;
+        let extension = match &target {
+            ResolvedCall::Extension(extension) => extension,
+            _ => return None,
+        };
+        if extension
+            .source
+            .is_some_and(|(file, _)| file == self.file_index)
+            && extension.callable.inline.must_inline()
+        {
             if let Some(r) = self.lower_inline_fn_call(
                 name,
                 args,
@@ -18877,22 +18848,14 @@ impl<'a> Lower<'a> {
             }
             return None;
         }
-        // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
-        // `invokestatic <facade>.name(this, args)` (the receiver is the first parameter of the lowered
-        // static impl). Mirrors a qualified `recv.name(args)` module-extension call. Prefer the overload
-        // whose arity matches the call (`fun R.f()` vs `fun R.f(x)`), else the primary id.
-        if let Some(fid) = self.unique_ext_fun_id_by_arity(this_ty, name, args.len()) {
-            let params = self.ir.functions[fid as usize].params.clone();
-            if params.len() == args.len() + 1 {
-                let mut a = vec![this_value];
-                for (arg, pt) in args.iter().zip(&params[1..]) {
-                    a.push(self.lower_arg(*arg, pt)?);
-                }
-                return Some(self.emit_local_call(fid, a));
+        match extension.callable.origin {
+            crate::libraries::Origin::Module { .. } => self
+                .lower_selected_op_call(this_value, this_ty, name, args, target, Some(e), &[], None)
+                .map(|(value, _)| value),
+            crate::libraries::Origin::Library => {
+                self.lower_ext_call_on(this_value, this_ty, name, args, e)
             }
         }
-        // A stdlib/library EXTENSION on the receiver (`uppercase`/`reversed`).
-        self.lower_ext_call_on(this_value, this_ty, name, args, e)
     }
 
     /// The IR loop label a `return@<label>` should `continue`, when `label` names an active `forEach`
