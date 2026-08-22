@@ -7265,9 +7265,9 @@ impl<'a> Lower<'a> {
         self.ir.external_static_field(&owner, name, descriptor)
     }
 
-    /// Lower the enum entry owner selected by the checker.
-    fn lower_resolved_enum_entry(&mut self, e: AstExprId, name: &str) -> Option<u32> {
-        let enum_internal = self.info.resolved_enum_entry_owner(e)?;
+    /// Lower the enum entry identity selected by the checker.
+    fn lower_resolved_enum_entry(&mut self, e: AstExprId) -> Option<u32> {
+        let (enum_internal, name) = self.info.resolved_enum_entry(e)?;
         if let Some(cls) = self.class_info_name(enum_internal).map(|class| class.id) {
             if let Some(index) = self.ir.classes[cls as usize]
                 .enum_entries
@@ -24266,7 +24266,7 @@ impl<'a> Lower<'a> {
             ) {
                 return self.lower_recorded_static_property(e);
             }
-            if let Some(entry) = self.lower_resolved_enum_entry(e, &n) {
+            if let Some(entry) = self.lower_resolved_enum_entry(e) {
                 return Some(entry);
             }
             // `this@Label` consumes the exact receiver identity recorded by the checker.
@@ -24538,7 +24538,7 @@ impl<'a> Lower<'a> {
                 }
                 return Some(value);
             }
-            if let Some(entry) = self.lower_resolved_enum_entry(e, &name) {
+            if let Some(entry) = self.lower_resolved_enum_entry(e) {
                 return Some(entry);
             }
             let rt = self.recv_ty(receiver).non_null();
