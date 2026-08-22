@@ -518,14 +518,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
-    /// The storage of a package-level `const val` (`kotlin.math.PI`). A `const` has no accessor — the
-    /// platform holds it in a field on whichever package artifact owns the declaration — so it cannot be
-    /// answered by the property namespace, which models properties by their accessors. Resolution of a
-    /// bare imported name needs the OWNER, which only the platform knows.
-    fn top_level_static_field(&self, _package: TypeName, _name: &str) -> Option<StaticFieldRef> {
-        None
-    }
-
     /// Normalize a semantic type to the identity used when comparing source call arguments against
     /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
     /// Implementations that do not need library-name normalization return the type unchanged.
@@ -1983,6 +1975,8 @@ pub struct PropertyInfo {
     pub setter_visibility: Visibility,
     /// `const val` — a compile-time constant whose value use sites inline.
     pub is_const: bool,
+    /// Complete constant payload for a `const val`, normalized by its declaration provider.
+    pub compile_time_constant: Option<LibraryConst>,
     /// The property's Kotlin visibility.
     pub visibility: Visibility,
     /// The declaring type's internal name — for the resolver's access check (`protected`/`private`).
@@ -2474,6 +2468,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             setter: None,
             setter_visibility: Visibility::Private,
             is_const: false,
+            compile_time_constant: None,
             visibility: Visibility::Public,
             owner,
             receiver_rank: 0,
@@ -2607,6 +2602,7 @@ impl EmptySymbolSource {
                 setter: None,
                 setter_visibility: Visibility::Private,
                 is_const: false,
+                compile_time_constant: None,
                 visibility: Visibility::Public,
                 owner,
                 receiver_rank: 0,
@@ -2707,6 +2703,7 @@ impl EmptySymbolSource {
                 setter: None,
                 setter_visibility: Visibility::Private,
                 is_const: false,
+                compile_time_constant: None,
                 visibility: Visibility::Public,
                 owner: crate::types::type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
                 receiver_rank: 0,

@@ -930,6 +930,7 @@ fn source_property(
         setter,
         setter_visibility: property.setter_visibility.unwrap_or(property.visibility),
         is_const: property.is_const,
+        compile_time_constant: None,
         visibility: property.visibility,
         owner,
         receiver_rank,
@@ -1156,6 +1157,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                                 .setter_visibility()
                                 .unwrap_or_else(|| declaration.visibility()),
                             is_const: false,
+                            compile_time_constant: None,
                             visibility: declaration.visibility(),
                             owner,
                             receiver_rank: 0,
@@ -1210,6 +1212,11 @@ impl SymbolSource for ModuleSymbols<'_> {
                 setter,
                 setter_visibility: property.setter_visibility,
                 is_const: property.is_const,
+                compile_time_constant: if property.is_const {
+                    property.compile_time_constant.clone()
+                } else {
+                    None
+                },
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -1261,6 +1268,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     setter,
                     setter_visibility: property.visibility,
                     is_const: false,
+                    compile_time_constant: None,
                     visibility: property.visibility,
                     owner,
                     receiver_rank: 0,
