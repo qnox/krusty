@@ -1191,7 +1191,6 @@ fn register_top_level_function_conflict(
 }
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
-pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
 /// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`has_reified_type_params`/`is_abstract`/
@@ -2623,6 +2622,25 @@ impl ClassSig {
             bindings.insert(name.clone(), *argument);
         }
         bindings
+    }
+
+    fn erased_type_parameter_bindings(&self) -> HashMap<String, Ty> {
+        self.type_parameter_bindings(Ty::obj_name(self.internal))
+            .into_iter()
+            .map(|(parameter, bound)| {
+                let erased = if bound == Ty::Error || matches!(bound, Ty::Nullable(_)) {
+                    Ty::obj("kotlin/Any")
+                } else {
+                    let head = bound.erased_recv();
+                    if head.is_reference() {
+                        head
+                    } else {
+                        Ty::obj("kotlin/Any")
+                    }
+                };
+                (parameter, erased)
+            })
+            .collect()
     }
 
     pub(crate) fn has_no_arg_constructor(&self) -> bool {
@@ -15745,7 +15763,7 @@ fn publish_member_property_type(
         .iter_mut()
         .find(|(property_name, _, _)| property_name == &entry.name)
     {
-        backing.1 = ty;
+        backing.1 = physical;
     }
 }
 
@@ -24544,13 +24562,12 @@ impl<'a> Checker<'a> {
                 self.unbound_classifier_value_calls.insert(call);
             }
             let selected_owner = selected.callable.owner_type();
-            if !self.member_accessible(selected.visibility, selected_owner) {
-                self.reject_if_inaccessible(
-                    selected.visibility,
-                    name,
-                    selected_owner,
-                    self.call_callee_name_span(call),
-                );
+            if self.reject_if_inaccessible(
+                selected.visibility,
+                name,
+                selected_owner,
+                self.call_callee_name_span(call),
+            ) {
                 return ClassifierValueCall::Checked(Ty::Error);
             }
             let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
@@ -24905,11 +24922,7 @@ impl<'a> Checker<'a> {
         selected
     }
 
-    /// A read of a TOP-LEVEL property named through its package (`pkg.topLevelProp`, `pkg.TOP_CONST`).
-    /// The package is the only scope consulted — a fully-qualified reference names one declaration, so
-    /// nothing about the file's imports may shadow or widen it. A `const val` has no accessor, so the
-    /// platform's field storage answers it; everything else reads through its getter, exactly as the
-    /// imported spelling does.
+    /// A read of a top-level property named through its package (`pkg.topLevelProp`).
     fn read_package_property(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -29251,14 +29264,13 @@ impl<'a> Checker<'a> {
                     Ok(Some(selection)) => {
                         if let Some((visibility, owner)) = selection.access() {
                             if visibility != Visibility::Public
-                                && !self.member_accessible(visibility, owner)
-                            {
-                                self.reject_if_inaccessible(
+                                && self.reject_if_inaccessible(
                                     visibility,
                                     &name,
                                     owner,
                                     self.call_callee_name_span(call),
-                                );
+                                )
+                            {
                                 return Ty::Error;
                             }
                         }
@@ -29311,14 +29323,13 @@ impl<'a> Checker<'a> {
                             Ok(Some(selection)) if is_function_property_shape(selection.ty()) => {
                                 if let Some((visibility, owner)) = selection.access() {
                                     if visibility != Visibility::Public
-                                        && !self.member_accessible(visibility, owner)
-                                    {
-                                        self.reject_if_inaccessible(
+                                        && self.reject_if_inaccessible(
                                             visibility,
                                             &name,
                                             owner,
                                             self.call_callee_name_span(call),
-                                        );
+                                        )
+                                    {
                                         return Ty::Error;
                                     }
                                 }
@@ -32248,17 +32259,20 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                     .collect::<Vec<_>>();
-                if top_level_candidates.iter().any(|candidate| {
-                    candidate.visibility == Visibility::Private
-                        && candidate
-                            .source_key
-                            .is_some_and(|(source_file, _)| source_file != self.file_index)
-                }) && top_level_candidates
-                    .iter()
-                    .all(|candidate| !self.source_callable_visible(candidate))
+                if !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+                    && top_level_candidates.iter().any(|candidate| {
+                        candidate.visibility == Visibility::Private
+                            && candidate
+                                .source_key
+                                .is_some_and(|(source_file, _)| source_file != self.file_index)
+                    })
+                    && top_level_candidates
+                        .iter()
+                        .all(|candidate| !self.source_callable_visible(candidate))
                 {
+                    let span = self.call_callee_name_span(call);
                     self.diags.error(
-                        self.call_callee_name_span(call),
+                        span,
                         format!("cannot access '{fname}': it is private in its file"),
                     );
                     return Ty::Error;
@@ -32561,6 +32575,10 @@ impl<'a> Checker<'a> {
                 ) {
                     return Ty::Error;
                 }
+                if let Some(retained) = retained_receiver_call_failure {
+                    self.report_retained_member_mapping_failure(call, &fname, args, retained);
+                    return Ty::Error;
+                }
                 if let Some((arguments, candidates, class_name, internal)) =
                     source_constructor_failure
                 {
@@ -32633,13 +32651,17 @@ impl<'a> Checker<'a> {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
-                    (
-                        inaccessible_classifier_message(&fname, access),
-                        Some(DiagnosticIdentity::ClassifierAccess {
-                            reference: span,
-                            classifier: internal,
-                        }),
-                    )
+                    if self.invisible_reference_suppressed(span) {
+                        (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
+                    } else {
+                        (
+                            inaccessible_classifier_message(&fname, access),
+                            Some(DiagnosticIdentity::ClassifierAccess {
+                                reference: span,
+                                classifier: internal,
+                            }),
+                        )
+                    }
                 } else {
                     // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at
                     // all is UNRESOLVED_REFERENCE, the same diagnostic a bare unresolved name gets.
@@ -36415,6 +36437,7 @@ val result = object { fun value(): String = captured }
         let mut symbols = collect_signatures(&files, &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
 
+        assert_no_diags(&diagnostics);
         let function_parameters = info.resolved_declaration_type_parameters(function_start);
         let anonymous_parameters = info.resolved_declaration_type_parameters(anonymous_start);
         assert_eq!(function_parameters.len(), 1);
@@ -38475,7 +38498,7 @@ fun box(): String {
             .expect("source should contain Kind.PENDING member read");
         assert_eq!(info.ty(member), Ty::String);
         assert!(
-            info.resolved_enum_entry_owner(member).is_none(),
+            info.resolved_enum_entry(member).is_none(),
             "local value root must not be recorded as an enum-entry classifier path"
         );
     }

@@ -9668,6 +9668,7 @@ mod tests {
 
         assert_eq!(
             infer_constructor_type_args(
+                &EMPTY_SOURCE,
                 owner,
                 &classifier,
                 &[Ty::String],

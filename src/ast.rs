@@ -1262,6 +1262,7 @@ pub struct SecondaryCtor {
     pub params: Vec<Param>,
     pub delegation: CtorDelegation,
     pub body: Option<ExprId>,
+    /// Source range from `constructor` through its delegation call or body.
     pub span: Span,
 }
 

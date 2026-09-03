@@ -633,6 +633,59 @@ fn stdio_server_accepts_expected_type_selected_callable_reference_overloads() {
 }
 
 #[test]
+fn stdio_server_counts_receiver_bound_call_as_receiver_use() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///implicit-receiver-extension-call.kt",
+        "class Box<out T : Any?> private constructor(private val value: Any?) {\n\
+         \x20   companion object {\n\
+         \x20       fun <T> Box<T>.getOrNull(): Int {\n\
+         \x20           getOrDefault(null)\n\
+         \x20           return 0\n\
+         \x20       }\n\
+         \x20       fun <T> Box<T>.getOrDefault(defaultValue: T): T = defaultValue\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(diagnostics, Vec::<Value>::new());
+}
+
+#[test]
+fn stdio_server_visits_a_companion_extension_once() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///companion-extension.kt",
+        "class Box {\n\
+         \x20   companion object {\n\
+         \x20       fun String.unused(): Int = 1\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(
+        diagnostics,
+        [json!({
+            "range": {
+                "start": {"line": 2, "character": 12},
+                "end": {"line": 2, "character": 18}
+            },
+            "severity": 2,
+            "source": null,
+            "message": "Receiver parameter is never used"
+        })]
+    );
+}
+
+#[test]
+fn stdio_server_counts_a_result_type_parameter_as_receiver_use() {
+    let diagnostics = diagnostics_after_open(
+        &[],
+        "file:///result-type-receiver.kt",
+        "class Box<T>\nfun <T> Box<T>.empty(): T? = null\n",
+    );
+    assert_eq!(diagnostics, Vec::<Value>::new());
+}
+
+#[test]
 fn stdio_server_accepts_adapted_callable_reference_during_generic_inference() {
     let diagnostics = diagnostics_after_open(
         &[],

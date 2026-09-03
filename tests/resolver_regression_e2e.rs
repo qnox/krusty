@@ -1,12 +1,90 @@
 //! Focused classpath resolver regressions. These duplicate a few cases from the larger feature bundle so
 //! resolver/provider cleanup gets a small, direct failure when metadata or inline-overload selection drifts.
 
+use std::path::Path;
+
 use super::common;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ObservedDiagnostic {
+    file: String,
+    line: usize,
+    column: usize,
+    message: String,
+}
+
+fn reference_errors(output: &str) -> Vec<ObservedDiagnostic> {
+    let lines = output.lines().collect::<Vec<_>>();
+    let (diagnostics, remainder) = lines.as_chunks::<3>();
+    assert_eq!(remainder.len(), 0);
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let line = diagnostic[0];
+            let (location, message) = line
+                .split_once(": error: ")
+                .unwrap_or_else(|| panic!("unexpected kotlinc diagnostic: {line}"));
+            let mut fields = location.rsplitn(3, ':');
+            let column = fields
+                .next()
+                .expect("kotlinc diagnostic column")
+                .parse()
+                .expect("numeric kotlinc diagnostic column");
+            let line = fields
+                .next()
+                .expect("kotlinc diagnostic line")
+                .parse()
+                .expect("numeric kotlinc diagnostic line");
+            let path = fields.next().expect("kotlinc diagnostic path");
+            ObservedDiagnostic {
+                file: Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("UTF-8 kotlinc diagnostic filename")
+                    .to_string(),
+                line,
+                column,
+                message: message.to_string(),
+            }
+        })
+        .collect()
+}
 
 /// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
 /// cannot turn either failure into a passing skip.
 fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
+}
+
+fn assert_frontends_accept(sources: &[(&str, &str)]) {
+    let result = common::compiler_diagnostics(sources, &[common::stdlib_jar()]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, "")
+    );
+    let source_text = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&source_text),
+        Vec::<String>::new()
+    );
+}
+
+fn assert_accepted_and_runs(src: &str, stem: &str) {
+    let (reference_code, reference_diagnostics) = common::kotlinc_source_result(stem, src);
+    assert_eq!((reference_code, reference_diagnostics.as_str()), (0, ""));
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        Vec::<String>::new()
+    );
+    assert_eq!(run(src, stem), "OK");
+}
+
+fn assert_accepted_and_runs_files(sources: &[(&str, &str)], stem: &str) {
+    assert_frontends_accept(sources);
+    common::expect_box_ok_files_with_stdlib(sources, stem);
 }
 
 #[test]
@@ -38,6 +116,656 @@ fun box(): String = if (G.Step("x").describe() == 1) "OK" else "FAIL"
     let (code, diagnostics) = common::kotlinc_source_result("ResolverNestedSealedInterface", src);
     assert_eq!((code, diagnostics.as_str()), (0, ""));
     assert_eq!(run(src, "ResolverNestedSealedInterface"), "OK");
+}
+
+#[test]
+fn companion_anonymous_object_does_not_capture_outer_type_parameter() {
+    let src = r#"
+class Attempt<T> private constructor(private val value: T) {
+    companion object {
+        fun <T> tryAgain(): Attempt<T> {
+            @Suppress("UNCHECKED_CAST")
+            return Attempt(tryAgain) as Attempt<T>
+        }
+        private val tryAgain: Any = object {
+            override fun toString(): String = "try again"
+        }
+    }
+}
+fun box(): String {
+    Attempt.tryAgain<String>()
+    return "OK"
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverAnonObjectCompanionScope");
+}
+
+#[test]
+fn plain_nested_class_anonymous_object_does_not_capture_outer_type_parameter() {
+    let src = r#"
+class Outer<T>(val value: T) {
+    class Nested {
+        val marker = object { override fun toString() = "nested" }
+    }
+}
+fun box(): String = if (Outer.Nested().marker.toString() == "nested") "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAnonObjectNestedClassScope");
+}
+
+#[test]
+fn local_classifier_shadows_type_parameter_for_anonymous_object() {
+    let src = r#"
+fun <T> build(): Any {
+    class T
+    return object { override fun toString() = "shadowed" }
+}
+fun box(): String = if (build<String>().toString() == "shadowed") "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAnonObjectLocalClassifierScope");
+}
+
+#[test]
+fn constructor_call_binds_unconstrained_type_parameter_from_expected_return() {
+    let src = r#"
+interface MyMap<K, V> { fun describe(): String }
+class MapImpl<K, E, V>(val f: Factory<K, E>) : MyMap<K, V> {
+    override fun describe(): String = "OK"
+}
+interface Factory<K, E> {
+    fun <V> createMap(): MyMap<K, V> = MapImpl(this)
+}
+class StrFactory : Factory<String, Char>
+fun box(): String = StrFactory().createMap<Int>().describe()
+"#;
+    let (code, diagnostics) =
+        common::kotlinc_source_result("ResolverCtorExpectedTypeBindingReference", src);
+    assert_eq!((code, diagnostics), (0, String::new()));
+    assert_eq!(run(src, "ResolverCtorExpectedTypeBinding"), "OK");
+}
+
+#[test]
+fn classpath_constructor_binds_unconstrained_type_parameter_from_expected_return() {
+    let library = r#"
+package lib
+interface MyMap<K, V> { fun describe(): String }
+class MapImpl<K, E, V>(val factory: Factory<K, E>) : MyMap<K, V> {
+    override fun describe(): String = "OK"
+}
+interface Factory<K, E>
+class StrFactory : Factory<String, Char>
+"#;
+    let main = r#"
+import lib.Factory
+import lib.MapImpl
+import lib.MyMap
+import lib.StrFactory
+fun create(factory: Factory<String, Char>): MyMap<String, Int> = MapImpl(factory)
+fun box(): String = create(StrFactory()).describe()
+"#;
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(library, main).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn constructor_call_contradicting_the_expected_type_still_errors() {
+    let src = r#"
+interface MyMap<K, V>
+class MapImpl<K, E, V>(val f: Factory<K, E>) : MyMap<K, V>
+interface Factory<K, E>
+class StrFactory : Factory<String, Char>
+val x: MyMap<String, Int> = MapImpl<Char, Char, String>(StrFactory())
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("CtorExpectedContradiction", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [
+            ObservedDiagnostic {
+                file: "CtorExpectedContradiction.kt".to_string(),
+                line: 6,
+                column: 27,
+                message: "initializer type mismatch: expected 'MyMap<String, Int>', actual 'MapImpl<Char, Char, String>'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "CtorExpectedContradiction.kt".to_string(),
+                line: 6,
+                column: 57,
+                message: "argument type mismatch: actual type is 'StrFactory', but 'Factory<Char, Char>' was expected.".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "argument type mismatch: actual type is 'StrFactory', but 'Factory<Char, Char>' was expected."
+                .to_string(),
+            "initializer type mismatch: expected 'MyMap<String, Int>', actual 'MapImpl<Char, Char, String>'."
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn constructor_expected_return_does_not_hide_an_unconstrained_parameter() {
+    let src = r#"
+interface MyMap<K, V>
+class MapImpl<K, E, V>(val key: K) : MyMap<K, V>
+val x: MyMap<String, Int> = MapImpl("value")
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("CtorExpectedPartial", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "CtorExpectedPartial.kt".to_string(),
+            line: 4,
+            column: 29,
+            message: "cannot infer type for type parameter 'E'. Specify it explicitly.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["initializer type mismatch: expected 'MyMap<String, Int>', actual 'MapImpl<String, Any?, Any?>'."
+            .to_string()]
+    );
+}
+
+#[test]
+fn constructor_expected_return_respects_type_parameter_bounds() {
+    let src = r#"
+interface View<V>
+class TextImpl<V : CharSequence> : View<V>
+val x: View<Int> = TextImpl()
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("CtorExpectedBound", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "CtorExpectedBound.kt".to_string(),
+            line: 4,
+            column: 20,
+            message: "cannot infer type for type parameter 'V'. Specify it explicitly.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "initializer type mismatch: expected 'View<Int>', actual 'TextImpl<CharSequence>'."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn member_delegated_property_keeps_the_delegate_value_type() {
+    let src = r#"
+class C(val count: Int) {
+    val h by lazy { 31 * count }
+    fun use(): Int = h
+}
+fun box(): String = if (C(7).use() == 217) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverMemberDelegatedProperty");
+}
+
+#[test]
+fn member_delegated_property_with_explicit_lazy_mode_keeps_the_delegate_value_type() {
+    let src = r#"
+class C(val count: Int) {
+    val h by lazy(LazyThreadSafetyMode.PUBLICATION) { 31 * count }
+    fun use(): Int = h
+}
+fun box(): String = if (C(7).use() == 217) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverMemberDelegatedLazyMode");
+}
+
+#[test]
+fn as_cast_in_condition_smart_casts_on_fallthrough() {
+    let src = r#"
+fun f(a: Any?, len: Int): Boolean {
+    if (a == null || len != (a as CharSequence).length) return false
+    return a.length > 0
+}
+fun box(): String = if (f("abc", 3)) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsConditionSmartCast");
+}
+
+#[test]
+fn safe_as_cast_in_condition_does_not_smart_cast_on_fallthrough() {
+    let src = r#"
+fun g(a: Any?, len: Int): Boolean {
+    if (a == null || len != ((a as? CharSequence)?.length ?: -1)) return false
+    return a.length > 0
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverSafeAsCondition", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverSafeAsCondition.kt".to_string(),
+            line: 4,
+            column: 14,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn conditionally_evaluated_as_cast_does_not_smart_cast() {
+    let src = r#"
+fun f(a: Any?, skip: Boolean): Int {
+    if (skip || (a as CharSequence).length == 0) return a.length
+    return 0
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverConditionalAs", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverConditionalAs.kt".to_string(),
+            line: 3,
+            column: 59,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn closure_mutated_value_does_not_smart_cast_after_as_cast() {
+    let src = r#"
+fun f(value: Any?): Int {
+    var current = value
+    val clear = { current = null }
+    if ((current as CharSequence).length == 0) return 0
+    return current.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverUnstableAs", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverUnstableAs.kt".to_string(),
+            line: 6,
+            column: 20,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn nullable_target_as_cast_narrows_to_the_nullable_target() {
+    let src = r#"
+fun f(a: Any?): Int {
+    if ((a as CharSequence?) == null) return -1
+    return a.length
+}
+fun box(): String = if (f("abc") == 3 && f(null) == -1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverNullableTargetAs");
+}
+
+#[test]
+fn as_cast_in_third_disjunct_smart_casts_on_fallthrough() {
+    let src = r#"
+fun f(value: Any?, blocked: Boolean): Int {
+    if (value == null || blocked || (value as CharSequence).length == 0) return 0
+    return value.length
+}
+fun box(): String = if (f("abc", false) == 3) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsConditionThirdDisjunct");
+}
+
+#[test]
+fn as_cast_in_nested_if_condition_smart_casts_on_both_outcomes() {
+    let src = r#"
+fun f(value: Any): Boolean {
+    if (if (value as Boolean) true else false) return value
+    return value
+}
+fun box(): String = if (f(true) && !f(false)) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsNestedIfCondition");
+}
+
+#[test]
+fn bare_as_statement_smart_casts_on_fallthrough() {
+    let src = r#"
+interface Named { val data: String }
+class N(override val data: String) : Named
+fun f(other: Any): String {
+    other as Named
+    return other.data
+}
+fun box(): String = if (f(N("ok")) == "ok") "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverAsStatementSmartCast");
+}
+
+#[test]
+fn nullable_target_as_statement_keeps_its_proven_type() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?): Int {
+    value as CharSequence?
+    if (value == null) return -1
+    return value.length
+}
+fun box(): String = if (f("abc") == 3 && f(null) == -1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverNullableAsStatement");
+}
+
+#[test]
+fn as_cast_in_evaluated_call_argument_smart_casts_after_statement() {
+    let src = r#"
+fun consume(value: Int) {}
+fun f(value: Any): Int {
+    consume((value as CharSequence).length)
+    return value.length
+}
+fun box(): String = if (f("abc") == 3) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ResolverCallArgumentAsStatement");
+}
+
+#[test]
+fn safe_as_statement_does_not_smart_cast() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?): Int {
+    value as? CharSequence
+    return value.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverSafeAsStatement", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverSafeAsStatement.kt".to_string(),
+            line: 5,
+            column: 18,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn conditional_as_in_statement_does_not_smart_cast() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?, skip: Boolean): Int {
+    skip || (value as CharSequence).isEmpty()
+    return value.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverConditionalAsStatement", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverConditionalAsStatement.kt".to_string(),
+            line: 5,
+            column: 18,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn closure_mutated_value_does_not_smart_cast_after_as_statement() {
+    let src = r#"
+@Suppress("UNUSED_EXPRESSION")
+fun f(value: Any?): Int {
+    var current = value
+    val clear = { current = null }
+    current as CharSequence
+    return current.length
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ResolverUnstableAsStatement", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "ResolverUnstableAsStatement.kt".to_string(),
+            line: 7,
+            column: 20,
+            message: "unresolved reference 'length'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        ["unresolved reference 'length'.".to_string()]
+    );
+}
+
+#[test]
+fn member_call_on_class_typed_receiver_substitutes_both_class_and_member_parameters() {
+    let src = r#"
+interface MyMap<K, V> {
+    fun descendantKeys(key: K): Set<K>
+}
+
+fun interface MyFactory<K, E> {
+    fun convert(element: K): List<E>
+
+    fun <V> createMap(): MyMap<K, V> = TODO()
+}
+
+class SetImpl<K, E>(convertor: MyFactory<K, E>) {
+    private val map = convertor.createMap<Nothing?>()
+
+    fun descendants(element: K): Set<K> {
+        return map.descendantKeys(element)
+    }
+}
+"#;
+    assert_frontends_accept(&[("MixedClassMemberParams.kt", src)]);
+}
+
+#[test]
+fn inferred_member_properties_keep_direct_and_nested_classifier_parameters() {
+    const DECLARATIONS: &str = r#"
+interface Values<T> {
+    fun direct(): T
+    fun nested(): List<T>
+}
+
+class Holder<T>(values: Values<T>) {
+    val direct = values.direct()
+    val nested = values.nested()
+}
+
+class StringValues : Values<String> {
+    override fun direct(): String = "OK"
+    override fun nested(): List<String> = listOf("OK")
+}
+"#;
+    const USE: &str = r#"
+fun box(): String {
+    val holder = Holder<String>(StringValues())
+    val direct: String = holder.direct
+    val nested: List<String> = holder.nested
+    return if (direct == "OK" && nested.single() == "OK") "OK" else "FAIL"
+}
+"#;
+
+    assert_accepted_and_runs_files(
+        &[("Declarations.kt", DECLARATIONS), ("Use.kt", USE)],
+        "InferredDirectAndNestedProperties",
+    );
+}
+
+#[test]
+fn inferred_member_property_erasure_respects_classifier_bounds() {
+    let source = r#"
+interface Producer<T> {
+    fun produce(): T
+}
+
+class ReferenceBound<T : CharSequence>(producer: Producer<T>) {
+    private val value = producer.produce()
+
+    fun current(): T = value
+    fun length(): Int = value.length
+}
+
+class NullableBound<T : CharSequence?>(producer: Producer<T>) {
+    private val value = producer.produce()
+
+    fun current(): T = value
+}
+
+class StringProducer : Producer<String> {
+    override fun produce(): String = "OK"
+}
+
+class NullableProducer : Producer<String?> {
+    override fun produce(): String? = null
+}
+
+fun box(): String {
+    val reference = ReferenceBound<String>(StringProducer())
+    val nullable = NullableBound<String?>(NullableProducer())
+    return if (reference.length() == 2 && nullable.current() == null) "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(source, "InferredPropertyBounds");
+}
+
+#[test]
+fn inferred_direct_nullable_parameter_property_round_trips() {
+    let source = r#"
+interface Values<T> {
+    fun nullable(): T?
+}
+
+class IntValues : Values<Int> {
+    override fun nullable(): Int? = 41
+}
+
+class Holder<T>(values: Values<T>) {
+    private val value = values.nullable()
+
+    fun current(): T? = value
+}
+
+fun box(): String {
+    val value: Int? = Holder<Int>(IntValues()).current()
+    return if (value == 41) "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(source, "InferredNullableParameterProperty");
+}
+
+#[test]
+fn inferred_member_property_keeps_a_captured_outer_parameter() {
+    let source = r#"
+interface Producer<T> { fun produce(): T }
+
+class Outer<T> {
+    inner class Holder(producer: Producer<T>) {
+        private val value = producer.produce()
+
+        fun current(): T = value
+    }
+}
+
+fun read(holder: Outer<String>.Holder): String = holder.current()
+"#;
+    assert_frontends_accept(&[("InferredCapturedParameterProperty.kt", source)]);
+}
+
+#[test]
+fn default_imported_const_val_is_a_top_level_property() {
+    let source = r#"
+fun read(bufferSize: Int = DEFAULT_BUFFER_SIZE): Int = bufferSize
+
+fun box(): String = if (read() == 8192) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(source, "DefaultImportedConstVal");
+}
+
+#[test]
+fn imported_const_val_alias_selects_the_constant_property() {
+    let source = r#"
+import kotlin.io.DEFAULT_BUFFER_SIZE as BUFFER_SIZE
+
+fun box(): String = if (BUFFER_SIZE == 8192) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(source, "ImportedConstValAlias");
+}
+
+#[test]
+fn qualified_const_val_selects_the_constant_property() {
+    let source = r#"
+fun box(): String = if (kotlin.io.DEFAULT_BUFFER_SIZE == 8192) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(source, "QualifiedConstVal");
+}
+
+#[test]
+fn non_const_property_keeps_its_getter() {
+    let source = r#"
+var offset: Int = 0
+val bufferSize: Int = 7
+    get() = field + offset
+
+fun box(): String {
+    val first = bufferSize
+    offset = 1
+    val second = bufferSize
+    return if (first == 7 && second == 8) "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(source, "NonConstPropertyGetter");
+}
+
+#[test]
+fn star_imported_property_outprioritizes_a_default_imported_const_val() {
+    const DECLARATION: &str = "package selected\nconst val DEFAULT_BUFFER_SIZE: Int = 7\n";
+    const USE: &str = r#"
+package use
+
+import selected.*
+
+fun box(): String = if (DEFAULT_BUFFER_SIZE == 7) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs_files(
+        &[("Declaration.kt", DECLARATION), ("Use.kt", USE)],
+        "ImportedConstValPrecedence",
+    );
 }
 
 #[test]
@@ -1148,4 +1876,269 @@ fun box(): String {
     let out =
         common::compile_and_run_box(src, "PrimitiveBuiltinInfixAmbiguity", &[stdlib], Some(&jdk));
     assert_eq!(out.as_deref(), Some("OK"));
+}
+
+#[test]
+fn member_extension_null_literal_binds_receiver_bound_formal() {
+    let source = r#"
+class Box<out T : Any?> private constructor(private val value: Any?) {
+    companion object {
+        fun <T> Box<T>.getOrNull(): T? = getOrDefault(null)
+        fun <T> Box<T>.getOrDefault(defaultValue: T): T = defaultValue
+    }
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("MemberExtensionNullFormal", source);
+    assert_eq!((code, diagnostics), (0, String::new()));
+    let (diagnostics, selected) = common::inspect_checker_with_stdlib(source, |file, info, _| {
+        file.expr_arena
+            .iter()
+            .enumerate()
+            .filter(|(_, expression)| matches!(expression, krusty::ast::Expr::Call { .. }))
+            .map(|(index, _)| krusty::ast::ExprId(index as u32))
+            .map(|call| {
+                let (owner, name, receiver, parameters) = info
+                    .resolved_member_abi_signature(call)
+                    .expect("selected member extension");
+                (
+                    owner,
+                    name.to_string(),
+                    receiver,
+                    parameters.to_vec(),
+                    info.resolved_call_is_member(call),
+                    info.resolved_call_is_extension(call),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(diagnostics, Vec::<String>::new());
+    assert_eq!(
+        selected,
+        [(
+            krusty::types::type_name("Box$Companion"),
+            "getOrDefault".to_string(),
+            Some(krusty::types::Ty::obj_args(
+                "Box",
+                &[krusty::types::Ty::obj("kotlin/Any")],
+            )),
+            vec![krusty::types::Ty::obj("kotlin/Any")],
+            true,
+            true,
+        )]
+    );
+}
+
+#[test]
+fn member_extension_null_literal_still_rejected_for_invariant_receiver() {
+    let source = r#"
+class MutBox<T>(var v: T) {
+    companion object {
+        fun <T> MutBox<T>.getOrDefault(defaultValue: T): T = defaultValue
+        fun read(box: MutBox<String>): String = box.getOrDefault(null)
+    }
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("MemberExtensionInvariantNull", source);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [ObservedDiagnostic {
+            file: "MemberExtensionInvariantNull.kt".to_string(),
+            line: 5,
+            column: 66,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(source),
+        ["unresolved reference 'getOrDefault'.".to_string()]
+    );
+}
+
+#[test]
+fn inapplicable_receiver_extension_descends_to_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = if ("abc".f(2) == 1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerImportDescent");
+}
+
+#[test]
+fn inapplicable_receiver_member_descends_to_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+class C {
+    fun min(): Int = 9
+    fun f(endOffset: Int): Int = min(endOffset, 1)
+}
+fun box(): String = if (C().f(3) == 1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerMemberImportDescent");
+}
+
+#[test]
+fn type_inapplicable_receiver_extension_descends_to_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+fun CharSequence.min(a: String, b: String): Int = a.length + b.length
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = if ("abc".f(3) == 1) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerTypeImportDescent");
+}
+
+#[test]
+fn inapplicable_nearer_receiver_descends_to_outer_receiver() {
+    let src = r#"
+fun String.pick(): Int = 9
+class Outer {
+    fun pick(value: Int): Int = 100 + value
+    fun result(): Int = with("") { pick(1) }
+}
+fun box(): String = if (Outer().result() == 101) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerOuterReceiverDescent");
+}
+
+#[test]
+fn applicable_receiver_extension_beats_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+fun CharSequence.min(a: Int, b: Int): Int = 1000 + a + b
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = if ("abc".f(3) == 1004) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerExtensionWins");
+}
+
+#[test]
+fn applicable_receiver_member_beats_explicit_import() {
+    let src = r#"
+import kotlin.math.min
+class C {
+    fun min(a: Int, b: Int): Int = 500 + a + b
+    fun f(endOffset: Int): Int = min(endOffset, 1)
+}
+fun box(): String = if (C().f(3) == 504) "OK" else "FAIL"
+"#;
+    assert_accepted_and_runs(src, "ReceiverTowerMemberWins");
+}
+
+#[test]
+fn inapplicable_receiver_extension_without_import_keeps_arity_diagnostic() {
+    let src = r#"
+fun CharSequence.f(endOffset: Int): Int = min(endOffset, 1)
+fun box(): String = "abc".f(2).toString()
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ReceiverTowerRetainedFailure", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [
+            ObservedDiagnostic {
+                file: "ReceiverTowerRetainedFailure.kt".to_string(),
+                line: 2,
+                column: 43,
+                message: "return type mismatch: expected 'Int', actual 'Char'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "ReceiverTowerRetainedFailure.kt".to_string(),
+                line: 2,
+                column: 47,
+                message: "too many arguments for 'fun CharSequence.min(): Char'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "ReceiverTowerRetainedFailure.kt".to_string(),
+                line: 2,
+                column: 58,
+                message: "too many arguments for 'fun CharSequence.min(): Char'.".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "too many arguments: expected at most 0".to_string(),
+            "too many arguments: expected at most 0".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn inapplicable_receiver_member_without_later_candidate_keeps_arity_diagnostic() {
+    let src = r#"
+class C {
+    fun min(): Int = 9
+    fun f(endOffset: Int): Int = min(endOffset, 1)
+}
+"#;
+    let (code, diagnostics) = common::kotlinc_source_result("ReceiverTowerMemberFailure", src);
+    assert_eq!(code, 1);
+    assert_eq!(
+        reference_errors(&diagnostics),
+        [
+            ObservedDiagnostic {
+                file: "ReceiverTowerMemberFailure.kt".to_string(),
+                line: 4,
+                column: 38,
+                message: "too many arguments for 'fun min(): Int'.".to_string(),
+            },
+            ObservedDiagnostic {
+                file: "ReceiverTowerMemberFailure.kt".to_string(),
+                line: 4,
+                column: 49,
+                message: "too many arguments for 'fun min(): Int'.".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [
+            "too many arguments: expected at most 0".to_string(),
+            "too many arguments: expected at most 0".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn later_inapplicable_import_owns_the_terminal_diagnostic() {
+    let sources = [
+        (
+            "Library.kt",
+            r#"
+package other
+fun choose(value: String): Int = value.length
+"#,
+        ),
+        (
+            "Main.kt",
+            r#"
+import other.choose
+fun CharSequence.choose(): Int = 0
+fun CharSequence.f(): Int = choose(1)
+"#,
+        ),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    assert_eq!(result.reference_code, 1);
+    assert_eq!(
+        reference_errors(&result.reference_stderr),
+        [ObservedDiagnostic {
+            file: "Main.kt".to_string(),
+            line: 4,
+            column: 36,
+            message: "argument type mismatch: actual type is 'Int', but 'String' was expected."
+                .to_string(),
+        }]
+    );
+    let source_text = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&source_text),
+        ["argument type mismatch: actual type is 'Int', but 'String' was expected.".to_string()]
+    );
 }
