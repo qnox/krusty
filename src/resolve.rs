@@ -69,8 +69,8 @@ use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
     finalized_streamed_signature_index, install_streamed_anonymous_capture_declarations,
-    publish_checked_default_local_signatures, publish_checked_inline_local_signatures,
-    publish_checked_local_signatures_in_pass_two_root,
+    install_streamed_plugin_declarations, publish_checked_default_local_signatures,
+    publish_checked_inline_local_signatures, publish_checked_local_signatures_in_pass_two_root,
 };
 #[cfg(test)]
 pub(crate) use streaming_signature_bridge::{

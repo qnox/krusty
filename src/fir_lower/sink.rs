@@ -1037,6 +1037,13 @@ impl<'a> CommonIrBodySink<'a> {
             self.ir
                 .fn_params
                 .insert(function, FnParamInfo::names(names));
+            if let Some(plugin) = index.callable_behavior(callable.id).plugin_expression {
+                self.ir
+                    .plugin_declaration_functions
+                    .entry(plugin)
+                    .or_default()
+                    .push(function);
+            }
             if let Some(vararg) = (0..signature.parameters.len()).find(|ordinal| {
                 index
                     .callable_parameter(callable.id, *ordinal as u32)

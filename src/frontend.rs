@@ -919,6 +919,7 @@ where
         diags,
     );
     prepare_symbols(&files, &mut symbols);
+    crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
     let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
     let has_inline_capture_roots = inline_capture_selection
         .roots

@@ -2241,6 +2241,11 @@ pub struct IrFile {
     /// Common lowering publishes the edge once; checked-operation realization consumes it without
     /// name lookup or overload reconstruction.
     pub checked_callable_functions: std::collections::HashMap<crate::fir::CallableId, FunId>,
+    /// Frontend-plugin declaration identity to its predeclared common-IR callable. Backend plugin
+    /// realization fills this exact declaration instead of rediscovering a generated member by
+    /// owner/name/descriptor or emitting a duplicate alongside it.
+    pub plugin_declaration_functions:
+        std::collections::HashMap<crate::libraries::PluginExpressionDeclaration, Vec<FunId>>,
     /// Referenced current-module callables copied from finalized declaration headers. The stable
     /// identity remains only as an exact edge; the backend consumes this semantic container record
     /// instead of reopening the frontend module index.

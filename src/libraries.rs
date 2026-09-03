@@ -502,7 +502,7 @@ pub enum InlineBodyPlan {
 }
 
 /// Opaque compiler-plugin implementation identity attached to one declared callable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct PluginExpressionDeclaration {
     pub plugin: &'static str,
     pub operation: &'static str,

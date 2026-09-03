@@ -3462,6 +3462,196 @@ pub(crate) fn install_streamed_anonymous_capture_declarations(
     }
 }
 
+/// Give declarations contributed by frontend plugins stable module identities before the
+/// temporary collection table is projected into [`crate::fir::ResolvedModuleIndex`]. Plugins
+/// contribute complete semantic callable shapes, so these declarations need no compact source
+/// syntax; they do need the same owner graph as written and language-generated declarations.
+pub(crate) fn install_streamed_plugin_declarations(
+    headers: &mut crate::fir::StreamedHeaderModule,
+    table: &mut SymbolTable,
+) {
+    use crate::fir::{DeclarationAnchor, DeclarationFlags, DeclarationKind, DeclarationStub};
+
+    fn unused_sibling(
+        headers: &crate::fir::StreamedHeaderModule,
+        owner: crate::fir::DeclarationId,
+        kind: DeclarationKind,
+    ) -> u32 {
+        (0..=u32::MAX)
+            .rev()
+            .find(|candidate| {
+                !headers.stubs.iter().any(|stub| {
+                    headers.declarations.anchor(stub.id).is_some_and(|anchor| {
+                        anchor.owner == Some(owner)
+                            && anchor.kind == kind
+                            && anchor.sibling == *candidate
+                    })
+                })
+            })
+            .expect("a declaration owner exhausted its structural ordinals")
+    }
+
+    let companion_owners = table
+        .classes
+        .values()
+        .filter_map(|class| {
+            Some((
+                class.companion_internal?,
+                (
+                    class.stable_declaration?,
+                    crate::fir::SourceFileId::from_raw(class.source_file),
+                ),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut generated_owners = table
+        .classes
+        .values()
+        .filter(|class| {
+            class.methods.values().flatten().any(|signature| {
+                signature.plugin_expression.is_some() && signature.stable_declaration.is_none()
+            })
+        })
+        .map(|class| class.internal)
+        .collect::<Vec<_>>();
+    generated_owners.sort_by_key(|owner| owner.render());
+
+    for internal in generated_owners {
+        let stable_owner = match table
+            .class_by_type_name(internal)
+            .and_then(|class| class.stable_declaration)
+        {
+            Some(declaration) => declaration,
+            None => {
+                let Some(&(outer, source)) = companion_owners.get(&internal) else {
+                    panic!("a plugin-generated classifier must have a stable enclosing owner")
+                };
+                let range = headers
+                    .declarations
+                    .anchor(outer)
+                    .expect("a stable enclosing classifier must retain its Pass-1 range")
+                    .range;
+                let declaration = headers.declarations.intern(DeclarationAnchor {
+                    source,
+                    range,
+                    owner: Some(outer),
+                    kind: DeclarationKind::Classifier,
+                    sibling: unused_sibling(headers, outer, DeclarationKind::Classifier),
+                });
+                headers.stubs.push(DeclarationStub {
+                    id: declaration,
+                    source,
+                    range,
+                    lookup_name: Some(headers.lookup_names.intern("Companion")),
+                    body: None,
+                    signature_inference: None,
+                    initialization_order: None,
+                    kind: DeclarationKind::Classifier,
+                    visibility: crate::types::Visibility::Public,
+                    flags: DeclarationFlags::default()
+                        .with(DeclarationFlags::COMPANION, true)
+                        .with(DeclarationFlags::FINAL, true)
+                        .with(DeclarationFlags::COMPILER_GENERATED, true),
+                });
+                let constructor = headers.declarations.intern(DeclarationAnchor {
+                    source,
+                    range,
+                    owner: Some(declaration),
+                    kind: DeclarationKind::Constructor,
+                    sibling: 0,
+                });
+                headers.stubs.push(DeclarationStub {
+                    id: constructor,
+                    source,
+                    range,
+                    lookup_name: None,
+                    body: None,
+                    signature_inference: None,
+                    initialization_order: None,
+                    kind: DeclarationKind::Constructor,
+                    visibility: crate::types::Visibility::Private,
+                    flags: DeclarationFlags::default()
+                        .with(DeclarationFlags::COMPILER_GENERATED, true),
+                });
+                let generated = table
+                    .class_by_type_name_mut(internal)
+                    .expect("a generated plugin owner must remain in the collection table");
+                generated.stable_declaration = Some(declaration);
+                generated.primary_constructor_declaration = Some(constructor);
+                declaration
+            }
+        };
+        let owner_anchor = headers
+            .declarations
+            .anchor(stable_owner)
+            .expect("a stable plugin owner must retain its Pass-1 range");
+        let method_plans = {
+            let class = table
+                .class_by_type_name(internal)
+                .expect("a generated plugin owner must remain in the collection table");
+            let mut plans = Vec::new();
+            for name in &class.declared_callable_order {
+                if let Some(overloads) = class.methods.get(name) {
+                    plans.extend(overloads.iter().enumerate().filter_map(
+                        |(ordinal, signature)| {
+                            if signature.plugin_expression.is_some()
+                                && signature.stable_declaration.is_none()
+                            {
+                                Some((name.clone(), ordinal))
+                            } else {
+                                None
+                            }
+                        },
+                    ));
+                }
+            }
+            plans
+        };
+        for (name, ordinal) in method_plans {
+            let sibling = unused_sibling(headers, stable_owner, DeclarationKind::Function);
+            let declaration = headers.declarations.intern(DeclarationAnchor {
+                source: owner_anchor.source,
+                range: owner_anchor.range,
+                owner: Some(stable_owner),
+                kind: DeclarationKind::Function,
+                sibling,
+            });
+            let (visibility, flags) = {
+                let signature = table
+                    .class_by_type_name_mut(internal)
+                    .and_then(|class| class.methods.get_mut(&name))
+                    .and_then(|overloads| overloads.get_mut(ordinal))
+                    .expect("a planned plugin callable must remain in its owner");
+                signature.stable_declaration = Some(declaration);
+                (
+                    signature.visibility,
+                    DeclarationFlags::default()
+                        .with(DeclarationFlags::INLINE, signature.is_inline())
+                        .with(DeclarationFlags::FINAL, signature.is_final())
+                        .with(DeclarationFlags::OVERRIDE, signature.is_override())
+                        .with(DeclarationFlags::ABSTRACT, signature.is_abstract())
+                        .with(DeclarationFlags::SUSPEND, signature.is_suspend())
+                        .with(DeclarationFlags::OPERATOR, signature.is_operator())
+                        .with(DeclarationFlags::INFIX, signature.is_infix())
+                        .with(DeclarationFlags::COMPILER_GENERATED, true),
+                )
+            };
+            headers.stubs.push(DeclarationStub {
+                id: declaration,
+                source: owner_anchor.source,
+                range: owner_anchor.range,
+                lookup_name: Some(headers.lookup_names.intern(&name)),
+                body: None,
+                signature_inference: None,
+                initialization_order: None,
+                kind: DeclarationKind::Function,
+                visibility,
+                flags,
+            });
+        }
+    }
+}
+
 pub(crate) struct StreamedSignatureIndex {
     pub(crate) index: crate::fir::ResolvedModuleIndex,
     pub(crate) failures: Vec<crate::fir::DeclarationId>,
@@ -3920,9 +4110,10 @@ pub(crate) fn finalized_streamed_signature_index(
             && !owns_signature_default
             && graph.constraint(stub.id).is_none()
             && graph.explicit_signature_types(stub.id).is_none();
-        let signature = if stub
-            .flags
-            .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+        let signature = if stub.kind == DeclarationKind::Function
+            && stub
+                .flags
+                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
         {
             generated_function(table, stub).map(|(signature, receiver)| {
                 (
@@ -4663,6 +4854,27 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
+        if stub
+            .flags
+            .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+            && headers.syntax.declaration(stub.id).is_none()
+        {
+            if index
+                .publish_classifier_header(
+                    stub.id,
+                    classifier.internal,
+                    None,
+                    std::iter::empty(),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                )
+                .is_err()
+            {
+                stop_with_failure!(stub.id);
+            }
+            continue;
+        }
         let declaration = headers
             .syntax
             .declaration(stub.id)
@@ -4921,6 +5133,61 @@ pub(crate) fn finalized_streamed_signature_index(
                         parameter.flags.is_reified(),
                     ),
                     resolved_bounds,
+                )
+                .is_err()
+            {
+                stop_with_failure!(stub.id);
+            }
+        }
+    }
+    // Syntaxless frontend-plugin callables already carry their complete semantic generic shape.
+    // Publish those formals on the generated stable declaration just as compact syntax publishes
+    // written callable formals above.
+    for stub in headers.stubs.iter().filter(|stub| {
+        stub.kind == DeclarationKind::Function
+            && stub
+                .flags
+                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+            && headers.syntax.declaration(stub.id).is_none()
+    }) {
+        let Some((signature, _)) = stable_function(table, stub.id) else {
+            stop_with_failure!(stub.id);
+        };
+        let Some(generic) = signature.generic_sig.as_ref() else {
+            continue;
+        };
+        for (ordinal, semantic_name) in generic.formals.iter().enumerate() {
+            let bounds = generic
+                .formal_bounds
+                .get(ordinal)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|bound| {
+                    let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
+                        table
+                            .classes
+                            .get(&owner)
+                            .is_some_and(|classifier| classifier.is_interface())
+                            || table
+                                .libraries
+                                .classifier(owner)
+                                .is_some_and(|classifier| classifier.is_interface())
+                    });
+                    (bound, is_interface)
+                });
+            if index
+                .publish_type_parameter(
+                    stub.id,
+                    u32::try_from(ordinal).expect("too many generated callable type parameters"),
+                    crate::types::type_parameter_source_name(semantic_name),
+                    semantic_name,
+                    crate::fir::ResolvedTypeParameterFlags::new(
+                        crate::types::TypeVariance::Invariant,
+                        false,
+                        false,
+                    ),
+                    bounds,
                 )
                 .is_err()
             {
@@ -5399,6 +5666,26 @@ pub(crate) fn finalized_streamed_signature_index(
                 }
             }
             DeclarationKind::Constructor => {
+                if stub
+                    .flags
+                    .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                    && headers.syntax.declaration(stub.id).is_none()
+                {
+                    index.publish_constructor_shape(
+                        callable,
+                        stub.id,
+                        crate::fir::ResolvedCallableShape {
+                            context_parameter_count: 0,
+                            context_value_count: 0,
+                            extension_receiver: None,
+                        },
+                    );
+                    index.publish_callable_parameters(
+                        callable,
+                        std::iter::empty::<(&str, crate::fir::ResolvedValueParameterFlags)>(),
+                    );
+                    continue;
+                }
                 let declaration = headers
                     .syntax
                     .declaration(stub.id)

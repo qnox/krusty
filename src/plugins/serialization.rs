@@ -179,6 +179,34 @@ fn companion_fq(class_fq: &str) -> String {
     crate::types::type_name_nested_child(type_name(class_fq), "Companion").render()
 }
 
+fn frontend_serializer_accessor(ir: &IrFile, owner: crate::types::TypeName) -> Option<u32> {
+    let declaration = crate::libraries::PluginExpressionDeclaration {
+        plugin: "serialization",
+        operation: "serializer",
+    };
+    ir.plugin_declaration_functions
+        .get(&declaration)?
+        .iter()
+        .copied()
+        .find(|&function| ir.functions[function as usize].dispatch_receiver == Some(owner))
+}
+
+fn complete_frontend_serializer_accessor(
+    ir: &mut IrFile,
+    owner: crate::types::TypeName,
+    body: ExprId,
+) -> bool {
+    let Some(function) = frontend_serializer_accessor(ir, owner) else {
+        return false;
+    };
+    let accessor = &mut ir.functions[function as usize];
+    assert!(
+        accessor.body.replace(body).is_none(),
+        "a frontend plugin declaration may receive one generated body"
+    );
+    true
+}
+
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
 /// companion, or synthesizing a `Foo$Companion` (`is_companion`: the emitter gives it a private ctor +
 /// a `(DefaultConstructorMarker)` accessor, and `companion_class` on the outer class emits the
@@ -193,6 +221,9 @@ fn place_serializer_accessor(
     body: ExprId,
 ) {
     let comp_fq = companion_fq(class_fq);
+    if complete_frontend_serializer_accessor(ir, type_name(&comp_fq), body) {
+        return;
+    }
     let accessor = ir.add_fun(IrFunction {
         name: "serializer".to_string(),
         params,
@@ -1021,6 +1052,14 @@ impl SerializationPlugin {
             stmts: vec![ret],
             value: None,
         });
+        let frontend_owner = if ir.classes[class_id as usize].is_object {
+            type_name(class_fq)
+        } else {
+            type_name(&companion_fq(class_fq))
+        };
+        if complete_frontend_serializer_accessor(ir, frontend_owner, body) {
+            return;
+        }
         // A custom-serializer / enum / sealed class keeps `serializer()` as a STATIC on the class for
         // now (the Companion relocation is done for plain data classes, whose emitter path honors
         // `companion_class`; the enum/interface emitters do not yet).
@@ -1228,6 +1267,9 @@ impl SerializationPlugin {
             stmts: vec![ret],
             value: None,
         });
+        if complete_frontend_serializer_accessor(ir, type_name(&companion_fq(class_fq)), body) {
+            return;
+        }
         // Sealed keeps `serializer()` STATIC on the class (Companion relocation is data-class-only for now).
         let accessor = ir.add_fun(IrFunction {
             name: "serializer".to_string(),
@@ -1748,16 +1790,18 @@ impl IrPlugin for SerializationPlugin {
             // own singleton (a synthesized Companion would duplicate its `<clinit>`), so both keep the
             // static form (see `serializer_of`).
             if is_generic || ir.classes[class_id as usize].is_object {
-                let accessor = ir.add_fun(IrFunction {
-                    name: "serializer".to_string(),
-                    params: acc_params,
-                    ret: kserializer_of(class_ty(&class_fq)),
-                    body: Some(acc_body),
-                    is_static: true,
-                    dispatch_receiver: None,
-                    param_checks: Vec::new(),
-                });
-                ir.classes[class_id as usize].methods.push(accessor);
+                if !complete_frontend_serializer_accessor(ir, type_name(&class_fq), acc_body) {
+                    let accessor = ir.add_fun(IrFunction {
+                        name: "serializer".to_string(),
+                        params: acc_params,
+                        ret: kserializer_of(class_ty(&class_fq)),
+                        body: Some(acc_body),
+                        is_static: true,
+                        dispatch_receiver: None,
+                        param_checks: Vec::new(),
+                    });
+                    ir.classes[class_id as usize].methods.push(accessor);
+                }
             } else {
                 place_serializer_accessor(
                     ir,
