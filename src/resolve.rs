@@ -50617,8 +50617,8 @@ impl<'a> Checker<'a> {
     /// Apply an expected callable shape to one generic declaration before reference adaptation.
     /// The declaration origin and binding mode are irrelevant here: member, extension, and top-level
     /// candidates all carry the same `FunctionInfo`/`GenericSig` structure. An extension additionally
-    /// contributes its already-selected receiver as inference evidence and retains that receiver as
-    /// the leading physical callable parameter.
+    /// contributes its already-selected receiver as inference evidence. Reference-shape construction
+    /// later places an unbound receiver according to the declaration's semantic parameter roles.
     fn specialize_callable_ref_candidate(
         &self,
         function: &mut crate::libraries::FunctionInfo,
@@ -50659,20 +50659,24 @@ impl<'a> Checker<'a> {
                 // the semantic reference shape from the selected declaration fact here.
                 let unbound = matches!(binding, CallableReferenceBinding::Unbound)
                     && !function.companion_extension;
-                let expected_values = expected.map(|expected| {
+                let context_count = function.context_count.min(function.semantic_params().len());
+                let expected_values = if let Some(expected) = expected {
+                    let mut values = expected.params.to_vec();
                     if unbound {
-                        expected.params.get(1..).unwrap_or_default()
-                    } else {
-                        &expected.params[..]
+                        values.get(context_count)?;
+                        values.remove(context_count);
                     }
-                });
+                    Some(values)
+                } else {
+                    None
+                };
                 let type_arguments = self
                     .specialize_callable_ref_candidate(
-                    &mut function,
-                    Some(receiver),
-                    expected_values,
-                    expected.map(|expected| expected.ret),
-                )
+                        &mut function,
+                        Some(receiver),
+                        expected_values.as_deref(),
+                        expected.map(|expected| expected.ret),
+                    )
                     .ok()?;
                 let declared_receiver = function.semantic_receiver()?;
                 if !self.receiver_is_assignable(receiver, declared_receiver) {
@@ -50702,6 +50706,7 @@ impl<'a> Checker<'a> {
                 }
                 let semantic_params = function.semantic_params();
                 let value_params = &*semantic_params;
+                let context_count = function.context_count.min(value_params.len());
                 crate::trace_compiler!(
                     "resolve",
                     "extension reference candidate name={name} binding={binding:?} receiver={receiver:?} declared_receiver={declared_receiver:?} params={value_params:?} required={} owner={} descriptor={}",
@@ -50709,39 +50714,39 @@ impl<'a> Checker<'a> {
                     function.callable.owner.render(),
                     function.callable.descriptor,
                 );
-                let mut reference_params = if unbound {
-                    vec![receiver]
-                } else {
-                    Vec::new()
-                };
-                reference_params.extend(value_params.iter().copied());
+                let mut reference_params = value_params.to_vec();
+                if unbound {
+                    reference_params.insert(context_count, receiver);
+                }
                 let plan = match expected {
                     Some(expected) => {
                         if function.callable.suspend && !expected.suspend {
                             return None;
                         }
-                        let expected_values = if unbound {
-                            let (&expected_receiver, expected_values) =
-                                expected.params.split_first()?;
+                        if unbound {
+                            let expected_receiver = *expected.params.get(context_count)?;
                             if !self.receiver_is_assignable(expected_receiver, receiver) {
                                 return None;
                             }
-                            expected_values
-                        } else {
-                            &expected.params[..]
-                        };
-                        let mut values = self.callable_ref_parameter_plan(
+                        }
+                        let expected_values = expected_values.as_deref()?;
+                        let values = self.callable_ref_parameter_plan(
                             value_params,
                             &function.call_sig,
                             expected_values,
                         )?;
-                        let mut plan = if unbound {
-                            Self::shift_adapted_ref_values(&mut values, 1);
-                            vec![AdaptedRefArgument::Value(0)]
-                        } else {
-                            Vec::new()
-                        };
-                        plan.extend(values);
+                        let mut plan = values;
+                        if unbound {
+                            callable_reference_selection::shift_plan_values_from(
+                                &mut plan,
+                                context_count,
+                                1,
+                            );
+                            plan.insert(
+                                context_count,
+                                AdaptedRefArgument::Value(context_count),
+                            );
+                        }
                         if !self.callable_ref_is_compatible(
                             &expected.params,
                             function.callable.ret,
@@ -50843,14 +50848,17 @@ impl<'a> Checker<'a> {
         }
         let unbound =
             matches!(binding, CallableReferenceBinding::Unbound) && !function.companion_extension;
-        let mut semantic_params = if unbound { vec![receiver] } else { Vec::new() };
-        semantic_params.extend(function.semantic_params().iter().copied());
+        let mut semantic_params = function.semantic_params().into_owned();
+        let context_count = function.context_count.min(semantic_params.len());
+        if unbound {
+            semantic_params.insert(context_count, receiver);
+        }
         let function_ty = expected.map_or_else(
             || {
                 Ty::fun_with_shape(
                     semantic_params.clone(),
                     function.callable.ret,
-                    0,
+                    context_count,
                     unbound,
                     function.callable.suspend,
                 )
@@ -52029,10 +52037,6 @@ impl<'a> Checker<'a> {
 
     fn adapted_ref_plan_is_identity_from(plan: &[AdaptedRefArgument], value_offset: usize) -> bool {
         callable_reference_selection::plan_is_identity_from(plan, value_offset)
-    }
-
-    fn shift_adapted_ref_values(plan: &mut [AdaptedRefArgument], offset: usize) {
-        callable_reference_selection::shift_plan_values(plan, offset)
     }
 
     /// Select a top-level callable reference from its expected function type. Calls have argument

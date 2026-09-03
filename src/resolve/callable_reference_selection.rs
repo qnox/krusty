@@ -789,13 +789,24 @@ pub(super) fn plan_is_identity_from(plan: &[AdaptedRefArgument], value_offset: u
 }
 
 pub(super) fn shift_plan_values(plan: &mut [AdaptedRefArgument], offset: usize) {
+    shift_plan_values_from(plan, 0, offset);
+}
+
+pub(super) fn shift_plan_values_from(
+    plan: &mut [AdaptedRefArgument],
+    first_value: usize,
+    offset: usize,
+) {
     for argument in plan {
         match argument {
-            AdaptedRefArgument::Value(value) => *value += offset,
+            AdaptedRefArgument::Value(value) if *value >= first_value => *value += offset,
             AdaptedRefArgument::Vararg { values, .. } => {
-                values.iter_mut().for_each(|value| *value += offset);
+                values
+                    .iter_mut()
+                    .filter(|value| **value >= first_value)
+                    .for_each(|value| *value += offset);
             }
-            AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Value(_) | AdaptedRefArgument::Default => {}
         }
     }
 }

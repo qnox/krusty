@@ -499,6 +499,44 @@ fn unbound_member_reference_does_not_evaluate_classifier_syntax() {
 }
 
 #[test]
+fn unbound_context_extension_reference_preserves_parameter_roles() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: +ContextReceivers\n\
+         class Context\n\
+         class Receiver\n\
+         class Param\n\
+         context(Context) fun Receiver.baz(param: Param) {}\n\
+         fun reference(): context(Context) Receiver.(Param) -> Unit = Receiver::baz\n",
+        "reference",
+    );
+    let FirExprKind::CallableReference {
+        target,
+        function_type,
+        binding,
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("context extension reference")
+        .kind
+    else {
+        panic!("context extension must become checked callable-reference FIR")
+    };
+    assert!(index
+        .callable(target.module().expect("module target"))
+        .is_some());
+    let Ty::Fun(signature) = function_type.get() else {
+        panic!("callable reference must retain its function shape")
+    };
+    assert_eq!(signature.context_count, 1);
+    assert!(signature.has_receiver);
+    assert_eq!(
+        signature.params,
+        [Ty::obj("Context"), Ty::obj("Receiver"), Ty::obj("Param")]
+    );
+    assert_eq!(*binding, FirCallableReferenceBinding::Unbound);
+}
+
+#[test]
 fn top_level_property_reference_keeps_stable_property_identity_and_mutability() {
     let (body, index) = checked_function_body_with_platform(
         "var answer: Int = 42\n\
