@@ -95,6 +95,10 @@ fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
         .to_string()
 }
 
+fn lexical_receiver_declaration(file: &File, reference: &TypeRef) -> (Span, String) {
+    (reference.span, lexical_receiver_label(file, reference))
+}
+
 fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextReceiver {
     let label = (parameter.name == "_").then(|| lexical_receiver_label(file, &parameter.ty));
     ContextReceiver::new(ty, parameter.name.clone(), label)
@@ -34946,7 +34950,9 @@ impl<'a> Checker<'a> {
         {
             let defaults_scope = scope.declaration_function_child_with_context(
                 semantic_receiver.filter(|_| f.receiver.is_some()),
-                f.receiver.as_ref().map(|receiver| receiver.span),
+                f.receiver
+                    .as_ref()
+                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
                 &semantic_context_receivers,
             );
             let defaults_scope = &defaults_scope;
@@ -34988,7 +34994,9 @@ impl<'a> Checker<'a> {
                     let inferred = {
                         let params_scope = scope.declaration_function_child_with_context(
                             semantic_receiver.filter(|_| f.receiver.is_some()),
-                            f.receiver.as_ref().map(|receiver| receiver.span),
+                            f.receiver
+                                .as_ref()
+                                .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
                             &semantic_context_receivers,
                         );
                         let scope = &params_scope;
@@ -35134,7 +35142,9 @@ impl<'a> Checker<'a> {
             }
             let params_scope = scope.declaration_function_child_with_context(
                 semantic_receiver.filter(|_| f.receiver.is_some()),
-                f.receiver.as_ref().map(|receiver| receiver.span),
+                f.receiver
+                    .as_ref()
+                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
                 &semantic_context_receivers,
             );
             let scope = &params_scope;
@@ -66129,7 +66139,9 @@ impl<'a> Checker<'a> {
         {
             let defaults_scope = scope.declaration_function_child_with_context(
                 extension_receiver,
-                f.receiver.as_ref().map(|receiver| receiver.span),
+                f.receiver
+                    .as_ref()
+                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
                 &context_receivers,
             );
             let scope = &defaults_scope;
@@ -66154,7 +66166,9 @@ impl<'a> Checker<'a> {
         {
             let params_scope = scope.declaration_function_child_with_context(
                 extension_receiver,
-                f.receiver.as_ref().map(|receiver| receiver.span),
+                f.receiver
+                    .as_ref()
+                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
                 &context_receivers,
             );
             let scope = &params_scope;
@@ -66410,7 +66424,9 @@ impl<'a> Checker<'a> {
         let resolved_property_ty = {
             let context_scope = scope.declaration_function_child_with_context(
                 recv_ty,
-                p.receiver.as_ref().map(|receiver| receiver.span),
+                p.receiver
+                    .as_ref()
+                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
                 &context_receivers,
             );
             let scope = &context_scope;
@@ -68889,7 +68905,9 @@ impl<'a> Checker<'a> {
                         let accessor_scope = property_scope
                             .declaration_function_child_with_context(
                                 extension_receiver,
-                                bp.receiver.as_ref().map(|receiver| receiver.span),
+                                bp.receiver.as_ref().map(|receiver| {
+                                    lexical_receiver_declaration(self.file, receiver)
+                                }),
                                 &context_receivers,
                             );
                         for receiver in &context_receivers {
@@ -70073,7 +70091,9 @@ impl<'a> Checker<'a> {
                         let accessor_scope = accessor_tparam_scope
                             .declaration_function_child_with_context(
                                 extension_receiver,
-                                bp.receiver.as_ref().map(|receiver| receiver.span),
+                                bp.receiver.as_ref().map(|receiver| {
+                                    lexical_receiver_declaration(self.file, receiver)
+                                }),
                                 &context_receivers,
                             );
                         let scope = &accessor_scope;
@@ -70550,7 +70570,9 @@ impl<'a> Checker<'a> {
             // every enclosing receiver depth. Only an extension receiver adds a new rung.
             let members_scope = scope.declaration_function_child_with_context(
                 extension_receiver,
-                f.receiver.as_ref().map(|receiver| receiver.span),
+                f.receiver
+                    .as_ref()
+                    .map(|receiver| lexical_receiver_declaration(self.file, receiver)),
                 &context_receivers,
             );
             let scope = &members_scope;
@@ -75754,6 +75776,10 @@ impl<'a> Checker<'a> {
                         let receiver =
                             self.implicit_receivers(scope).into_iter().find(|receiver| {
                                 scope.implicit_receiver_has_context_label(receiver.identity, label)
+                                    || scope.implicit_receiver_has_extension_label(
+                                        receiver.identity,
+                                        label,
+                                    )
                             });
                         if let Some(receiver) = receiver {
                             self.mark_implicit_receiver_selection(e, receiver);

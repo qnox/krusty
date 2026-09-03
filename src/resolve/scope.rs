@@ -219,6 +219,9 @@ pub(crate) struct Scope<'p, B> {
     /// selected outer receiver marks that declaration used without reconstructing identity from a
     /// type or label.
     extension_receiver_declaration: Option<Span>,
+    /// Source-declared receiver type label (`String` in `fun String.f`). This cannot be recovered
+    /// from the semantic type when the source used a type alias.
+    extension_receiver_label: Option<String>,
     /// Bindings introduced by THIS scope, in declaration order. Declaration order is what makes
     /// `fun g(a: Int, b: Int = a)` resolve and `fun g(a: Int = b, b: Int)` not.
     ///
@@ -245,6 +248,7 @@ impl<'p, B> Scope<'p, B> {
             context_receivers: RefCell::new(Vec::new()),
             current_receiver_name: None,
             extension_receiver_declaration: None,
+            extension_receiver_label: None,
             bindings: RefCell::new(Vec::new()),
             flow: RefCell::new(Flow::default()),
         }
@@ -330,12 +334,15 @@ impl<'p, B> Scope<'p, B> {
     pub(crate) fn declaration_function_child_with_context(
         &'p self,
         receiver: Option<Ty>,
-        extension_declaration: Option<Span>,
+        extension_declaration: Option<(Span, String)>,
         context_receivers: &[ContextReceiver],
     ) -> Scope<'p, B> {
         debug_assert_eq!(receiver.is_some(), extension_declaration.is_some());
         let mut child = Scope::with_parent(Some(self), ScopeKind::Function { receiver });
-        child.extension_receiver_declaration = extension_declaration;
+        if let Some((declaration, label)) = extension_declaration {
+            child.extension_receiver_declaration = Some(declaration);
+            child.extension_receiver_label = Some(label);
+        }
         child
             .context_receivers
             .get_mut()
@@ -847,6 +854,19 @@ impl<'p, B> Scope<'p, B> {
                         .then(|| receiver.label.clone())
                         .flatten()
                 })
+        })
+    }
+
+    pub(crate) fn implicit_receiver_has_extension_label(
+        &self,
+        identity: (usize, usize),
+        label: &str,
+    ) -> bool {
+        self.ancestors().any(|scope| {
+            let scope_identity = scope as *const Self as usize;
+            (scope_identity, 0) == identity
+                && matches!(scope.kind, ScopeKind::Function { receiver: Some(_) })
+                && scope.extension_receiver_label.as_deref() == Some(label)
         })
     }
 

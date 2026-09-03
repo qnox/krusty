@@ -59,6 +59,22 @@ fn callable_type_alias_context_receiver_uses_its_source_label() {
 }
 
 #[test]
+fn extension_receiver_type_label_is_a_checked_receiver_coordinate() {
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +ContextReceivers\nfun Int.value(): Int = this@Int\n",
+        "value",
+    );
+    assert!(matches!(
+        body.expr(root_expression(&body))
+            .map(|expression| &expression.kind),
+        Some(FirExprKind::ImplicitReceiver {
+            current: true,
+            depth: 0,
+        })
+    ));
+}
+
+#[test]
 fn nested_inner_member_extension_publishes_exact_enclosing_receiver_paths() {
     let (body, index) = checked_function_body(
         "class Outer {\n\
