@@ -26,7 +26,7 @@ use crate::types::{
     existing_type_name, ty_mentions_param, type_name, type_name_nested_child, wk, Ty, TypeName,
     Visibility,
 };
-use scope::{ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
+use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
 mod callable_reference_selection;
 mod capture_analysis;
@@ -83,6 +83,22 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
+
+fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
+    file.alias_spellings
+        .get(&reference.span)
+        .unwrap_or(reference)
+        .name
+        .rsplit(['.', '/'])
+        .next()
+        .unwrap_or(&reference.name)
+        .to_string()
+}
+
+fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextReceiver {
+    let label = (parameter.name == "_").then(|| lexical_receiver_label(file, &parameter.ty));
+    ContextReceiver::new(ty, parameter.name.clone(), label)
+}
 
 fn resolved_annotation_identities(
     annotations: &[AnnotationRef],
@@ -27466,6 +27482,9 @@ impl<'a> Checker<'a> {
                                             .or_else(|| {
                                                 scope.implicit_receiver_context_name(identity)
                                             })
+                                            .or_else(|| {
+                                                scope.implicit_receiver_context_label(identity)
+                                            })
                                             .map(String::into_boxed_str)
                                     })
                                     .flatten(),
@@ -29370,7 +29389,7 @@ impl<'a> Checker<'a> {
             }
             // free function call: name(args)
             Expr::Name(fname) => {
-                if fname == "this" {
+                if fname == "this" || fname.starts_with("this@") {
                     let receiver_ty = self.expr(scope, callee);
                     let arg_tys = self.invoke_operator_arg_tys(scope, call, receiver_ty, args);
                     if let Some(ret) = self.record_invoke_or_report(
@@ -34909,7 +34928,7 @@ impl<'a> Checker<'a> {
             .iter()
             .zip(&semantic_params)
             .take(f.context_count)
-            .map(|(parameter, ty)| (*ty, parameter.name.clone()))
+            .map(|(parameter, ty)| lexical_context_receiver(self.file, parameter, *ty))
             .collect::<Vec<_>>();
         let semantic_erasure = semantic_tparams
             .erasure
@@ -65987,9 +66006,10 @@ impl<'a> Checker<'a> {
             .iter()
             .take(f.context_count)
             .map(|parameter| {
-                (
+                lexical_context_receiver(
+                    self.file,
+                    parameter,
                     self.check_declaration_type(scope, &parameter.ty),
-                    parameter.name.clone(),
                 )
             })
             .collect::<Vec<_>>();
@@ -66380,9 +66400,10 @@ impl<'a> Checker<'a> {
             .context_params
             .iter()
             .map(|parameter| {
-                (
+                lexical_context_receiver(
+                    self.file,
+                    parameter,
                     self.type_ref_ty_reported(scope, &parameter.ty),
-                    parameter.name.clone(),
                 )
             })
             .collect::<Vec<_>>();
@@ -67916,26 +67937,30 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|parameter| {
                     self.check_declaration_type(scope, &parameter.ty);
-                    (
+                    lexical_context_receiver(
+                        self.file,
+                        parameter,
                         self.type_ref_ty(scope, &parameter.ty),
-                        parameter.name.clone(),
                     )
                 })
                 .collect::<Vec<_>>();
             scope.declare_context_receivers(&class_context_receivers);
             let mut context_names = std::collections::HashSet::new();
-            for (ty, name) in &class_context_receivers {
-                if name == "_" {
+            for receiver in &class_context_receivers {
+                if receiver.name == "_" {
                     continue;
                 }
-                if !context_names.insert(name.as_str()) {
+                if !context_names.insert(receiver.name.as_str()) {
                     self.diags.error(
                         cl.span,
-                        format!("conflicting declaration: context parameter '{name}' is declared more than once"),
+                        format!(
+                            "conflicting declaration: context parameter '{}' is declared more than once",
+                            receiver.name
+                        ),
                     );
                     continue;
                 }
-                self.declare(scope, name, *ty, false);
+                self.declare(scope, &receiver.name, receiver.ty, false);
             }
             if body_local_class {
                 // A nested typealias declared by a body-local class is itself body-local and is
@@ -68294,22 +68319,12 @@ impl<'a> Checker<'a> {
             // semantic receiver, while a synthetic capture label would invent another receiver that
             // does not exist at runtime; either corrupts the coordinate recorded for `this@Outer`.
             let mut labels = self.body_class_captured_receiver_labels(d);
-            labels.extend(
-                cl.context_params
-                    .iter()
-                    .zip(&class_context_receivers)
-                    .filter(|(parameter, _)| parameter.name == "_")
-                    .map(|(parameter, (ty, _))| {
-                        let label = parameter
-                            .ty
-                            .name
-                            .rsplit(['.', '/'])
-                            .next()
-                            .unwrap_or(&parameter.ty.name)
-                            .to_owned();
-                        (label, *ty, false)
-                    }),
-            );
+            labels.extend(class_context_receivers.iter().filter_map(|receiver| {
+                receiver
+                    .label
+                    .clone()
+                    .map(|label| (label, receiver.ty, false))
+            }));
             labels.extend(self.stable_class_receiver_labels(cl, scope.this_ty()));
             let enclosing_label_depth = self.this_labels.len();
             let label_depth = labels.len();
@@ -68864,9 +68879,10 @@ impl<'a> Checker<'a> {
                             .context_params
                             .iter()
                             .map(|parameter| {
-                                (
+                                lexical_context_receiver(
+                                    self.file,
+                                    parameter,
                                     self.type_ref_ty(&property_scope, &parameter.ty),
-                                    parameter.name.clone(),
                                 )
                             })
                             .collect::<Vec<_>>();
@@ -68876,9 +68892,9 @@ impl<'a> Checker<'a> {
                                 bp.receiver.as_ref().map(|receiver| receiver.span),
                                 &context_receivers,
                             );
-                        for (parameter_ty, name) in &context_receivers {
-                            if name != "_" {
-                                self.declare(&accessor_scope, name, *parameter_ty, false);
+                        for receiver in &context_receivers {
+                            if receiver.name != "_" {
+                                self.declare(&accessor_scope, &receiver.name, receiver.ty, false);
                             }
                         }
                         let field_ty =
@@ -70047,9 +70063,10 @@ impl<'a> Checker<'a> {
                             .context_params
                             .iter()
                             .map(|parameter| {
-                                (
+                                lexical_context_receiver(
+                                    self.file,
+                                    parameter,
                                     self.type_ref_ty(&accessor_tparam_scope, &parameter.ty),
-                                    parameter.name.clone(),
                                 )
                             })
                             .collect::<Vec<_>>();
@@ -70064,9 +70081,9 @@ impl<'a> Checker<'a> {
                         // a child method scope, so it inherits that rung without cloning the whole
                         // property set. `expr_inner_name` compares exact receiver coordinates and
                         // therefore still gives a nearer extension receiver priority.
-                        for (parameter_type, name) in &context_receivers {
-                            if name != "_" {
-                                self.declare(scope, name, *parameter_type, false);
+                        for receiver in &context_receivers {
+                            if receiver.name != "_" {
+                                self.declare(scope, &receiver.name, receiver.ty, false);
                             }
                         }
                         let field_ty = (bp.receiver.is_none() && bp.context_params.is_empty())
@@ -70509,14 +70526,32 @@ impl<'a> Checker<'a> {
             // inference in this path.
             && !self.has_finalized_signature(stable_declaration);
         {
+            let parameter_types = f
+                .params
+                .iter()
+                .map(|parameter| {
+                    semantic_value_parameter_ty(
+                        self.check_declaration_type(scope, &parameter.ty),
+                        parameter.is_vararg,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let context_receivers = f
+                .params
+                .iter()
+                .zip(&parameter_types)
+                .take(f.context_count)
+                .map(|(parameter, ty)| lexical_context_receiver(self.file, parameter, *ty))
+                .collect::<Vec<_>>();
             // Implicit-`this` scope: an extension member resolves `this` to its extension receiver,
             // a plain member to the dispatch receiver.
             // The class rung already carries the dispatch receiver. Repeating it on the method
             // rung creates two semantic receiver coordinates for one runtime value and shifts
             // every enclosing receiver depth. Only an extension receiver adds a new rung.
-            let members_scope = scope.declaration_function_child(
+            let members_scope = scope.declaration_function_child_with_context(
                 extension_receiver,
                 f.receiver.as_ref().map(|receiver| receiver.span),
+                &context_receivers,
             );
             let scope = &members_scope;
             if f.receiver.is_none() {
@@ -70544,16 +70579,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let parameter_types = f
-                .params
-                .iter()
-                .map(|parameter| {
-                    semantic_value_parameter_ty(
-                        self.check_declaration_type(scope, &parameter.ty),
-                        parameter.is_vararg,
-                    )
-                })
-                .collect::<Vec<_>>();
             let defaults_scope = scope.child(ScopeKind::Block);
             self.check_parameter_defaults(
                 &defaults_scope,
@@ -75726,9 +75751,26 @@ impl<'a> Checker<'a> {
                         ty
                     }
                     None => {
-                        self.diags
-                            .error(self.span(e), format!("unresolved reference '{n}'."));
-                        Ty::Error
+                        let receiver =
+                            self.implicit_receivers(scope).into_iter().find(|receiver| {
+                                scope.implicit_receiver_has_context_label(receiver.identity, label)
+                            });
+                        if let Some(receiver) = receiver {
+                            self.mark_implicit_receiver_selection(e, receiver);
+                            self.expr_lowers.insert(
+                                e,
+                                if receiver.current {
+                                    ExprLowering::LabeledThisInner
+                                } else {
+                                    ExprLowering::LabeledThisDispatch
+                                },
+                            );
+                            receiver.ty
+                        } else {
+                            self.diags
+                                .error(self.span(e), format!("unresolved reference '{n}'."));
+                            Ty::Error
+                        }
                     }
                 }
             }
@@ -83812,7 +83854,7 @@ impl<'a> Checker<'a> {
                         } else {
                             "this".to_string()
                         };
-                        (*ty, name)
+                        ContextReceiver::new(*ty, name, None)
                     })
                     .collect::<Vec<_>>();
                 let lambda_scope =

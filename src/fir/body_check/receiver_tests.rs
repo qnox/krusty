@@ -15,6 +15,50 @@ fn explicit_this_is_a_checked_receiver_coordinate_not_a_local_name() {
 }
 
 #[test]
+fn labeled_member_context_receiver_is_a_checked_receiver_coordinate() {
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +ContextReceivers\n\
+         class Host { context(String) fun value(): String = this@String }\n",
+        "value",
+    );
+    assert!(matches!(
+        body.expr(root_expression(&body))
+            .map(|expression| &expression.kind),
+        Some(FirExprKind::ImplicitReceiver {
+            current: true,
+            depth: 0,
+        })
+    ));
+}
+
+#[test]
+fn callable_type_alias_context_receiver_uses_its_source_label() {
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +ContextReceivers\n\
+         typealias StringProvider = () -> String\n\
+         context(StringProvider) fun value(): String = this@StringProvider()\n",
+        "value",
+    );
+    assert_eq!(
+        body.expr(root_expression(&body))
+            .expect("checked context receiver invocation")
+            .ty
+            .get(),
+        Ty::String
+    );
+    assert!((0..body.expression_count()).any(|raw| {
+        matches!(
+            body.expr(FirExprId::from_raw(raw as u32))
+                .map(|expression| &expression.kind),
+            Some(FirExprKind::ImplicitReceiver {
+                current: true,
+                depth: 0,
+            })
+        )
+    }));
+}
+
+#[test]
 fn nested_inner_member_extension_publishes_exact_enclosing_receiver_paths() {
     let (body, index) = checked_function_body(
         "class Outer {\n\

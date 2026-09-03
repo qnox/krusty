@@ -45,6 +45,23 @@ pub(crate) enum ScopeKind {
     Block,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ContextReceiver {
+    pub(crate) ty: Ty,
+    pub(crate) name: String,
+    pub(crate) label: Option<String>,
+}
+
+impl ContextReceiver {
+    pub(crate) fn new(ty: Ty, name: impl Into<String>, label: Option<String>) -> Self {
+        Self {
+            ty,
+            name: name.into(),
+            label,
+        }
+    }
+}
+
 /// A STABLE ACCESS PATH a flow narrowing (smart cast) applies to: an immutable ROOT binding
 /// (`this`, a local `val`/parameter) followed by immutable property segments (`a.b.c`). A root-only
 /// path is the classic name narrowing; segments extend the same proofs (`==`/`!=` null checks,
@@ -192,7 +209,7 @@ pub(crate) struct Scope<'p, B> {
     /// extension/current receiver stays in [`ScopeKind::Function`]; keeping the remaining
     /// receivers on the same rung lets every scope consumer (member lookup and context-argument
     /// selection alike) observe the exact lambda shape.
-    context_receivers: RefCell<Vec<(Ty, String)>>,
+    context_receivers: RefCell<Vec<ContextReceiver>>,
     /// Runtime binding of the function rung's current receiver. Ordinary extension receivers are
     /// addressed as `this`; when the last context parameter occupies this slot, lowering binds it
     /// under its declared name instead.
@@ -299,7 +316,7 @@ impl<'p, B> Scope<'p, B> {
         &'p self,
         receiver: Option<Ty>,
         receiver_name: Option<String>,
-        context_receivers: &[(Ty, String)],
+        context_receivers: &[ContextReceiver],
     ) -> Scope<'p, B> {
         let mut child = Scope::with_parent(Some(self), ScopeKind::Function { receiver });
         child.current_receiver_name = receiver_name;
@@ -310,19 +327,11 @@ impl<'p, B> Scope<'p, B> {
         child
     }
 
-    pub(crate) fn declaration_function_child(
-        &'p self,
-        receiver: Option<Ty>,
-        extension_declaration: Option<Span>,
-    ) -> Scope<'p, B> {
-        self.declaration_function_child_with_context(receiver, extension_declaration, &[])
-    }
-
     pub(crate) fn declaration_function_child_with_context(
         &'p self,
         receiver: Option<Ty>,
         extension_declaration: Option<Span>,
-        context_receivers: &[(Ty, String)],
+        context_receivers: &[ContextReceiver],
     ) -> Scope<'p, B> {
         debug_assert_eq!(receiver.is_some(), extension_declaration.is_some());
         let mut child = Scope::with_parent(Some(self), ScopeKind::Function { receiver });
@@ -336,7 +345,7 @@ impl<'p, B> Scope<'p, B> {
 
     /// Attach classifier-owned context receivers after its type parameters have entered the class
     /// rung and their types can be resolved. This mutates only the current lexical scope frame.
-    pub(crate) fn declare_context_receivers(&self, receivers: &[(Ty, String)]) {
+    pub(crate) fn declare_context_receivers(&self, receivers: &[ContextReceiver]) {
         self.context_receivers
             .borrow_mut()
             .extend_from_slice(receivers);
@@ -465,8 +474,8 @@ impl<'p, B> Scope<'p, B> {
                 _ => {}
             }
             if !rung.context_receivers.borrow().is_empty() {
-                for (receiver, _) in rung.context_receivers.borrow().iter().rev() {
-                    if receiver_has_value(*receiver) {
+                for receiver in rung.context_receivers.borrow().iter().rev() {
+                    if receiver_has_value(receiver.ty) {
                         return Some(RootValue::Receiver);
                     }
                 }
@@ -801,6 +810,46 @@ impl<'p, B> Scope<'p, B> {
             .and_then(|receiver| receiver.context_name)
     }
 
+    pub(crate) fn implicit_receiver_has_context_label(
+        &self,
+        identity: (usize, usize),
+        label: &str,
+    ) -> bool {
+        self.ancestors().any(|scope| {
+            let scope_identity = scope as *const Self as usize;
+            scope
+                .context_receivers
+                .borrow()
+                .iter()
+                .rev()
+                .enumerate()
+                .any(|(index, receiver)| {
+                    (scope_identity, index + 1) == identity
+                        && receiver.label.as_deref() == Some(label)
+                })
+        })
+    }
+
+    pub(crate) fn implicit_receiver_context_label(
+        &self,
+        identity: (usize, usize),
+    ) -> Option<String> {
+        self.ancestors().find_map(|scope| {
+            let scope_identity = scope as *const Self as usize;
+            scope
+                .context_receivers
+                .borrow()
+                .iter()
+                .rev()
+                .enumerate()
+                .find_map(|(index, receiver)| {
+                    ((scope_identity, index + 1) == identity)
+                        .then(|| receiver.label.clone())
+                        .flatten()
+                })
+        })
+    }
+
     /// Identity of the innermost class receiver rung, if this lexical chain has one.
     ///
     /// Receiver types are not identities: a context parameter, extension receiver, and class
@@ -851,9 +900,11 @@ impl<'p, B> Scope<'p, B> {
             if let Some(name) = scope.current_receiver_name.as_ref() {
                 *receiver_binding_counts.entry(name.clone()).or_default() += 1;
             }
-            for (_, name) in scope.context_receivers.borrow().iter() {
-                if name != "_" {
-                    *receiver_binding_counts.entry(name.clone()).or_default() += 1;
+            for receiver in scope.context_receivers.borrow().iter() {
+                if receiver.name != "_" {
+                    *receiver_binding_counts
+                        .entry(receiver.name.clone())
+                        .or_default() += 1;
                 }
             }
             for binding in scope.bindings.borrow().iter().rev() {
@@ -894,13 +945,12 @@ impl<'p, B> Scope<'p, B> {
                 _ => {}
             }
             if !scope.context_receivers.borrow().is_empty() {
-                for (index, (ty, name)) in scope.context_receivers.borrow().iter().rev().enumerate()
-                {
-                    let context_name = (name != "_").then(|| name.clone());
+                for (index, receiver) in scope.context_receivers.borrow().iter().rev().enumerate() {
+                    let context_name = (receiver.name != "_").then(|| receiver.name.clone());
                     push(
                         &mut out,
                         &mut same_name_depths,
-                        *ty,
+                        receiver.ty,
                         (scope_identity, index + 1),
                         context_name,
                         None,
@@ -1094,7 +1144,11 @@ mod tests {
     fn class_receiver_identity_is_not_a_same_typed_context_receiver() {
         let root: Scope<'_, u32> = Scope::root();
         let class_scope = root.child(class("A", false));
-        let function = class_scope.function_child(None, None, &[(obj("A"), "other".to_string())]);
+        let function = class_scope.function_child(
+            None,
+            None,
+            &[ContextReceiver::new(obj("A"), "other", None)],
+        );
 
         let receivers = function.implicit_receivers_with_declarations();
         let class_identity = function
