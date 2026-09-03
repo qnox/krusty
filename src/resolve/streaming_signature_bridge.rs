@@ -2450,7 +2450,11 @@ impl ProductionSignatureSemantics<'_> {
         let class_super = class
             .super_internal
             .filter(|owner| matches_qualifier(*owner))
-            .map(|owner| applied(owner, &class.super_type_args));
+            .map(|owner| applied(owner, &class.super_type_args))
+            .or_else(|| {
+                let any = crate::types::type_name("kotlin/Any");
+                (!class.is_interface() && matches_qualifier(any)).then(|| Ty::obj_name(any))
+            });
         let interface_supers = class
             .interfaces
             .iter_ids()

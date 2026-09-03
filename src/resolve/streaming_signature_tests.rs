@@ -95,6 +95,57 @@ fn generated_data_class_copy_publishes_its_complete_callable_header() {
 }
 
 #[test]
+fn implicit_any_is_the_class_super_rung_during_signature_solving() {
+    let source = r#"
+interface Contract {
+    override fun equals(other: Any?): Boolean
+    override fun hashCode(): Int
+}
+class Implementation : Contract {
+    override fun equals(other: Any?) = super.equals(other)
+    override fun hashCode() = super.hashCode()
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ImplicitAnySuper")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("super calls must produce a finalized signature module")
+        .module
+        .index();
+    let owner = index
+        .classifier_declaration(crate::types::type_name("Implementation"))
+        .expect("implementation declaration");
+    for (name, result) in [("equals", Ty::Boolean), ("hashCode", Ty::Int)] {
+        let declaration = index
+            .declarations_named(name)
+            .iter()
+            .copied()
+            .find(|declaration| {
+                index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| header.owner == Some(owner))
+            })
+            .expect("implementation member declaration");
+        assert_eq!(
+            index
+                .signature(declaration)
+                .map(|signature| signature.result.get()),
+            Some(result)
+        );
+    }
+}
+
+#[test]
 fn compact_classifier_publication_does_not_restore_a_validated_cycle_edge() {
     let source = "object Cyclic : Cyclic()";
     let inputs = [SourceInput::kotlin(source).with_file_stem("Cyclic")];
