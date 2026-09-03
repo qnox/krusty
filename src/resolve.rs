@@ -84,6 +84,10 @@ const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
 
+fn is_super_qualifier(spelling: &str) -> bool {
+    spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@")
+}
+
 fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
     file.alias_spellings
         .get(&reference.span)
@@ -2385,28 +2389,30 @@ impl PostponedCallConstraints {
         &mut self,
         expected: Ty,
         actual: Ty,
+        inferred: &crate::symbol_resolver::AssignabilityConstraints,
         shadowed_formals: &std::collections::HashSet<String>,
     ) {
         crate::trace_compiler!(
             "lambda_apply",
             "postponed constrain expected={expected:?} actual={actual:?}"
         );
-        let mut lower = crate::symbol_resolver::GSigBinds::new();
-        crate::symbol_resolver::unify_inferred_ty(expected, actual, &mut lower);
-        for (formal, actual) in lower.into_iter().filter(|(formal, _)| {
-            self.formals.contains(formal) && !shadowed_formals.contains(formal)
+        for (formal, actual) in inferred.lower.iter().filter(|(formal, _)| {
+            self.formals.iter().any(|allowed| allowed == *formal)
+                && !shadowed_formals.contains(formal.as_str())
         }) {
             let merged =
-                crate::symbol_resolver::merge_inferred_ty(self.lower.get(&formal).copied(), actual);
-            self.lower.insert(formal, merged);
+                crate::symbol_resolver::merge_inferred_ty(self.lower.get(formal).copied(), *actual);
+            self.lower.insert(formal.clone(), merged);
         }
 
-        let mut upper = crate::symbol_resolver::GSigBinds::new();
-        crate::symbol_resolver::unify_inferred_ty(actual, expected, &mut upper);
-        for (formal, expected) in upper.into_iter().filter(|(formal, _)| {
-            self.formals.contains(formal) && !shadowed_formals.contains(formal)
+        for (formal, upper) in inferred.upper.iter().filter(|(formal, _)| {
+            self.formals.iter().any(|allowed| allowed == *formal)
+                && !shadowed_formals.contains(formal.as_str())
         }) {
-            self.upper.entry(formal).or_default().push(expected);
+            self.upper
+                .entry(formal.clone())
+                .or_default()
+                .extend(upper.iter().copied());
         }
     }
 
@@ -25339,6 +25345,11 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let inferred = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+            &self.fed_source(),
+            expected,
+            actual,
+        );
         let mut shadowed_formals = std::collections::HashSet::new();
         for constraints in self.postponed_call_constraints.iter().rev() {
             let mut declared_bounds = HashMap::new();
@@ -25346,7 +25357,7 @@ impl<'a> Checker<'a> {
             collect_declared_bounds(actual, &constraints.formals, &mut declared_bounds);
 
             let mut trial = constraints.clone();
-            trial.constrain_assignable(expected, actual, &shadowed_formals);
+            trial.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
             for (formal, &lower) in &trial.lower {
                 if shadowed_formals.contains(formal)
                     || lower == Ty::Error
@@ -28202,7 +28213,7 @@ impl<'a> Checker<'a> {
                 // `super.method(args)` / `super<T>.method(args)` — dispatch to a supertype's method
                 // (non-virtual). A `super<T>` qualifier (encoded on the name) selects that supertype.
                 let super_qual: Option<Option<String>> = match self.file.expr(receiver) {
-                    Expr::Name(r) if r.starts_with("super") => {
+                    Expr::Name(r) if is_super_qualifier(r) => {
                         // The optional `<T>` type qualifier (a `@label` may follow it, ignored here).
                         let ty = r
                             .strip_prefix("super<")
@@ -29370,6 +29381,18 @@ impl<'a> Checker<'a> {
                     .stable_receiver_callables(rt, &name)
                     .functions()
                     .to_vec();
+                // This visit is the constraint-collection half of a postponed builder call. An
+                // argument can still contain the enclosing call's variable even when the member
+                // receiver does not (`flatMapTo(this)`, where `this` is `MutableSet<E>`). The
+                // enclosing call rechecks the lambda after solving E; only that final visit may
+                // diagnose overload applicability.
+                if self.postponed_call_mentions(rt)
+                    || arg_tys
+                        .iter()
+                        .any(|argument| self.postponed_call_mentions(*argument))
+                {
+                    return Ty::Error;
+                }
                 if self.call_has_error_argument(args)
                     && (member_mapping_failure.is_some() || !inapplicable_candidates.is_empty())
                 {
@@ -33891,7 +33914,7 @@ impl<'a> Checker<'a> {
         // `super.prop = value` is a setter call on the current receiver, not an assignment through a
         // value named `super`. Select the exact direct-super accessor now and hand it to lowering.
         if let Expr::Name(super_name) = self.file.expr(receiver) {
-            if super_name.starts_with("super") {
+            if is_super_qualifier(super_name) {
                 let Some(dispatch_receiver) = self.super_receiver_selection(scope, super_name)
                 else {
                     self.diags.error(
@@ -54318,8 +54341,23 @@ impl<'a> Checker<'a> {
             (params, bindings)
         });
         if generic.as_ref().is_some_and(|(_, bindings)| {
+            // This is only the pre-lambda applicability probe. A bound that depends on a still
+            // unbound callable formal is completed by the postponed lambda result and cannot
+            // eliminate the overload yet (`C : MutableCollection<in R>` with `R` supplied by the
+            // lambda). Validate every already-closed bound now; final selection validates all of
+            // them after the lambda has its semantic type.
+            let unresolved = semantic
+                .formals
+                .iter()
+                .filter(|formal| !bindings.contains_key(*formal))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut partial_signature = semantic.clone().into_owned();
+            for bounds in &mut partial_signature.formal_bounds {
+                bounds.retain(|bound| !ty_mentions_param(*bound, &unresolved));
+            }
             !crate::symbol_resolver::generic_bindings_satisfy_bounds(
-                &semantic,
+                &partial_signature,
                 bindings,
                 |actual, bound| self.generic_bound_admits(actual, bound),
             )
@@ -72957,9 +72995,14 @@ impl<'a> Checker<'a> {
         // owns the same formal, its constraints must not leak into an enclosing invocation of that
         // declaration. Walk the inference frames innermost-first and shadow only duplicate formal
         // identities; constraints on distinct enclosing variables continue to propagate normally.
+        let inferred = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+            &self.fed_source(),
+            expected,
+            actual,
+        );
         let mut shadowed_formals = std::collections::HashSet::new();
         for constraints in self.postponed_call_constraints.iter_mut().rev() {
-            constraints.constrain_assignable(expected, actual, &shadowed_formals);
+            constraints.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
             crate::trace_compiler!(
                 "resolve",
                 "postponed constraint expected={expected:?} actual={actual:?} lower={:?} upper={:?}",
@@ -77281,7 +77324,7 @@ impl<'a> Checker<'a> {
                 // route says nothing — and the tower would offer this class, whose own `foo` is the
                 // one being determined.
                 if let Expr::Name(spelling) = self.file.expr(receiver) {
-                    if spelling.starts_with("super") {
+                    if is_super_qualifier(spelling) {
                         let spelling = spelling.clone();
                         // `super<B>` names its supertype outright; a bare `super` means the
                         // declaring class's own superclass. Either way the answer is a SUPERTYPE's
@@ -78803,7 +78846,7 @@ impl<'a> Checker<'a> {
             // Resolve it before treating `super` as an expression: it is a dispatch qualifier, never a
             // value. The same target structure as a super method call crosses into lowering.
             if let Expr::Name(super_name) = self.file.expr(receiver) {
-                if super_name.starts_with("super") {
+                if is_super_qualifier(super_name) {
                     let Some(dispatch_receiver) = self.super_receiver_selection(scope, super_name)
                     else {
                         self.diags.error(
@@ -79280,7 +79323,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .copied()
                     .filter(|operand| {
-                        !matches!(self.file.expr(*operand), Expr::Name(name) if name.starts_with("super"))
+                        !matches!(self.file.expr(*operand), Expr::Name(name) if is_super_qualifier(name))
                             && matches!(
                                 self.qualifier(scope, QualifierInput::Expression(*operand)),
                                 Ok(ResolvedQualifier::Value)
@@ -82085,6 +82128,23 @@ impl<'a> Checker<'a> {
                 &selected,
                 &slot_tys,
             ) else {
+                // Provider realization requires concrete call-site substitutions. During the
+                // constraint-collection visit of a builder lambda, an enclosing variable may
+                // still occur in the receiver, parameters, or argument slots. Selection has
+                // already produced the semantic result; the mandatory finalized recheck records
+                // its physical realization after that variable is solved.
+                let postponed = self.postponed_call_mentions(selected_receiver)
+                    || selected
+                        .semantic_params()
+                        .iter()
+                        .any(|parameter| self.postponed_call_mentions(*parameter))
+                    || slot_tys
+                        .iter()
+                        .flatten()
+                        .any(|argument| self.postponed_call_mentions(*argument));
+                if postponed {
+                    return Some(selected.callable.ret);
+                }
                 crate::trace_compiler!(
                     "resolve",
                     "extension realization failure name={name} receiver={rt:?} slots={slot_tys:?} selected_receiver={:?} selected_params={:?} selected_call_sig={:?} selected_callable={:?}",

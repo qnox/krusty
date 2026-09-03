@@ -178,10 +178,27 @@ impl ProductionSignatureSemantics<'_> {
             "scoped argument constraints owner={:?} parameters={parameters:?} arguments={arguments:?} before={active:?}",
             constraint_owner,
         );
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
         for (&parameter, &argument) in parameters.iter().zip(arguments) {
-            let mut inferred = crate::symbol_resolver::GSigBinds::new();
-            crate::symbol_resolver::unify_inferred_ty(parameter, argument, &mut inferred);
-            crate::symbol_resolver::unify_inferred_ty(argument, parameter, &mut inferred);
+            let constraints =
+                crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                    &source, parameter, argument,
+                );
+            let mut inferred = constraints.lower;
+            for (formal, upper) in constraints.upper {
+                for actual in upper {
+                    inferred
+                        .entry(formal.clone())
+                        .and_modify(|known| {
+                            *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                        })
+                        .or_insert(actual);
+                }
+            }
             inferred.retain(|formal, _| active_formals.contains(formal.as_str()));
             Self::merge_scoped_constraints(active, inferred);
         }
@@ -697,12 +714,13 @@ impl ProductionSignatureSemantics<'_> {
             );
             let (argument_kinds, argument_types) =
                 Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-            let projected = self.project_postponed_callables(scope, callables, &argument_kinds);
+            let projected =
+                self.project_postponed_callables(scope, receiver, callables, &argument_kinds);
             let crate::symbol_resolver::CandidateSelection::Selected((selected, _, result)) =
                 resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     spelling,
-                    &argument_kinds,
+                    projected.arguments(),
                     &resolved_type_arguments,
                     projected.callables(),
                 )
@@ -2076,6 +2094,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 declaration,
                 selected_argument_types,
                 postponed_bindings,
+                extension_parameters,
             )) = self.with_resolver(scope, |resolver| {
                 let (mut functions, properties) =
                     resolver.receiver_callables(receiver, spelling).into_parts();
@@ -2084,12 +2103,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 let callables = crate::libraries::Callables::from_parts(functions, properties);
                 let (selected_arguments, selected_argument_types) =
                     Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-                let projected =
-                    self.project_postponed_callables(scope, callables, &selected_arguments);
+                let projected = self.project_postponed_callables(
+                    scope,
+                    receiver,
+                    callables,
+                    &selected_arguments,
+                );
                 let selection = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     spelling,
-                    &selected_arguments,
+                    projected.arguments(),
                     &resolved_type_arguments,
                     projected.callables(),
                 );
@@ -2121,6 +2144,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         None,
                         selected_argument_types,
                         postponed_bindings,
+                        None,
                     ));
                 }
                 Some((
@@ -2130,9 +2154,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     selected.stable_declaration,
                     selected_argument_types,
                     postponed_bindings,
+                    Some(parameters),
                 ))
             }) {
                 self.commit_postponed_bindings(scope, postponed_bindings);
+                if let Some(parameters) = extension_parameters {
+                    self.record_scoped_argument_constraints(
+                        scope,
+                        &parameters,
+                        &selected_argument_types,
+                    );
+                }
                 if let Some(member) = member.as_ref() {
                     if let Some(declaration) = member.stable_declaration {
                         if self.headers.stubs.iter().any(|stub| {
@@ -4482,18 +4514,23 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let (argument_kinds, argument_types) =
                 Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-            let projected =
-                self.project_postponed_callables(scope, callables, &argument_kinds);
+            let projected = self.project_postponed_callables(
+                scope,
+                receiver.get(),
+                callables,
+                &argument_kinds,
+            );
             crate::trace_compiler!(
                 "signature",
-                "member call selection receiver={:?} spelling={spelling} candidates={} arguments={argument_kinds:?}",
+                "member call selection receiver={:?} spelling={spelling} candidates={} arguments={:?}",
                 receiver.get(),
                 projected.callables().functions().len(),
+                projected.arguments(),
             );
             let selection = resolver.select_receiver_function_with_params_tracking(
                 receiver.get(),
                 spelling,
-                &argument_kinds,
+                projected.arguments(),
                 &type_arguments,
                 projected.callables(),
             );
@@ -4874,26 +4911,36 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 let callables = crate::libraries::Callables::from_parts(functions, properties);
                 let (kinds, slots) =
                     Self::probe_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-                let projected = self.project_postponed_callables(scope, callables, &kinds);
-                resolver
-                    .select_receiver_function_with_params(
-                        receiver.get(),
-                        spelling,
-                        &kinds,
-                        &type_arguments,
-                        projected.callables(),
-                    )
-                    .map(|(_, parameters)| {
-                        let parameters = parameters
-                            .into_iter()
-                            .map(|parameter| {
-                                resolver
-                                    .functional_expectation(parameter)
-                                    .unwrap_or(parameter)
-                            })
-                            .collect();
-                        (parameters, slots)
+                let projected =
+                    self.project_postponed_callables(scope, receiver.get(), callables, &kinds);
+                let selected_parameters = match resolver.select_receiver_function_with_params(
+                    receiver.get(),
+                    spelling,
+                    projected.arguments(),
+                    &type_arguments,
+                    projected.callables(),
+                ) {
+                    Some((_, parameters)) => parameters,
+                    None => self.common_postponed_parameters(
+                        resolver,
+                        arguments,
+                        resolver.receiver_function_parameter_shapes(
+                            receiver.get(),
+                            projected.arguments(),
+                            &type_arguments,
+                            projected.callables(),
+                        ),
+                    )?,
+                };
+                let parameters = selected_parameters
+                    .into_iter()
+                    .map(|parameter| {
+                        resolver
+                            .functional_expectation(parameter)
+                            .unwrap_or(parameter)
                     })
+                    .collect();
+                Some((parameters, slots))
             })?;
         crate::trace_compiler!(
             "signature",

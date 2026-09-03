@@ -8617,7 +8617,7 @@ impl<'a> Parser<'a> {
                 // A LABELED `this`/`super` (`this@Outer`, `super@Base`): the `@label` qualifies which
                 // enclosing receiver / supertype it denotes. Capture it on the name (`this@Outer`) so the
                 // checker/lowerer can resolve the label; a bare `this`/`super` stays unchanged.
-                if (n == "this" || n.starts_with("super"))
+                if (n == "this" || n == "super" || n.starts_with("super<"))
                     && self.at(TokenKind::At)
                     && self
                         .t

@@ -7507,7 +7507,10 @@ fn generic_function_call_admits(
             {
                 return None;
             }
-            if argument.is_lambda_literal()
+            let materialized_lambda = argument.is_lambda_literal()
+                && !argument.ty().mentions_error()
+                && !argument.ty().mentions_pending();
+            if (argument.is_lambda_literal() && !materialized_lambda)
                 || argument.is_expected_type_callable()
                 || argument.is_omitted_default()
             {

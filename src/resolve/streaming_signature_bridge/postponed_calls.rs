@@ -9,6 +9,7 @@ use super::*;
 
 pub(super) struct PostponedCallableFamily {
     callables: crate::libraries::Callables,
+    arguments: Vec<crate::symbol_resolver::CallArgKind>,
     bindings: Vec<(
         crate::libraries::FunctionInfo,
         crate::symbol_resolver::GSigBinds,
@@ -18,6 +19,10 @@ pub(super) struct PostponedCallableFamily {
 impl PostponedCallableFamily {
     pub(super) fn callables(&self) -> &crate::libraries::Callables {
         &self.callables
+    }
+
+    pub(super) fn arguments(&self) -> &[crate::symbol_resolver::CallArgKind] {
+        &self.arguments
     }
 
     pub(super) fn selected_bindings(
@@ -140,6 +145,7 @@ impl ProductionSignatureSemantics<'_> {
     pub(super) fn project_postponed_callables(
         &self,
         scope: crate::fir::SignatureScope,
+        receiver: Ty,
         callables: crate::libraries::Callables,
         arguments: &[crate::symbol_resolver::CallArgKind],
     ) -> PostponedCallableFamily {
@@ -159,6 +165,7 @@ impl ProductionSignatureSemantics<'_> {
         if active.is_empty() {
             return PostponedCallableFamily {
                 callables,
+                arguments: arguments.to_vec(),
                 bindings: Vec::new(),
             };
         }
@@ -174,6 +181,56 @@ impl ProductionSignatureSemantics<'_> {
 
         let (mut functions, properties) = callables.into_parts();
         let mut recorded = Vec::new();
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let arguments = arguments
+            .iter()
+            .map(|argument| match argument {
+                crate::symbol_resolver::CallArgKind::Typed(ty) => {
+                    crate::symbol_resolver::CallArgKind::Typed(
+                        crate::symbol_resolver::ty_subst_keep_unbound(*ty, &known),
+                    )
+                }
+                crate::symbol_resolver::CallArgKind::Spread(ty) => {
+                    crate::symbol_resolver::CallArgKind::Spread(
+                        crate::symbol_resolver::ty_subst_keep_unbound(*ty, &known),
+                    )
+                }
+                crate::symbol_resolver::CallArgKind::LambdaLiteral(ty) => {
+                    crate::symbol_resolver::CallArgKind::LambdaLiteral(
+                        crate::symbol_resolver::ty_subst_keep_unbound(*ty, &known),
+                    )
+                }
+                crate::symbol_resolver::CallArgKind::CallableReference { nominal, function } => {
+                    crate::symbol_resolver::CallArgKind::CallableReference {
+                        nominal: crate::symbol_resolver::ty_subst_keep_unbound(*nominal, &known),
+                        function: crate::symbol_resolver::ty_subst_keep_unbound(*function, &known),
+                    }
+                }
+                crate::symbol_resolver::CallArgKind::ExpectedTypeCallable {
+                    provisional,
+                    generic_sig,
+                } => crate::symbol_resolver::CallArgKind::ExpectedTypeCallable {
+                    provisional: crate::symbol_resolver::ty_subst_keep_unbound(
+                        *provisional,
+                        &known,
+                    ),
+                    generic_sig: generic_sig.clone(),
+                },
+                crate::symbol_resolver::CallArgKind::IntegerLiteral { ty, value } => {
+                    crate::symbol_resolver::CallArgKind::IntegerLiteral {
+                        ty: crate::symbol_resolver::ty_subst_keep_unbound(*ty, &known),
+                        value: *value,
+                    }
+                }
+                crate::symbol_resolver::CallArgKind::OmittedDefault => {
+                    crate::symbol_resolver::CallArgKind::OmittedDefault
+                }
+            })
+            .collect::<Vec<_>>();
         for candidate in &mut functions.overloads {
             let Some(mut signature) = candidate.generic_sig.clone() else {
                 continue;
@@ -181,15 +238,55 @@ impl ProductionSignatureSemantics<'_> {
             let value_parameters =
                 &signature.params[candidate.context_count.min(signature.params.len())..];
             let mut bindings = known.clone();
-            for (&parameter, argument) in value_parameters.iter().zip(arguments) {
+            for (&parameter, argument) in value_parameters.iter().zip(&arguments) {
                 if argument.is_omitted_default() || argument.is_lambda_literal() {
                     continue;
                 }
-                crate::symbol_resolver::unify_inferred_ty(
+                crate::symbol_resolver::unify_inferred_ty_with_source(
+                    &source,
                     parameter,
                     argument.type_for(parameter),
                     &mut bindings,
                 );
+            }
+            // Candidate formals can mediate a constraint on the enclosing postponed call. For
+            // `MutableSet<E>.addAll(Set<String>)`, argument inference first binds the extension's
+            // `T = String`; only then does receiver assignability expose the outer `E = String`.
+            // Keep that relation here, before discarding bindings not owned by the active frame.
+            if let Some(declared_receiver) = signature.receiver.or(candidate.receiver) {
+                let expected_receiver =
+                    crate::symbol_resolver::ty_subst_keep_unbound(declared_receiver, &bindings);
+                let constraints =
+                    crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                        &source,
+                        expected_receiver,
+                        receiver,
+                    );
+                for (formal, actual) in constraints.lower {
+                    if active.contains(formal.as_str()) {
+                        bindings
+                            .entry(formal)
+                            .and_modify(|known| {
+                                *known =
+                                    crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                            })
+                            .or_insert(actual);
+                    }
+                }
+                for (formal, upper) in constraints.upper {
+                    if !active.contains(formal.as_str()) {
+                        continue;
+                    }
+                    for actual in upper {
+                        bindings
+                            .entry(formal.clone())
+                            .and_modify(|known| {
+                                *known =
+                                    crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                            })
+                            .or_insert(actual);
+                    }
+                }
             }
             bindings.retain(|formal, _| active.contains(formal.as_str()));
             if bindings.is_empty() {
@@ -216,6 +313,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         PostponedCallableFamily {
             callables: crate::libraries::Callables::from_parts(functions, properties),
+            arguments,
             bindings: recorded,
         }
     }

@@ -4593,6 +4593,19 @@ fn nested_builder_constraints_finalize_the_enclosing_signature() {
 }
 
 #[test]
+fn mutable_collection_builder_constraints_finalize_before_overload_selection() {
+    assert_jvm_streaming_frontend(
+        r#"// WITH_STDLIB
+           interface A { fun names(): Set<String> }
+           fun collect(declared: A, supers: List<A>): Set<String> = buildSet {
+               addAll(declared.names())
+               supers.flatMapTo(this) { it.names() }
+           }"#,
+        "MutableCollectionBuilderSignature",
+    );
+}
+
+#[test]
 fn star_captured_self_bound_keeps_the_callers_type_parameter_in_checked_fir() {
     let source = r#"interface Entity<D, S : Entity<D, S>> {
             fun <T : S> isEqualTo(expected: Any?): T

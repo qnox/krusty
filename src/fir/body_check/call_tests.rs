@@ -2214,6 +2214,25 @@ fn postponed_builder_constraint_shapes_a_following_consumer_lambda_before_fir() 
 }
 
 #[test]
+fn postponed_collection_builder_rechecks_overloads_after_element_inference() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         interface A { fun names(): Set<String> }\n\
+         fun collect(declared: A, supers: List<A>): Set<String> = buildSet {\n\
+             addAll(declared.names())\n\
+             supers.flatMapTo(this) { it.names() }\n\
+         }\n",
+        "collect",
+        jvm_stdlib_semantics(),
+    );
+
+    assert!((0..body.expression_count()).any(|raw| {
+        body.expr(FirExprId::from_raw(raw as u32))
+            .is_some_and(|expression| matches!(expression.kind, FirExprKind::Call(_)))
+    }));
+}
+
+#[test]
 fn postponed_receiver_member_contextualizes_an_omitted_generic_alias_constructor() {
     let (body, _) = checked_function_body(
         "class Owner<T : Any> {\n\
