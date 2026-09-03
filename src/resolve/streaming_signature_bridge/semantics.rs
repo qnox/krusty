@@ -207,6 +207,38 @@ impl ProductionSignatureSemantics<'_> {
         self.record_scoped_argument_constraints(scope, &specialized, arguments);
     }
 
+    fn source_parameters_specialized_by_receiver(
+        &self,
+        source: (u32, u32),
+        receiver: Ty,
+        signature: &crate::fir::ResolvedSignature,
+    ) -> Option<Vec<Ty>> {
+        let callable = self
+            .table
+            .ext_funs
+            .values()
+            .flat_map(HashMap::values)
+            .flatten()
+            .find(|callable| {
+                callable.source_file == Some(source.0)
+                    && callable.source_decl == Some(DeclId(source.1))
+            })?;
+        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        crate::symbol_resolver::unify_inferred_ty(
+            callable.source_receiver?,
+            receiver,
+            &mut bindings,
+        );
+        Some(
+            signature.parameters[callable.context_count.min(signature.parameters.len())..]
+                .iter()
+                .map(|parameter| {
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter.get(), &bindings)
+                })
+                .collect(),
+        )
+    }
+
     /// Declare a callable/property's own type parameters when it has no transitional symbol-table
     /// record. Enum-entry members are the first such family: their complete syntax is packed in the
     /// header arena, but they live on the entry subclass rather than in the parent enum's legacy
@@ -2081,7 +2113,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 let postponed_bindings = projected.selected_bindings(&selected);
                 if selected.kind == crate::libraries::FnKind::Member {
                     let mut member = selected.member_with_return(result);
-                    member.params = parameters;
+                    member.params = parameters.clone();
                     return Some((
                         result,
                         Some(member),
@@ -2168,6 +2200,20 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     if let Some(signature) =
                         self.demanded_source_signature(None, declaration, demand)?
                     {
+                        // Preserve receiver-derived substitutions independently from ordinary
+                        // argument inference. Comparing this exact declared shape with the
+                        // materialized arguments relates active builder variables to the outer
+                        // receiver's type arguments instead of approximating both to a common
+                        // bound.
+                        if let Some(parameters) = self
+                            .source_parameters_specialized_by_receiver(source, receiver, &signature)
+                        {
+                            self.record_scoped_argument_constraints(
+                                scope,
+                                &parameters,
+                                &selected_argument_types,
+                            );
+                        }
                         return self.apply_demanded_source_callable(
                             source,
                             Some(receiver),

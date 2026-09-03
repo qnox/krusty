@@ -2404,6 +2404,19 @@ impl SignatureConstraintExtractor {
             }
         }
         if contextual {
+            // A contextual function literal does not know whether its expected function type has
+            // an extension receiver until signature evaluation. Defer bare `this` to that lexical
+            // moment: the evaluator first enters the expected receiver rung, while a non-receiver
+            // expectation naturally falls through to the enclosing declaration's `this`.
+            let spelling = self.graph.intern_name("this");
+            let selection = self.graph.add_value_selection(DeferredValueSelection {
+                scope,
+                spelling,
+                origin: lambda_origin,
+                expected: None,
+            });
+            let this = self.graph.add_expr(SigExpr::Value(selection));
+            bindings.insert("this".into(), this);
             self.lexical_values.push(bindings);
             self.lambda_returns.push(CompactLambdaReturnScope {
                 label: return_label.clone(),

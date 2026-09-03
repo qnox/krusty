@@ -3851,6 +3851,48 @@ fn contextual_extension_lambda_adopts_its_declared_result_in_a_generic_member() 
 }
 
 #[test]
+fn contextual_receiver_shadows_enclosing_this_in_callable_reference_signature() {
+    let source = r#"interface Flow<out T>
+        inline fun <T> Flow<T>.collect(crossinline action: suspend (T) -> Unit) {}
+        class Product<T>
+        interface Sink<T> { suspend fun emit(value: T) }
+        fun <T> build(block: suspend Sink<T>.() -> Unit): Product<T> = null!!
+        fun <Value> Flow<Value>.convert() = build { collect(this::emit) }
+    "#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ContextualThisReferenceSignature")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("contextual receiver reference must finalize in Pass 1")
+        .module
+        .index();
+    let signature = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("convert"))
+        .and_then(|declaration| index.signature(declaration))
+        .expect("convert signature");
+    let [result] = signature.result.get().type_args() else {
+        panic!("convert must return Product<Value>")
+    };
+    assert_eq!(
+        result
+            .ty_param_name()
+            .map(crate::types::type_parameter_source_name),
+        Some("Value"),
+        "resolved signature: {signature:?}",
+    );
+}
+
+#[test]
 fn inherited_generic_member_extension_is_visible_inside_a_receiver_lambda() {
     let source = r#"// WITH_STDLIB
         class NoiseMaker { fun say(value: String) {} }
