@@ -2919,6 +2919,7 @@ pub struct IrPackageProperty {
     pub type_params: Vec<IrPackageTypeParameter>,
     pub receiver: Option<Ty>,
     pub context_parameters: Vec<Ty>,
+    pub context_parameter_names: Vec<String>,
     pub is_const: bool,
     pub has_constant: bool,
     pub visibility: crate::types::Visibility,

@@ -5971,15 +5971,13 @@ pub(crate) fn finalized_streamed_signature_index(
             unreachable!("a property stub must own a property header")
         };
         let property = crate::fir::PropertyId::from_raw(stub.id.raw());
+        let context_parameters = headers.syntax.parameters(context_parameters);
         index.publish_property_shape(
             property,
             stub.id,
-            u32::try_from(headers.syntax.parameters(context_parameters).len())
-                .expect("too many property context parameters"),
+            u32::try_from(context_parameters.len()).expect("too many property context parameters"),
             u32::try_from(
-                headers
-                    .syntax
-                    .parameters(context_parameters)
+                context_parameters
                     .iter()
                     .filter(|parameter| {
                         headers
@@ -5992,6 +5990,16 @@ pub(crate) fn finalized_streamed_signature_index(
             .expect("too many named property context parameters"),
             resolved_receivers.get(&stub.id).copied(),
             mutable,
+        );
+        index.publish_property_context_parameter_names(
+            property,
+            context_parameters.iter().map(|parameter| {
+                headers
+                    .lookup_names
+                    .get(parameter.name)
+                    .unwrap_or("_")
+                    .into()
+            }),
         );
         if let Some(storage) = backing_field_types.get(&stub.id).copied() {
             index.publish_property_storage_type(property, storage);

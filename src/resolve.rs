@@ -24912,6 +24912,7 @@ impl<'a> Checker<'a> {
     /// imported spelling does.
     fn read_package_property(
         &mut self,
+        scope: &CheckerScope<'_>,
         expression: ExprId,
         package: TypeName,
         name: &str,
@@ -24919,29 +24920,48 @@ impl<'a> Checker<'a> {
         if let Some(property) = self.libraries.top_level_associated_property(package, name) {
             return Some(self.record_associated_property(Some(expression), property, true));
         }
-        let property = self
+        let properties = self
             .resolver_in_scope(std::slice::from_ref(&package))
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-            .and_then(crate::symbol_resolver::Symbol::value)?;
-        if let Some(ty) = self.record_top_level_source_constant(expression, &property) {
+            .map(crate::symbol_resolver::Symbol::values)
+            .unwrap_or_default();
+        let property = match self.select_top_level_property_candidates(scope, properties) {
+            TopLevelPropertySelection::Selected(property) => property,
+            TopLevelPropertySelection::MissingContext(missing, names) => {
+                self.diags.error(
+                    self.member_name_span(expression, name),
+                    format!(
+                        "no context argument for '{}' found.",
+                        missing.display(&names)
+                    ),
+                );
+                return Some(Ty::Error);
+            }
+            TopLevelPropertySelection::Ambiguous => {
+                self.diags.error(
+                    self.member_name_span(expression, name),
+                    format!("overload resolution ambiguity for property '{name}'"),
+                );
+                return Some(Ty::Error);
+            }
+            TopLevelPropertySelection::None => return None,
+        };
+        if let Some(ty) = self.record_top_level_source_constant(expression, &property.property) {
             return Some(ty);
         }
-        let ty = property.ty;
-        // A `const val` has NO accessor — the value lives in a field on the declaring facade, and
-        // calling the getter that its property shape nominally carries throws `NoSuchMethodError`.
-        let lowering = if property.is_const {
+        let ty = property.property.ty;
+        // A `const val` read denotes the declaration's compile-time value, not an accessor call.
+        // Preserve the semantic declaration identity when the value was supplied by a dependency.
+        let lowering = if property.property.is_const {
             ExprLowering::AssociatedPropertyRead {
-                stable_declaration: property.stable_declaration,
+                stable_declaration: property.property.stable_declaration,
                 external_identity: None,
                 singleton_dispatch: None,
-                owner: property.owner,
+                owner: property.property.owner,
                 name: name.to_string(),
             }
         } else {
-            ExprLowering::TopLevelPropertyGet(Box::new(ResolvedPropertyAccess {
-                property,
-                context_args: Vec::new(),
-            }))
+            ExprLowering::TopLevelPropertyGet(property)
         };
         self.expr_lowers.insert(expression, lowering);
         Some(ty)
@@ -57291,6 +57311,17 @@ impl<'a> Checker<'a> {
             .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
             .map(crate::symbol_resolver::Symbol::values)
             .unwrap_or_default();
+        self.select_top_level_property_candidates(scope, properties)
+    }
+
+    /// Apply context availability, inference, and declaration-rung precedence to an already
+    /// namespace-bounded family of top-level properties. Both imported/unqualified lookup and a
+    /// package-qualified read use this operation; only candidate collection differs.
+    fn select_top_level_property_candidates(
+        &self,
+        scope: &CheckerScope<'_>,
+        properties: Vec<crate::libraries::PropertyInfo>,
+    ) -> TopLevelPropertySelection {
         let mut missing_context = None;
         let mut applicable = Vec::new();
         for mut property in properties {
@@ -78912,7 +78943,7 @@ impl<'a> Checker<'a> {
             // physical companion classifier and skipped the public companion property.
             match receiver_qualifier.as_ref().ok().copied() {
                 Some(ResolvedQualifier::Package(package)) => {
-                    if let Some(ty) = self.read_package_property(e, package, &name) {
+                    if let Some(ty) = self.read_package_property(scope, e, package, &name) {
                         return self.set(e, ty);
                     }
                 }

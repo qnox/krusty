@@ -564,6 +564,9 @@ pub struct PropMeta {
     /// Extension-receiver type (`Property.receiver_type` = 10), `Some` for an extension property —
     /// the same separation from the accessor's JVM parameters as [`FnMeta::receiver`].
     pub receiver: Option<Ty>,
+    /// Resolved context-parameter labels and types in declaration order. Legacy context receivers
+    /// use `_` as their non-value label; both forms occupy the accessor's leading semantic slots.
+    pub context_params: Vec<(String, Ty)>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
     /// A `const val`: kotlinc sets the CONST flag bit and records a field-only
@@ -720,6 +723,13 @@ fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     if let Some(recv) = m.receiver {
         let rt = type_pb_declared(st, recv, &m.spellings.receiver, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
+    }
+    for (name, ty) in &m.context_params {
+        let mut parameter = Pb::new();
+        parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
+        let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
+        parameter.field_message(3, &ty); // ValueParameter.type = 3
+        p.repeated_message(17, &parameter); // Property.context_parameter = 17
     }
     let vis: u64 = match m.visibility {
         crate::types::Visibility::Internal => 0,
@@ -923,6 +933,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 receiver: None,
+                context_params: Vec::new(),
                 getter: ("getAnswer".into(), "()I".into()),
                 setter: None,
                 is_const: false,
@@ -968,6 +979,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 receiver: Some(Ty::String),
+                context_params: Vec::new(),
                 getter: (
                     "getDoubled".into(),
                     "(Ljava/lang/String;)Ljava/lang/String;".into(),
@@ -1002,6 +1014,55 @@ mod tests {
     }
 
     #[test]
+    fn package_context_property_round_trips() {
+        let (d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
+                visibility: crate::types::Visibility::Public,
+                name: "answer".into(),
+                ty: Ty::Int,
+                is_var: false,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                receiver: None,
+                context_params: vec![("_".into(), Ty::Int)],
+                getter: ("getAnswer".into(), "(I)I".into()),
+                setter: None,
+                is_const: false,
+                has_backing_field: false,
+                has_declared_getter: true,
+                has_constant: false,
+                decl_order: 0,
+            }],
+            &[],
+            None,
+        );
+        let d1 = String::from_iter(d1.into_iter().map(char::from));
+        let metadata = crate::jvm::metadata::decode_metadata(
+            &[d1],
+            &d2,
+            Some(2),
+            "sample/ContextKt",
+            None,
+            &[],
+        );
+        let [property] = metadata.package_properties.as_ref() else {
+            panic!("context property metadata must retain one declaration")
+        };
+        assert_eq!(property.context_params.len(), 1);
+        assert_eq!(property.context_params[0].name, "_");
+        assert_eq!(
+            property
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.params.as_slice()),
+            Some([Ty::Int].as_slice()),
+        );
+    }
+
+    #[test]
     fn inferred_generic_property_type_round_trips_without_declared_spelling() {
         let value = Ty::obj("sample/S");
         let property_ref = Ty::obj_args("kotlin/reflect/KProperty0", &[value]);
@@ -1017,6 +1078,7 @@ mod tests {
                 semantic_type_params: Vec::new(),
                 type_param_bounds: Vec::new(),
                 receiver: None,
+                context_params: Vec::new(),
                 getter: ("getRef".into(), "()Lkotlin/reflect/KProperty0;".into()),
                 setter: None,
                 is_const: false,
@@ -1055,6 +1117,7 @@ mod tests {
                 semantic_type_params: vec![semantic.into()],
                 type_param_bounds: vec![Vec::new()],
                 receiver: Some(receiver),
+                context_params: Vec::new(),
                 getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
                 is_const: false,

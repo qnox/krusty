@@ -4937,7 +4937,10 @@ impl JvmLibraries {
                 if mp.name != name {
                     continue; // this property name
                 }
-                // The accessors' receiver parameter: present iff the property is an extension.
+                // Accessors carry context parameters first, then the extension receiver when one
+                // exists. These are declaration roles from metadata; the descriptor only verifies
+                // that the selected physical accessor realizes the same arity.
+                let context_count = mp.context_params.len();
                 let receiver_params = usize::from(mp.is_extension);
                 let mp = mp.clone();
                 let property_gsig = mp.generic_sig.clone();
@@ -4976,15 +4979,26 @@ impl JvmLibraries {
                     );
                     continue;
                 };
-                if gparams.len() != receiver_params {
+                if gparams.len() != context_count + receiver_params {
                     crate::trace_compiler!(
                         "metadata_properties",
-                        "property {fqn} rejected: getter parameter count {} != metadata receiver count {receiver_params}",
-                        gparams.len()
+                        "property {fqn} rejected: getter parameter count {} != metadata context/receiver count {}",
+                        gparams.len(),
+                        context_count + receiver_params,
                     );
                     continue;
                 }
                 let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
+                let receiver = mp.is_extension.then(|| {
+                    generic_receiver.unwrap_or_else(|| {
+                        mp.receiver_class
+                            .map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
+                    })
+                });
+                let semantic_context = property_gsig
+                    .as_ref()
+                    .map(|signature| signature.params.clone())
+                    .unwrap_or_else(|| gparams[..context_count].to_vec());
                 let fallback_ret = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
                 let property_ty = property_gsig.as_ref().map_or_else(
                     || {
@@ -5004,10 +5018,14 @@ impl JvmLibraries {
                     gret,
                     getter_sig.desc,
                 );
+                getter.params = semantic_context.iter().copied().chain(receiver).collect();
+                getter.source_receiver = receiver;
+                getter.context_count = context_count;
+                getter.generic_sig = property_gsig.clone().map(Box::new);
                 getter.compiler_intrinsic = property_intrinsic;
                 let setter = mp.setter.and_then(|setter_sig| {
                     let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
-                    if sparams.len() != receiver_params + 1 || sret != Ty::Unit {
+                    if sparams.len() != context_count + receiver_params + 1 || sret != Ty::Unit {
                         return None;
                     }
                     let setter_method = self.cp.facade_static(
@@ -5018,14 +5036,23 @@ impl JvmLibraries {
                     if !setter_method.public {
                         return None;
                     }
-                    Some(LibraryCallable::library(
+                    let mut setter = LibraryCallable::library(
                         setter_method.owner,
                         setter_sig.name,
                         sparams,
                         Ty::Unit,
                         sret,
                         setter_sig.desc,
-                    ))
+                    );
+                    setter.params = semantic_context
+                        .iter()
+                        .copied()
+                        .chain(receiver)
+                        .chain(std::iter::once(property_ty))
+                        .collect();
+                    setter.source_receiver = receiver;
+                    setter.context_count = context_count;
+                    Some(setter)
                 });
                 props.push(PropertyInfo {
                     name: name.to_string(),
@@ -5034,19 +5061,18 @@ impl JvmLibraries {
                     } else {
                         PropKind::TopLevel
                     },
-                    receiver: mp.is_extension.then(|| {
-                        generic_receiver.unwrap_or_else(|| {
-                            mp.receiver_class
-                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
-                        })
-                    }),
+                    receiver,
                     formals: property_gsig
                         .as_ref()
                         .map(|gsig| gsig.formals.clone())
                         .unwrap_or_default(),
                     ty: property_ty,
-                    context_count: 0,
-                    context_param_names: Vec::new(),
+                    context_count,
+                    context_param_names: mp
+                        .context_params
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
                     getter,
                     setter,
                     setter_visibility: mp.visibility,

@@ -1575,6 +1575,10 @@ pub struct ResolvedModuleIndex {
     declarations_by_name: HashMap<DeclarationNameId, Vec<DeclarationId>>,
     properties: HashMap<PropertyId, ResolvedPropertyHeader>,
     property_by_declaration: HashMap<DeclarationId, PropertyId>,
+    /// Source labels parallel to a property's resolved context-parameter prefix. These are compact
+    /// declaration metadata: `_` distinguishes a legacy unnamed context receiver from a named
+    /// context value when common IR serializes the stable header for downstream consumers.
+    property_context_parameter_names: HashMap<PropertyId, Box<[Box<str>]>>,
     pub(super) type_parameters: HashMap<(DeclarationId, u32), TypeParameterId>,
     pub(super) type_parameter_owners: Vec<(DeclarationId, u32)>,
     pub(super) type_parameter_headers: Vec<super::ResolvedTypeParameterHeader>,
@@ -3062,6 +3066,43 @@ impl ResolvedModuleIndex {
         );
     }
 
+    pub fn publish_property_context_parameter_names(
+        &mut self,
+        id: PropertyId,
+        names: impl IntoIterator<Item = Box<str>>,
+    ) {
+        let names = names.into_iter().collect::<Vec<_>>().into_boxed_slice();
+        let expected = self
+            .property(id)
+            .expect("context parameter names require a published property")
+            .context_parameter_count as usize;
+        assert_eq!(
+            names.len(),
+            expected,
+            "property context parameter names must match its resolved signature"
+        );
+        if names.is_empty() {
+            return;
+        }
+        assert!(
+            self.property_context_parameter_names
+                .insert(id, names)
+                .is_none(),
+            "property context parameter names may be published only once"
+        );
+    }
+
+    pub fn property_context_parameter_name(
+        &self,
+        property: PropertyId,
+        ordinal: u32,
+    ) -> Option<&str> {
+        self.property_context_parameter_names
+            .get(&property)?
+            .get(ordinal as usize)
+            .map(AsRef::as_ref)
+    }
+
     /// Persistent signature payload only. Temporary graph nodes and source bodies cannot contribute
     /// because neither type is a field of this index.
     pub fn storage_payload_bytes(&self) -> usize {
@@ -3227,6 +3268,16 @@ impl ResolvedModuleIndex {
                 * (std::mem::size_of::<PropertyId>() + std::mem::size_of::<DeclarationId>())
             + self.property_by_declaration.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<PropertyId>())
+            + self.property_context_parameter_names.len()
+                * (std::mem::size_of::<PropertyId>() + std::mem::size_of::<Box<[Box<str>]>>())
+            + self
+                .property_context_parameter_names
+                .values()
+                .map(|names| {
+                    names.len() * std::mem::size_of::<Box<str>>()
+                        + names.iter().map(|name| name.len()).sum::<usize>()
+                })
+                .sum::<usize>()
             + self.type_parameter_storage_payload_bytes()
             + self
                 .signatures

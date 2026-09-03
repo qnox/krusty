@@ -289,6 +289,36 @@ fn context_property_read_keeps_the_selected_context_operand() {
 }
 
 #[test]
+fn package_qualified_context_property_keeps_the_selected_context_operand() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: +ContextReceivers\n\
+         package a\n\
+         context(Int) val two: Int get() = this@Int\n\
+         context(Int) fun read(): Int = a.two\n",
+        "read",
+    );
+    let FirExprKind::PropertyRead {
+        target,
+        dispatch_receiver,
+        extension_receiver,
+        context_arguments,
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("package-qualified context property read")
+        .kind
+    else {
+        panic!("package-qualified context property must become checked property FIR")
+    };
+    assert!(index
+        .property_declaration(target.module().unwrap())
+        .is_some());
+    assert!(dispatch_receiver.is_none());
+    assert!(extension_receiver.is_none());
+    assert_eq!(context_arguments.len(), 1);
+}
+
+#[test]
 fn generic_context_property_is_specialized_from_the_selected_context_value() {
     let (body, _) = checked_function_body_with_platform(
         "// LANGUAGE: +ContextParameters\n\

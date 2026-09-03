@@ -1691,28 +1691,34 @@ fn build_generic_sig(
     })
 }
 
-fn build_property_generic_sig(
-    inherited: &[(u64, String)],
-    inherited_bounds: &[Vec<Ty>],
-    type_params: &[ParsedTypeParam],
-    context_params: &[ParsedValueParam],
-    return_body: Option<&[u8]>,
+struct ParsedPropertySignature<'a> {
+    inherited: &'a [(u64, String)],
+    inherited_bounds: &'a [Vec<Ty>],
+    type_params: &'a [ParsedTypeParam],
+    context_params: &'a [ParsedValueParam],
+    context_receiver_bodies: &'a [Vec<u8>],
+    context_receiver_type_ids: &'a [u64],
+    return_body: Option<&'a [u8]>,
     return_nullable: bool,
-    receiver_body: Option<&[u8]>,
+    receiver_body: Option<&'a [u8]>,
     receiver_nullable: bool,
+}
+
+fn build_property_generic_sig(
+    property: ParsedPropertySignature<'_>,
     records: &[Rec],
     d2: &[String],
     type_table: Option<&[u8]>,
 ) -> Option<GenericSig> {
     let context = type_parameter_context(
-        inherited,
-        inherited_bounds,
-        type_params,
+        property.inherited,
+        property.inherited_bounds,
+        property.type_params,
         records,
         d2,
         type_table,
     )?;
-    let receiver = match receiver_body {
+    let receiver = match property.receiver_body {
         Some(body) => {
             let receiver = decode_metadata_type(
                 body,
@@ -1721,7 +1727,7 @@ fn build_property_generic_sig(
                 d2,
                 &context.names,
                 &context.erasure_bounds,
-                receiver_nullable,
+                property.receiver_nullable,
                 0,
             )?;
             Some(receiver)
@@ -1729,34 +1735,62 @@ fn build_property_generic_sig(
         None => None,
     };
     let ret = decode_metadata_type(
-        return_body?,
+        property.return_body?,
         type_table,
         records,
         d2,
         &context.names,
         &context.erasure_bounds,
-        return_nullable,
+        property.return_nullable,
         0,
     )?;
-    let params = context_params
-        .iter()
-        .map(|parameter| {
-            let (body, table_nullable) = value_parameter_type(parameter, type_table)?;
-            decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                &context.names,
-                &context.erasure_bounds,
-                table_nullable,
-                0,
+    let params = if !property.context_params.is_empty() {
+        property
+            .context_params
+            .iter()
+            .map(|parameter| {
+                let (body, table_nullable) = value_parameter_type(parameter, type_table)?;
+                decode_metadata_type(
+                    body,
+                    type_table,
+                    records,
+                    d2,
+                    &context.names,
+                    &context.erasure_bounds,
+                    table_nullable,
+                    0,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        property
+            .context_receiver_bodies
+            .iter()
+            .map(|body| (Some(body.as_slice()), None))
+            .chain(
+                property
+                    .context_receiver_type_ids
+                    .iter()
+                    .map(|&id| (None, Some(id))),
             )
-        })
-        .collect::<Option<Vec<_>>>()?;
+            .map(|(body, id)| {
+                let (body, table_nullable) = metadata_type_ref(body, id, type_table)?;
+                decode_metadata_type(
+                    body,
+                    type_table,
+                    records,
+                    d2,
+                    &context.names,
+                    &context.erasure_bounds,
+                    table_nullable,
+                    0,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?
+    };
     Some(GenericSig {
-        formals: context.formals[inherited.len()..].to_vec(),
-        formal_bounds: context.formal_bounds[inherited.len()..].to_vec(),
+        formals: context.formals[property.inherited.len()..].to_vec(),
+        formal_bounds: context.formal_bounds[property.inherited.len()..].to_vec(),
         receiver,
         params,
         ret,
@@ -2146,7 +2180,8 @@ pub struct MetaProp {
     pub ret_nullable: bool,
     /// Metadata-primary generic relation between an extension receiver and its return.
     pub generic_sig: Option<GenericSig>,
-    /// Named context parameters declared by this property.
+    /// Context parameters declared by this property. Legacy unnamed context receivers use an empty
+    /// source name and otherwise retain the same semantic type shape.
     pub context_params: Vec<MetaValueParam>,
     /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
     /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
@@ -3661,6 +3696,8 @@ fn decode_properties(
         let mut receiver_nullable = false;
         let mut type_params = Vec::new();
         let mut context_params = Vec::new();
+        let mut context_receiver_bodies = Vec::new();
+        let mut context_receiver_type_ids = Vec::new();
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -3693,6 +3730,25 @@ fn decode_properties(
                     if let Some(parameter) = parse_value_parameter(body) {
                         context_params.push(parameter);
                     }
+                }
+                (12, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(body) = p.bytes(n as usize) else {
+                        break;
+                    };
+                    context_receiver_bodies.push(body.to_vec());
+                }
+                (13, 0) => {
+                    if let Some(type_id) = p.varint() {
+                        context_receiver_type_ids.push(type_id);
+                    }
+                }
+                (13, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(ids) = p.bytes(n as usize) else {
+                        break;
+                    };
+                    context_receiver_type_ids.extend(packed_varints(ids));
                 }
                 (9, 0) => {
                     if let Some(tid) = p.varint() {
@@ -3761,14 +3817,18 @@ fn decode_properties(
         );
         let is_var = setter_signature.is_some() || flags & is_var_bit != 0;
         let generic_sig = build_property_generic_sig(
-            class_tparams,
-            class_tparam_bounds,
-            &type_params,
-            &context_params,
-            ret_body,
-            ret_nullable,
-            receiver_body,
-            receiver_nullable,
+            ParsedPropertySignature {
+                inherited: class_tparams,
+                inherited_bounds: class_tparam_bounds,
+                type_params: &type_params,
+                context_params: &context_params,
+                context_receiver_bodies: &context_receiver_bodies,
+                context_receiver_type_ids: &context_receiver_type_ids,
+                return_body: ret_body,
+                return_nullable: ret_nullable,
+                receiver_body,
+                receiver_nullable,
+            },
             records,
             d2,
             type_table,
@@ -3782,17 +3842,27 @@ fn decode_properties(
                     .and_then(|ty| ty.non_null().obj_internal());
             }
         }
-        let decoded_context_params = context_params
-            .iter()
+        let context_names = if context_params.is_empty() {
+            vec![String::new(); context_receiver_bodies.len() + context_receiver_type_ids.len()]
+        } else {
+            context_params
+                .iter()
+                .map(|parameter| {
+                    resolve_string(records, d2, parameter.name_id as usize).unwrap_or_default()
+                })
+                .collect()
+        };
+        let decoded_context_params = context_names
+            .into_iter()
             .zip(
                 generic_sig
                     .as_ref()
                     .into_iter()
                     .flat_map(|signature| signature.params.iter().copied()),
             )
-            .map(|(parameter, ty)| MetaValueParam {
+            .map(|(name, ty)| MetaValueParam {
                 ty: declared_classifier(ty),
-                name: resolve_string(records, d2, parameter.name_id as usize).unwrap_or_default(),
+                name,
                 flags: MvpFlags::default()
                     .with_nullable(ty.is_nullable())
                     .with_has_type_facts(true),

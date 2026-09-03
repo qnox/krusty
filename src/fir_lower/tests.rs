@@ -2842,6 +2842,26 @@ fn consuming_sink_materializes_context_iterator_operands() {
 }
 
 #[test]
+fn consuming_sink_retains_member_function_context_arity() {
+    let ir = lower_single_source(
+        "// LANGUAGE: +ContextReceivers\n\
+         class Foo {\n\
+             context(Int)\n\
+             fun four(dummy: Any?): Int = this@Int\n\
+         }\n",
+        "MemberContextFunction",
+    );
+    let function = ir
+        .functions
+        .iter()
+        .enumerate()
+        .find_map(|(id, function)| (function.name == "four").then_some(id as u32))
+        .expect("member context function");
+
+    assert_eq!(ir.fn_context_counts.get(&function), Some(&1));
+}
+
+#[test]
 fn consuming_sink_lowers_member_extension_iterator_protocol() {
     let ir = lower_single_source(
         "class It { operator fun hasNext(): Boolean = false }\n\

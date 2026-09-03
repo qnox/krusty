@@ -1169,6 +1169,12 @@ pub fn facade_package_metadata_from_ir(
                     .map(|parameter| parameter.bounds.clone())
                     .collect(),
                 receiver: declaration.receiver,
+                context_params: declaration
+                    .context_parameter_names
+                    .iter()
+                    .cloned()
+                    .zip(declaration.context_parameters.iter().copied())
+                    .collect(),
                 getter,
                 setter,
                 is_const: declaration.is_const,
@@ -1496,7 +1502,7 @@ fn facade_package_metadata_inner(
             semantic_type_params,
             type_param_bounds,
             receiver,
-            mut accessor_params,
+            context_params,
         ) = if p.receiver.is_some() {
             // Match by declaration, not name: extension properties may share a spelling on
             // different receivers and still denote different declarations.
@@ -1517,9 +1523,7 @@ fn facade_package_metadata_inner(
                     .map(|bound| vec![bound])
                     .collect(),
                 Some(property.receiver),
-                std::iter::once(property.receiver)
-                    .chain(property.context_params.iter().copied())
-                    .collect::<Vec<_>>(),
+                property.context_params.clone(),
             )
         } else {
             let Some(property) = syms.source_props.get(&(file_index, d.0)) else {
@@ -1537,6 +1541,8 @@ fn facade_package_metadata_inner(
                 property.context_params.clone(),
             )
         };
+        let mut accessor_params = context_params.clone();
+        accessor_params.extend(receiver);
         let descriptor_params = accessor_params
             .iter()
             .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
@@ -1586,6 +1592,12 @@ fn facade_package_metadata_inner(
             semantic_type_params,
             type_param_bounds,
             receiver,
+            context_params: p
+                .context_params
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .zip(context_params.iter().copied())
+                .collect(),
             getter,
             setter,
             is_const,

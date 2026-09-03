@@ -482,6 +482,11 @@ impl<'a> CommonIrBodySink<'a> {
         if callable.shape.extension_receiver.is_some() && !companion_associated {
             self.ir.extension_receiver_fns.insert(function);
         }
+        if callable.shape.context_parameter_count != 0 {
+            self.ir
+                .fn_context_counts
+                .insert(function, callable.shape.context_parameter_count as usize);
+        }
         if flags.has(crate::fir::DeclarationFlags::SUSPEND) {
             self.ir.suspend_funs.push(function);
         }
@@ -988,6 +993,11 @@ impl<'a> CommonIrBodySink<'a> {
             }
             if callable.shape.extension_receiver.is_some() && !companion_associated {
                 self.ir.extension_receiver_fns.insert(function);
+            }
+            if callable.shape.context_parameter_count != 0 {
+                self.ir
+                    .fn_context_counts
+                    .insert(function, callable.shape.context_parameter_count as usize);
             }
             if declaration_header
                 .flags
