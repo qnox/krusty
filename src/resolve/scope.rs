@@ -927,6 +927,28 @@ impl<'p, B> Scope<'p, B> {
                         .or_default() += 1;
                 }
             }
+            // Class-member checking keeps parameters on a block rung immediately inside the
+            // function receiver rung so they can shadow member properties. Named context
+            // parameters on that block are aliases of the parent's receiver entries, not nearer
+            // same-name shadows. Exclude those aliases exactly as we do when a function keeps its
+            // parameters on the receiver rung itself.
+            if matches!(scope.kind, ScopeKind::Block) {
+                if let Some(parent) = scope
+                    .parent
+                    .filter(|parent| matches!(parent.kind, ScopeKind::Function { .. }))
+                {
+                    if let Some(name) = parent.current_receiver_name.as_ref() {
+                        *receiver_binding_counts.entry(name.clone()).or_default() += 1;
+                    }
+                    for receiver in parent.context_receivers.borrow().iter() {
+                        if receiver.name != "_" {
+                            *receiver_binding_counts
+                                .entry(receiver.name.clone())
+                                .or_default() += 1;
+                        }
+                    }
+                }
+            }
             for binding in scope.bindings.borrow().iter().rev() {
                 if binding.ns != Ns::Value {
                     continue;

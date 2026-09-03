@@ -515,12 +515,17 @@ struct BodyFirChecker<'a> {
 
 #[derive(Clone, Debug)]
 struct ReceiverFrame {
+    /// Width in resolver receiver-tower coordinates, including named context values that are
+    /// materialized as ordinary FIR parameters rather than receiver slots.
     width: u32,
     /// Stable owner of this frame's dispatch receiver. Enum entries are classifier-like semantic
     /// owners even though their anonymous runtime subclass is not a source classifier header.
     dispatch_owner: Option<DeclarationId>,
-    /// Receiver-tower coordinate of `dispatch_owner` inside this frame.
+    /// Runtime receiver-slot coordinate of `dispatch_owner` inside this frame.
     dispatch_depth: Option<u32>,
+    /// Resolver coordinate to runtime receiver-slot coordinate for capturable receivers. Named
+    /// context values are absent because their stable `context_binding` captures the value.
+    capture_depths: HashMap<u32, u32>,
     /// Receiver coordinates in this frame that are reached through checked enclosing-instance
     /// edges rather than direct callable slots.
     structural_paths: HashMap<u32, Box<[DeclarationId]>>,
@@ -976,9 +981,7 @@ impl BodyFirChecker<'_> {
             .owned_receiver_count
             .checked_add(
                 u32::try_from(context_receivers.len())
-                    .expect("too many checked-body context parameters")
-                    .checked_sub(context_value_count)
-                    .expect("named context values exceed context parameters"),
+                    .expect("too many checked-body context parameters"),
             )
             .and_then(|count| count.checked_add(u32::from(extension_receiver.is_some())))
             .expect("too many checked-body implicit receivers");
@@ -990,14 +993,39 @@ impl BodyFirChecker<'_> {
     /// capture never degrades it to type/depth lookup in lowering.
     fn receiver_frame(&self) -> ReceiverFrame {
         let mut structural_paths = HashMap::new();
+        let mut capture_depths = HashMap::new();
+        let extension_count = u32::from(self.body.receiver_type().is_some());
+        let context_count = u32::try_from(self.body.context_receiver_types().len())
+            .expect("too many checked-body context receivers");
+        let context_value_count = self.body.context_value_count().min(context_count);
+        let mut semantic_depth = 0;
+        let mut runtime_depth = 0;
+        if extension_count != 0 {
+            capture_depths.insert(semantic_depth, runtime_depth);
+            semantic_depth += 1;
+            runtime_depth += 1;
+        }
+        for declaration_ordinal in (0..context_count).rev() {
+            if declaration_ordinal >= context_value_count {
+                capture_depths.insert(semantic_depth, runtime_depth);
+                runtime_depth += 1;
+            }
+            semantic_depth += 1;
+        }
         if self.body.local_callable().is_some() {
             return ReceiverFrame {
                 width: self.owned_receiver_count,
                 dispatch_owner: None,
                 dispatch_depth: None,
+                capture_depths,
                 structural_paths,
             };
         }
+        let dispatch_owner = self.current_storage_owner();
+        let dispatch_depth = dispatch_owner.map(|_| {
+            capture_depths.insert(semantic_depth, runtime_depth);
+            runtime_depth
+        });
         let owner = DeclarationId::from_raw(self.body.owner().raw());
         let mut classifier = self
             .index
@@ -1028,6 +1056,9 @@ impl BodyFirChecker<'_> {
                 )
                 .expect("too many implicit receivers");
             structural_paths.insert(depth, path.clone().into_boxed_slice());
+            if let Some(dispatch_depth) = dispatch_depth {
+                capture_depths.insert(depth, dispatch_depth);
+            }
             classifier = Some(outer);
         }
         ReceiverFrame {
@@ -1038,8 +1069,9 @@ impl BodyFirChecker<'_> {
                         .expect("too many structural receiver paths"),
                 )
                 .expect("too many implicit receivers"),
-            dispatch_owner: self.current_storage_owner(),
-            dispatch_depth: self.owned_receiver_count.checked_sub(1),
+            dispatch_owner,
+            dispatch_depth,
+            capture_depths,
             structural_paths,
         }
     }
@@ -1068,13 +1100,14 @@ impl BodyFirChecker<'_> {
         let mut depth = receiver_depth.checked_sub(self.owned_receiver_count as usize)?;
         for (enclosing_depth, frame) in self.outer_receiver_frames.iter().enumerate() {
             if depth < frame.width as usize {
-                let captured_depth = u32::try_from(depth).ok()?;
+                let semantic_depth = u32::try_from(depth).ok()?;
+                let captured_depth = *frame.capture_depths.get(&semantic_depth)?;
                 return Some((
                     u32::try_from(enclosing_depth).expect("too many nested receiver frames"),
                     captured_depth,
                     frame
                         .structural_paths
-                        .get(&captured_depth)
+                        .get(&semantic_depth)
                         .cloned()
                         .unwrap_or_default(),
                 ));
