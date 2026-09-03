@@ -1560,6 +1560,72 @@ class Wrapper(delegate: Source<String>) : Source<String> by delegate
 }
 
 #[test]
+fn interface_delegation_uses_finalized_inferred_property_and_function_results() {
+    let source = r#"
+fun propertyValue(): String = "O"
+fun functionValue(): String = "K"
+interface A {
+    val property get() = propertyValue()
+    fun function() = functionValue()
+}
+class B(val delegate: A) : A by delegate
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("DelegatedInferredMembers")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("delegation must close from finalized Pass-1 signatures")
+        .module
+        .index();
+    let wrapper = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .filter_map(|declaration| index.classifier_header(declaration))
+        .find(|classifier| classifier.classifier.matches("B"))
+        .expect("stable B classifier header");
+    let members = wrapper
+        .interface_delegations
+        .first()
+        .expect("stable interface-delegation plan")
+        .members
+        .as_ref();
+    let property = members
+        .iter()
+        .find_map(|member| match member {
+            crate::fir::ResolvedDelegatedMember::Property(property)
+                if property.name.as_ref() == "property" =>
+            {
+                Some(property)
+            }
+            _ => None,
+        })
+        .expect("delegated inferred property");
+    let function = members
+        .iter()
+        .find_map(|member| match member {
+            crate::fir::ResolvedDelegatedMember::Function(function)
+                if function.name.as_ref() == "function" =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .expect("delegated inferred function");
+
+    assert_eq!(property.ty.get(), Ty::String);
+    assert_eq!(property.getter.result.get(), Ty::String);
+    assert_eq!(function.call.result.get(), Ty::String);
+}
+
+#[test]
 fn explicit_generic_anonymous_override_does_not_poison_property_inference() {
     let source = r#"
 interface Key<T, R>

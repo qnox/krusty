@@ -129,68 +129,85 @@ fn is_delegated_function(function: &FunctionInfo, interface_owners: &HashSet<Typ
 
 fn effective_function<'a>(
     source: &dyn SymbolSource,
+    index: &ResolvedModuleIndex,
+    root: Ty,
     candidates: impl IntoIterator<Item = &'a FunctionInfo>,
 ) -> Option<&'a FunctionInfo> {
-    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    let candidates = candidates
+        .into_iter()
+        .map(|candidate| {
+            Some((
+                candidate,
+                applied_function_result(source, index, root, candidate)?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     let nearest = candidates
         .iter()
-        .map(|candidate| candidate.receiver_rank)
+        .map(|(candidate, _)| candidate.receiver_rank)
         .min()?;
     let nearest = candidates
         .into_iter()
-        .filter(|candidate| candidate.receiver_rank == nearest)
+        .filter(|(candidate, _)| candidate.receiver_rank == nearest)
         .collect::<Vec<_>>();
     let mut maximal = nearest
         .iter()
         .copied()
-        .filter(|candidate| {
-            let result = candidate.ret.apply(candidate.callable.ret);
-            !nearest.iter().copied().any(|other| {
-                let other_result = other.ret.apply(other.callable.ret);
-                other_result != result
-                    && crate::symbol_resolver::resolution_subtype(source, other_result, result)
+        .filter(|(_, result)| {
+            !nearest.iter().copied().any(|(_, other_result)| {
+                other_result != *result
+                    && crate::symbol_resolver::resolution_subtype(source, other_result, *result)
             })
         })
         .collect::<Vec<_>>();
-    let selected = maximal.pop()?;
+    let (selected, selected_result) = maximal.pop()?;
     maximal
         .iter()
-        .all(|candidate| {
-            candidate.ret.apply(candidate.callable.ret) == selected.ret.apply(selected.callable.ret)
-        })
+        .all(|(_, result)| *result == selected_result)
         .then_some(selected)
 }
 
 fn effective_property<'a>(
     source: &dyn SymbolSource,
+    index: &ResolvedModuleIndex,
+    root: Ty,
     candidates: impl IntoIterator<Item = &'a PropertyInfo>,
 ) -> Option<(&'a PropertyInfo, Option<&'a PropertyInfo>)> {
-    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    let candidates = candidates
+        .into_iter()
+        .map(|candidate| {
+            Some((
+                candidate,
+                applied_property_signature(source, index, root, candidate)?.1,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     let nearest = candidates
         .iter()
-        .map(|candidate| candidate.receiver_rank)
+        .map(|(candidate, _)| candidate.receiver_rank)
         .min()?;
     let nearest = candidates
         .into_iter()
-        .filter(|candidate| candidate.receiver_rank == nearest)
+        .filter(|(candidate, _)| candidate.receiver_rank == nearest)
         .collect::<Vec<_>>();
     let mut maximal = nearest
         .iter()
         .copied()
-        .filter(|candidate| {
-            !nearest.iter().copied().any(|other| {
-                other.ty != candidate.ty
-                    && crate::symbol_resolver::resolution_subtype(source, other.ty, candidate.ty)
+        .filter(|(_, candidate_ty)| {
+            !nearest.iter().copied().any(|(_, other_ty)| {
+                other_ty != *candidate_ty
+                    && crate::symbol_resolver::resolution_subtype(source, other_ty, *candidate_ty)
             })
         })
         .collect::<Vec<_>>();
-    let getter = maximal.pop()?;
-    if !maximal.iter().all(|candidate| candidate.ty == getter.ty) {
+    let (getter, getter_ty) = maximal.pop()?;
+    if !maximal.iter().all(|(_, ty)| *ty == getter_ty) {
         return None;
     }
     let setter = nearest
         .into_iter()
-        .find(|candidate| candidate.setter.is_some() && candidate.ty == getter.ty);
+        .find(|(candidate, ty)| candidate.setter.is_some() && *ty == getter_ty)
+        .map(|(candidate, _)| candidate);
     Some((getter, setter))
 }
 
@@ -254,6 +271,44 @@ fn stable_member_signature(
         &bindings,
     );
     Some((parameters, result))
+}
+
+fn applied_function_result(
+    source: &dyn SymbolSource,
+    index: &ResolvedModuleIndex,
+    root: Ty,
+    function: &FunctionInfo,
+) -> Option<Ty> {
+    match function.stable_declaration {
+        Some(declaration) => {
+            stable_member_signature(source, index, root, function.callable.owner, declaration)
+                .map(|(_, result)| result)
+        }
+        None => Some(function.ret.apply(function.callable.ret)),
+    }
+}
+
+fn applied_property_signature(
+    source: &dyn SymbolSource,
+    index: &ResolvedModuleIndex,
+    root: Ty,
+    property: &PropertyInfo,
+) -> Option<(Vec<Ty>, Ty)> {
+    match property.stable_declaration {
+        Some(declaration) => {
+            stable_member_signature(source, index, root, property.owner, declaration)
+        }
+        None => Some((
+            property
+                .getter
+                .params
+                .iter()
+                .take(property.context_count)
+                .copied()
+                .collect(),
+            property.ty,
+        )),
+    }
 }
 
 fn function_call(
@@ -403,8 +458,8 @@ fn property_call(
     property: &PropertyInfo,
     setter: bool,
     context_parameters: &[Ty],
+    property_type: Ty,
 ) -> Option<ResolvedDelegatedCall> {
-    let property_type = property.ty;
     let mut parameters = context_parameters.to_vec();
     if setter {
         parameters.push(property_type);
@@ -513,7 +568,7 @@ fn delegation_members(
             if own_function_slots.contains(&slot) {
                 continue;
             }
-            let function = effective_function(source, candidates)?;
+            let function = effective_function(source, index, interface, candidates)?;
             let call = function_call(source, index, interface, function);
             let overridden = delegated_function_declaration(index, function)?;
             let type_parameters = match function.generic_sig.as_ref() {
@@ -563,21 +618,16 @@ fn delegation_members(
         if property_candidates.is_empty() {
             continue;
         }
-        let (getter, setter) = effective_property(source, property_candidates)?;
-        let context_parameters = getter
-            .getter
-            .params
-            .iter()
-            .take(getter.context_count)
-            .copied()
-            .collect::<Vec<_>>();
+        let (getter, setter) = effective_property(source, index, interface, property_candidates)?;
+        let (context_parameters, property_type) =
+            applied_property_signature(source, index, interface, getter)?;
         if getter.context_param_names.len() != context_parameters.len() {
             return None;
         }
         members.push(ResolvedDelegatedMember::Property(
             ResolvedDelegatedProperty {
                 name: getter.name.clone().into_boxed_str(),
-                ty: ResolvedTy::new(getter.ty).ok()?,
+                ty: ResolvedTy::new(property_type).ok()?,
                 context_parameters: getter
                     .context_param_names
                     .iter()
@@ -590,7 +640,14 @@ fn delegation_members(
                     })
                     .collect::<Option<Vec<_>>>()?
                     .into_boxed_slice(),
-                getter: property_call(index, interface, getter, false, &context_parameters)?,
+                getter: property_call(
+                    index,
+                    interface,
+                    getter,
+                    false,
+                    &context_parameters,
+                    property_type,
+                )?,
                 setter: match setter {
                     Some(property) => Some(property_call(
                         index,
@@ -598,6 +655,7 @@ fn delegation_members(
                         property,
                         true,
                         &context_parameters,
+                        property_type,
                     )?),
                     None => None,
                 },
