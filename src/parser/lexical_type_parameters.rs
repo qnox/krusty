@@ -7,6 +7,7 @@
 #[derive(Default)]
 pub(super) struct LexicalTypeParameters {
     names: Vec<String>,
+    classifier_shadows: Vec<(String, usize)>,
 }
 
 impl LexicalTypeParameters {
@@ -29,12 +30,33 @@ impl LexicalTypeParameters {
         let mut visible = self
             .names
             .iter()
+            .enumerate()
             .rev()
-            .filter(|name| seen.insert(name.as_str()))
-            .cloned()
+            .filter(|(index, name)| {
+                seen.insert(name.as_str())
+                    && !self
+                        .classifier_shadows
+                        .iter()
+                        .rev()
+                        .find(|(classifier, _)| classifier == *name)
+                        .is_some_and(|(_, parameter_count)| *parameter_count > *index)
+            })
+            .map(|(_, name)| name.clone())
             .collect::<Vec<_>>();
         visible.reverse();
         visible
+    }
+
+    pub(super) fn shadow_count(&self) -> usize {
+        self.classifier_shadows.len()
+    }
+
+    pub(super) fn truncate_shadows(&mut self, count: usize) {
+        self.classifier_shadows.truncate(count);
+    }
+
+    pub(super) fn shadow_with_classifier(&mut self, classifier: String) {
+        self.classifier_shadows.push((classifier, self.names.len()));
     }
 }
 

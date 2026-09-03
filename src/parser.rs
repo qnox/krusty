@@ -1207,6 +1207,15 @@ impl<'a> Parser<'a> {
         self.lexical_type_parameters.names()
     }
 
+    fn cut_lexical_type_parameter_scope(&mut self) -> LexicalTypeParameters {
+        std::mem::take(&mut self.lexical_type_parameters)
+    }
+
+    fn restore_lexical_type_parameter_scope(&mut self, scope: LexicalTypeParameters) {
+        debug_assert!(self.lexical_type_parameters.names().is_empty());
+        self.lexical_type_parameters = scope;
+    }
+
     // ---- cursor helpers ----
     fn kind(&self) -> TokenKind {
         self.t[self.i].kind
@@ -2048,8 +2057,6 @@ impl<'a> Parser<'a> {
         }
         let (qname, annotation_span) = self.parse_annotation_reference();
         let args = self.parse_annotation_args();
-        // A `@file:Foo(args)` annotation applies to the file, not the next declaration — record it for
-        // plugins (e.g. `@file:UseContextualSerialization(MyDate::class)`) rather than dropping it.
         if target == "file" && !qname.is_empty() {
             self.file.file_annotations.push((
                 AnnotationRef {
@@ -2681,6 +2688,7 @@ impl<'a> Parser<'a> {
             "Companion".to_string()
         };
         let name = format!("{outer}.{simple_name}");
+        let lexical_scope = self.cut_lexical_type_parameter_scope();
         let (
             supertypes,
             base_class,
@@ -2749,6 +2757,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
+        self.restore_lexical_type_parameter_scope(lexical_scope);
         let declaration = ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name,
@@ -3205,6 +3214,8 @@ impl<'a> Parser<'a> {
                         let body = self
                             .at(TokenKind::LBrace)
                             .then(|| self.parse_block_expr(false));
+                        let ctor_span =
+                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
                         secondary_ctors.push(SecondaryCtor {
                             annotations,
                             annotation_args,
@@ -4198,6 +4209,8 @@ impl<'a> Parser<'a> {
                         } else {
                             None
                         };
+                        let ctor_span =
+                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
                         secondary_ctors.push(SecondaryCtor {
                             annotations,
                             annotation_args,
@@ -5791,6 +5804,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
         let saved_block_value = self.block_trailing_is_value;
+        let classifier_shadow_count = self.lexical_type_parameters.shadow_count();
         self.block_trailing_is_value = trailing_is_value;
         let mut stmts = Vec::new();
         loop {
@@ -5801,6 +5815,8 @@ impl<'a> Parser<'a> {
             stmts.push(self.parse_stmt());
         }
         self.block_trailing_is_value = saved_block_value;
+        self.lexical_type_parameters
+            .truncate_shadows(classifier_shadow_count);
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
         // A trailing bare expression is the block's value.
@@ -6556,10 +6572,13 @@ impl<'a> Parser<'a> {
                 // at its default `false` (so a local `sealed` class never reported `is_sealed`).
                 d.modality = modality_of(is_open, is_abstract, false);
                 let nested: Vec<crate::ast::DeclId> = self.file.decls[nested_start..].to_vec();
+                let classifier = d.name.clone();
                 let stmt = self.finish_stmt(Stmt::LocalClass(d), start);
                 if !nested.is_empty() {
                     self.file.local_class_nested.insert(stmt, nested);
                 }
+                self.lexical_type_parameters
+                    .shadow_with_classifier(classifier);
                 stmt
             }
             // Full-form destructuring (`+NameBasedDestructuring`): `(val a, val b) = e` /
@@ -7817,10 +7836,10 @@ impl<'a> Parser<'a> {
             }
             return self.parse_prefix();
         }
-        // `throw <expr>` — a soft keyword; raises an exception (bottom type `Nothing`).
+        // A jump operand is a full expression, including an elvis chain.
         if self.at(TokenKind::Ident) && self.keyword_text("throw") {
             self.bump(); // 'throw'
-            let operand = self.parse_bp(0);
+            let operand = self.parse_expr();
             let end = self.file.expr_spans[operand.0 as usize];
             return self
                 .file
@@ -7883,7 +7902,7 @@ impl<'a> Parser<'a> {
             ) {
                 None
             } else {
-                Some(self.parse_bp(0))
+                Some(self.parse_expr())
             };
             let end = value
                 .map(|v| self.file.expr_spans[v.0 as usize])
@@ -9599,6 +9618,59 @@ mod tests {
         file
     }
 
+    fn anonymous_object_type_parameters(source: &str) -> Vec<String> {
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert_eq!(
+            diagnostics.diags.len(),
+            0,
+            "{}",
+            diagnostics.render("test.kt", source)
+        );
+        let declaration = *file
+            .anonymous_object_classes
+            .values()
+            .next()
+            .expect("anonymous object declaration");
+        let Decl::Class(class) = file.decl(declaration) else {
+            panic!("anonymous object must be a class declaration");
+        };
+        class.lexical_type_parameter_captures.clone()
+    }
+
+    #[test]
+    fn anonymous_object_type_parameters_follow_classifier_boundaries() {
+        assert_eq!(
+            anonymous_object_type_parameters(
+                "class Outer<T> { companion object { val marker = object {} } }"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            anonymous_object_type_parameters(
+                "class Outer<T> { class Nested { val marker = object {} } }"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            anonymous_object_type_parameters(
+                "class Outer<T> { inner class Nested { val marker = object {} } }"
+            ),
+            vec!["T"]
+        );
+        assert_eq!(
+            anonymous_object_type_parameters("fun <T> build(): Any { class T; return object {} }"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            anonymous_object_type_parameters(
+                "fun <T> build(): Any { class T; fun <T> nested(): Any = object {}; return nested<String>() }"
+            ),
+            vec!["T"]
+        );
+    }
+
     #[test]
     fn visible_interface_members_publish_implicit_override_modality() {
         let source = "interface Contract {\n\
@@ -10867,6 +10939,24 @@ typealias Box<@Marker T> = List<T>
         assert_eq!(
             tree("fun g(x: Int, y: Int): Int = -x as Int * y"),
             "(fun g (param x Int) (param y Int) :Int (* (as (neg x) Int) y))\n"
+        );
+    }
+
+    #[test]
+    fn throw_operand_includes_the_elvis_chain() {
+        assert_eq!(
+            tree("fun fail(e: Throwable): Nothing = throw e.cause ?: e"),
+            "(fun fail (param e Throwable) :Nothing (throw (?: (. e cause) e)))\n"
+        );
+    }
+
+    #[test]
+    fn expression_position_return_operand_includes_the_elvis_chain() {
+        assert_eq!(
+            tree(
+                "fun choose(a: String?, b: String?): String { a ?: return b ?: \"fallback\"; return a }"
+            ),
+            "(fun choose (param a String) (param b String) :String (block (?: a (return (?: b \"fallback\"))) (return a)))\n"
         );
     }
 

@@ -1195,7 +1195,6 @@ fn register_top_level_function_conflict(
 }
 
 pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
-pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
 /// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`has_reified_type_params`/`is_abstract`/
@@ -4296,8 +4295,10 @@ impl SymbolTable {
 
     fn visibility_suppressed_declarations(
         &self,
-    ) -> impl Iterator<Item = crate::fir::DeclarationId> + '_ {
-        self.declaration_visibility_suppressions.keys().copied()
+    ) -> impl Iterator<Item = (crate::fir::DeclarationId, VisibilitySuppressions)> + '_ {
+        self.declaration_visibility_suppressions
+            .iter()
+            .map(|(&declaration, &suppressions)| (declaration, suppressions))
     }
 
     pub fn annotation_retention(
@@ -12709,7 +12710,7 @@ fn collect_stable_visibility_suppressions(
         for application in headers
             .file_visibility_suppressions(stub.source)
             .iter()
-            .chain(headers.declaration_visibility_suppressions(stub.source, stub.range))
+            .chain(headers.declaration_visibility_suppressions(stub.id))
         {
             let annotation = AnnotationRef {
                 name: String::new(),
@@ -24550,13 +24551,12 @@ impl<'a> Checker<'a> {
                 self.unbound_classifier_value_calls.insert(call);
             }
             let selected_owner = selected.callable.owner_type();
-            if !self.member_accessible(selected.visibility, selected_owner) {
-                self.reject_if_inaccessible(
-                    selected.visibility,
-                    name,
-                    selected_owner,
-                    self.call_callee_name_span(call),
-                );
+            if self.reject_if_inaccessible(
+                selected.visibility,
+                name,
+                selected_owner,
+                self.call_callee_name_span(call),
+            ) {
                 return ClassifierValueCall::Checked(Ty::Error);
             }
             let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
@@ -24911,11 +24911,7 @@ impl<'a> Checker<'a> {
         selected
     }
 
-    /// A read of a TOP-LEVEL property named through its package (`pkg.topLevelProp`, `pkg.TOP_CONST`).
-    /// The package is the only scope consulted — a fully-qualified reference names one declaration, so
-    /// nothing about the file's imports may shadow or widen it. A `const val` has no accessor, so the
-    /// platform's field storage answers it; everything else reads through its getter, exactly as the
-    /// imported spelling does.
+    /// A read of a top-level property named through its package (`pkg.topLevelProp`).
     fn read_package_property(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -29262,14 +29258,13 @@ impl<'a> Checker<'a> {
                     Ok(Some(selection)) => {
                         if let Some((visibility, owner)) = selection.access() {
                             if visibility != Visibility::Public
-                                && !self.member_accessible(visibility, owner)
-                            {
-                                self.reject_if_inaccessible(
+                                && self.reject_if_inaccessible(
                                     visibility,
                                     &name,
                                     owner,
                                     self.call_callee_name_span(call),
-                                );
+                                )
+                            {
                                 return Ty::Error;
                             }
                         }
@@ -29322,14 +29317,13 @@ impl<'a> Checker<'a> {
                             Ok(Some(selection)) if is_function_property_shape(selection.ty()) => {
                                 if let Some((visibility, owner)) = selection.access() {
                                     if visibility != Visibility::Public
-                                        && !self.member_accessible(visibility, owner)
-                                    {
-                                        self.reject_if_inaccessible(
+                                        && self.reject_if_inaccessible(
                                             visibility,
                                             &name,
                                             owner,
                                             self.call_callee_name_span(call),
-                                        );
+                                        )
+                                    {
                                         return Ty::Error;
                                     }
                                 }
@@ -32271,17 +32265,20 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                     .collect::<Vec<_>>();
-                if top_level_candidates.iter().any(|candidate| {
-                    candidate.visibility == Visibility::Private
-                        && candidate
-                            .source_key
-                            .is_some_and(|(source_file, _)| source_file != self.file_index)
-                }) && top_level_candidates
-                    .iter()
-                    .all(|candidate| !self.source_callable_visible(candidate))
+                if !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+                    && top_level_candidates.iter().any(|candidate| {
+                        candidate.visibility == Visibility::Private
+                            && candidate
+                                .source_key
+                                .is_some_and(|(source_file, _)| source_file != self.file_index)
+                    })
+                    && top_level_candidates
+                        .iter()
+                        .all(|candidate| !self.source_callable_visible(candidate))
                 {
+                    let span = self.call_callee_name_span(call);
                     self.diags.error(
-                        self.call_callee_name_span(call),
+                        span,
                         format!("cannot access '{fname}': it is private in its file"),
                     );
                     return Ty::Error;
@@ -32308,31 +32305,24 @@ impl<'a> Checker<'a> {
                             top_level_candidates.clone(),
                         )
                     });
-                // Ordinary members and member extensions on the implicit-receiver tower already
-                // had their closer rungs above. `this_member_call_ret` can additionally expose an
-                // imported extension on that value; that import rung must not replace an applicable
-                // receiver-less declaration from the selected top-level name rung. Only continue to
-                // imported extensions when no top-level candidate applies (a missing-context result
-                // is likewise inapplicable and may fall through).
-                if matches!(
-                    &top_level,
-                    None | Some(CallableCandidateSelection::MissingContext(_))
-                ) {
-                    for implicit_receiver in self.implicit_receivers(scope) {
-                        if let Some(ret) = self.this_member_call_ret(
-                            scope,
-                            CallArgs {
-                                call,
-                                args,
-                                arg_tys: &arg_tys,
-                            },
-                            implicit_receiver,
-                            implicit_receiver.ty,
-                            &fname,
-                            expected,
-                        ) {
-                            return ret;
-                        }
+                // An implicit-receiver member or extension is a closer tower rung than the selected
+                // receiver-less declaration. Commit the first applicable receiver rung; retain an
+                // argument-mapping failure only for the terminal diagnostic after later rungs decline.
+                let mut retained_receiver_call_failure = None;
+                for implicit_receiver in self.implicit_receivers(scope) {
+                    if let Some(ret) = self.this_member_call_ret(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
+                        implicit_receiver,
+                        &fname,
+                        expected,
+                        &mut retained_receiver_call_failure,
+                    ) {
+                        return ret;
                     }
                 }
                 if let Some((signature, origin)) = self.receiver_function_value(scope, &fname) {
@@ -32584,6 +32574,10 @@ impl<'a> Checker<'a> {
                 ) {
                     return Ty::Error;
                 }
+                if let Some(retained) = retained_receiver_call_failure {
+                    self.report_retained_member_mapping_failure(call, &fname, args, retained);
+                    return Ty::Error;
+                }
                 if let Some((arguments, candidates, class_name, internal)) =
                     source_constructor_failure
                 {
@@ -32656,13 +32650,17 @@ impl<'a> Checker<'a> {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
-                    (
-                        inaccessible_classifier_message(&fname, access),
-                        Some(DiagnosticIdentity::ClassifierAccess {
-                            reference: span,
-                            classifier: internal,
-                        }),
-                    )
+                    if self.invisible_reference_suppressed(span) {
+                        (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None)
+                    } else {
+                        (
+                            inaccessible_classifier_message(&fname, access),
+                            Some(DiagnosticIdentity::ClassifierAccess {
+                                reference: span,
+                                classifier: internal,
+                            }),
+                        )
+                    }
                 } else {
                     // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at
                     // all is UNRESOLVED_REFERENCE, the same diagnostic a bare unresolved name gets.
@@ -36438,6 +36436,7 @@ val result = object { fun value(): String = captured }
         let mut symbols = collect_signatures(&files, &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
 
+        assert_no_diags(&diagnostics);
         let function_parameters = info.resolved_declaration_type_parameters(function_start);
         let anonymous_parameters = info.resolved_declaration_type_parameters(anonymous_start);
         assert_eq!(function_parameters.len(), 1);
@@ -38498,7 +38497,7 @@ fun box(): String {
             .expect("source should contain Kind.PENDING member read");
         assert_eq!(info.ty(member), Ty::String);
         assert!(
-            info.resolved_enum_entry_owner(member).is_none(),
+            info.resolved_enum_entry(member).is_none(),
             "local value root must not be recorded as an enum-entry classifier path"
         );
     }
@@ -47277,8 +47276,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
-                resolved_index
-                    .is_some_and(|index| index.declaration_suppresses_visibility(*declaration))
+                resolved_index.is_some_and(|index| {
+                    index.declaration_suppresses_invisible_reference(*declaration)
+                })
             })
     }) {
         // File-level visibility suppressions were resolved and compacted into every stable
@@ -47288,6 +47288,15 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         // selected body here prevents one such declaration from widening its siblings.
         c.active_statement_suppressions
             .push("INVISIBLE_REFERENCE".to_string());
+    }
+    if selected_stable_bodies.is_some_and(|declarations| {
+        !declarations.is_empty()
+            && declarations.iter().all(|declaration| {
+                resolved_index.is_some_and(|index| {
+                    index.declaration_suppresses_invisible_member(*declaration)
+                })
+            })
+    }) {
         c.active_statement_suppressions
             .push("INVISIBLE_MEMBER".to_string());
     }
@@ -62761,7 +62770,7 @@ impl<'a> Checker<'a> {
         if !scope.tparam_contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
                 if !r.is_import() {
-                    if !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
+                    if !self.invisible_reference_suppressed(r.span) {
                         if let Some(access) =
                             self.resolver().inaccessible_classifier_access(internal)
                         {
@@ -64004,7 +64013,113 @@ impl<'a> Checker<'a> {
                 path.segments.push(name.clone());
                 Some(path)
             }
+            Expr::As {
+                operand,
+                nullable: false,
+                ..
+            } => self.expr_access_path(*operand),
             _ => None,
+        }
+    }
+
+    /// The type a successful checked cast narrows a stable path to. A nullable target accepts null,
+    /// so the proven type remains nullable.
+    fn proven_narrowed_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        declared: Option<Ty>,
+        ty: &TypeRef,
+    ) -> Option<Ty> {
+        let target = self.type_ref_ty_silent(scope, ty);
+        let runtime_target =
+            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), target)
+                .unwrap_or(target);
+        let runtime_target = declared
+            .map(|declared| {
+                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
+                    &self.fed_source(),
+                    runtime_target,
+                    declared,
+                )
+            })
+            .unwrap_or(runtime_target);
+        if ty.nullable() {
+            return (runtime_target != Ty::Error)
+                .then_some(Ty::nullable(runtime_target.non_null()));
+        }
+        if runtime_target.is_reference() {
+            Some(runtime_target)
+        } else {
+            (target.is_numeric_or_char() || target == Ty::Boolean).then_some(target)
+        }
+    }
+
+    /// Collect checked-cast facts from subexpressions that certainly ran when `expression` ran.
+    fn as_cast_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        out: &mut Vec<(NarrowPath, Ty)>,
+    ) {
+        match self.file.expr(expression).clone() {
+            Expr::As {
+                operand,
+                ty,
+                nullable,
+            } => {
+                self.as_cast_narrowings(scope, operand, out);
+                if nullable {
+                    return;
+                }
+                let Some(path) = self.expr_access_path(operand) else {
+                    return;
+                };
+                let Some(stable_ty) = self.stable_path_ty(scope, &path, self.span(expression))
+                else {
+                    return;
+                };
+                if let Some(narrowed) = self.proven_narrowed_ty(scope, Some(stable_ty), &ty) {
+                    out.push((path, narrowed));
+                }
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                self.as_cast_narrowings(scope, lhs, out);
+                if !matches!(op, BinOp::And | BinOp::Or) {
+                    self.as_cast_narrowings(scope, rhs, out);
+                }
+            }
+            Expr::Elvis { lhs, .. } => self.as_cast_narrowings(scope, lhs, out),
+            Expr::Unary { operand, .. } | Expr::NotNull { operand } | Expr::Is { operand, .. } => {
+                self.as_cast_narrowings(scope, operand, out)
+            }
+            Expr::Member { receiver, .. } | Expr::SafeCall { receiver, .. } => {
+                self.as_cast_narrowings(scope, receiver, out)
+            }
+            Expr::Index { array, indices } => {
+                self.as_cast_narrowings(scope, array, out);
+                for index in indices {
+                    self.as_cast_narrowings(scope, index, out);
+                }
+            }
+            Expr::Call { callee, args } => {
+                self.as_cast_narrowings(scope, callee, out);
+                for argument in args {
+                    self.as_cast_narrowings(scope, argument, out);
+                }
+            }
+            Expr::InRange {
+                value, start, end, ..
+            } => {
+                self.as_cast_narrowings(scope, value, out);
+                self.as_cast_narrowings(scope, start, out);
+                self.as_cast_narrowings(scope, end, out);
+            }
+            Expr::RangeTo { lo, hi, .. } => {
+                self.as_cast_narrowings(scope, lo, out);
+                self.as_cast_narrowings(scope, hi, out);
+            }
+            Expr::If { cond, .. } => self.as_cast_narrowings(scope, cond, out),
+            _ => {}
         }
     }
 
@@ -64808,6 +64923,7 @@ impl<'a> Checker<'a> {
         }
         self.contract_condition_narrowings(scope, cond, truth, out, declined);
         out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
+        self.as_cast_narrowings(scope, cond, out);
     }
 
     /// Bring the narrowings a condition proves into scope for a guarded region. The single
@@ -72461,6 +72577,38 @@ impl<'a> Checker<'a> {
                     crate::symbol_resolver::ty_subst_keep_unbound(bound, &known);
             }
         }
+        let formal_bounds = class
+            .type_param_bounds
+            .iter()
+            .map(|bound| {
+                (*bound != Ty::Error)
+                    .then_some(*bound)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut result_bindings = class
+            .type_params
+            .iter()
+            .cloned()
+            .zip(bindings.iter().copied())
+            .filter(|(_, binding)| *binding != Ty::Error)
+            .collect::<HashMap<_, _>>();
+        crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+            &self.fed_source(),
+            class.internal_name(),
+            &class.type_params,
+            &formal_bounds,
+            expected_result,
+            &mut result_bindings,
+        );
+        for (index, formal) in class.type_params.iter().enumerate() {
+            if bindings[index] == Ty::Error {
+                if let Some(&seed) = result_bindings.get(formal) {
+                    bindings[index] = seed;
+                }
+            }
+        }
         // Prefer the declared bound over an unconstrained `Any` join.
         for type_parameter in 0..bindings.len() {
             if explicitly_bound[type_parameter] {
@@ -79373,6 +79521,11 @@ impl<'a> Checker<'a> {
                 // walk stops at the first non-diverging then-branch: control can fall through
                 // it with its condition TRUE, so neither its negation nor anything deeper holds.
                 if let Stmt::Expr(ie) = self.file.stmt(*s).clone() {
+                    if !self.stmt_diverges(*s) {
+                        let mut casts = Vec::new();
+                        self.as_cast_narrowings(scope, ie, &mut casts);
+                        self.apply_narrowings(scope, &casts, &[], false);
+                    }
                     let mut level = ie;
                     while let Expr::If {
                         cond,
@@ -80102,6 +80255,7 @@ impl<'a> Checker<'a> {
                 .min(classifier.type_params.len())]
                 .to_vec();
             crate::symbol_resolver::infer_constructor_type_args_for_formals(
+                &source,
                 internal,
                 &classifier,
                 &own_formals,
@@ -81821,16 +81975,16 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn record_extension_call_from_callables(
+    /// Select one receiver's extension rung without committing it.
+    fn select_extension_rung(
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
         rt: Ty,
-        name: &str,
         type_args: &[Ty],
         expected: Option<Ty>,
         callables: &crate::libraries::Callables,
-    ) -> Option<Ty> {
+    ) -> ExtensionRungSelection {
         let CallArgs {
             call: e,
             args,
@@ -81854,17 +82008,24 @@ impl<'a> Checker<'a> {
             expected,
             overloads.clone(),
         );
-        self.record_extension_selection(
-            scope,
-            call_args,
-            rt,
-            name,
-            type_args,
-            ExtensionRungSelection {
-                selection,
-                overloads,
-            },
-        )
+        ExtensionRungSelection {
+            selection,
+            overloads,
+        }
+    }
+
+    fn record_extension_call_from_callables(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
+        rt: Ty,
+        name: &str,
+        type_args: &[Ty],
+        expected: Option<Ty>,
+        callables: &crate::libraries::Callables,
+    ) -> Option<Ty> {
+        let rung = self.select_extension_rung(scope, call_args, rt, type_args, expected, callables);
+        self.record_extension_selection(scope, call_args, rt, name, type_args, rung)
     }
 
     /// Finish an extension rung whose candidates have already been ranked. This function only
@@ -82651,7 +82812,9 @@ impl<'a> Checker<'a> {
         mut selected: crate::symbol_resolver::ResolvedMember,
     ) -> Option<Ty> {
         let owner = selected.member.owner?;
-        if !self.selected_member_accessible(&selected, owner) {
+        if !self.selected_member_accessible(&selected, owner)
+            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+        {
             if matches!(
                 selected.member.visibility,
                 Visibility::PackagePrivate | Visibility::Protected
@@ -82933,15 +83096,12 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
         receiver: ImplicitReceiver,
-        rt: Ty,
         name: &str,
         expected: Option<Ty>,
+        retained: &mut Option<MemberMappingFailure>,
     ) -> Option<Ty> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
+        let CallArgs { call, args, .. } = call_args;
+        let rt = self.apply_postponed_call_bindings(receiver.ty);
         let type_args = self.resolved_explicit_type_args(scope, call);
         let mut extension_rung = None;
         if rt == Ty::String || matches!(rt, Ty::Obj(..) | Ty::TyParam(..)) {
@@ -82953,25 +83113,39 @@ impl<'a> Checker<'a> {
                 MemberSlotCall::Ambiguous | MemberSlotCall::Rejected => {
                     return Some(Ty::Error);
                 }
-                MemberSlotCall::ExtensionRung { extension, .. } => extension_rung = Some(extension),
+                MemberSlotCall::ExtensionRung {
+                    extension,
+                    member_mapping_failure,
+                } => {
+                    if extension.selection.is_none() {
+                        if let Some(failure) = member_mapping_failure {
+                            retained.get_or_insert(*failure);
+                        }
+                    }
+                    extension_rung = Some(extension);
+                }
             }
         }
-        let call_args = CallArgs {
-            call,
-            args,
-            arg_tys,
-        };
-        let ret = match extension_rung {
-            Some(extension) if extension.selection.is_some() => {
-                self.record_extension_selection(scope, call_args, rt, name, &type_args, extension)
+        let rung = match extension_rung {
+            Some(extension) => extension,
+            None => {
+                let callables = self.stable_receiver_callables(rt, name);
+                self.select_extension_rung(scope, call_args, rt, &type_args, expected, &callables)
             }
-            // Applicability is evaluated per scope-tower rung. A same-named extension visible on
-            // this implicit receiver does not claim the call merely because it exists; when none of
-            // its overloads applies, the receiver-less/top-level rung must still participate.
-            // Terminal diagnostics later retain the complete imported candidate family.
-            Some(_) => None,
-            None => self.record_extension_call(scope, call_args, rt, name, &type_args, expected),
         };
+        if rung.selection.is_none() {
+            if let Some((failure, candidate)) = self.unanimous_callable_mapping_failure(
+                scope,
+                call,
+                args,
+                &type_args,
+                &rung.overloads,
+            ) {
+                retained.get_or_insert(MemberMappingFailure { failure, candidate });
+            }
+            return None;
+        }
+        let ret = self.record_extension_selection(scope, call_args, rt, name, &type_args, rung);
         if let Some(ret) = ret {
             self.mark_implicit_receiver_selection(call, receiver);
             return Some(ret);
@@ -83143,7 +83317,10 @@ impl<'a> Checker<'a> {
                 .member
                 .owner
                 .expect("a selected convention member has a declaring classifier");
-            if !self.selected_member_accessible(&resolved, owner) {
+            if !self.selected_member_accessible(&resolved, owner)
+                && !diagnostic_spans
+                    .is_some_and(|(_, span)| self.invisible_reference_suppressed(span))
+            {
                 if let Some((_, span)) = diagnostic_spans {
                     let visibility = match selected.visibility {
                         Visibility::Private => "private",
@@ -84928,34 +85105,14 @@ impl<'a> Checker<'a> {
                 // result constraint before specializing the selected constructor. It may replace an
                 // upper-only bottom exactly when it satisfies every recorded upper; an ordinary
                 // concrete argument solution remains authoritative.
-                let mut result_bindings = crate::symbol_resolver::GSigBinds::new();
-                self.constrain_provider_constructor_result(
+                crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+                    &source,
                     internal,
-                    classifier,
+                    classifier.type_params(),
+                    classifier.type_param_bounds(),
                     expected_classifier,
-                    &mut result_bindings,
+                    &mut bindings,
                 );
-                for (formal, actual) in result_bindings {
-                    let admissible_upper =
-                        constraints.upper_bounds.get(&formal).is_none_or(|uppers| {
-                            uppers
-                                .iter()
-                                .all(|upper| self.receiver_is_assignable(actual, *upper))
-                        });
-                    // A concrete or lexically quantified expected application is fixed at this
-                    // call site (`val x: Box<Any> = Box("s")`, or a generic function returning
-                    // `Continuation<T>`). It specializes the constructor before its arguments are
-                    // checked. A symbolic variable owned by an enclosing inference problem is only
-                    // fallback evidence and must not replace a concrete argument solution.
-                    let fixed_result = Self::type_is_lexically_fixed(scope, actual);
-                    if admissible_upper
-                        && (fixed_result || constraints.upper_only.contains(&formal))
-                    {
-                        bindings.insert(formal, actual);
-                    } else {
-                        bindings.entry(formal).or_insert(actual);
-                    }
-                }
                 // Without independent evidence, a constructor variable that supplies context to a
                 // postponed producer completes from its declared upper bound. Substitute preceding
                 // solutions so dependent bounds (`U : Base<T>`) retain their semantic application.
@@ -85015,6 +85172,23 @@ impl<'a> Checker<'a> {
                         bindings.insert(formal.clone(), explicit);
                     }
                 }
+                let result_arguments = classifier
+                    .type_params()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, formal)| {
+                        bindings.get(formal).copied().unwrap_or_else(|| {
+                            classifier
+                                .type_param_bounds()
+                                .get(index)
+                                .and_then(|bounds| bounds.first())
+                                .copied()
+                                .filter(|bound| *bound != Ty::Error)
+                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                member.ret = Ty::obj_args_name(internal, &result_arguments);
                 member.params = signature
                     .params
                     .iter()
@@ -85098,7 +85272,9 @@ impl<'a> Checker<'a> {
         let Some(member) = members.get(candidate_index).cloned() else {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
-        if !self.member_accessible(member.visibility, internal) {
+        if !self.member_accessible(member.visibility, internal)
+            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+        {
             if member.visibility == Visibility::PackagePrivate {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -85321,6 +85497,12 @@ impl<'a> Checker<'a> {
                     ResolvedConstructor::Source { .. } => None,
                 });
             if !class.type_params.is_empty() {
+                if let Some(result) = selected.map(|member| member.ret).filter(|result| {
+                    result.obj_internal() == Some(internal)
+                        && result.type_args().len() == class.type_params.len()
+                }) {
+                    return result;
+                }
                 if let Some((generic, specialized)) = selected
                     .and_then(|member| member.generic_sig.as_ref().map(|generic| (generic, member)))
                     .filter(|(generic, member)| generic.params.len() == member.params.len())
@@ -85431,9 +85613,11 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|&a| self.expr_types[a.0 as usize])
                 .collect();
-            if let Some(inferred) = self.resolved_type_name(internal).and_then(|t| {
+            let classifier = self.resolved_type_name(internal);
+            let source = self.fed_source();
+            if let Some(inferred) = classifier.and_then(|t| {
                 crate::symbol_resolver::infer_constructor_type_args(
-                    internal, &t, &arg_tys, expected,
+                    &source, internal, &t, &arg_tys, expected,
                 )
             }) {
                 if inferred.iter().any(|t| !t.is_erased_top()) {
@@ -85848,9 +86032,6 @@ impl<'a> Checker<'a> {
     /// top-level site (no enclosing class) a non-public member is inaccessible.
     /// Java package-private declarations are accessible from their declaring package.
     fn member_accessible(&self, vis: Visibility, owner: TypeName) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_MEMBER") {
-            return true;
-        }
         match vis {
             Visibility::Public => true,
             Visibility::Internal => {
@@ -85992,7 +86173,7 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         internal: TypeName,
     ) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
+        if self.invisible_reference_suppressed(self.span(expression)) {
             return false;
         }
         let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
@@ -86028,10 +86209,150 @@ impl<'a> Checker<'a> {
         true
     }
 
+    fn invisible_reference_suppressed(&self, span: Span) -> bool {
+        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
+            return true;
+        }
+        self.file
+            .file_annotations
+            .iter()
+            .any(|(annotation, arguments)| {
+                self.annotation_is_kotlin_suppress(annotation)
+                    && arguments.iter().any(|argument| {
+                        self.file
+                            .const_string_value(*argument)
+                            .is_some_and(|value| value.to_lossy() == "INVISIBLE_REFERENCE")
+                    })
+            })
+            || self
+                .file
+                .decls
+                .iter()
+                .any(|&declaration| self.decl_suppresses_invisible_reference(declaration, span))
+            || self.file.stmt_arena.iter().any(|statement| {
+                matches!(statement, Stmt::LocalFun(function)
+                    if self.fun_suppresses_invisible_reference(function, span))
+            })
+    }
+
+    fn annotation_is_kotlin_suppress(&self, annotation: &AnnotationRef) -> bool {
+        self.applied_annotations
+            .get(&(annotation.span.lo, annotation.span.hi))
+            .map(|applied| applied.internal)
+            .or_else(|| {
+                self.module
+                    .legacy_symbols()
+                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
+            })
+            .or_else(|| {
+                self.select_classifier(&CheckerScope::root(), &annotation.name)
+                    .found()
+            })
+            .is_some_and(|identity| identity.matches("kotlin/Suppress"))
+    }
+
+    fn annotations_suppress_invisible_reference(
+        &self,
+        annotations: &[AnnotationRef],
+        annotation_args: &[Vec<ExprId>],
+    ) -> bool {
+        annotations
+            .iter()
+            .zip(annotation_args)
+            .any(|(annotation, arguments)| {
+                self.annotation_is_kotlin_suppress(annotation)
+                    && arguments.iter().any(|argument| {
+                        self.file
+                            .const_string_value(*argument)
+                            .is_some_and(|value| value.to_lossy() == "INVISIBLE_REFERENCE")
+                    })
+            })
+    }
+
+    fn span_contains(outer: Span, inner: Span) -> bool {
+        inner.lo >= outer.lo && inner.hi <= outer.hi
+    }
+
+    fn fun_suppresses_invisible_reference(&self, function: &FunDecl, span: Span) -> bool {
+        Self::span_contains(function.span, span)
+            && self.annotations_suppress_invisible_reference(
+                &function.annotations,
+                &function.annotation_args,
+            )
+    }
+
+    fn property_suppresses_invisible_reference(&self, property: &PropDecl, span: Span) -> bool {
+        Self::span_contains(property.span, span)
+            && self.annotations_suppress_invisible_reference(
+                &property.annotations,
+                &property.annotation_args,
+            )
+    }
+
+    fn primary_constructor_suppresses_invisible_reference(
+        &self,
+        class: &ClassDecl,
+        span: Span,
+    ) -> bool {
+        let Some(annotations) = class.primary_ctor_annotations.as_deref() else {
+            return false;
+        };
+        self.annotations_suppress_invisible_reference(
+            annotations,
+            &class.primary_ctor_annotation_args,
+        ) && class.props.iter().any(|parameter| {
+            Self::span_contains(parameter.ty.span, span)
+                || parameter
+                    .default
+                    .is_some_and(|default| Self::span_contains(self.span(default), span))
+        })
+    }
+
+    fn decl_suppresses_invisible_reference(&self, declaration: DeclId, span: Span) -> bool {
+        match self.file.decl(declaration) {
+            Decl::Fun(function) => self.fun_suppresses_invisible_reference(function, span),
+            Decl::Property(property) => {
+                self.property_suppresses_invisible_reference(property, span)
+            }
+            Decl::Class(class) => {
+                if !Self::span_contains(class.span, span) {
+                    return false;
+                }
+                self.annotations_suppress_invisible_reference(
+                    &class.annotations,
+                    &class.annotation_args,
+                ) || class
+                    .methods
+                    .iter()
+                    .any(|method| self.fun_suppresses_invisible_reference(method, span))
+                    || self.primary_constructor_suppresses_invisible_reference(class, span)
+                    || class.body_props.iter().any(|property| {
+                        self.property_suppresses_invisible_reference(property, span)
+                    })
+                    || class.secondary_ctors.iter().any(|constructor| {
+                        Self::span_contains(constructor.span, span)
+                            && self.annotations_suppress_invisible_reference(
+                                &constructor.annotations,
+                                &constructor.annotation_args,
+                            )
+                    })
+                    || class.companion.is_some_and(|companion| {
+                        self.decl_suppresses_invisible_reference(companion, span)
+                    })
+            }
+        }
+    }
+
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
     /// from the current site. Shared by the property-read and member-call checks.
-    fn reject_if_inaccessible(&mut self, vis: Visibility, name: &str, owner: TypeName, span: Span) {
-        if !self.member_accessible(vis, owner) {
+    fn reject_if_inaccessible(
+        &mut self,
+        vis: Visibility,
+        name: &str,
+        owner: TypeName,
+        span: Span,
+    ) -> bool {
+        if !self.member_accessible(vis, owner) && !self.invisible_reference_suppressed(span) {
             let kind = match vis {
                 Visibility::Private => "private",
                 Visibility::Protected => "protected",
@@ -86046,6 +86367,9 @@ impl<'a> Checker<'a> {
                     owner.render()
                 ),
             );
+            true
+        } else {
+            false
         }
     }
 
