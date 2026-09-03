@@ -2196,6 +2196,7 @@ impl<'a> SemanticClassifier<'a> {
             return Some(self.selected_member_navigation(
                 resolved_expression,
                 selected.member.source_member,
+                selected.member.stable_declaration,
                 matches!(selected.origin, krusty::libraries::Origin::Library),
             ));
         }
@@ -2491,6 +2492,7 @@ impl<'a> SemanticClassifier<'a> {
         &self,
         expression: ExprId,
         source: Option<krusty::libraries::SourceMember>,
+        stable: Option<krusty::frontend::FrontendDeclarationId>,
         library: bool,
     ) -> SelectedNavigation {
         if let Some(source) = source {
@@ -2498,6 +2500,12 @@ impl<'a> SemanticClassifier<'a> {
                 .definition_symbols
                 .source_member_target(source)
                 .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source);
+        }
+        if let Some(target) = stable.and_then(|declaration| {
+            self.definition_symbols
+                .stable_declaration_target(declaration)
+        }) {
+            return SelectedNavigation::Source(target);
         }
         if library {
             return self
@@ -2517,14 +2525,12 @@ impl<'a> SemanticClassifier<'a> {
             if member.name != name {
                 return None;
             }
-            return Some(if let Some(source) = member.source_member {
-                self.definition_symbols
-                    .source_member_target(source)
-                    .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source)
-            } else {
-                self.library_ref_at(expression)
-                    .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Library)
-            });
+            return Some(self.selected_member_navigation(
+                expression,
+                member.source_member,
+                member.stable_declaration,
+                member.stable_declaration.is_none(),
+            ));
         }
         None
     }
@@ -2554,10 +2560,19 @@ impl<'a> SemanticClassifier<'a> {
                 .type_info
                 .and_then(|types| types.resolved_super_call(expression))
             {
-                let selected = if let Some(source) = resolved.source_member {
-                    self.definition_symbols
-                        .source_member_target(source)
-                        .map_or(SelectedNavigation::Unavailable, SelectedNavigation::Source)
+                let selected = if let Some(target) = resolved
+                    .source_member
+                    .and_then(|source| self.definition_symbols.source_member_target(source))
+                    .or_else(|| {
+                        resolved
+                            .property_declaration
+                            .or(resolved.stable_declaration)
+                            .and_then(|declaration| {
+                                self.definition_symbols
+                                    .stable_declaration_target(declaration)
+                            })
+                    }) {
+                    SelectedNavigation::Source(target)
                 } else {
                     SelectedNavigation::Library(LibraryRef {
                         fqn: resolved.owner.render(),
@@ -2591,6 +2606,7 @@ impl<'a> SemanticClassifier<'a> {
                     let selected = self.selected_member_navigation(
                         expression,
                         selected.member.source_member,
+                        selected.member.stable_declaration,
                         matches!(selected.origin, krusty::libraries::Origin::Library),
                     );
                     self.push_selected_navigation(source_span, selected);

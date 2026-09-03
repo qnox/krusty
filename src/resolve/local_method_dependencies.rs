@@ -442,6 +442,7 @@ impl Checker<'_> {
             &function,
             &dependency.properties,
             Some(dependency.source),
+            Some(declaration),
         );
 
         self.this_labels = saved_this_labels;

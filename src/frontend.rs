@@ -5,6 +5,7 @@
 use crate::ast::File;
 use crate::diag::{DiagSink, Severity, Span};
 use crate::features::LangFeatures;
+pub use crate::fir::DeclarationId as FrontendDeclarationId;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 

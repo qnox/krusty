@@ -205,6 +205,22 @@ impl ActiveSourceCursor {
 }
 
 impl ActiveSourceDeclarations {
+    /// Stable declarations represented by this one live parser unit. The iterator exposes only
+    /// semantic identities; arena bindings remain private and die with the active unit.
+    pub(crate) fn stable_declarations(&self) -> impl Iterator<Item = DeclarationId> + '_ {
+        self.declarations
+            .iter()
+            .enumerate()
+            .filter_map(|(raw, binding)| {
+                binding.map(|_| {
+                    DeclarationId::from_raw(
+                        u32::try_from(raw)
+                            .expect("active declaration table exceeds packed identity"),
+                    )
+                })
+            })
+    }
+
     /// Bind a whole-file syntax arena retained by a same-parse caller to the complete stable
     /// declaration stream. Production Pass 2 binds one bounded parser unit at a time through
     /// [`ActiveSourceCursor`]; this adapter exists for Pass-1 inline checking and focused tests

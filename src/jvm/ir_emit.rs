@@ -13303,7 +13303,16 @@ impl<'a> Emitter<'a> {
                     "inline lambda expression={a} impl={impl_fn} impl_params={:?} semantic={semantic_signature:?}",
                     impl_f.params
                 );
-                let body_value_ty = self.value_ty(inline_body);
+                // This body is emitted in a scratch frame whose lambda-parameter slots have not been
+                // installed yet. Asking `value_ty` here would read same-numbered slots from the outer
+                // caller (for example, infer `it + 1` as the caller's `List`) and omit result boxing.
+                // The checked expression type is stable and independent of physical slot layout.
+                let body_value_ty = self
+                    .ir
+                    .logical_types
+                    .get(&inline_body)
+                    .copied()
+                    .unwrap_or(impl_f.ret);
                 let body_ret = ir_ty_to_jvm(&body_value_ty);
                 // Each capture binds to the caller's actual slot (a mutable capture writes through).
                 let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
@@ -19095,8 +19104,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn value_ty(&self, e: u32) -> Ty {
-        if let Some(result) = self.ir.exhaustive_whens.get(&e) {
-            return ir_ty_to_jvm(result);
+        if matches!(self.ir.expr(e), IrExpr::When { .. }) {
+            if let Some(result) = self.ir.exhaustive_whens.get(&e) {
+                return ir_ty_to_jvm(result);
+            }
         }
         match self.ir.expr(e) {
             IrExpr::StringConcat(_) => Ty::String,

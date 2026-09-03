@@ -1698,7 +1698,7 @@ fn super_call_preserves_checked_default_ordinals_and_source_identity() {
 }
 
 #[test]
-fn sibling_inline_adapted_reference_uses_exact_module_target_when_not_in_active_ir() {
+fn sibling_inline_adapted_reference_uses_the_retained_inline_template() {
     let ir = lower_source_from_set(
         &[
             ("inline fun sibling(value: Int): Int = value", "Dependency"),
@@ -1710,7 +1710,8 @@ fn sibling_inline_adapted_reference_uses_exact_module_target_when_not_in_active_
     assert!(ir.functions.iter().any(|function| {
         function.name.starts_with("$fir_callable_ref_") && function.params == [Ty::Int]
     }));
-    assert!(ir.exprs.iter().any(|expression| matches!(
+    assert!(!ir.foreign_inline_templates.is_empty());
+    assert!(!ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
             callee: crate::ir::Callee::Module {
@@ -2574,36 +2575,29 @@ fn enclosing_receiver_path_lowers_from_stable_classifier_edges() {
          }\n",
         "EnclosingReceiver",
     );
-    let inner2 = ir
-        .classes
-        .iter()
-        .position(|class| class.fq_name == crate::types::type_name("Outer$Inner1$Inner2"))
-        .expect("Inner2 common class") as u32;
-    let inner1 = ir
-        .classes
-        .iter()
-        .position(|class| class.fq_name == crate::types::type_name("Outer$Inner1"))
-        .expect("Inner1 common class") as u32;
+    let inner2 = crate::types::type_name("Outer$Inner1$Inner2");
+    let inner1 = crate::types::type_name("Outer$Inner1");
+    let outer = crate::types::type_name("Outer");
 
     assert!(ir.exprs.iter().any(|expression| {
-        let IrExpr::GetField {
+        let IrExpr::EnclosingInstance {
             receiver,
-            class,
-            index: 0,
+            inner,
+            outer: selected_outer,
         } = expression
         else {
             return false;
         };
-        if *class != inner1 {
+        if *inner != inner1 || *selected_outer != outer {
             return false;
         }
         matches!(
             ir.expr(*receiver),
-            IrExpr::GetField {
-                class,
-                index: 0,
+            IrExpr::EnclosingInstance {
+                inner,
+                outer,
                 ..
-            } if *class == inner2
+            } if *inner == inner2 && *outer == inner1
         )
     }));
 }

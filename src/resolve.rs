@@ -2656,6 +2656,22 @@ impl ClassSig {
             .find_map(|(n, t, v)| (n == name).then_some((*t, *v)))
     }
 
+    /// Stable identity of a declared property while both the source declaration inventory and the
+    /// compact declaration projection are live. Exact transient identity wins; the name fallback
+    /// covers the compact projection, which deliberately carries no parser coordinate.
+    pub fn stable_property_declaration(
+        &self,
+        source: crate::libraries::SourceMember,
+        name: &str,
+    ) -> Option<crate::fir::DeclarationId> {
+        self.declared_props
+            .values()
+            .chain(self.contextual_props.values().flatten())
+            .find(|property| property.source_member == Some(source))
+            .or_else(|| self.declared_props.get(name))
+            .and_then(|property| property.stable_declaration)
+    }
+
     /// A property visible to Kotlin source lookup. Internal capture storage deliberately remains
     /// available through [`Self::prop`] for bounded classifier checking, while this operation
     /// excludes it and lets an inherited declaration with the same spelling remain visible.
@@ -16676,7 +16692,7 @@ fn infer_method_return_ty(
     });
     let method_scope = &method_scope;
     let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
-    checker.check_method(method_scope, method, &properties, None);
+    checker.check_method(method_scope, method, &properties, None, None);
     checker.symbolic_signature_inference = outer;
     let incomplete = checker.inference_incomplete;
     // Keyed by the method that was ASKED for. `check_method` records every return it computed while
@@ -19271,6 +19287,10 @@ pub struct ResolvedSuperCall {
     /// Stable source declaration selected for this call. Dependency declarations leave this unset;
     /// current-compilation defaults use it to retain their exact checked default-expression owner.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
+    /// Kotlin property declaration selected by property syntax. The callable declaration above is
+    /// still the exact accessor target used by FIR; editor/navigation consumers use this identity
+    /// to reach the source property rather than its generated getter or setter.
+    pub property_declaration: Option<crate::fir::DeclarationId>,
     pub source_member: Option<crate::libraries::SourceMember>,
     /// Exact semantic dependency property when this selection came from property syntax. The
     /// callable identity remains available for ordinary accessor calls, but checked FIR uses this
@@ -19314,6 +19334,7 @@ impl ResolvedSuperCall {
             interface,
             realization,
             stable_declaration,
+            property_declaration: None,
             source_member,
             external_property,
         })
@@ -21809,6 +21830,7 @@ struct ScopedProperty {
     class_storage: Option<u32>,
     enum_entry_property: Option<u32>,
     source_member: Option<crate::libraries::SourceMember>,
+    stable_declaration: Option<crate::fir::DeclarationId>,
 }
 
 #[derive(Clone)]
@@ -22957,9 +22979,11 @@ impl<'a> Checker<'a> {
     fn record_checked_source_member_result(
         &mut self,
         source: crate::libraries::SourceMember,
+        stable: Option<crate::fir::DeclarationId>,
         ty: Ty,
     ) {
-        if let Some(declaration) = self.active_source_member_declaration(source) {
+        if let Some(declaration) = stable.or_else(|| self.active_source_member_declaration(source))
+        {
             self.inferred_stable_declaration_rets
                 .insert(declaration, ty);
         } else {
@@ -23011,8 +23035,13 @@ impl<'a> Checker<'a> {
             })
     }
 
-    fn remove_checked_source_member_result(&mut self, source: crate::libraries::SourceMember) {
-        if let Some(declaration) = self.active_source_member_declaration(source) {
+    fn remove_checked_source_member_result(
+        &mut self,
+        source: crate::libraries::SourceMember,
+        stable: Option<crate::fir::DeclarationId>,
+    ) {
+        if let Some(declaration) = stable.or_else(|| self.active_source_member_declaration(source))
+        {
             self.inferred_stable_declaration_rets.remove(&declaration);
         } else {
             self.inferred_source_member_rets.remove(&source);
@@ -23134,9 +23163,37 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         member: &mut crate::libraries::LibraryMember,
     ) -> Option<Ty> {
-        let inferred =
-            self.checked_source_member_result(member.source_member, member.stable_declaration)?;
         let bindings = self.member_receiver_type_bindings(receiver, member);
+        let inferred = self
+            .checked_source_member_result(member.source_member, member.stable_declaration)
+            .or_else(|| {
+                // Legacy same-parse signature checking has not yet installed the stable body-local
+                // result map. Accept only the unique declaration-shaped result; production Pass 2
+                // carries the stable declaration above and never enters this compatibility path.
+                (!self.has_finalized_signature(member.stable_declaration))
+                    .then(|| {
+                        let owner = member.owner?;
+                        let mut matches = self
+                            .inferred_method_rets
+                            .iter()
+                            .filter(|((candidate_owner, name, parameters), _)| {
+                                *candidate_owner == owner
+                                    && name == &member.name
+                                    && parameters.len() == member.params.len()
+                                    && parameters.iter().zip(&member.params).all(
+                                        |(declared, selected)| {
+                                            crate::symbol_resolver::ty_subst_keep_unbound(
+                                                *declared, &bindings,
+                                            ) == *selected
+                                        },
+                                    )
+                            })
+                            .map(|(_, result)| *result);
+                        let result = matches.next()?;
+                        matches.next().is_none().then_some(result)
+                    })
+                    .flatten()
+            })?;
         let inferred = crate::symbol_resolver::ty_subst_keep_unbound(inferred, &bindings);
         if let Some(parameters) = member
             .generic_sig
@@ -49906,14 +49963,30 @@ impl<'a> Checker<'a> {
         properties: &[ScopedProperty],
         plan: Option<&ClassCapturePlan>,
         method_index: usize,
-        source_member: crate::libraries::SourceMember,
+        declaration: (
+            crate::libraries::SourceMember,
+            Option<crate::fir::DeclarationId>,
+        ),
     ) {
+        let (source_member, stable_declaration) = declaration;
         let Some(plan) = plan else {
-            self.check_method(scope, function, properties, Some(source_member));
+            self.check_method(
+                scope,
+                function,
+                properties,
+                Some(source_member),
+                stable_declaration,
+            );
             return;
         };
         match plan.methods.get(method_index) {
-            Some(true) => self.check_method(scope, function, properties, Some(source_member)),
+            Some(true) => self.check_method(
+                scope,
+                function,
+                properties,
+                Some(source_member),
+                stable_declaration,
+            ),
             Some(false) => {
                 self.check_unselected_method_annotation_applications(scope, function);
                 self.reset_body_mutations(fun_body_expr(&function.body));
@@ -55245,6 +55318,11 @@ impl<'a> Checker<'a> {
             |owner: TypeName| qualifier.is_none_or(|qualifier| owner.qualifier_matches(qualifier));
         let select = |applied_owner: Ty, interface: bool| {
             let owner = applied_owner.obj_internal()?;
+            let property_declaration = self
+                .resolver()
+                .select_member_property(applied_owner, name)
+                .and_then(|selected| selected.property)
+                .and_then(|property| property.stable_declaration);
             if setter {
                 let selected = self.select_property_setter(applied_owner, name)?;
                 let stable_declaration = selected.stable_declaration;
@@ -55271,6 +55349,7 @@ impl<'a> Checker<'a> {
                     interface,
                     realization,
                     stable_declaration,
+                    property_declaration,
                     source_member: selected.source_member,
                     external_property,
                 })
@@ -55279,7 +55358,10 @@ impl<'a> Checker<'a> {
                 if member.member.is_abstract() {
                     return None;
                 }
-                ResolvedSuperCall::selected(receiver.clone(), owner, interface, member.member)
+                let mut target =
+                    ResolvedSuperCall::selected(receiver.clone(), owner, interface, member.member)?;
+                target.property_declaration = property_declaration;
+                Some(target)
             }
         };
 
@@ -59923,6 +60005,7 @@ impl<'a> Checker<'a> {
                 class_storage: None,
                 enum_entry_property: Some(field as u32),
                 source_member: None,
+                stable_declaration: None,
             });
         }
         properties
@@ -60189,6 +60272,7 @@ impl<'a> Checker<'a> {
                         class_storage: None,
                         enum_entry_property: None,
                         source_member: property.source_member,
+                        stable_declaration: property.stable_declaration,
                     });
                     crate::trace_compiler!(
                         "resolve",
@@ -67082,9 +67166,27 @@ impl<'a> Checker<'a> {
                 if inferred == Ty::Error || inferred.mentions_pending() {
                     continue;
                 }
+                let stable_declaration = self
+                    .resolved_index
+                    .and_then(|index| {
+                        let owner = self
+                            .active_classifier_internal(declaration, class)
+                            .and_then(|owner| index.classifier_declaration(owner))?;
+                        index.owned_declaration(
+                            owner,
+                            crate::fir::DeclarationKind::Property,
+                            u32::try_from(primary_parameter_count + property_index)
+                                .expect("too many local class properties"),
+                        )
+                    })
+                    .or(properties[unresolved].stable_declaration);
                 self.property_decl_types
                     .insert((property.span.lo, property.span.hi), inferred);
-                self.record_checked_source_member_result(source_member, inferred);
+                self.record_checked_source_member_result(
+                    source_member,
+                    stable_declaration,
+                    inferred,
+                );
                 let scoped = &mut properties[unresolved];
                 debug_assert_eq!(scoped.ty, Ty::Error);
                 scoped.ty = inferred;
@@ -67921,6 +68023,24 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: (cl.props.len() + property_index) as u32,
                     };
+                    let stable_declaration = self
+                        .resolved_index
+                        .and_then(|index| {
+                            let owner = current_owner
+                                .and_then(|owner| index.classifier_declaration(owner))?;
+                            index.owned_declaration(
+                                owner,
+                                crate::fir::DeclarationKind::Property,
+                                u32::try_from(cl.props.len() + property_index)
+                                    .expect("too many local class properties"),
+                            )
+                        })
+                        .or_else(|| {
+                            props
+                                .iter()
+                                .find(|candidate| candidate.source_member == Some(source_member))
+                                .and_then(|candidate| candidate.stable_declaration)
+                        });
                     // An explicit or already-finalized property type does not need local
                     // inference, but its declaration still belongs to this body-local classifier
                     // and therefore is absent from the immutable provider used by member reads.
@@ -67987,7 +68107,21 @@ impl<'a> Checker<'a> {
                         })
                         .flatten();
                     if let Some(constraint) = constraint {
-                        self.record_checked_source_member_result(source_member, constraint);
+                        self.record_checked_source_member_result(
+                            source_member,
+                            stable_declaration,
+                            constraint,
+                        );
+                        if let Some(owner) = current_owner {
+                            self.record_checked_local_property(
+                                owner,
+                                property,
+                                source_member,
+                                stable_declaration,
+                                constraint,
+                                cl.is_interface(),
+                            );
+                        }
                         if let Some(scoped) = props.iter_mut().find(|candidate| {
                             candidate.source_member == Some(source_member)
                                 || (candidate.name == property.name && candidate.ty == Ty::Error)
@@ -68016,13 +68150,24 @@ impl<'a> Checker<'a> {
                     );
                     let Some(inferred) = inferred else {
                         if constraint.is_some() {
-                            self.remove_checked_source_member_result(source_member);
+                            self.remove_checked_source_member_result(
+                                source_member,
+                                stable_declaration,
+                            );
+                            if let Some(owner) = current_owner {
+                                self.checked_local_properties
+                                    .remove(&(owner, property.name.clone()));
+                            }
                         }
                         continue;
                     };
                     self.property_decl_types
                         .insert((property.span.lo, property.span.hi), inferred);
-                    self.record_checked_source_member_result(source_member, inferred);
+                    self.record_checked_source_member_result(
+                        source_member,
+                        stable_declaration,
+                        inferred,
+                    );
                     if let Some(owner) = current_owner {
                         self.record_checked_local_property(
                             owner,
@@ -68052,6 +68197,8 @@ impl<'a> Checker<'a> {
                             class_storage: None,
                             enum_entry_property: None,
                             source_member: Some(source_member),
+                            stable_declaration: self
+                                .active_source_member_declaration(source_member),
                         });
                         let scoped = props.last().expect("a checked local property was appended");
                         self.declare_scoped_property(property_scope, scoped, false);
@@ -68427,6 +68574,18 @@ impl<'a> Checker<'a> {
                     owner: d.0,
                     method: method_index as u32,
                 };
+                let stable_declaration = self
+                    .resolved_index
+                    .and_then(|index| {
+                        let owner =
+                            current_owner.and_then(|owner| index.classifier_declaration(owner))?;
+                        index.owned_declaration(
+                            owner,
+                            crate::fir::DeclarationKind::Function,
+                            u32::try_from(method_index).expect("too many class methods"),
+                        )
+                    })
+                    .or_else(|| self.active_source_member_declaration(source_member));
                 let selected = if self.signature_defaults_only {
                     default_owned_class
                         || self.selected_signature_default_source_member(source_member)
@@ -68452,7 +68611,7 @@ impl<'a> Checker<'a> {
                     &props,
                     method_capture_plan,
                     method_check_index,
-                    source_member,
+                    (source_member, stable_declaration),
                 );
                 if let Some(declaration) = registered {
                     self.finish_registered_local_method(declaration);
@@ -68679,6 +68838,7 @@ impl<'a> Checker<'a> {
                             class_storage: Some(field as u32),
                             enum_entry_property: Some(field as u32),
                             source_member: None,
+                            stable_declaration: None,
                         });
 
                         // Entry-body properties are declarations of the synthetic entry subclass, not
@@ -68764,18 +68924,37 @@ impl<'a> Checker<'a> {
                         self.this_extension_receiver = previous_extension_receiver;
                     }
                     for (entry_method, bm) in entry.methods.iter().enumerate() {
+                        let source_member = crate::libraries::SourceMember::EnumEntry {
+                            file: self.file_index,
+                            owner: d.0,
+                            entry: entry_index as u32,
+                            method: entry_method as u32,
+                        };
+                        let stable_declaration = self
+                            .active_source_member_declaration(source_member)
+                            .or_else(|| {
+                                let index = self.resolved_index?;
+                                let owner = current_owner
+                                    .and_then(|owner| index.classifier_declaration(owner))?;
+                                let entry = index.owned_declaration(
+                                    owner,
+                                    crate::fir::DeclarationKind::EnumEntry,
+                                    u32::try_from(entry_index).expect("too many enum entries"),
+                                )?;
+                                index.owned_declaration(
+                                    entry,
+                                    crate::fir::DeclarationKind::Function,
+                                    u32::try_from(entry_method)
+                                        .expect("too many enum-entry methods"),
+                                )
+                            });
                         self.check_method_in_capture_plan(
                             entry_scope,
                             bm,
                             &entry_props,
                             method_capture_plan,
                             method_check_index,
-                            crate::libraries::SourceMember::EnumEntry {
-                                file: self.file_index,
-                                owner: d.0,
-                                entry: entry_index as u32,
-                                method: entry_method as u32,
-                            },
+                            (source_member, stable_declaration),
                         );
                         method_check_index += 1;
                     }
@@ -69605,7 +69784,25 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: source_property_index as u32,
                     };
-                    let stable_property = self.active_source_member_declaration(source_member);
+                    let stable_property = self
+                        .resolved_index
+                        .and_then(|index| {
+                            let owner = current_owner
+                                .and_then(|owner| index.classifier_declaration(owner))?;
+                            index.owned_declaration(
+                                owner,
+                                crate::fir::DeclarationKind::Property,
+                                u32::try_from(source_property_index)
+                                    .expect("too many class properties"),
+                            )
+                        })
+                        .or_else(|| self.active_source_member_declaration(source_member))
+                        .or_else(|| {
+                            props
+                                .iter()
+                                .find(|candidate| candidate.source_member == Some(source_member))
+                                .and_then(|candidate| candidate.stable_declaration)
+                        });
                     let extension_receiver = bp
                         .receiver
                         .as_ref()
@@ -69819,7 +70016,11 @@ impl<'a> Checker<'a> {
                         self.property_decl_types
                             .insert((bp.span.lo, bp.span.hi), prop_ty);
                         if body_local_class && bp.declared_ty().is_none() {
-                            self.record_checked_source_member_result(source_member, prop_ty);
+                            self.record_checked_source_member_result(
+                                source_member,
+                                stable_property,
+                                prop_ty,
+                            );
                         }
                         if body_local_class {
                             if let Some(owner) = current_owner {
@@ -70160,6 +70361,7 @@ impl<'a> Checker<'a> {
         f: &FunDecl,
         props: &[ScopedProperty],
         source_member: Option<crate::libraries::SourceMember>,
+        stable_declaration: Option<crate::fir::DeclarationId>,
     ) {
         let selected_default_method = source_member
             .is_some_and(|member| self.selected_signature_default_source_member(member));
@@ -70224,8 +70426,9 @@ impl<'a> Checker<'a> {
                 .push((label_index, recv_ref.span));
             self.this_extension_receiver = Some(recv_ref.span);
         }
-        let stable_declaration =
-            source_member.and_then(|source| self.active_source_member_declaration(source));
+        let stable_declaration = stable_declaration.or_else(|| {
+            source_member.and_then(|source| self.active_source_member_declaration(source))
+        });
         let inherited_result = (f.ret.is_none() && f.is_override())
             .then(|| {
                 let dispatch = dispatch_this?;
@@ -70276,14 +70479,18 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Unit
             });
-        if f.ret.is_some() && self.ret_ty != Ty::Error {
+        if !self.signature_defaults_only && f.ret.is_some() && self.ret_ty != Ty::Error {
             if let Some(source_member) = source_member {
                 // A body-local member may explicitly return its enclosing local classifier
                 // (`inner class D { fun outer(): C = ... }`). Its pre-check module signature uses
                 // `Error` because `C` exists only on this Pass-2 lexical rung. Make the checked
                 // declaration result visible to later calls in the same active body, exactly like
                 // an inferred local-member result; no syntax or overlay survives this file.
-                self.record_checked_source_member_result(source_member, self.ret_ty);
+                self.record_checked_source_member_result(
+                    source_member,
+                    stable_declaration,
+                    self.ret_ty,
+                );
             }
         }
         let class_storage_captures = match source_member.as_ref() {
@@ -70419,7 +70626,11 @@ impl<'a> Checker<'a> {
                             }
                         }
                         if let Some(source_member) = source_member {
-                            self.record_checked_source_member_result(source_member, inferred);
+                            self.record_checked_source_member_result(
+                                source_member,
+                                stable_declaration,
+                                inferred,
+                            );
                         }
                     }
                 }

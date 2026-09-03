@@ -16537,9 +16537,9 @@ impl<'a> Lower<'a> {
                             "suspendConversion0".to_string(),
                             0,
                             crate::ir::FrDispatch::SuspendConvert,
-                            Some(type_name(
-                                &crate::jvm::names::function_interface_internal_name(n),
-                            )),
+                            // Keep the selected target in its Kotlin semantic spelling. The backend
+                            // owns the physical Function0..22/FunctionN carrier choice.
+                            Some(type_name(&format!("kotlin/Function{n}"))),
                             "invoke".to_string(),
                             true,
                             param_tys,

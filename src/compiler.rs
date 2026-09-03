@@ -9,6 +9,107 @@ use crate::backend::{Artifact, Backend};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::{check_source_set, CheckedFile, FrontendSymbols, StreamingSourceSetAnalysis};
 
+/// Transfer line-only output metadata while one bounded Pass-2 parser unit is live. This belongs
+/// to orchestration rather than checked-FIR lowering: the lowerer never observes source syntax.
+fn accept_active_debug_metadata(
+    index: &crate::fir::ResolvedModuleIndex,
+    file: &File,
+    active: &crate::fir::ActiveSourceDeclarations,
+    ir: &mut crate::ir::IrFile,
+) {
+    for declaration in active.stable_declarations() {
+        if let Some((_, classifier)) = active.class(file, declaration) {
+            if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
+                ir.classes[class as usize].decl_line = classifier.decl_line;
+            }
+        }
+
+        if let Some(function) = active.function(file, declaration) {
+            if let Some(ir_function) = index
+                .callable_for_declaration(declaration)
+                .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
+            {
+                ir.fn_decl_lines.insert(ir_function, function.decl_line);
+                ir.fn_sig_lines.insert(ir_function, function.sig_line);
+                if function.body_close_line != 0 {
+                    ir.fn_close_lines
+                        .insert(ir_function, function.body_close_line);
+                }
+            }
+        }
+
+        let property_line = active
+            .property(file, declaration)
+            .map(|property| property.decl_line)
+            .or_else(|| {
+                active
+                    .constructor_parameter(file, declaration)
+                    .map(|property| property.decl_line)
+            });
+        if let Some(line) = property_line.filter(|line| *line != 0) {
+            if let Some(property) = index.property_for_declaration(declaration) {
+                if let Some(layout) = ir.local_property_layouts.get(&property) {
+                    match layout {
+                        crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                            storage,
+                            getter,
+                            setter,
+                            ..
+                        } => {
+                            if let Some(storage) = ir.statics.get_mut(*storage as usize) {
+                                storage.line = line;
+                            }
+                            for function in getter.iter().chain(setter.iter()) {
+                                ir.fn_decl_lines.insert(*function, line);
+                            }
+                        }
+                        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                            getter,
+                            setter,
+                            ..
+                        } => {
+                            ir.fn_decl_lines.insert(*getter, line);
+                            if let Some(setter) = setter {
+                                ir.fn_decl_lines.insert(*setter, line);
+                            }
+                        }
+                        crate::ir::IrLocalPropertyLayout::Member {
+                            owner,
+                            getter,
+                            setter,
+                            name,
+                            ..
+                        } => {
+                            ir.prop_decl_lines.insert((*owner, name.clone()), line);
+                            for function in getter.iter().chain(setter.iter()) {
+                                ir.fn_decl_lines.insert(*function, line);
+                            }
+                        }
+                        crate::ir::IrLocalPropertyLayout::MemberExtension { .. } => {}
+                    }
+                }
+            }
+        }
+
+        if let Some(entry) = active.enum_entry(file, declaration) {
+            if let Some(owner) = index
+                .declaration_anchor(declaration)
+                .and_then(|anchor| anchor.owner)
+                .and_then(|owner| ir.checked_classifier_classes.get(&owner))
+                .copied()
+            {
+                if let Some(ir_entry) = ir.classes[owner as usize]
+                    .enum_entries
+                    .iter_mut()
+                    .find(|candidate| candidate.name == entry.name)
+                {
+                    ir_entry.decl_line = entry.decl_line;
+                }
+            }
+        }
+    }
+}
+
 /// Complete diagnostics for an invalid module during the normal second source pass. A failed
 /// signature prevents checked FIR publication, but it must not suppress independent diagnostics in
 /// ordinary bodies. The ordinary checker is still the sole semantic authority; this path only
@@ -274,6 +375,7 @@ pub fn emit_analyzed<B: Backend>(
                     return;
                 }
             };
+            accept_active_debug_metadata(&index, &active_file, &active, sink.ir_mut());
             let work = match active.ordinary_body_work(&active_file, source_id, &index) {
                 Ok(work) => work,
                 Err(error) => {
@@ -324,6 +426,9 @@ pub fn emit_analyzed<B: Backend>(
                     source_rejected = true;
                 }
             }
+            // Property storage/accessor realizations can be created while consuming the group, so
+            // refresh their line-only metadata before this bounded parser unit is dropped.
+            accept_active_debug_metadata(&index, &active_file, &active, sink.ir_mut());
             // `active_file`, its AST-keyed semantic tables, and checked FIR temporaries all
             // drop when this callback returns, before the parser resumes with the next unit.
         });

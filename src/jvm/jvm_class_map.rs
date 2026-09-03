@@ -298,12 +298,14 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // metadata-decoded function type into bytecode (a checkcast on an alias-expanded return) must
     // erase it here or reference a class that does not exist (corpus
     // `nestedFunctionTypeAliasExpansion.kt`: NoClassDefFoundError kotlin/Function1).
-    if let Some(mapped) = internal
+    if let Some(arity) = internal
         .strip_prefix("kotlin/Function")
         .and_then(|n| n.parse::<usize>().ok())
-        .and_then(|arity| crate::types::FUNCTION_N_INTERNAL.get(arity).copied())
     {
-        return mapped;
+        return crate::types::FUNCTION_N_INTERNAL
+            .get(arity)
+            .copied()
+            .unwrap_or("kotlin/jvm/functions/FunctionN");
     }
     internal
 }
