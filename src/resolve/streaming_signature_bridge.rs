@@ -2822,16 +2822,47 @@ impl ProductionSignatureSemantics<'_> {
             .collect()
     }
 
+    fn declaration_context_receivers(&self, scope: crate::fir::SignatureScope) -> Vec<Ty> {
+        let compact_parameters =
+            self.headers
+                .syntax
+                .declaration(scope.owner)
+                .and_then(|declaration| match declaration.kind {
+                    crate::fir::HeaderDeclarationKind::Callable {
+                        parameters,
+                        context_count,
+                        ..
+                    } => self
+                        .headers
+                        .syntax
+                        .parameters(parameters)
+                        .get(..context_count as usize)
+                        .map(<[_]>::to_vec),
+                    crate::fir::HeaderDeclarationKind::Property {
+                        context_parameters, ..
+                    } => Some(self.headers.syntax.parameters(context_parameters).to_vec()),
+                    crate::fir::HeaderDeclarationKind::Classifier { .. }
+                    | crate::fir::HeaderDeclarationKind::Constructor { .. }
+                    | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
+                });
+        if let Some(parameters) = compact_parameters {
+            return parameters
+                .iter()
+                .filter_map(|parameter| self.resolve_compact_header_type(scope, parameter.ty))
+                .collect();
+        }
+        self.callable_signature(scope.owner)
+            .map(|signature| {
+                signature.params[..signature.context_count.min(signature.params.len())].to_vec()
+            })
+            .unwrap_or_default()
+    }
+
     fn declaration_implicit_receivers(&self, scope: crate::fir::SignatureScope) -> Vec<Ty> {
         let Some(anchor) = self.headers.declarations.anchor(scope.owner) else {
             return Vec::new();
         };
-        let context_receivers = self
-            .callable_signature(scope.owner)
-            .map(|signature| {
-                signature.params[..signature.context_count.min(signature.params.len())].to_vec()
-            })
-            .unwrap_or_default();
+        let context_receivers = self.declaration_context_receivers(scope);
         if let Some(mut owner) = self.declaration_semantic_parent(scope.owner) {
             let mut receivers = Vec::new();
             let mut direct_classifier = true;

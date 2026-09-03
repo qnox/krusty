@@ -1626,6 +1626,50 @@ class B(val delegate: A) : A by delegate
 }
 
 #[test]
+fn inferred_extension_property_sees_its_context_receiver() {
+    let source = r#"// LANGUAGE: +ContextReceivers
+class View { val coefficient = 42 }
+context(View) val Int.dp get() = coefficient
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ContextPropertySignature")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::from_source(source),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the context property signature must finalize")
+        .module
+        .index();
+    let declaration = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("dp"))
+        .expect("stable dp property declaration");
+    let signature = index
+        .signature(declaration)
+        .expect("finalized dp property signature");
+    let property = index
+        .property_for_declaration(declaration)
+        .and_then(|property| index.property(property))
+        .expect("stable dp property shape");
+
+    assert_eq!(signature.parameters.len(), 1);
+    assert_eq!(signature.parameters[0].get(), Ty::obj("View"));
+    assert_eq!(signature.result.get(), Ty::Int);
+    assert_eq!(property.context_parameter_count, 1);
+    assert_eq!(
+        property.extension_receiver.map(|ty| ty.get()),
+        Some(Ty::Int)
+    );
+}
+
+#[test]
 fn explicit_generic_anonymous_override_does_not_poison_property_inference() {
     let source = r#"
 interface Key<T, R>
