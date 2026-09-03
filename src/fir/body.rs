@@ -255,9 +255,9 @@ pub enum FirInlineBodyPlan {
     ForEach {
         lambda_parameter: u32,
         iterator_ty: ResolvedTy,
-        iterator: FirIteratorCall,
-        has_next: FirIteratorCall,
-        next: FirIteratorCall,
+        iterator: Box<FirIteratorCall>,
+        has_next: Box<FirIteratorCall>,
+        next: Box<FirIteratorCall>,
     },
 }
 
@@ -1717,9 +1717,9 @@ pub enum FirLoopHeader {
         variable_ty: ResolvedTy,
         iterable: FirExprId,
         iterator_ty: ResolvedTy,
-        iterator: FirIteratorCall,
-        has_next: FirIteratorCall,
-        next: FirIteratorCall,
+        iterator: Box<FirIteratorCall>,
+        has_next: Box<FirIteratorCall>,
+        next: Box<FirIteratorCall>,
     },
 }
 
@@ -1734,6 +1734,16 @@ pub enum FirIteratorReceiver {
 pub struct FirIteratorCall {
     pub target: FirCallTarget,
     pub receiver: FirIteratorReceiver,
+    /// Checker-selected implicit context operands for this convention call. Iterator protocol
+    /// calls have no source value arguments, but their declarations may have context parameters.
+    pub context_arguments: Box<[FirIteratorContextArgument]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirIteratorContextArgument {
+    /// Final applied type used to specialize a stable module declaration.
+    pub parameter_type: ResolvedTy,
+    pub receiver: FirReceiver,
 }
 
 /// Checked statement shapes. Assignments and convention operations are already represented as

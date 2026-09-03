@@ -378,6 +378,26 @@ impl BodyLowering<'_> {
         call: &FirIteratorCall,
         receiver: ExprId,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let context_parameter_types = call
+            .context_arguments
+            .iter()
+            .map(|argument| argument.parameter_type.get())
+            .collect::<Vec<_>>();
+        let arguments = call
+            .context_arguments
+            .iter()
+            .enumerate()
+            .map(|(parameter, argument)| {
+                Ok(crate::ir::IrCheckedArgument::Expression {
+                    parameter: u32::try_from(parameter)
+                        .map_err(|_| FirLoweringFailure::UnsupportedIntrinsicCall)?,
+                    value: self.expression_with_conversion(
+                        argument.receiver.value,
+                        argument.receiver.conversion,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
         let (dispatch_receiver, extension_receiver) = match &call.receiver {
             FirIteratorReceiver::Dispatch => (Some(receiver), None),
             FirIteratorReceiver::Extension => (None, Some(receiver)),
@@ -402,8 +422,8 @@ impl BodyLowering<'_> {
                     *target,
                     dispatch_receiver,
                     extension_receiver,
-                    &[],
-                    &[],
+                    &arguments,
+                    &context_parameter_types,
                     &[],
                 )
                 .ok_or(FirLoweringFailure::MissingCallable(*target)),
@@ -433,7 +453,7 @@ impl BodyLowering<'_> {
                     *extension_receiver_parameter,
                     dispatch_receiver,
                     extension_receiver,
-                    &[],
+                    &arguments,
                 )
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration)),
             crate::fir::FirCallTarget::Intrinsic {
@@ -449,7 +469,7 @@ impl BodyLowering<'_> {
                     *result,
                     dispatch_receiver,
                     extension_receiver,
-                    &[],
+                    &arguments,
                 )
                 .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall),
         }

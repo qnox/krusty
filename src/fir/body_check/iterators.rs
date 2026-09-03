@@ -1,5 +1,5 @@
 use super::*;
-use crate::fir::{FirIteratorCall, FirIteratorReceiver};
+use crate::fir::{FirIteratorCall, FirIteratorContextArgument, FirIteratorReceiver};
 use crate::resolve::ResolvedCall;
 
 impl BodyFirChecker<'_> {
@@ -47,21 +47,21 @@ impl BodyFirChecker<'_> {
             variable_ty,
             iterable,
             iterator_ty,
-            iterator: self.iterator_protocol_call(
+            iterator: Box::new(self.iterator_protocol_call(
                 self.file.stmt_spans.get(statement.0 as usize).copied(),
                 origin,
                 &protocol.iterator,
-            )?,
-            has_next: self.iterator_protocol_call(
+            )?),
+            has_next: Box::new(self.iterator_protocol_call(
                 self.file.stmt_spans.get(statement.0 as usize).copied(),
                 origin,
                 &protocol.has_next,
-            )?,
-            next: self.iterator_protocol_call(
+            )?),
+            next: Box::new(self.iterator_protocol_call(
                 self.file.stmt_spans.get(statement.0 as usize).copied(),
                 origin,
                 &protocol.next,
-            )?,
+            )?),
         })
     }
 
@@ -71,146 +71,64 @@ impl BodyFirChecker<'_> {
         origin: OriginId,
         selected: &ResolvedCall,
     ) -> Result<FirIteratorCall, BodyCheckFailure> {
-        let result = selected.ret();
-        let (stable_declaration, external_declaration, receiver_ty, receiver, declared_result) =
-            match selected {
-                ResolvedCall::Member(selected)
-                    if selected.member.params.is_empty() && selected.context_args.is_empty() =>
-                {
-                    (
-                        selected.member.stable_declaration,
-                        selected.member.external_identity,
-                        selected.receiver,
-                        FirIteratorReceiver::Dispatch,
-                        selected.member.declared_ret,
-                    )
-                }
-                ResolvedCall::Extension(selected)
-                    if selected.params.is_empty() && selected.context_args.is_empty() =>
-                {
-                    (
-                        selected.stable_declaration,
-                        selected.callable.external_identity,
-                        selected.receiver,
-                        FirIteratorReceiver::Extension,
-                        selected.callable.declared_ret,
-                    )
-                }
-                ResolvedCall::MemberExtension {
-                    stable_declaration,
-                    external_identity,
-                    dispatch_receiver,
-                    extension_receiver,
-                    params,
-                    context_args,
-                    ret,
-                    inline,
-                    inline_body_plan,
-                    suspend,
-                    declared_ret,
-                    vararg_index,
-                    ..
-                } if params.is_empty() && context_args.is_empty() && vararg_index.is_none() => {
-                    let dispatch_ty = dispatch_receiver.ty;
-                    let dispatch_receiver = self
-                        .materialize_implicit_receiver(origin, span, dispatch_receiver)?
-                        .ok_or_else(|| {
-                            self.failure(
-                                span,
-                                BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
-                            )
-                        })?;
-                    let target = if let Some(declaration) = stable_declaration {
-                        self.index
-                            .callable_for_declaration(*declaration)
-                            .map(|callable| FirCallTarget::Module(callable.id))
-                            .ok_or_else(|| {
-                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                            })?
-                    } else {
-                        FirCallTarget::External {
-                            declaration: external_identity.ok_or_else(|| {
-                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                            })?,
-                            receiver: Some(ResolvedTy::new(dispatch_ty).map_err(|error| {
-                                self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
-                            })?),
-                            declared_receiver: None,
-                            parameters: vec![ResolvedTy::new(*extension_receiver).map_err(
-                                |error| {
-                                    self.failure(
-                                        span,
-                                        BodyCheckFailureKind::UnpublishableType(error),
-                                    )
-                                },
-                            )?]
-                            .into_boxed_slice(),
-                            result: ResolvedTy::new(*ret).map_err(|error| {
-                                self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
-                            })?,
-                            declared_result: declared_ret
-                                .map(ResolvedTy::new)
-                                .transpose()
-                                .map_err(|error| {
-                                    self.failure(
-                                        span,
-                                        BodyCheckFailureKind::UnpublishableType(error),
-                                    )
-                                })?,
-                            suspend: *suspend,
-                            can_inline: inline.can_inline(),
-                            inline_plan: super::calls::fir_inline_body_plan(
-                                inline_body_plan.as_deref(),
-                            ),
-                            extension_receiver_parameter: Some(0),
-                        }
-                    };
-                    return Ok(FirIteratorCall {
-                        target,
-                        receiver: FirIteratorReceiver::MemberExtension { dispatch_receiver },
-                    });
-                }
-                ResolvedCall::TopLevel(_)
-                | ResolvedCall::Companion(_)
-                | ResolvedCall::LocalFunction(_)
-                | ResolvedCall::Member(_)
-                | ResolvedCall::Extension(_)
-                | ResolvedCall::MemberExtension { .. } => {
-                    return Err(self.failure(
-                        span,
-                        BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
-                    ));
-                }
-            };
-        let resolved = |ty| {
-            ResolvedTy::new(ty)
-                .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
-        };
-        let target = if let Some(declaration) = stable_declaration {
-            self.index
-                .callable_for_declaration(declaration)
-                .map(|callable| FirCallTarget::Module(callable.id))
-                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?
-        } else {
-            crate::trace_compiler!(
-                "fir",
-                "checked iterator protocol target selected={selected:?} external={external_declaration:?}"
-            );
-            FirCallTarget::External {
-                declaration: external_declaration.ok_or_else(|| {
-                    self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                })?,
-                receiver: Some(resolved(receiver_ty)?),
-                declared_receiver: None,
-                parameters: Box::new([]),
-                result: resolved(result)?,
-                declared_result: declared_result.map(resolved).transpose()?,
-                suspend: false,
-                can_inline: false,
-                inline_plan: None,
-                extension_receiver_parameter: None,
+        let selected_target = self.selected_call_target(span, Some(selected))?;
+        if !selected_target.value_parameters.is_empty() || selected_target.vararg_index.is_some() {
+            return Err(self.failure(
+                span,
+                BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
+            ));
+        }
+        let context_arguments = selected_target
+            .context_arguments
+            .iter()
+            .zip(&selected_target.context_parameters)
+            .map(|(argument, parameter_type)| {
+                let receiver = self.materialize_context_argument_at(
+                    span,
+                    origin,
+                    argument.as_ref().ok_or_else(|| {
+                        self.failure(
+                            span,
+                            BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
+                        )
+                    })?,
+                )?;
+                Ok(FirIteratorContextArgument {
+                    parameter_type: *parameter_type,
+                    receiver,
+                })
+            })
+            .collect::<Result<Vec<_>, BodyCheckFailure>>()?
+            .into_boxed_slice();
+        let receiver = match selected {
+            ResolvedCall::Member(_) => FirIteratorReceiver::Dispatch,
+            ResolvedCall::Extension(_) => FirIteratorReceiver::Extension,
+            ResolvedCall::MemberExtension {
+                dispatch_receiver, ..
+            } => {
+                let dispatch_receiver = self
+                    .materialize_implicit_receiver(origin, span, dispatch_receiver)?
+                    .ok_or_else(|| {
+                        self.failure(
+                            span,
+                            BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
+                        )
+                    })?;
+                FirIteratorReceiver::MemberExtension { dispatch_receiver }
+            }
+            ResolvedCall::TopLevel(_)
+            | ResolvedCall::Companion(_)
+            | ResolvedCall::LocalFunction(_) => {
+                return Err(self.failure(
+                    span,
+                    BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
+                ));
             }
         };
-        Ok(FirIteratorCall { target, receiver })
+        Ok(FirIteratorCall {
+            target: selected_target.target,
+            receiver,
+            context_arguments,
+        })
     }
 }

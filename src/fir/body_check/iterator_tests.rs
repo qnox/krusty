@@ -52,6 +52,41 @@ fn source_iterator_loop_keeps_all_selected_convention_targets() {
 }
 
 #[test]
+fn context_extension_iterator_keeps_its_checked_context_operand() {
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +ContextReceivers\n\
+         class Context\n\
+         class Values\n\
+         class ValuesIterator {\n\
+             operator fun hasNext(): Boolean = false\n\
+             operator fun next(): Int = 1\n\
+         }\n\
+         context(Context)\n\
+         operator fun Values.iterator(): ValuesIterator = ValuesIterator()\n\
+         context(Context)\n\
+         fun run() { for (value in Values()) { value } }\n",
+        "run",
+    );
+    let FirExprKind::Block { statements, .. } = &body.expr(root_expression(&body)).unwrap().kind
+    else {
+        panic!("function body must be a FIR block")
+    };
+    let FirStatementKind::Loop {
+        header: FirLoopHeader::Iterator { iterator, .. },
+        ..
+    } = &body.statement(statements[0]).unwrap().kind
+    else {
+        panic!("context extension must remain a checked iterator call")
+    };
+    assert_eq!(iterator.context_arguments.len(), 1);
+    assert!(matches!(
+        body.expr(iterator.context_arguments[0].receiver.value)
+            .map(|expression| &expression.kind),
+        Some(FirExprKind::ImplicitReceiver { .. })
+    ));
+}
+
+#[test]
 fn member_extension_next_keeps_both_iterator_protocol_receivers() {
     let (body, index) = checked_function_body(
         "class It {\n\

@@ -649,9 +649,17 @@ impl BodyFirChecker<'_> {
                     iterator_ty: ResolvedTy::new(protocol.iter_ty).map_err(|error| {
                         self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                     })?,
-                    iterator: self.iterator_protocol_call(span, origin, &protocol.iterator)?,
-                    has_next: self.iterator_protocol_call(span, origin, &protocol.has_next)?,
-                    next: self.iterator_protocol_call(span, origin, &protocol.next)?,
+                    iterator: Box::new(self.iterator_protocol_call(
+                        span,
+                        origin,
+                        &protocol.iterator,
+                    )?),
+                    has_next: Box::new(self.iterator_protocol_call(
+                        span,
+                        origin,
+                        &protocol.has_next,
+                    )?),
+                    next: Box::new(self.iterator_protocol_call(span, origin, &protocol.next)?),
                 };
                 let FirCallTarget::External { inline_plan, .. } = &mut target else {
                     return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));

@@ -2816,6 +2816,32 @@ fn consuming_sink_materializes_source_iterator_protocol() {
 }
 
 #[test]
+fn consuming_sink_materializes_context_iterator_operands() {
+    let ir = lower_single_source(
+        "// LANGUAGE: +ContextReceivers\n\
+         class Context\n\
+         class Values\n\
+         class ValuesIterator {\n\
+             operator fun hasNext(): Boolean = false\n\
+             operator fun next(): Int = 1\n\
+         }\n\
+         context(Context)\n\
+         operator fun Values.iterator(): ValuesIterator = ValuesIterator()\n\
+         context(Context)\n\
+         fun run() { for (value in Values()) { value } }\n",
+        "ContextIterator",
+    );
+    assert!(ir
+        .exprs
+        .iter()
+        .any(|expression| matches!(expression, IrExpr::While { .. })));
+    assert!(!ir
+        .exprs
+        .iter()
+        .any(|expression| matches!(expression, IrExpr::Checked(_))));
+}
+
+#[test]
 fn consuming_sink_lowers_member_extension_iterator_protocol() {
     let ir = lower_single_source(
         "class It { operator fun hasNext(): Boolean = false }\n\
