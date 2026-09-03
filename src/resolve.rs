@@ -20610,6 +20610,7 @@ pub enum ImplicitPropertyWriteTarget {
         receiver: ImplicitReceiverSelection,
         stable_declaration: Option<crate::fir::DeclarationId>,
         property_ty: Ty,
+        context_args: Vec<ResolvedContextArgument>,
         getter: Option<Box<crate::symbol_resolver::ResolvedMember>>,
         setter: Option<Box<crate::symbol_resolver::ResolvedPropertySetter>>,
     },
@@ -48299,6 +48300,7 @@ struct ImplicitPropertyWriteResolution {
     receiver: ImplicitReceiver,
     property_ty: Ty,
     is_var: bool,
+    context_args: Vec<ResolvedContextArgument>,
     getter: Option<crate::symbol_resolver::ResolvedMember>,
     setter: Option<crate::symbol_resolver::ResolvedPropertySetter>,
     extension: Option<ResolvedPropertyAccess>,
@@ -70844,23 +70846,47 @@ impl<'a> Checker<'a> {
                 receiver,
                 property_ty: property.ty,
                 is_var: property.mutable,
+                context_args: Vec::new(),
                 getter: None,
                 setter: None,
                 extension: None,
                 stable_declaration: property.stable_declaration,
             });
         }
-        if let Some(property) = self
-            .resolver()
-            .select_member_property_where(receiver.ty, name)
-            .and_then(|selected| selected.property)
-            .filter(|property| property.context_count == 0)
-        {
-            let getter = crate::symbol_resolver::ResolvedMember::from_callable(
+        let selected = self.resolver().select_member_property_applicable_where(
+            receiver.ty,
+            name,
+            |property| {
+                let context_types = property.getter.params.get(..property.context_count)?;
+                self.select_context_arguments_with_types(scope, context_types)
+                    .ok()
+                    .map(|_| {
+                        (
+                            self.receiver_property_accessible(
+                                property.visibility,
+                                property.owner,
+                                receiver.ty,
+                            ),
+                            property.context_count,
+                        )
+                    })
+            },
+        );
+        if let Some((selected_ty, property)) = selected.and_then(|selected| {
+            let ty = selected.ty;
+            selected.property.map(|property| (ty, property))
+        }) {
+            let context_types = property.getter.params.get(..property.context_count)?;
+            let context_args = self.select_context_arguments(scope, context_types)?;
+            let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
                 receiver.ty,
                 property.getter.clone(),
                 false,
             );
+            getter.context_args = context_args.iter().cloned().map(Some).collect();
+            getter.member.context_count = property.context_count;
+            getter.member.stable_declaration =
+                property.getter_declaration.or(property.stable_declaration);
             let setter = property.setter.clone().map(|callable| {
                 crate::symbol_resolver::ResolvedPropertySetter {
                     callable,
@@ -70871,8 +70897,9 @@ impl<'a> Checker<'a> {
             });
             return Some(ImplicitPropertyWriteResolution {
                 receiver,
-                property_ty: property.ty,
+                property_ty: selected_ty,
                 is_var: setter.is_some(),
+                context_args,
                 getter: Some(getter),
                 setter,
                 extension: None,
@@ -70888,6 +70915,7 @@ impl<'a> Checker<'a> {
                 receiver,
                 property_ty: ty,
                 is_var: true,
+                context_args: Vec::new(),
                 getter,
                 setter: Some(setter),
                 extension: None,
@@ -70900,6 +70928,7 @@ impl<'a> Checker<'a> {
                 receiver,
                 property_ty: property.ret,
                 is_var: false,
+                context_args: Vec::new(),
                 getter: Some(property),
                 setter: None,
                 extension: None,
@@ -70917,6 +70946,7 @@ impl<'a> Checker<'a> {
                 receiver,
                 property_ty: property.ty,
                 is_var: property.setter.is_some(),
+                context_args: Vec::new(),
                 getter: None,
                 setter: None,
                 extension: Some(ResolvedPropertyAccess {
@@ -70944,6 +70974,7 @@ impl<'a> Checker<'a> {
                 receiver,
                 stable_declaration: resolution.stable_declaration,
                 property_ty: resolution.property_ty,
+                context_args: resolution.context_args.clone(),
                 getter: resolution.getter.clone().map(Box::new),
                 setter: resolution.setter.clone().map(Box::new),
             }

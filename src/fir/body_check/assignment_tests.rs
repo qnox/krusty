@@ -168,6 +168,34 @@ fn compound_member_property_binds_the_shared_receiver_once() {
 }
 
 #[test]
+fn implicit_context_member_property_updates_keep_context_operands() {
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +ContextReceivers\n\
+         class Context\n\
+         class Value {\n\
+             context(Context)\n\
+             var number: Int get() = 0; set(value) {}\n\
+         }\n\
+         context(Context)\n\
+         fun Value.update(other: Value) { number += other.number; number++ }\n",
+        "update",
+    );
+    let context_counts = (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::PropertyRead {
+                context_arguments, ..
+            }
+            | FirExprKind::PropertyWrite {
+                context_arguments, ..
+            } => Some(context_arguments.len()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(context_counts, [1, 1, 1, 1, 1]);
+}
+
+#[test]
 fn generic_member_plus_fallback_uses_the_instantiated_receiver_arguments() {
     let (body, index) = checked_function_body(
         "class Box<T> { operator fun plus(other: Box<T>): Box<T> = this }\n\

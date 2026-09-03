@@ -1112,6 +1112,7 @@ impl BodyFirChecker<'_> {
             crate::resolve::ImplicitPropertyWriteTarget::Member {
                 receiver,
                 stable_declaration,
+                context_args,
                 getter,
                 setter,
                 ..
@@ -1130,7 +1131,7 @@ impl BodyFirChecker<'_> {
                     external_setter,
                     Some(receiver),
                     None,
-                    Vec::new(),
+                    context_args,
                 )
             }
             crate::resolve::ImplicitPropertyWriteTarget::Extension { receiver, access } => {
@@ -1206,13 +1207,11 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedStatement(super::StatementForm::IncDec),
                 )
             })?;
-        // Context arguments are materialized from a source expression, and an increment STATEMENT
-        // has none. A context-parameterized property increment keeps the caller's diagnosis rather
-        // than being lowered from a fabricated origin.
-        if !context_args.is_empty() {
-            return Ok(None);
-        }
-        let context_arguments: Box<[FirReceiver]> = Box::new([]);
+        let context_arguments = context_args
+            .iter()
+            .map(|argument| self.materialize_context_argument_at(span, cause, argument))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice();
         let origin = cause;
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
@@ -1399,6 +1398,7 @@ impl BodyFirChecker<'_> {
                 crate::resolve::ImplicitPropertyWriteTarget::Member {
                     receiver,
                     stable_declaration,
+                    context_args,
                     getter,
                     setter,
                     ..
@@ -1418,7 +1418,7 @@ impl BodyFirChecker<'_> {
                         external_setter,
                         Some(receiver),
                         None,
-                        Vec::new(),
+                        context_args,
                     )
                 }
                 crate::resolve::ImplicitPropertyWriteTarget::Extension { receiver, access } => {
@@ -1441,12 +1441,13 @@ impl BodyFirChecker<'_> {
             },
             _ => return Ok(None),
         };
-        // Context arguments materialize from a source expression the increment does not have.
-        if !context_args.is_empty() {
-            return Ok(None);
-        }
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let context_arguments = context_args
+            .iter()
+            .map(|argument| self.materialize_context_argument(expression, cause, argument))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice();
         let read_target = self.property_target_at(Some(span), declaration, external_getter)?;
         let write_target = self.property_target_at(Some(span), declaration, external_setter)?;
         let resolution = self
@@ -1469,7 +1470,7 @@ impl BodyFirChecker<'_> {
                 target: read_target.clone(),
                 dispatch_receiver,
                 extension_receiver,
-                context_arguments: Box::new([]),
+                context_arguments: context_arguments.clone(),
                 substitutions: Box::new([]),
             },
         });
@@ -1542,7 +1543,7 @@ impl BodyFirChecker<'_> {
                 target: write_target,
                 dispatch_receiver,
                 extension_receiver,
-                context_arguments: Box::new([]),
+                context_arguments,
                 value,
                 conversion: None,
                 substitutions: Box::new([]),
@@ -1732,6 +1733,7 @@ impl BodyFirChecker<'_> {
                     crate::resolve::ImplicitPropertyWriteTarget::Member {
                         receiver,
                         stable_declaration,
+                        context_args,
                         setter,
                         ..
                     } => {
@@ -1762,6 +1764,8 @@ impl BodyFirChecker<'_> {
                                     setter.callable,
                                     false,
                                 );
+                            selected.context_args =
+                                context_args.iter().cloned().map(Some).collect();
                             selected.member.stable_declaration = setter.stable_declaration;
                             return self
                                 .selected_member_setter_call(value, &selected, dispatch_receiver)
@@ -1772,7 +1776,7 @@ impl BodyFirChecker<'_> {
                             external,
                             Some(dispatch_receiver),
                             None,
-                            Vec::new(),
+                            context_args,
                         )
                     }
                     crate::resolve::ImplicitPropertyWriteTarget::Extension { receiver, access } => {

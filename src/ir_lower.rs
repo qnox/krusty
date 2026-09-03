@@ -7839,6 +7839,7 @@ impl<'a> Lower<'a> {
                 property_ty,
                 getter,
                 setter,
+                ..
             } => {
                 let current = self.lower_implicit_member_property_get(
                     receiver.clone(),
