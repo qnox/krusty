@@ -3066,10 +3066,9 @@ impl StreamedHeaderModule {
 
     pub(crate) fn declaration_visibility_suppressions(
         &self,
-        source: SourceFileId,
-        range: Span,
+        declaration: DeclarationId,
     ) -> &[HeaderVisibilitySuppressionApplication] {
-        self.visibility_suppressions.declaration(source, range)
+        self.visibility_suppressions.declaration(declaration)
     }
 
     pub(crate) fn detached_type_roots(
@@ -3159,10 +3158,8 @@ pub(crate) struct HeaderVisibilitySuppressionApplication {
 #[derive(Default)]
 struct HeaderVisibilitySuppressionArena {
     files: std::collections::HashMap<SourceFileId, Vec<HeaderVisibilitySuppressionApplication>>,
-    declarations: std::collections::HashMap<
-        (SourceFileId, Span),
-        Vec<HeaderVisibilitySuppressionApplication>,
-    >,
+    declarations:
+        std::collections::HashMap<DeclarationId, Vec<HeaderVisibilitySuppressionApplication>>,
 }
 
 impl HeaderVisibilitySuppressionArena {
@@ -3198,7 +3195,7 @@ impl HeaderVisibilitySuppressionArena {
             .collect()
     }
 
-    fn add_file(&mut self, source: SourceFileId, file: &File) {
+    fn add_file(&mut self, source: SourceFileId, file: &File, stubs: &[DeclarationStub]) {
         let file_applications = file
             .file_annotations
             .iter()
@@ -3217,12 +3214,19 @@ impl HeaderVisibilitySuppressionArena {
         }
 
         let mut record = |range: Span,
+                          kind: DeclarationKind,
                           annotations: &[crate::ast::AnnotationRef],
                           arguments: &[Vec<crate::ast::ExprId>]| {
             let applications = Self::applications(file, annotations, arguments);
-            if !applications.is_empty() {
+            if let (false, Some(declaration)) = (
+                applications.is_empty(),
+                stubs
+                    .iter()
+                    .find(|stub| stub.range == range && stub.kind == kind)
+                    .map(|stub| stub.id),
+            ) {
                 self.declarations
-                    .entry((source, range))
+                    .entry(declaration)
                     .or_default()
                     .extend(applications);
             }
@@ -3231,19 +3235,35 @@ impl HeaderVisibilitySuppressionArena {
             match file.decl(declaration) {
                 Decl::Fun(function) => record(
                     function.span,
+                    DeclarationKind::Function,
                     &function.annotations,
                     &function.annotation_args,
                 ),
                 Decl::Property(property) => record(
                     property.span,
+                    DeclarationKind::Property,
                     &property.annotations,
                     &property.annotation_args,
                 ),
                 Decl::Class(class) => {
-                    record(class.span, &class.annotations, &class.annotation_args);
+                    record(
+                        class.span,
+                        DeclarationKind::Classifier,
+                        &class.annotations,
+                        &class.annotation_args,
+                    );
+                    if let Some(annotations) = &class.primary_ctor_annotations {
+                        record(
+                            class.span,
+                            DeclarationKind::Constructor,
+                            annotations,
+                            &class.primary_ctor_annotation_args,
+                        );
+                    }
                     for function in &class.methods {
                         record(
                             function.span,
+                            DeclarationKind::Function,
                             &function.annotations,
                             &function.annotation_args,
                         );
@@ -3251,6 +3271,7 @@ impl HeaderVisibilitySuppressionArena {
                     for property in &class.body_props {
                         record(
                             property.span,
+                            DeclarationKind::Property,
                             &property.annotations,
                             &property.annotation_args,
                         );
@@ -3259,6 +3280,7 @@ impl HeaderVisibilitySuppressionArena {
                         for function in &entry.methods {
                             record(
                                 function.span,
+                                DeclarationKind::Function,
                                 &function.annotations,
                                 &function.annotation_args,
                             );
@@ -3266,6 +3288,7 @@ impl HeaderVisibilitySuppressionArena {
                         for property in &entry.props {
                             record(
                                 property.span,
+                                DeclarationKind::Property,
                                 &property.annotations,
                                 &property.annotation_args,
                             );
@@ -3283,13 +3306,9 @@ impl HeaderVisibilitySuppressionArena {
             .unwrap_or_default()
     }
 
-    fn declaration(
-        &self,
-        source: SourceFileId,
-        range: Span,
-    ) -> &[HeaderVisibilitySuppressionApplication] {
+    fn declaration(&self, declaration: DeclarationId) -> &[HeaderVisibilitySuppressionApplication] {
         self.declarations
-            .get(&(source, range))
+            .get(&declaration)
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
@@ -3507,13 +3526,13 @@ impl HeaderInventoryBuilder {
         let first_source_type = self.syntax.type_count();
         self.scopes
             .add_file(source, file, is_common, &mut self.lookup_names);
-        self.visibility_suppressions.add_file(source, file);
         for ty in &file.detached_type_refs {
             let ty = self.syntax.add_type(ty, &mut self.lookup_names);
             self.detached_types.push((source, ty));
         }
         let stubs =
             extract_file_stubs(file, source, &mut self.declarations, &mut self.lookup_names);
+        self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
                 Decl::Fun(function) => (DeclarationKind::Function, function.span),

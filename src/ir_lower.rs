@@ -14,16 +14,15 @@ use crate::ast::{
     FunBody, FunDecl, Stmt, TemplatePart,
 };
 use crate::frontend::{
-    function_import_scope, AdaptedRefArgument, AnonymousObjectCapture,
-    AnonymousObjectCaptureSource, CallableReferenceBinding, CallableReferenceTarget,
-    CompoundAssignmentTarget, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget,
-    ExprLowering, FrontendClassModel, FrontendSymbols, FrontendTypeInfo, FunctionImportScope,
-    ImplicitPropertyWriteTarget, ImplicitReceiverSelection, IncDecSite, InvokeKind, LambdaCapture,
-    LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
-    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
-    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
-    SingletonValue, StmtLowering,
+    AdaptedRefArgument, AnonymousObjectCapture, AnonymousObjectCaptureSource,
+    CallableReferenceBinding, CallableReferenceTarget, CompoundAssignmentTarget, CtorDefaultValue,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendClassModel,
+    FrontendSymbols, FrontendTypeInfo, ImplicitPropertyWriteTarget, ImplicitReceiverSelection,
+    IncDecSite, InvokeKind, LambdaCapture, LambdaInfo, PlatformNarrowing, ReceiverFnValueOrigin,
+    ResolvedCall, ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
+    ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
+    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrAnnotationConstruction, IrBinOp, IrCatch, IrClass,
@@ -7376,7 +7375,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Lower the enum entry owner selected by the checker.
-    fn lower_resolved_enum_entry(&mut self, e: AstExprId, _name: &str) -> Option<u32> {
+    fn lower_resolved_enum_entry(&mut self, e: AstExprId) -> Option<u32> {
         let entry = self.info.resolved_enum_entry(e)?;
         Some(self.ir.add_expr(IrExpr::EnumEntry {
             classifier: entry.classifier,

@@ -1529,7 +1529,8 @@ pub struct ResolvedModuleIndex {
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
-    visibility_suppressions: std::collections::HashSet<DeclarationId>,
+    invisible_reference_suppressions: std::collections::HashSet<DeclarationId>,
+    invisible_member_suppressions: std::collections::HashSet<DeclarationId>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
@@ -2098,16 +2099,36 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
-    pub(crate) fn declaration_suppresses_visibility(&self, declaration: DeclarationId) -> bool {
-        self.visibility_suppressions.contains(&declaration)
+    pub(crate) fn declaration_suppresses_invisible_reference(
+        &self,
+        declaration: DeclarationId,
+    ) -> bool {
+        self.invisible_reference_suppressions.contains(&declaration)
     }
 
-    pub(crate) fn publish_visibility_suppression(&mut self, declaration: DeclarationId) {
+    pub(crate) fn declaration_suppresses_invisible_member(
+        &self,
+        declaration: DeclarationId,
+    ) -> bool {
+        self.invisible_member_suppressions.contains(&declaration)
+    }
+
+    pub(crate) fn publish_visibility_suppression(
+        &mut self,
+        declaration: DeclarationId,
+        invisible_reference: bool,
+        invisible_member: bool,
+    ) {
         assert!(
             self.declaration_headers.contains_key(&declaration),
             "visibility suppression requires a finalized declaration header"
         );
-        self.visibility_suppressions.insert(declaration);
+        if invisible_reference {
+            self.invisible_reference_suppressions.insert(declaration);
+        }
+        if invisible_member {
+            self.invisible_member_suppressions.insert(declaration);
+        }
     }
 
     pub(crate) fn publish_annotation_policy(
@@ -3144,7 +3165,9 @@ impl ResolvedModuleIndex {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + self.visibility_suppressions.len() * std::mem::size_of::<DeclarationId>()
+            + (self.invisible_reference_suppressions.len()
+                + self.invisible_member_suppressions.len())
+                * std::mem::size_of::<DeclarationId>()
             + self.classifiers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedClassifierHeader>())

@@ -1028,8 +1028,6 @@ fn expand_fun_type_aliases(file: &mut File) {
     file.alias_spellings = spellings;
 }
 
-type LexicalTypeParameterScope = (Vec<String>, Vec<(String, TypeRef)>, Vec<(String, usize)>);
-
 struct Parser<'a> {
     src: &'a str,
     t: &'a [Token],
@@ -1207,6 +1205,15 @@ impl<'a> Parser<'a> {
 
     fn current_lexical_type_params(&self) -> Vec<String> {
         self.lexical_type_parameters.names()
+    }
+
+    fn cut_lexical_type_parameter_scope(&mut self) -> LexicalTypeParameters {
+        std::mem::take(&mut self.lexical_type_parameters)
+    }
+
+    fn restore_lexical_type_parameter_scope(&mut self, scope: LexicalTypeParameters) {
+        debug_assert!(self.lexical_type_parameters.names().is_empty());
+        self.lexical_type_parameters = scope;
     }
 
     // ---- cursor helpers ----
@@ -3825,20 +3832,10 @@ impl<'a> Parser<'a> {
         let enclosing_type_parameters = (!inherits_enclosing_type_parameters)
             .then(|| std::mem::take(&mut self.lexical_type_parameters));
         let start = self.file.decls.len();
-        let retains_outer_type_parameters = is_inner
-            && (self.kind() == TokenKind::KwClass
-                || (self.kind() == TokenKind::Ident
-                    && self.keyword_text("data")
-                    && self
-                        .t
-                        .get(self.i + 1)
-                        .is_some_and(|token| token.kind == TokenKind::KwClass)));
-        let lexical_scope =
-            (!retains_outer_type_parameters).then(|| self.cut_lexical_type_parameter_scope());
-        let parsed = match self.kind() {
+        let (mut nested, supports_inner) = match self.kind() {
             TokenKind::KwClass => {
                 let nested = self.parse_class();
-                Some((nested, true))
+                (nested, true)
             }
             TokenKind::KwFun
                 if self
@@ -3849,7 +3846,7 @@ impl<'a> Parser<'a> {
                 self.bump(); // `fun`
                 let mut nested = self.parse_interface();
                 nested.is_fun_interface = true;
-                Some((nested, false))
+                (nested, false)
             }
             TokenKind::Ident
                 if self.keyword_text("data")
@@ -3866,11 +3863,9 @@ impl<'a> Parser<'a> {
                         (self.parse_class(), true)
                     };
                 nested.is_data = true;
-                Some((nested, supports_inner))
+                (nested, supports_inner)
             }
-            TokenKind::Ident if self.keyword_text("interface") => {
-                Some((self.parse_interface(), false))
-            }
+            TokenKind::Ident if self.keyword_text("interface") => (self.parse_interface(), false),
             TokenKind::Ident
                 if self.keyword_text("annotation")
                     && self
@@ -3881,7 +3876,7 @@ impl<'a> Parser<'a> {
                 self.bump(); // `annotation`
                 let mut nested = self.parse_class();
                 nested.kind = ClassKind::Annotation;
-                Some((nested, false))
+                (nested, false)
             }
             TokenKind::Ident
                 if self.keyword_text("enum")
@@ -3890,7 +3885,7 @@ impl<'a> Parser<'a> {
                         .get(self.i + 1)
                         .is_some_and(|token| token.kind == TokenKind::KwClass) =>
             {
-                Some((self.parse_enum(), false))
+                (self.parse_enum(), false)
             }
             TokenKind::Ident if self.keyword_text("object") => (self.parse_object(), false),
             _ => {
@@ -5809,7 +5804,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
         let saved_block_value = self.block_trailing_is_value;
-        let classifier_shadow_count = self.lexical_classifier_shadows.len();
+        let classifier_shadow_count = self.lexical_type_parameters.shadow_count();
         self.block_trailing_is_value = trailing_is_value;
         let mut stmts = Vec::new();
         loop {
@@ -5820,8 +5815,8 @@ impl<'a> Parser<'a> {
             stmts.push(self.parse_stmt());
         }
         self.block_trailing_is_value = saved_block_value;
-        self.lexical_classifier_shadows
-            .truncate(classifier_shadow_count);
+        self.lexical_type_parameters
+            .truncate_shadows(classifier_shadow_count);
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
         // A trailing bare expression is the block's value.
@@ -6582,8 +6577,8 @@ impl<'a> Parser<'a> {
                 if !nested.is_empty() {
                     self.file.local_class_nested.insert(stmt, nested);
                 }
-                self.lexical_classifier_shadows
-                    .push((classifier, self.lexical_type_params.len()));
+                self.lexical_type_parameters
+                    .shadow_with_classifier(classifier);
                 stmt
             }
             // Full-form destructuring (`+NameBasedDestructuring`): `(val a, val b) = e` /
@@ -9641,7 +9636,7 @@ mod tests {
         let Decl::Class(class) = file.decl(declaration) else {
             panic!("anonymous object must be a class declaration");
         };
-        class.type_params.clone()
+        class.lexical_type_parameter_captures.clone()
     }
 
     #[test]

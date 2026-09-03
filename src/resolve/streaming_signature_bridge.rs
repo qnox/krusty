@@ -2262,6 +2262,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[Ty],
         bound_outer: Option<Ty>,
         explicit_type_arguments: &[Ty],
+        expected: Option<Ty>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let owner = member.owner.ok_or_else(Self::failure)?;
         let Some(class) = self.table.class_by_type_name(owner) else {
@@ -2349,6 +2350,29 @@ impl ProductionSignatureSemantics<'_> {
         if completed_is_valid {
             bindings = completed_bindings;
         }
+        let formal_bounds = class
+            .type_param_bounds
+            .iter()
+            .map(|bound| {
+                (*bound != Ty::Error)
+                    .then_some(*bound)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+            &source,
+            owner,
+            &class.type_params,
+            &formal_bounds,
+            expected,
+            &mut bindings,
+        );
         let mut result_arguments = class
             .type_params
             .iter()
@@ -2699,6 +2723,7 @@ impl ProductionSignatureSemantics<'_> {
             &argument_types,
             Some(receiver),
             type_arguments,
+            None,
         )
         .map(Some)
     }

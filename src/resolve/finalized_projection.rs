@@ -473,8 +473,12 @@ pub(crate) fn publish_stable_declaration_metadata(
     for (&declaration, spellings) in &table.stable_declared_spellings {
         index.publish_declaration_spellings(declaration, spellings.clone());
     }
-    for declaration in table.visibility_suppressed_declarations() {
-        index.publish_visibility_suppression(declaration);
+    for (declaration, suppressions) in table.visibility_suppressed_declarations() {
+        index.publish_visibility_suppression(
+            declaration,
+            suppressions.invisible_reference,
+            suppressions.invisible_member,
+        );
     }
     for property in table.source_props.values() {
         let (Some(declaration), Some(constant)) = (

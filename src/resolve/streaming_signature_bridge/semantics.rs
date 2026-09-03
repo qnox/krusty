@@ -2005,6 +2005,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         &selected_argument_types,
                         None,
                         &resolved_type_arguments,
+                        expected.map(crate::fir::ResolvedTy::get),
                     );
                 }
                 // Constructor applicability is one rung, not a terminal interpretation of the
@@ -2345,6 +2346,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         &selected_argument_types,
                         None,
                         &resolved_type_arguments,
+                        expected.map(crate::fir::ResolvedTy::get),
                     );
                 }
             }
@@ -2724,6 +2726,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &selected_argument_types,
                     None,
                     &resolved_type_arguments,
+                    expected.map(crate::fir::ResolvedTy::get),
                 )?;
                 if let Some((formals, expansion)) = source_alias.as_ref() {
                     return self
@@ -3644,6 +3647,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .ok_or_else(Self::failure)?;
                 let mut arguments =
                     crate::symbol_resolver::infer_constructor_type_args_for_formals(
+                        &source,
                         nested,
                         &declaration,
                         &classifier.type_params,
