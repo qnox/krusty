@@ -3,9 +3,9 @@
 //! itself contain a suspension point compiles and runs — the `finally` executes on the normal and the
 //! caught-exception paths, and around a state-machine suspension elsewhere in the function.
 //!
-//! Not yet supported (declined cleanly, never miscompiled): a suspension INSIDE the try body (the
-//! finally-across-resume-states shape), and a `catch` clause in a function that also builds a state
-//! machine. Those remain separate, larger pieces of work.
+//! State-machine try/catch/finally is normalized as nested handler responsibilities, and a suspending
+//! finally carries a nullable pending exception across its cleanup states before conditionally
+//! rethrowing it.
 
 use super::common;
 
@@ -84,5 +84,42 @@ fn leaf_suspend_finally_runs_when_try_returns() {
          var r = -1\n\
          builder { r = f(m) }\n\
          return if (r == 1 && m.hit) \"OK\" else \"F r=$r hit=${m.hit}\" }\n",
+    );
+}
+
+#[test]
+fn suspending_finally_preserves_or_overrides_pending_completion() {
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        var log = \"\"\n\
+        class Caught : RuntimeException()\n\
+        class Escaping : RuntimeException()\n\
+        class Cleanup : RuntimeException()\n\
+        suspend fun body(mode: Int): Int { log += \"B$mode;\"; return when (mode) {\n\
+        \x20 0 -> 42\n\
+        \x20 1 -> throw Caught()\n\
+        \x20 else -> throw Escaping()\n\
+        } }\n\
+        suspend fun cleanup(fail: Boolean) { log += \"F;\"; if (fail) throw Cleanup() }\n\
+        suspend fun run(mode: Int, cleanupFails: Boolean): Int = try {\n\
+        \x20 body(mode)\n\
+        } catch (e: Caught) {\n\
+        \x20 7\n\
+        } finally {\n\
+        \x20 cleanup(cleanupFails)\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+        \x20 val normal = run(0, false)\n\
+        \x20 val caught = run(1, false)\n\
+        \x20 val escaping = try { run(2, false); \"wrong\" } catch (e: Escaping) { \"E\" }\n\
+        \x20 val override = try { run(2, true); \"wrong\" } catch (e: Cleanup) { \"C\" }\n\
+        \x20 if (normal == 42 && caught == 7 && escaping == \"E\" && override == \"C\" &&\n\
+        \x20     log == \"B0;F;B1;F;B2;F;B2;F;\") \"OK\" else \"FAIL:$normal:$caught:$escaping:$override:$log\"\n\
+        }\n";
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    assert_eq!(
+        common::expect_box_run(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()),),
+        "OK"
     );
 }

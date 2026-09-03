@@ -12,14 +12,13 @@
 //! |----------------|---------------|--------------------------------------|----------------|
 //! | none           | `Object`      | no                                   | yes            |
 //! | `Cargo`        | `Lapp/Cargo;` | yes                                  | yes            |
-//! | `Cargo?`       | `Lapp/Cargo;` | no                                   | NO (see below) |
+//! | `Cargo?`       | `Lapp/Cargo;` | no                                   | tested below   |
 //! | `Any`          | `Object`      | yes                                  | yes            |
 //! | `Any?`         | `Object`      | no                                   | yes            |
 //!
-//! The nullable-bound row is the one facet still open, and it is PRE-EXISTING and shared with the
-//! function path (so not a class/function asymmetry): `tparam_bound_erasure` deliberately keeps `Any`
-//! for a nullable bound, for `fun <T : Cargo?>` exactly as for `class C<T : Cargo?>`. Its descriptors
-//! are asserted below as they are, so closing that gap fails this file rather than passing silently.
+//! Descriptor erasure and nullability remain independent: `Cargo?` still erases to `Cargo`, while
+//! admitting null means the field/accessors/constructor parameter carry neither a nullability
+//! annotation nor a constructor guard.
 
 use super::common;
 
@@ -147,11 +146,11 @@ fn null_admitting_bounds_take_no_annotations_and_stay_byte_identical() {
     }
 }
 
-/// A NULLABLE bound is the one row still short of kotlinc: it keeps `Object` where kotlinc erases to
-/// the bound. Asserted as it IS, so closing that gap fails here instead of passing silently — and it
-/// takes no annotations either way, which this pins too.
+/// A nullable class bound still supplies the JVM erasure. Nullability affects Kotlin's admissible
+/// type arguments, not the descriptor's bound head, and neither compiler emits nullability
+/// annotations for the type-parameter-backed property/parameter/result occurrences.
 #[test]
-fn nullable_bound_still_erases_to_object() {
+fn nullable_bound_erases_to_its_declared_class() {
     let src = r#"package app
 
 open class Cargo(val v: Int)
@@ -164,24 +163,22 @@ class NBound<T : Cargo?>(val t: T)
     };
     assert_eq!(
         descriptors(&krusty),
-        [
-            "Ljava/lang/Object;",
-            "(Ljava/lang/Object;)V",
-            "()Ljava/lang/Object;"
-        ],
-        "krusty keeps `Any` for a nullable bound"
+        ["Lapp/Cargo;", "(Lapp/Cargo;)V", "()Lapp/Cargo;"],
+        "krusty erases a nullable bound to its declared class"
     );
     assert_eq!(
         descriptors(&kotlinc),
         ["Lapp/Cargo;", "(Lapp/Cargo;)V", "()Lapp/Cargo;"],
         "kotlinc erases a nullable bound to the bound — the open facet"
     );
-    for dump in [&kotlinc, &krusty] {
-        assert!(
-            !dump.contains("checkNotNullParameter"),
-            "a nullable bound admits null, so neither compiler guards it"
-        );
-    }
+    assert!(
+        !kotlinc.contains("checkNotNullParameter"),
+        "kotlinc does not guard a nullable-bound parameter"
+    );
+    assert!(
+        !krusty.contains("checkNotNullParameter"),
+        "krusty must not guard a nullable-bound parameter"
+    );
 }
 
 /// The `d2` string table — the medium the gap was reported in — matches kotlinc's exactly.

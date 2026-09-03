@@ -173,15 +173,22 @@ fn toolchain_path(env: Option<OsString>, kind: &str, suffix: &str) -> Option<Pat
     })
 }
 
-/// The `lib/` dir of the reference kotlinc dist we differential-test against — its jars are the
-/// exact ones the reference compiler ships. `KRUSTY_KOTLINC` overrides the provisioned dist.
-pub fn kotlinc_lib_dir() -> Option<PathBuf> {
-    let kc = toolchain_path(
+/// The reference Kotlin/JVM compiler used by differential and conformance-oracle runs.
+/// `KRUSTY_KOTLINC` overrides the provisioned distribution.
+pub fn kotlinc_path() -> Option<PathBuf> {
+    let path = toolchain_path(
         std::env::var_os("KRUSTY_KOTLINC"),
         "kotlinc",
         "kotlinc/bin/kotlinc",
     )?;
-    let lib = kc.is_file().then_some(kc)?.parent()?.parent()?.join("lib");
+    path.is_file().then_some(path)
+}
+
+/// The `lib/` dir of the reference kotlinc dist we differential-test against — its jars are the
+/// exact ones the reference compiler ships. `KRUSTY_KOTLINC` overrides the provisioned dist.
+pub fn kotlinc_lib_dir() -> Option<PathBuf> {
+    let kc = kotlinc_path()?;
+    let lib = kc.parent()?.parent()?.join("lib");
     lib.is_dir().then_some(lib)
 }
 
@@ -363,6 +370,21 @@ pub fn jdk_modules() -> Option<PathBuf> {
     )?;
     let p = home.join("lib").join("modules");
     p.is_file().then_some(p)
+}
+
+/// The selected JDK's versioned public-API symbol archive used for a `--release`-style classpath
+/// view. An explicit survey bootclasspath remains authoritative; otherwise this returns `ct.sym`
+/// from the same JDK home as [`jdk_modules`]. The caller supplies the release separately.
+pub fn jdk_symbols() -> Option<PathBuf> {
+    if nonempty_path(std::env::var_os("KRUSTY_SURVEY_JDK_MODULES")).is_some() {
+        return jdk_modules();
+    }
+    let home = jdk_home_from(
+        std::env::var_os("JAVA_HOME"),
+        std::env::var_os("KRUSTY_REF_JAVA_HOME"),
+    )?;
+    let symbols = home.join("lib").join("ct.sym");
+    symbols.is_file().then_some(symbols)
 }
 
 fn collect_stdlib_jars(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {

@@ -53,9 +53,9 @@ fun box(): String { builder { }; return \"OK\" }\n";
     );
 }
 
-/// A reusable `builder { … }` over a named `Continuation` completion (anonymous-object completions hit a
-/// separate property-override gap). Each `box()` declares a LOCAL `var res` the lambda captures and
-/// writes — the pattern the coroutine box corpus uses to observe a coroutine's effect.
+/// A reusable `builder { … }` over a named `Continuation` completion. Each `box()` declares a LOCAL
+/// `var res` the lambda captures and writes — the pattern the coroutine box corpus uses to observe a
+/// coroutine's effect.
 const BUILDER: &str = "import kotlin.coroutines.*\n\
 import kotlin.coroutines.intrinsics.*\n\
 class Done : Continuation<Unit> {\n\
@@ -308,6 +308,22 @@ fun box(): String {\n\
     return if (c.context == EmptyCoroutineContext) \"OK\" else \"FAIL\"\n\
 }\n";
     assert_eq!(run(src).expect("context bridge dispatches"), "OK");
+}
+
+#[test]
+fn anonymous_inferred_covariant_context_override_gets_supertype_bridge() {
+    // The inferred property signature is checked in the anonymous classifier's live Pass-2 lexical
+    // scope. Its exact semantic override edge must then refresh common IR before backend erasure.
+    let src = "import kotlin.coroutines.*\n\
+fun completion(): Continuation<Any?> = object : Continuation<Any?> {\n\
+    override val context = EmptyCoroutineContext\n\
+    override fun resumeWith(result: Result<Any?>) {}\n\
+}\n\
+fun box(): String {\n\
+    val c: Continuation<Any?> = completion()\n\
+    return if (c.context == EmptyCoroutineContext) \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(run(src).expect("anonymous context bridge dispatches"), "OK");
 }
 
 #[test]

@@ -6,6 +6,7 @@
 
 use super::classfile::ClassWriter;
 use super::classreader::{utf8_value, MethodCode, C};
+use crate::types::TypeName;
 use std::collections::HashMap;
 
 /// A platform realization selected only while emitting an already-resolved semantic member call.
@@ -102,6 +103,18 @@ pub trait MethodBodies {
     /// assignment compiles to. `None` when `owner` isn't a compiled class this source can see, declares no
     /// such property, or the property is read-only.
     fn property_write_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
+        None
+    }
+    /// Decode one checked provider accessor identity into its exact JVM property realization.
+    fn external_property_access(
+        &self,
+        _accessor: crate::fir::ExternalCallableId,
+    ) -> Option<PropertyAccess> {
+        None
+    }
+    /// JVM storage for an already-resolved semantic singleton classifier. This is queried only by
+    /// bytecode realization; front-end and common IR never observe the owner or field name.
+    fn singleton_storage(&self, _classifier: TypeName) -> Option<(TypeName, String)> {
         None
     }
 }
@@ -2322,17 +2335,33 @@ pub fn splice_unified(
                 }
             })
             .collect::<Option<Vec<_>>>()?;
-        // The spliced-away lambda's `aload` is deleted, so its FunctionN value no longer sits on
-        // the operand stack at any host frame between the load and the (now replaced) invoke; drop
-        // it from the frame stack so the relocated frame matches the post-splice operand stack.
-        let stack = f
-            .stack
+        // A substituted lambda's `aload` is deleted, so remove that exact value while it would have
+        // been live between the load and `FunctionN.invoke`. Do not discard FunctionN values by type:
+        // an inline host can legitimately carry an unsubstituted function parameter across a branch
+        // (`mapIndexed` does this), and that value remains part of the verifier stack.
+        let mut source_stack = f.stack.clone();
+        let mut removed_positions = Vec::new();
+        for (k, (&load, &site)) in lambda_loads.iter().zip(&lambda_sites).enumerate() {
+            if load < *old_idx && *old_idx <= site {
+                let prefix_len = host_states.get(k)?.as_ref()?.1.len();
+                removed_positions.push(prefix_len);
+            }
+        }
+        removed_positions.sort_unstable();
+        removed_positions.dedup();
+        for position in removed_positions.into_iter().rev() {
+            let VType::Object(class) = source_stack.get(position)? else {
+                return None;
+            };
+            if !class_name(&body.source_cp, *class)
+                .is_some_and(|name| name.starts_with("kotlin/jvm/functions/Function"))
+            {
+                return None;
+            }
+            source_stack.remove(position);
+        }
+        let stack = source_stack
             .iter()
-            .filter(|v| {
-                !matches!(v, VType::Object(idx)
-                    if class_name(&body.source_cp, *idx)
-                        .is_some_and(|n| n.starts_with("kotlin/jvm/functions/Function")))
-            })
             .map(|v| relocate_vtype(v, &body.source_cp, cw))
             .collect::<Option<Vec<_>>>()?;
         frames.push((offs[new_idx], locals, stack));

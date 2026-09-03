@@ -6,6 +6,24 @@
 
 use super::common;
 
+/// A private JVM implementation field is not a Kotlin member and therefore cannot hide an
+/// inherited mapped-builtin property. `ArrayList` physically stores `size` in such a field while
+/// Kotlin's source declaration comes from `Collection.size`.
+#[test]
+fn private_platform_field_does_not_hide_inherited_kotlin_property() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let source = "fun box(): String {\n\
+        \x20 val values = ArrayList<Int>()\n\
+        \x20 values.add(7)\n\
+        \x20 return if (values.size == 1) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run(source, "Main", &[stdlib], Some(jdk.as_path())),
+        "OK"
+    );
+}
+
 /// Minimal repro with a javac fixture: `Sub.setSize` overrides `Base.setSize`, so a `Sub` receiver
 /// sees the setter at two rungs. The write must resolve (to the most-derived override) and the
 /// read-back must observe it.

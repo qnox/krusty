@@ -392,8 +392,8 @@ pub(crate) fn selected_context_values(
                     Stmt::Destructure { entries, .. } => nested_bound_names.extend(
                         entries
                             .iter()
-                            .filter(|(name, _)| name != "_")
-                            .map(|(name, _)| name.clone()),
+                            .filter(|entry| !entry.ignored)
+                            .map(|entry| entry.name.clone()),
                     ),
                     _ => {}
                 }

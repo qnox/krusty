@@ -217,12 +217,16 @@ fn symbolic_getter_inference_keeps_merged_nullable_constructor_binding() {
         return;
     }
     assert!(
-        diagnostics.iter().any(|message| {
-            message.contains("only safe")
-                || message.contains("nullable receiver")
-                || message.contains("unresolved reference")
-        }),
+        diagnostics
+            .iter()
+            .any(|message| message.contains("only safe") || message.contains("nullable receiver")),
         "{diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|message| !message.contains("unresolved reference")),
+        "the inferred PairBox<String?> shape must reach member lookup: {diagnostics:?}"
     );
 }
 

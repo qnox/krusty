@@ -1493,10 +1493,12 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
     ];
 
-    let workers = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(10)
-        .min(cases.len());
+    // Each comparison launches both compiler CLIs with the complete stdlib classpath. CPU count is
+    // therefore not a safe concurrency budget: ten simultaneous classpath indexes can be killed by
+    // the host before a diagnostic is produced, turning a parity test into a resource-race test.
+    // Keep this exhaustive comparison serial; the surrounding test binary remains free to schedule
+    // independent tests normally.
+    let workers = 1;
     let chunk_size = cases.len().div_ceil(workers);
     let mismatches = std::thread::scope(|scope| {
         cases

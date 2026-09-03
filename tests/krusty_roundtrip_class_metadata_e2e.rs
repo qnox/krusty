@@ -55,6 +55,77 @@ fn expect_roundtrip_ok(tag: &str, lib_src: &str, main: &str) {
     assert_eq!(output, "OK", "{tag}");
 }
 
+#[test]
+fn top_level_generic_overload_roundtrip_preserves_intersection_bounds() {
+    let (dir, classes) = krusty_lib_dir(
+        "generic_overload_intersection_bounds",
+        r#"
+fun <T> choose(value: T): String = "unbounded"
+fun <T> choose(value: T): String where T : Comparable<T> = "comparable"
+fun <T> choose(value: T): String where T : Comparable<T>, T : Number = "number"
+"#,
+    );
+    let (_, facade) = classes
+        .iter()
+        .find(|(name, _)| name == "LibKt")
+        .expect("top-level declarations emit a LibKt facade");
+    let parsed = parse_class(facade).expect("LibKt.class parses");
+    let mut descriptors = parsed
+        .methods
+        .iter()
+        .filter(|method| method.name == "choose")
+        .map(|method| method.descriptor.clone())
+        .collect::<Vec<_>>();
+    descriptors.sort();
+    assert_eq!(
+        descriptors,
+        [
+            "(Ljava/lang/Comparable;)Ljava/lang/String;",
+            "(Ljava/lang/Number;)Ljava/lang/String;",
+            "(Ljava/lang/Object;)Ljava/lang/String;",
+        ]
+    );
+    let metadata = parsed.meta;
+    let mut bound_sets = metadata
+        .package_functions
+        .iter()
+        .filter(|function| function.kotlin_name == "choose")
+        .map(|function| {
+            function
+                .generic_sig
+                .as_ref()
+                .expect("generic overload has a metadata signature")
+                .formal_bounds[0]
+                .iter()
+                .map(|bound| bound.source_name())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    bound_sets.sort();
+    assert_eq!(
+        bound_sets,
+        [
+            Vec::<String>::new(),
+            vec!["Comparable<T>".to_string()],
+            vec!["Number".to_string(), "Comparable<T>".to_string()],
+        ]
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [dir, stdlib];
+    let output = common::compile_and_run_box(
+        r#"
+fun box(): String = if (choose(1) == "number" && choose("x") == "comparable") "OK" else "FAIL"
+"#,
+        "Main",
+        &classpath,
+        Some(&jdk),
+    )
+    .expect("consumer compiles and runs against intersection-bound overloads");
+    assert_eq!(output, "OK");
+}
+
 /// The write side, pinned directly: krusty's DEFAULT emit puts a `@kotlin.Metadata` on the class file
 /// (not only on the file facade), and it names the class's Kotlin members. Without this the reader has
 /// nothing to read, whatever the reader does.
@@ -89,6 +160,88 @@ fn a_class_carries_its_own_metadata_by_default() {
         .map(|p| p.name.as_str())
         .collect();
     assert_eq!(properties, ["x", "y"], "and its constructor properties");
+}
+
+#[test]
+fn generic_value_class_constructor_keeps_classifier_inference_across_modules() {
+    const LIB: &str = "@JvmInline value class A<T : String>(val value: T)\n\
+fun interface B { fun f(a: A<String>): String }\n";
+    const MAIN: &str = "fun get(b: B) = b.f(A(\"OK\"))\n\
+fun use() {\n\
+    val lambda = { a: A<String> -> a.value }\n\
+    get(lambda)\n\
+}\n";
+
+    let (dir, classes) = krusty_lib_dir("generic_value_constructor", LIB);
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "A")
+        .expect("krusty emits A.class");
+    let metadata = parse_class(bytes).expect("A.class parses").meta;
+    assert_eq!(metadata.class_type_parameters.type_params(), &["T"]);
+    assert_eq!(
+        metadata.class_type_parameters.type_param_bounds(),
+        &vec![vec![krusty::types::Ty::String]],
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(MAIN, &[dir, stdlib], Some(&jdk));
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+/// A value class whose carrier erases to `Object` remains a semantic return type in class metadata.
+/// The physical member is mangled and returns the carrier, while dependency-call realization retains
+/// whether its declaring owner is an interface. Withholding the metadata makes the whole operator
+/// invisible to the consuming module; losing the owner kind emits `invokevirtual` for an interface.
+#[test]
+fn object_erased_value_class_operator_round_trips_across_modules() {
+    const LIB: &str = r#"
+public class WhateverUseCase : UseCaseWithParameter<Result<Int>, Int> {
+    override operator fun invoke(param: Result<Int>): Result<Int> {
+        return param.onFailure {
+            return if (it is NumberFormatException)
+                Result.success(0)
+            else
+                Result.failure(it)
+        }
+    }
+}
+
+interface UseCaseWithParameter<P, R> {
+    operator fun invoke(param: P): Result<R>
+}
+"#;
+    const MAIN: &str = r#"
+fun box(): String {
+    val useCase = WhateverUseCase()
+    return if (useCase(Result.failure(NumberFormatException())) == Result.success(0)) "OK"
+        else "Fail"
+}
+"#;
+
+    expect_roundtrip_ok("object_erased_result_operator", LIB, MAIN);
+}
+
+/// An Object-erased value-class carrier and a box in a generic slot have the same descriptor but
+/// opposite representation contracts. The dependency declaration, not the substituted call-site type,
+/// must keep those boundaries distinct.
+#[test]
+fn object_erased_value_class_direct_and_generic_parameters_stay_distinct() {
+    const LIB: &str = r#"
+fun direct(value: Result<Int>): Result<Int> = value
+fun <T> genericEqual(first: T, second: T): Boolean = first == second
+"#;
+    const MAIN: &str = r#"
+fun box(): String {
+    val directValue = direct(Result.success(1))
+    if (directValue != Result.success(1)) return "direct"
+    if (!genericEqual(Result.success(2), Result.success(2))) return "generic"
+    return "OK"
+}
+"#;
+
+    expect_roundtrip_ok("object_erased_direct_and_generic_parameters", LIB, MAIN);
 }
 
 /// A value-class-typed BODY property is DESCRIBED, and the record is byte-identical to kotlinc's:
@@ -459,4 +612,63 @@ fn plain_class_member_named_arguments_round_trip() {
     return \"OK\"\n\
 }\n";
     expect_roundtrip_ok("member", LIB, MAIN);
+}
+
+#[test]
+fn object_member_extension_function_round_trips_as_an_importable_extension() {
+    const LIB: &str = "package test\ninterface I { fun <T> T.fromInterface(): T = this }\nobject C : I {\nfun f(value: Int): Int = 1\nfun f(value: String): Int = 2\nfun Boolean.f(): Int = 3\n}\n";
+    const MAIN: &str = "import test.C.f\nimport test.C.fromInterface\nfun box(): String = if (f(1) == 1 && f(\"s\") == 2 && true.f() == 3 && 4.fromInterface() == 4) \"OK\" else \"fail\"\n";
+
+    let (dir, classes) = krusty_lib_dir("object_member_extension", LIB);
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "test/C")
+        .expect("krusty emits the object class");
+    let metadata = parse_class(bytes).expect("object class parses").meta;
+    let functions = metadata
+        .class_functions
+        .iter()
+        .filter(|function| function.kotlin_name == "f")
+        .collect::<Vec<_>>();
+    assert_eq!(functions.len(), 3);
+    assert_eq!(
+        functions
+            .iter()
+            .filter(|function| function.is_extension())
+            .count(),
+        1
+    );
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "test/I")
+        .expect("krusty emits the interface class");
+    let metadata = parse_class(bytes).expect("interface class parses").meta;
+    let inherited_extension = metadata
+        .class_functions
+        .iter()
+        .find(|function| function.kotlin_name == "fromInterface")
+        .expect("interface metadata contains the member extension");
+    assert!(
+        inherited_extension.is_extension(),
+        "the inherited member extension retains its declaration kind",
+    );
+    assert!(
+        inherited_extension
+            .generic_sig
+            .as_ref()
+            .and_then(|signature| signature.receiver)
+            .is_some_and(|receiver| receiver.is_ty_param()),
+        "the generic extension receiver remains a type parameter: {:?}",
+        inherited_extension.generic_sig,
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [dir, stdlib];
+    let output =
+        common::compile_and_run_box(MAIN, "Main", &classpath, Some(&jdk)).unwrap_or_else(|| {
+            let diagnostics = common::front_end_diagnostics(MAIN, &classpath, Some(&jdk));
+            panic!("consumer failed to compile or run: {diagnostics:?}")
+        });
+    assert_eq!(output, "OK");
 }

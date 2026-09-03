@@ -60,7 +60,11 @@ fn property_is_contextual(
     }
     ctx.property_canonical_type_name(ir, class_id, property)
         .is_some_and(|canonical| {
-            ctx.file_annotation_mentions_canonical_type("UseContextualSerialization", &canonical)
+            ctx.file_annotation_mentions_canonical_type(
+                ir,
+                "UseContextualSerialization",
+                &canonical,
+            )
         })
 }
 
@@ -716,13 +720,13 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             }));
         }
         // Generic: `Foo.serializer(<arg serializer>…)`, each type argument's serializer derived
-        // recursively. A star projection already carries its checked readable upper bound as an
-        // out-projection (`Box<*>`, `T : E` => `Box<out E>`), so consume that semantic type directly.
+        // recursively. A star projection carries its checked readable upper bound separately from
+        // an explicit `out` projection, so consume that semantic read type directly.
         // An in-projection has no readable element type from which a serializer can be derived.
         let mut arg_sers = Vec::with_capacity(n_tp);
         for argument in type_args.iter().take(n_tp) {
             let readable = match argument {
-                Ty::OutProjection(inner) => **inner,
+                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
                 Ty::InProjection(_) => return None,
                 _ => *argument,
             };
@@ -868,7 +872,7 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
         return type_args.len() >= n_tp
             && type_args.iter().take(n_tp).all(|argument| {
                 let readable = match argument {
-                    Ty::OutProjection(inner) => **inner,
+                    Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
                     Ty::InProjection(_) => return false,
                     _ => *argument,
                 };
@@ -1330,6 +1334,12 @@ impl IrPlugin for SerializationPlugin {
         let serializer_type = type_name(KSERIALIZER_FQ);
         let serializable_annotation = type_name(SERIALIZABLE_FQ);
         for call in &ctx.calls {
+            // A declaration carrying this plugin marker was generated only after the annotated
+            // classifier was validated. That selected declaration is sufficient semantic evidence
+            // even when a bounded Pass-2 source view does not contain the classifier's annotation
+            // syntax. The generic library `serializer<T>()` intrinsic has no such declaration-owned
+            // proof and still requires the source annotation below.
+            let declaration_owned = call.implementation.is_some();
             let implementation = call.implementation.or_else(|| {
                 let signature = call.generic_sig.as_ref()?;
                 (call.owner.namespace() == serializer_package
@@ -1364,7 +1374,8 @@ impl IrPlugin for SerializationPlugin {
             let Some(classifier) = classifier else {
                 continue;
             };
-            if !ctx.has_source_annotation(classifier, serializable_annotation) {
+            if !declaration_owned && !ctx.has_source_annotation(classifier, serializable_annotation)
+            {
                 continue;
             }
             let operands = call
@@ -1523,6 +1534,7 @@ impl IrPlugin for SerializationPlugin {
                 IrCtorArg {
                     name: None,
                     ty: kserializer_of(class_ty("kotlin/Any")),
+                    declared_ty: None,
                     is_field: false,
                     has_default: false,
                     is_vararg: false,
@@ -1537,6 +1549,8 @@ impl IrPlugin for SerializationPlugin {
             // and delegates to the concrete `Foo`-typed override.
             ser.bridges = vec![
                 crate::ir::Bridge {
+                    kind: crate::ir::BridgeKind::Function,
+                    target_function: Some(serialize),
                     name: "serialize".to_string(),
                     erased_params: vec![
                         class_ty("kotlinx/serialization/encoding/Encoder"),
@@ -1548,17 +1562,21 @@ impl IrPlugin for SerializationPlugin {
                         class_ty(&class_fq),
                     ],
                     concrete_ret: unit(),
+                    target_ret: None,
                     type_safe_barrier: false,
                     target_name: None,
                     box_ret: None,
                     unbox_params: Vec::new(),
                 },
                 crate::ir::Bridge {
+                    kind: crate::ir::BridgeKind::Function,
+                    target_function: Some(deserialize),
                     name: "deserialize".to_string(),
                     erased_params: vec![class_ty("kotlinx/serialization/encoding/Decoder")],
                     erased_ret: class_ty("kotlin/Any"),
                     concrete_params: vec![class_ty("kotlinx/serialization/encoding/Decoder")],
                     concrete_ret: class_ty(&class_fq),
+                    target_ret: None,
                     type_safe_barrier: false,
                     target_name: None,
                     box_ret: None,
@@ -1699,6 +1717,7 @@ impl IrPlugin for SerializationPlugin {
                     args,
                     ctor_params: Some(vec![kserializer_of(class_ty("kotlin/Any")); n_tp]),
                     ctor_desc: None,
+                    external_target: None,
                 });
                 let ret = ir.add_expr(IrExpr::Return(Some(new_ser)));
                 (
@@ -1867,12 +1886,14 @@ impl IrPlugin for SerializationPlugin {
                     .secondary_ctors
                     .push(crate::ir::IrSecondaryCtor {
                         annotations: crate::ir::DeclarationAnnotations::default(),
+                        prefix_params: Vec::new(),
                         vararg_index: None,
                         params: deser_params,
                         named_params: Vec::new(),
                         defaults: vec![],
                         delegate_prelude: vec![],
                         delegate_args: vec![],
+                        default_parameters: Vec::new(),
                         body: Some(deser_body),
                         delegate: crate::ir::CtorDelegateTarget::Super {
                             owner: super_owner,
@@ -2434,6 +2455,7 @@ impl IrPlugin for SerializationPlugin {
                             args: vec![u],
                             ctor_params: None,
                             ctor_desc: None,
+                            external_target: None,
                         });
                         let ret = ir.add_expr(IrExpr::Return(Some(new)));
                         let body = ir.add_expr(IrExpr::Block {
@@ -2764,6 +2786,7 @@ impl IrPlugin for SerializationPlugin {
                                 args,
                                 ctor_params: None,
                                 ctor_desc: None,
+                                external_target: None,
                             });
                             stmts.push(ir.add_expr(IrExpr::Return(Some(new))));
                             ir.add_expr(IrExpr::Block { stmts, value: None })
@@ -2788,6 +2811,7 @@ impl IrPlugin for SerializationPlugin {
                                 args,
                                 ctor_params: None,
                                 ctor_desc: None,
+                                external_target: None,
                             });
                             let ret = ir.add_expr(IrExpr::Return(Some(new)));
                             ir.add_expr(IrExpr::Block {

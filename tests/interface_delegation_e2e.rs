@@ -32,6 +32,44 @@ fun box(): String { val c = C(IA(), IB()); return if (c.a() + c.b() == \"ab\") \
 }
 
 #[test]
+fn named_class_expression_delegate_is_evaluated_in_its_constructor() {
+    const SRC: &str = "interface A { fun value(): String }\n\
+class Impl : A { override fun value(): String = \"OK\" }\n\
+class C : A by Impl()\n\
+fun box(): String = C().value()\n";
+    assert_eq!(
+        run(SRC).expect("named expression delegation compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn anonymous_object_expression_delegate_is_a_constructor_argument() {
+    const SRC: &str = "interface A { fun value(): String }\n\
+class Impl : A { override fun value(): String = \"OK\" }\n\
+fun box(): String = object : A by Impl() {}.value()\n";
+    assert_eq!(
+        run(SRC).expect("anonymous expression delegation compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn local_named_class_delegate_uses_its_lexical_value() {
+    const SRC: &str = "interface A { fun value(): String }\n\
+class Impl : A { override fun value(): String = \"OK\" }\n\
+fun box(): String {\n\
+    val delegate = Impl()\n\
+    class Local : A by delegate\n\
+    return Local().value()\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("local lexical delegation compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn delegation_forwards_same_name_overloads() {
     const SRC: &str = "interface A { fun foo(value: String): String }\n\
 interface B { fun foo(value: Any): Any }\n\
@@ -181,6 +219,51 @@ fn forwarder_emission_is_byte_deterministic() {
     }
 }
 
+#[test]
+fn forwarders_preserve_function_property_interleaving() {
+    const SRC: &str = "interface Base {\n\
+    val first: String\n\
+    fun middle(): String\n\
+    val last: String\n\
+}\n\
+class Impl : Base {\n\
+    override val first = \"O\"\n\
+    override fun middle() = \"K\"\n\
+    override val last = \"!\"\n\
+}\n\
+class DelegatedImpl(val d: Base) : Base by d\n\
+fun box(): String = DelegatedImpl(Impl()).first + DelegatedImpl(Impl()).middle()\n";
+    let classes = common::expect_classes_with_stdlib(SRC, "DelegMixedOrder");
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name.ends_with("DelegatedImpl"))
+        .expect("DelegatedImpl emitted");
+    let info = krusty::jvm::classreader::parse_class(bytes).expect("DelegatedImpl parses");
+    let order = info
+        .methods
+        .iter()
+        .filter(|method| matches!(method.name.as_str(), "getFirst" | "middle" | "getLast"))
+        .map(|method| method.name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(order, ["getFirst", "middle", "getLast"]);
+    if let Some(reference) = common::kotlinc_library(SRC) {
+        let bytes = std::fs::read(reference.join("DelegatedImpl.class"))
+            .expect("read kotlinc DelegatedImpl");
+        let info =
+            krusty::jvm::classreader::parse_class(&bytes).expect("kotlinc DelegatedImpl parses");
+        let reference_order = info
+            .methods
+            .iter()
+            .filter(|method| matches!(method.name.as_str(), "getFirst" | "middle" | "getLast"))
+            .map(|method| method.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order, reference_order,
+            "forwarder order differs from kotlinc"
+        );
+    }
+}
+
 /// A `val`-param delegate to a PRIMITIVE-instantiated generic interface (`A<Long> by a`) forwards
 /// through its own typed field and is handled correctly. (A non-`val`-param primitive instantiation is
 /// skipped — the erased forwarder mis-boxes an `int` literal as `Integer` for a `Long` parameter.)
@@ -194,4 +277,65 @@ fun box(): String = C(B()).foo(42L)\n";
         run(SRC).expect("val-param primitive generic delegation compiles + runs"),
         "OK"
     );
+}
+
+#[test]
+fn classpath_char_sequence_delegation_uses_published_forwarders() {
+    const SRC: &str = r#"
+        private class Text(private val value: String) : CharSequence by value
+
+        fun box(): String {
+            val text: CharSequence = Text("OK")
+            return if (text.length == 2 && text[1] == 'K' && text.subSequence(0, 2) == "OK") {
+                "OK"
+            } else {
+                "fail"
+            }
+        }
+    "#;
+    assert_eq!(
+        run(SRC).expect("classpath CharSequence delegation compiles and runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn generic_classpath_comparable_delegation_keeps_applied_parameter_type() {
+    const SRC: &str = r#"
+        private class BooleanWrap(private val value: Boolean) : Comparable<Boolean> by value
+
+        fun box(): String =
+            if (BooleanWrap(false).compareTo(true) < 0) "OK" else "fail"
+    "#;
+    assert_eq!(
+        run(SRC).expect("generic classpath delegation compiles and runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn dependency_interface_delegation_uses_opaque_external_targets() {
+    const LIB: &str = r#"
+        package api
+
+        interface Echo<T> {
+            fun echo(value: T): T
+        }
+
+        class EchoImpl : Echo<String> {
+            override fun echo(value: String): String = value
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.Echo
+        import api.EchoImpl
+
+        private class EchoDelegate(delegate: Echo<String>) : Echo<String> by delegate
+
+        fun box(): String = EchoDelegate(EchoImpl()).echo("OK")
+    "#;
+    let Some(output) = common::expect_box_run_against_kotlinc(LIB, MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
 }

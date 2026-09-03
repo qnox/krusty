@@ -96,3 +96,16 @@ fun box(): String = if (C(5).sum() == 13) \"OK\" else \"no\"
 ";
     common::expect_box_ok_with_stdlib(SRC, "C");
 }
+
+#[test]
+fn private_computed_property_uses_its_checked_accessors() {
+    const SRC: &str = "class Secret {\n\
+        private var storage: Int = 0\n\
+        private var computed: Int\n\
+            get() = storage + 1\n\
+            set(value) { storage = value * 2 }\n\
+        fun verify(): Int { computed = 6; return computed }\n\
+    }\n\
+    fun box(): String = if (Secret().verify() == 13) \"OK\" else \"fail\"\n";
+    common::expect_box_ok_with_stdlib(SRC, "PrivateComputed");
+}

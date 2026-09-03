@@ -42,6 +42,19 @@ where
         vec![(format!("{stem}.js"), super::emit_file(&ir).into_bytes())]
     }
 
+    fn lower_ir_file(
+        &self,
+        file: crate::backend::CheckedIrFile<'_>,
+        _state: &mut Self::State,
+        _diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        let stem = &file.stems[file.source.raw() as usize];
+        vec![(
+            format!("{stem}.js"),
+            super::emit_file(&file.ir).into_bytes(),
+        )]
+    }
+
     fn finalize(&self, _state: Self::State, _module_name: &str) -> Vec<Artifact> {
         Vec::new()
     }

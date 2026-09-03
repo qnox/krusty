@@ -1675,7 +1675,10 @@ fn stdio_server_offers_the_dev_dump_code_action_for_a_rootless_document() {
     // make the supposedly rootless fixture discover transient Kotlin files produced by parallel
     // tests, so unrelated corpus size could consume the bounded dump-retention budget.
     let isolated_cwd = TempProject::new("dev-dump-rootless-cwd");
-    let mut server = ServerProcess::start_in(&["--dev"], isolated_cwd.path());
+    let cache = isolated_cwd.path().join("cache");
+    let cache = cache.to_str().expect("UTF-8 temporary cache path");
+    let mut server =
+        ServerProcess::start_in(&["--dev", "-deps-cache-dir", cache], isolated_cwd.path());
     let initialize = server.request(1, "initialize", json!({}));
     let capabilities = &initialize["result"]["capabilities"];
     assert_eq!(
@@ -1761,8 +1764,10 @@ fn stdio_server_offers_the_dev_dump_code_action_in_a_project() {
     let root_uri: String = url::Url::from_directory_path(project.path())
         .expect("temporary project root is a file URI")
         .into();
+    let cache = project.path().join("cache");
+    let cache = cache.to_str().expect("UTF-8 temporary cache path");
 
-    let mut server = ServerProcess::start(&["--dev"]);
+    let mut server = ServerProcess::start(&["--dev", "-deps-cache-dir", cache]);
     server.request(1, "initialize", json!({"rootUri": root_uri}));
     server.notify("initialized", json!({}));
     let response = request_dump_code_action(&mut server, 2, &uri, DUMP_ACTION_SOURCE);

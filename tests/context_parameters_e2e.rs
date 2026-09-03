@@ -746,7 +746,7 @@ fn context_local_function_maps_named_argument_past_default() {
 }
 
 #[test]
-fn context_local_default_cannot_bind_same_named_caller_local() {
+fn context_local_named_default_binds_preceding_parameter() {
     const SRC: &str = "class C\n\
         fun box(): String {\n\
         \x20 val a = 5\n\
@@ -754,17 +754,16 @@ fn context_local_default_cannot_bind_same_named_caller_local() {
         \x20 val actual = with(C()) { combine(a = 1) }\n\
         \x20 return if (actual == 11) \"OK\" else actual.toString()\n\
         }\n";
-    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
-    assert!(
-        diagnostics.iter().any(|message| message.contains(
-            "local function default argument that references another parameter is not supported"
-        )),
-        "{diagnostics:?}"
+    common::expect_true_e2e(
+        "context_local_named_default_binds_preceding_parameter",
+        SRC,
+        &[],
     );
+    assert_eq!(run(SRC).expect("local context named default"), "OK");
 }
 
 #[test]
-fn context_local_positional_default_cannot_bind_same_named_caller_local() {
+fn context_local_positional_default_binds_preceding_parameter() {
     const SRC: &str = "class C\n\
         fun box(): String {\n\
         \x20 val a = 5\n\
@@ -772,11 +771,64 @@ fn context_local_positional_default_cannot_bind_same_named_caller_local() {
         \x20 val actual = with(C()) { combine(1) }\n\
         \x20 return if (actual == 11) \"OK\" else actual.toString()\n\
         }\n";
-    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
-    assert!(
-        diagnostics.iter().any(|message| message.contains(
-            "local function default argument that references another parameter is not supported"
-        )),
-        "{diagnostics:?}"
+    common::expect_true_e2e(
+        "context_local_positional_default_binds_preceding_parameter",
+        SRC,
+        &[],
     );
+    assert_eq!(run(SRC).expect("local context positional default"), "OK");
+}
+
+#[test]
+fn contextual_class_retains_context_for_member_bodies() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextReceivers
+        class A(val value: String)
+        context(A)
+        class B { fun result(): String = value }
+        fun box(): String = with(A("OK")) { B() }.result()
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
+
+#[test]
+fn contextual_class_retains_multiple_contexts_in_source_order() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextReceivers
+        class A(val value: String)
+        class B(val value: String)
+        context(A, B)
+        class C { fun result(): String = this@A.value + this@B.value }
+        fun box(): String {
+            val value = with(A("O")) { with(B("K")) { C() } }
+            return value.result()
+        }
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
+
+#[test]
+fn contextual_class_constructors_forward_the_same_context_prefix() {
+    const SRC: &str = r#"
+        // LANGUAGE: +ContextReceivers
+        class A(val value: String)
+        context(A)
+        class B(oValue: Boolean = true, kValue: Boolean = true) {
+            var o: Boolean
+            var k: Boolean
+            init { o = oValue; k = kValue }
+            constructor(oValue: String, kValue: String) : this(
+                oValue == "O",
+                kValue == "K"
+            )
+            fun result(): String = if (o && k) value else "fail"
+        }
+        fun box(): String = with(A("OK")) {
+            val primary = B(true, true).result()
+            val secondary = B("O", "K").result()
+            val defaulted = B().result()
+            if (primary == "OK" && secondary == "OK" && defaulted == "OK") "OK" else "fail"
+        }
+    "#;
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }

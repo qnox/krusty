@@ -38,7 +38,7 @@ fn local_data_class_and_interface() {
     if (En().hi() != \"hi\") return \"fail iface\"\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("local data class + local interface should compile + run");
+    let out = common::expect_box_run_with_stdlib(SRC, "C");
     assert_eq!(out, "OK");
 }
 

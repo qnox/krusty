@@ -8,10 +8,8 @@
 //! owner/receiver at each read/write site (`ExprLowering::MemberExtensionPropertyRead`,
 //! `StmtLowering::MemberExtensionPropertyWrite`).
 //!
-//! Deliberately still gated (never miscompile): a receiver or return mentioning a class type
-//! parameter's OWN type (`val T.x: T`), a value-class receiver/return (mangling/boxing), property
-//! type parameters (`val <T> T.x`), delegated member extension properties, and
-//! open/override/abstract extension properties (cross-class extension dispatch isn't modeled).
+//! Deliberately still gated (never miscompile): a value-class receiver/return (mangling/boxing)
+//! and open/override/abstract extension properties (cross-class extension dispatch isn't modeled).
 
 use super::common;
 
@@ -410,17 +408,72 @@ fn corpus_member_ext_props_box_ok() {
     }
 }
 
-/// The corpus generic-receiver case (`class Test<T> { val T.foo }`) needs the erased/rebound
-/// receiver handoff — gated in pass 1. Must stay skipped (never a partial miscompile).
+/// The corpus generic-receiver case (`class Test<T> { val T.foo }`) uses the same stable generic
+/// receiver handoff as focused repository sources.
 #[test]
-fn corpus_generic_receiver_member_ext_prop_stays_skipped() {
+fn corpus_generic_receiver_member_ext_prop_runs() {
     if !common::corpus_ready() {
         return;
     }
     assert_eq!(
-        common::run_box_corpus_case("extensionProperties/extensionMemberWithTypeParameter.kt"),
-        None,
-        "extensionMemberWithTypeParameter needs the generic-receiver tier — must stay skipped"
+        common::run_box_corpus_case("extensionProperties/extensionMemberWithTypeParameter.kt")
+            .as_deref(),
+        Some("OK"),
+        "extensionMemberWithTypeParameter must execute through checked FIR"
+    );
+}
+
+#[test]
+fn property_type_parameter_member_extension_property_runs() {
+    run_box(
+        r#"
+class Test {
+    val <T> T.foo: T
+        get() = this
+}
+
+fun box(): String = with(Test()) { "OK".foo }
+"#,
+        "MemberExtPropGenericProperty",
+    );
+}
+
+#[test]
+fn delegated_member_extension_property_passes_the_extension_receiver_to_get_value() {
+    run_box(
+        r#"
+import kotlin.reflect.KProperty
+
+class Del {
+    operator fun getValue(receiver: Int, property: KProperty<*>): String = "OK"
+}
+
+class Test {
+    val Int.foo: String by Del()
+    fun test(): String = 1.foo
+}
+
+fun box(): String = Test().test()
+"#,
+        "MemberExtPropDelegated",
+    );
+}
+
+#[test]
+fn delegated_top_level_extension_property_passes_the_extension_receiver_to_get_value() {
+    run_box(
+        r#"
+import kotlin.reflect.KProperty
+
+class Del {
+    operator fun getValue(receiver: String, property: KProperty<*>): String = receiver
+}
+
+val String.echo: String by Del()
+
+fun box(): String = "OK".echo
+"#,
+        "TopLevelExtPropDelegated",
     );
 }
 
@@ -431,39 +484,6 @@ fn corpus_generic_receiver_member_ext_prop_stays_skipped() {
 fn unsupported_member_ext_prop_shapes_still_rejected() {
     let jdk = common::jdk_modules();
     let cases: &[(&str, &str)] = &[
-        // A DELEGATED member extension property (`by Del()`): the delegate's getValue receives a
-        // KProperty + the extension receiver — a splice this path doesn't build.
-        (
-            "MemberExtPropDelegated",
-            r#"
-import kotlin.reflect.KProperty
-
-class Del {
-    operator fun getValue(t: Int, p: KProperty<*>): String = "OK"
-}
-
-class Test {
-    val Int.foo: String by Del()
-    fun test(): String = 1.foo
-}
-
-fun box(): String = Test().test()
-"#,
-        ),
-        // A property TYPE PARAMETER (`val <T> T.x`): its erasure/bound handling isn't modeled here.
-        (
-            "MemberExtPropGenericProp",
-            r#"
-class Test {
-    val <T> T.foo: String
-        get() = "OK"
-
-    fun test(): String = 1.foo
-}
-
-fun box(): String = Test().test()
-"#,
-        ),
         // An OPEN member extension property: cross-class extension overrides register nothing.
         (
             "MemberExtPropOpen",

@@ -45,7 +45,16 @@ struct ValueTryParts {
     body: ExprId,
     catches: Vec<crate::ir::IrCatch>,
     finally: Option<ExprId>,
-    branch_wrap: Option<(IrTypeOp, Ty)>,
+    branch_wrap: Option<ValueBranchWrap>,
+}
+
+#[derive(Clone)]
+enum ValueBranchWrap {
+    TypeOp(IrTypeOp, Ty),
+    /// A JVM value-class representation wrapper already selected and emitted by the preceding target
+    /// pass. It is a pure one-argument conversion, so applying it to each selected `try` value preserves
+    /// the wrapper around the value while exposing the suspension to the state-machine normalizer.
+    ValueClassBox(Callee),
 }
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
 /// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_suspension`.
@@ -87,6 +96,16 @@ fn continuation_ty() -> Ty {
     Ty::obj(CONTINUATION)
 }
 
+/// Physical JVM type of one suspend declaration parameter. Shared mutable captures remain their
+/// source element type in common IR and carry a sparse marker; every coroutine layout consumer must
+/// apply that marker identically so pre-normalization scope snapshots and final spill fields agree.
+fn suspend_parameter_ty(ir: &IrFile, function: u32, parameter: usize, semantic: Ty) -> Ty {
+    ir.shared_capture_parameters
+        .get(&(function, parameter as u32))
+        .map(crate::jvm::shared_captures::holder_ty)
+        .unwrap_or(semantic)
+}
+
 /// Trace a residual suspending expression as an id-labelled tree. This is intentionally kept next to
 /// the suspend pass rather than in the generic IR printer: it is only useful when normalization leaves
 /// a suspension below a statement shape the state-machine flattener does not model.
@@ -107,6 +126,31 @@ fn trace_residual_suspension(ir: &IrFile, expression: ExprId, depth: usize) {
     }
 }
 
+fn trace_residual_parents(ir: &IrFile, expression: ExprId) {
+    fn walk(ir: &IrFile, child: ExprId, depth: usize, seen: &mut HashSet<ExprId>) {
+        if depth >= 10 || !seen.insert(child) {
+            return;
+        }
+        for (parent, node) in ir.exprs.iter().enumerate() {
+            let mut contains = false;
+            for_each_child(&ir.exprs, parent as ExprId, &mut |candidate| {
+                contains = contains || candidate == child;
+            });
+            if contains {
+                crate::trace_compiler!(
+                    "suspend",
+                    "flatten parent {}{}: {:?}",
+                    "  ".repeat(depth),
+                    parent,
+                    node
+                );
+                walk(ir, parent as ExprId, depth + 1, seen);
+            }
+        }
+    }
+    walk(ir, expression, 0, &mut HashSet::new());
+}
+
 /// Rewrite every `suspend fun` in `ir` to the JVM CPS ABI. `facade` is the file's facade class internal
 /// name (e.g. `SKt`) — the continuation class for `bar` is `SKt$bar$1`. Returns `false` (skip the whole
 /// file, never miscompile) on any suspend shape this pass can't yet transform.
@@ -116,6 +160,7 @@ pub fn lower_suspend(
     facade: &str,
     continuation_metadata: &mut ContinuationMetadataMap,
 ) -> bool {
+    realize_safe_coroutine_points(ir);
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
@@ -149,7 +194,11 @@ pub fn lower_suspend(
                     Vec::new()
                 } else {
                     let f = &ir.functions[fid as usize];
-                    let this_offset = u32::from(f.dispatch_receiver.is_some());
+                    // `dispatch_receiver` retains the semantic owner for a value-class member even
+                    // after the JVM value-class pass turns that member into a static `*-impl`
+                    // method whose carrier is parameter zero. Only a physically non-static method
+                    // owns a JVM `this` slot.
+                    let this_offset = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
                     // Capture runs BEFORE the CPS rewrite appends the `Continuation` — only strip a
                     // trailing continuation when it is already there.
                     let has_cont = f.params.last().is_some_and(|t| {
@@ -160,7 +209,12 @@ pub fn lower_suspend(
                     // ALL value parameters — kotlinc spills primitive params too (`Z$0` for a
                     // Boolean), per-kind counters decide the field family.
                     (0..n_real)
-                        .map(|i| (this_offset + i as u32, spill_field_ty(f.params[i])))
+                        .map(|i| {
+                            (
+                                this_offset + i as u32,
+                                spill_field_ty(suspend_parameter_ty(ir, fid, i, f.params[i])),
+                            )
+                        })
                         .collect()
                 };
                 {
@@ -218,6 +272,7 @@ pub fn lower_suspend(
         // Splicing lifts the block's statements to the top level where the hoister/flattener handle them.
         if let (Some(b), None) = (body, forward) {
             splice_return_blocks(ir, b);
+            separate_catches_from_finally(ir, b);
         }
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
@@ -230,8 +285,37 @@ pub fn lower_suspend(
         // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
         let ret_ty = ir.functions[fid as usize].ret.clone();
         if let (Some(b), None) = (body, forward) {
+            // An expression-bodied suspend function can carry a suspending `when`/`try` as the block's
+            // trailing VALUE rather than as an explicit `return`. Materialize that tail first so the
+            // same value-control-flow desugars below handle expression and block bodies identically.
+            // Do not do this for a direct tail suspension: `desugar_tail_suspend` owns that shape and
+            // preserves tail-call/CPS result typing.
+            // Tail forwarding was decided from the untouched checked IR above. If a remaining
+            // trailing value still suspends, materialize it as an explicit return/effect now so
+            // the generic statement normalizers can expose its suspension. This covers not only
+            // value `when`/`try`, but a source grouping block retained below a checked coercion.
+            let suspending_tail = matches!(&ir.exprs[b as usize],
+                IrExpr::Block { value: Some(value), .. }
+                    if expr_calls_suspend(ir, *value, &suspend_set));
+            if suspending_tail {
+                ensure_tail_return(ir, b, ret_ty == Ty::Unit);
+                // Materializing the tail can expose an inline non-local return that was previously
+                // the block's value (`run { return await() }`). Re-run the same structural splicer so
+                // the inner return becomes the function statement and the now-unreachable synthetic
+                // outer return is removed before suspension hoisting/state flattening.
+                splice_return_blocks(ir, b);
+            }
             desugar_value_try(ir, b, &suspend_set, &ret_ty);
             desugar_value_when(ir, b, &suspend_set, &ret_ty);
+            normalize_statement_try_results(ir, b, true);
+            // A leaf suspend function is emitted as an ordinary JVM method with an added continuation
+            // parameter; its structured try/finally already implements returns correctly. Pending
+            // completion is required only when this body will actually be split into machine states.
+            if expr_calls_suspend(ir, b, &suspend_set) {
+                linearize_finally_returns(ir, b, &ret_ty);
+            }
+            linearize_suspending_finally(ir, b, &suspend_set);
+            normalize_block_inits(ir, b);
             // The value-`try`/`when` desugars bind each branch's value to a local, which can leave a
             // suspension NESTED in that bound value (`v = Sub(mk().tag)`) — a position the FIRST
             // hoist pass (which ran before the desugars) never saw. Hoist again with a FRESH
@@ -239,6 +323,7 @@ pub fn lower_suspend(
             // through unchanged.
             let mut value_types = function_value_types(ir, fid, b);
             hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
+            promote_diverging_tail_to_statement(ir, b);
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
         let has_susp =
@@ -317,6 +402,11 @@ pub fn lower_suspend(
             // exactly kotlinc's tail-call optimization.
             let cont = ir.add_expr(IrExpr::GetValue(p_old));
             append_continuation(ir, call, cont);
+            // Checked expression bodies carry one source-oriented grouping block around the actual
+            // statements. Normalize that transparent wrapper now that the forward decision has been
+            // made; the call id remains stable and `make_forward_body` can rewrite the function's
+            // physical tail in one place.
+            splice_return_blocks(ir, b);
             make_forward_body(ir, b, call);
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
@@ -366,7 +456,516 @@ pub fn lower_suspend(
             return false;
         }
     }
+    finalize_suspend_bridges(ir);
     true
+}
+
+/// Common IR retains the inferred expression type even when a `try` occurs in a statement region.
+/// Suspension normalization needs the consumer fact explicitly: only statement-position tries may
+/// discard branch values and become `Unit`; a try used by a return, assignment, call argument, or
+/// another value consumer keeps its checked result unchanged.
+fn normalize_statement_try_results(ir: &mut IrFile, expression: ExprId, statement: bool) {
+    match ir.exprs[expression as usize].clone() {
+        IrExpr::Lambda { .. } => {}
+        IrExpr::Block { stmts, value } => {
+            for child in stmts {
+                normalize_statement_try_results(ir, child, true);
+            }
+            if let Some(value) = value {
+                normalize_statement_try_results(ir, value, statement);
+            }
+        }
+        IrExpr::When { branches } => {
+            for (condition, body) in branches {
+                if let Some(condition) = condition {
+                    normalize_statement_try_results(ir, condition, false);
+                }
+                normalize_statement_try_results(ir, body, statement);
+            }
+        }
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            if statement {
+                if let IrExpr::Try { result, .. } = &mut ir.exprs[expression as usize] {
+                    *result = Ty::Unit;
+                }
+            }
+            for region in std::iter::once(body)
+                .chain(catches.into_iter().map(|catch| catch.body))
+                .chain(finally)
+            {
+                normalize_statement_try_results(ir, region, statement);
+            }
+        }
+        IrExpr::While {
+            cond, body, update, ..
+        } if statement => {
+            normalize_statement_try_results(ir, cond, false);
+            normalize_statement_try_results(ir, body, true);
+            if let Some(update) = update {
+                normalize_statement_try_results(ir, update, true);
+            }
+        }
+        IrExpr::TypeOp { arg, .. } if statement => {
+            normalize_statement_try_results(ir, arg, true);
+        }
+        _ => {}
+    }
+}
+
+/// Canonicalize `try { body } catch { arms } finally { cleanup }` as an inner `try/catch` wrapped by
+/// an outer `try/finally`. This is Kotlin's exact control-flow composition: the cleanup observes normal
+/// completion of either the body or a selected catch, and also every exception escaping the inner
+/// region. Keeping one handler responsibility per `IrExpr::Try` lets the state-machine handler stack
+/// compose nested regions instead of growing a second catch-plus-finally implementation.
+fn separate_catches_from_finally(ir: &mut IrFile, expression: ExprId) {
+    let mut children = Vec::new();
+    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        separate_catches_from_finally(ir, child);
+    }
+    let IrExpr::Try {
+        body,
+        catches,
+        finally: Some(finally),
+        result,
+    } = ir.exprs[expression as usize].clone()
+    else {
+        return;
+    };
+    if catches.is_empty() {
+        return;
+    }
+    let inner = ir.add_expr(IrExpr::Try {
+        body,
+        catches,
+        finally: None,
+        result,
+    });
+    let outer_body = if result == Ty::Unit {
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![inner],
+            value: None,
+        })
+    } else {
+        ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(inner),
+        })
+    };
+    ir.exprs[expression as usize] = IrExpr::Try {
+        body: outer_body,
+        catches: Vec::new(),
+        finally: Some(finally),
+        result,
+    };
+}
+
+/// Make a suspending `finally` an ordinary state-machine sequence while preserving the exceptional
+/// path. Value-producing tries have already been bound to storage before this runs, and combined
+/// catch/finally regions have already been split, so the remaining node is statement-shaped:
+///
+/// ```text
+/// var pending: Throwable? = null
+/// try { body } catch (e: Throwable) { pending = e }
+/// finallyBody
+/// if (pending != null) throw pending
+/// ```
+///
+/// `pending` is an ordinary compiler temp. The normal liveness pass sees its read after the finally
+/// suspension and allocates the continuation spill; no backend-only field identity is invented here.
+fn linearize_suspending_finally(ir: &mut IrFile, expression: ExprId, suspend_set: &HashSet<u32>) {
+    if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
+        return;
+    }
+    let mut children = Vec::new();
+    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        linearize_suspending_finally(ir, child, suspend_set);
+    }
+    let IrExpr::Try {
+        body,
+        catches,
+        finally: Some(finally),
+        result,
+    } = ir.exprs[expression as usize].clone()
+    else {
+        return;
+    };
+    if !catches.is_empty()
+        || result != Ty::Unit
+        || !expr_calls_suspend(ir, finally, suspend_set)
+        || expr_has_return(ir, body)
+        || expr_contains_owned_loop_jump(ir, body)
+    {
+        return;
+    }
+
+    let pending = max_value_index(ir) + 1;
+    let pending_ty = Ty::nullable(Ty::obj("java/lang/Throwable"));
+    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let declaration = ir.add_expr(IrExpr::Variable {
+        index: pending,
+        ty: pending_ty,
+        init: Some(null),
+        named: false,
+    });
+    let catch_var = pending + 1;
+    let caught = ir.add_expr(IrExpr::GetValue(catch_var));
+    let remember = ir.add_expr(IrExpr::SetValue {
+        var: pending,
+        value: caught,
+    });
+    let catch_body = ir.add_expr(IrExpr::Block {
+        stmts: vec![remember],
+        value: None,
+    });
+    let protected = ir.add_expr(IrExpr::Try {
+        body,
+        catches: vec![crate::ir::IrCatch {
+            var: catch_var,
+            name: None,
+            exc_internal: type_name("java/lang/Throwable"),
+            body: catch_body,
+        }],
+        finally: None,
+        result: Ty::Unit,
+    });
+    let pending_read = ir.add_expr(IrExpr::GetValue(pending));
+    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let has_exception = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Ne,
+        lhs: pending_read,
+        rhs: null,
+    });
+    let exception = ir.add_expr(IrExpr::GetValue(pending));
+    let throw = ir.add_expr(IrExpr::Throw { operand: exception });
+    let throw_block = ir.add_expr(IrExpr::Block {
+        stmts: vec![throw],
+        value: None,
+    });
+    let no_exception = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: None,
+    });
+    let rethrow = ir.add_expr(IrExpr::When {
+        branches: vec![(Some(has_exception), throw_block), (None, no_exception)],
+    });
+    ir.exprs[expression as usize] = IrExpr::Block {
+        stmts: vec![declaration, protected, finally, rethrow],
+        value: None,
+    };
+}
+
+/// Route function returns through each enclosing `finally`. The return expression is evaluated once
+/// into a typed pending-value local; a labeled break leaves a one-shot loop around the protected body;
+/// after cleanup, the completion-kind dispatch performs the actual return. An exception or a return
+/// from the finally itself naturally bypasses/overrides that pending completion.
+fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, return_ty: &Ty) {
+    if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
+        return;
+    }
+    let mut children = Vec::new();
+    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        linearize_finally_returns(ir, child, return_ty);
+    }
+    let IrExpr::Try {
+        body,
+        catches,
+        finally: Some(finally),
+        result,
+    } = ir.exprs[expression as usize].clone()
+    else {
+        return;
+    };
+    if result != Ty::Unit || !expr_has_return(ir, body) {
+        return;
+    }
+
+    let completion = max_value_index(ir) + 1;
+    let pending_value = completion + 1;
+    let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let completion_decl = ir.add_expr(IrExpr::Variable {
+        index: completion,
+        ty: Ty::Int,
+        init: Some(zero),
+        named: false,
+    });
+    let stored_return_ty = if *return_ty == Ty::Unit {
+        Ty::obj("kotlin/Unit")
+    } else {
+        *return_ty
+    };
+    let default_return = zero_value(ir, &stored_return_ty);
+    let return_decl = ir.add_expr(IrExpr::Variable {
+        index: pending_value,
+        ty: stored_return_ty,
+        init: Some(default_return),
+        named: false,
+    });
+    let label = format!("$finally$return${expression}");
+    rewrite_returns_to_pending(ir, body, &label, completion, pending_value);
+    let leave = ir.add_expr(IrExpr::Break {
+        label: Some(label.clone()),
+    });
+    let loop_body = ir.add_expr(IrExpr::Block {
+        stmts: vec![body, leave],
+        value: None,
+    });
+    let always = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+    let protected_loop = ir.add_expr(IrExpr::While {
+        cond: always,
+        body: loop_body,
+        update: None,
+        post_test: false,
+        label: Some(label),
+    });
+    let protected_body = ir.add_expr(IrExpr::Block {
+        stmts: vec![protected_loop],
+        value: None,
+    });
+    let protected = ir.add_expr(IrExpr::Try {
+        body: protected_body,
+        catches,
+        finally: Some(finally),
+        result: Ty::Unit,
+    });
+    let completion_read = ir.add_expr(IrExpr::GetValue(completion));
+    let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let has_return = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Ne,
+        lhs: completion_read,
+        rhs: zero,
+    });
+    let return_value = ir.add_expr(IrExpr::GetValue(pending_value));
+    let perform_return = ir.add_expr(IrExpr::Return(Some(return_value)));
+    let return_block = ir.add_expr(IrExpr::Block {
+        stmts: vec![perform_return],
+        value: None,
+    });
+    let fallthrough = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: None,
+    });
+    let dispatch = ir.add_expr(IrExpr::When {
+        branches: vec![(Some(has_return), return_block), (None, fallthrough)],
+    });
+    ir.exprs[expression as usize] = IrExpr::Block {
+        stmts: vec![completion_decl, return_decl, protected, dispatch],
+        value: None,
+    };
+}
+
+fn rewrite_returns_to_pending(
+    ir: &mut IrFile,
+    expression: ExprId,
+    label: &str,
+    completion: u32,
+    pending_value: u32,
+) {
+    match ir.exprs[expression as usize].clone() {
+        IrExpr::Lambda { .. } => return,
+        IrExpr::Return(value) => {
+            let value = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+            let store_value = ir.add_expr(IrExpr::SetValue {
+                var: pending_value,
+                value,
+            });
+            let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let mark_return = ir.add_expr(IrExpr::SetValue {
+                var: completion,
+                value: one,
+            });
+            let leave = ir.add_expr(IrExpr::Break {
+                label: Some(label.to_string()),
+            });
+            ir.exprs[expression as usize] = IrExpr::Block {
+                stmts: vec![store_value, mark_return, leave],
+                value: None,
+            };
+        }
+        _ => {
+            let mut children = Vec::new();
+            for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+            for child in children {
+                rewrite_returns_to_pending(ir, child, label, completion, pending_value);
+            }
+        }
+    }
+}
+
+/// Realize Kotlin's safe `suspendCoroutine` protocol around each already-inlined user block.
+///
+/// Common lowering preserves the selected primitive and its checked block as one semantic suspension
+/// point. The JVM realization uses the stdlib's actual protocol: intercept the current machine
+/// continuation, wrap it in `SafeContinuation`, invoke the block once with that wrapper, then read
+/// `getOrThrow()`. An immediate resume therefore produces the value synchronously; an asynchronous
+/// resume first returns `COROUTINE_SUSPENDED` and later re-enters the enclosing machine. No callable
+/// lookup or inline-body recovery happens here—the frontend supplied both the exact intrinsic kind and
+/// the already-spliced block.
+fn realize_safe_coroutine_points(ir: &mut IrFile) {
+    let points = ir
+        .intrinsic_suspension_points
+        .iter()
+        .filter_map(|(&expression, point)| {
+            (point.kind == crate::ir::IrIntrinsicSuspensionKind::Safe).then_some(expression)
+        })
+        .collect::<Vec<_>>();
+    for expression in points {
+        let safe_slot = max_value_index(ir).saturating_add(1);
+        let block = ir.add_expr(ir.exprs[expression as usize].clone());
+        rewrite_subtree(ir, block, &mut |node| {
+            if matches!(node, IrExpr::CurrentContinuation) {
+                *node = IrExpr::GetValue(safe_slot);
+            }
+        });
+
+        let current = ir.add_expr(IrExpr::CurrentContinuation);
+        let intercepted = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
+                name: "intercepted".to_string(),
+                descriptor: "(Lkotlin/coroutines/Continuation;)Lkotlin/coroutines/Continuation;"
+                    .to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![current],
+        });
+        let safe_ty = Ty::obj("kotlin/coroutines/SafeContinuation");
+        let safe = ir.add_expr(IrExpr::New {
+            internal: type_name("kotlin/coroutines/SafeContinuation"),
+            args: vec![intercepted],
+            ctor_params: None,
+            ctor_desc: Some("(Lkotlin/coroutines/Continuation;)V".to_string()),
+            external_target: None,
+        });
+        let declare_safe = ir.add_expr(IrExpr::Variable {
+            index: safe_slot,
+            ty: safe_ty,
+            init: Some(safe),
+            named: false,
+        });
+        let safe_for_result = ir.add_expr(IrExpr::GetValue(safe_slot));
+        let result = ir.add_expr(IrExpr::Call {
+            callee: Callee::Virtual {
+                owner: type_name("kotlin/coroutines/SafeContinuation"),
+                name: "getOrThrow".to_string(),
+                descriptor: "()Ljava/lang/Object;".to_string(),
+                params: None,
+                interface: false,
+            },
+            dispatch_receiver: Some(safe_for_result),
+            args: Vec::new(),
+        });
+        ir.exprs[expression as usize] = IrExpr::Block {
+            stmts: vec![declare_safe, block],
+            value: Some(result),
+        };
+        crate::trace_compiler!(
+            "suspend",
+            "realize safe coroutine point expression={expression} safe_slot={safe_slot}"
+        );
+    }
+}
+
+/// Convert already-derived suspend override bridges from their declared Kotlin signature to the JVM
+/// CPS signature. Bridge derivation intentionally runs before value-class realization, so that pass can
+/// reuse its normal target mangling and argument/return adaptation. Once concrete suspend methods have
+/// gained their trailing continuation, both sides of each matching bridge gain the same parameter and
+/// return `Object`; any pre-CPS result boxing is removed because the concrete suspend method already
+/// crosses the continuation boundary in boxed form.
+fn finalize_suspend_bridges(ir: &mut IrFile) {
+    let continuation = continuation_ty();
+    let object = object_ty();
+    let suspend_targets: HashSet<(TypeName, String, usize)> = ir
+        .classes
+        .iter()
+        .flat_map(|class| {
+            class.methods.iter().filter_map(|&fid| {
+                ir.suspend_funs.contains(&fid).then(|| {
+                    let function = &ir.functions[fid as usize];
+                    (
+                        class.fq_name,
+                        function.name.clone(),
+                        function.params.len().saturating_sub(1),
+                    )
+                })
+            })
+        })
+        .collect();
+    let boxed_suspend_targets: HashSet<(TypeName, String, usize)> = ir
+        .classes
+        .iter()
+        .flat_map(|class| {
+            class.methods.iter().filter_map(|&fid| {
+                matches!(
+                    ir.value_class_suspend_returns.get(&fid),
+                    Some(crate::ir::IrValueClassSuspendResult::Boxed { .. })
+                )
+                .then(|| {
+                    let function = &ir.functions[fid as usize];
+                    (
+                        class.fq_name,
+                        function.name.clone(),
+                        function.params.len().saturating_sub(1),
+                    )
+                })
+            })
+        })
+        .collect();
+    for class in &mut ir.classes {
+        for bridge in &mut class.bridges {
+            let target = bridge.target_name.as_deref().unwrap_or(&bridge.name);
+            if !suspend_targets.contains(&(
+                class.fq_name,
+                target.to_string(),
+                bridge.concrete_params.len(),
+            )) {
+                continue;
+            }
+            bridge.erased_params.push(continuation);
+            bridge.concrete_params.push(continuation);
+            if !bridge.unbox_params.is_empty() {
+                bridge.unbox_params.push(None);
+            }
+            bridge.erased_ret = object;
+            let target_key = (
+                class.fq_name,
+                target.to_string(),
+                bridge.concrete_params.len().saturating_sub(1),
+            );
+            let target_returns_boxed = boxed_suspend_targets.contains(&target_key);
+            if bridge.box_ret.is_some()
+                && bridge.concrete_ret.is_reference()
+                && !target_returns_boxed
+            {
+                // A generic supertype boundary needs a BOX, while a reference-carrier suspend target
+                // returns the raw carrier as Object. Preserve the pre-CPS carrier adaptation and record
+                // only the target descriptor's erased return separately.
+                bridge.target_ret = Some(object);
+            } else {
+                // A scalar-carrier suspend target already boxed its value class before `areturn`; a
+                // non-value-class bridge needs no result adaptation either. Forward Object directly.
+                bridge.concrete_ret = object;
+                bridge.target_ret = None;
+                bridge.box_ret = None;
+            }
+            crate::trace_compiler!(
+                "bridges",
+                "finalized suspend bridge {}::{} -> {} arity={} target_boxed={target_returns_boxed}",
+                class.fq_name,
+                bridge.name,
+                target,
+                bridge.erased_params.len()
+            );
+        }
+    }
 }
 
 /// Lift a value-position `Block` out of a top-level statement's direct operand, so a suspension buried in
@@ -376,7 +975,9 @@ pub fn lower_suspend(
 ///   `return { s…; v }`      → `s…; return v`
 ///   `val x = { s…; v }`     → `s…; val x = v`
 ///   `x = { s…; v }`         → `s…; x = v`
-/// Only a value-bearing block is spliced (a value-less / divergent block is left alone). Re-runs until
+///   `capture = { s…; v }`   → `s…; capture = v`
+/// A value-bearing block is spliced into its consumer. A value-less block is spliced only when it
+/// definitely diverges, in which case the consumer can never execute and is removed. Re-runs until
 /// settled, so nested blocks (safe-call inside elvis) fully unfold; lifted statements are reprocessed.
 fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
     // Normalize lexical child blocks before their parent. A return/value wrapper can sit inside an
@@ -452,7 +1053,34 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
             changed = true;
             continue;
         }
-        let spliced = match ir.exprs[s as usize].clone() {
+        let statement = ir.exprs[s as usize].clone();
+        // A checked inline/labeled return can leave `return { effects; return value }`: the inner
+        // value-less block never falls through, so evaluating the outer consumer is impossible.
+        // Lift its statements and drop the unreachable consumer. Apply the same semantic rule to
+        // local/captured writes whose stable holder has no prior effect; this is the divergent twin
+        // of the value-block normalization immediately below.
+        let divergent_operand = match &statement {
+            IrExpr::Return(Some(inner))
+            | IrExpr::Variable {
+                init: Some(inner), ..
+            }
+            | IrExpr::SetValue { value: inner, .. } => Some(*inner),
+            IrExpr::RefSet { holder, value, .. }
+                if matches!(ir.exprs[*holder as usize], IrExpr::GetValue(_)) =>
+            {
+                Some(*value)
+            }
+            _ => None,
+        };
+        if let Some(statements) = divergent_operand
+            .filter(|inner| !ir.intrinsic_suspension_points.contains_key(inner))
+            .and_then(|inner| diverging_block_statements(ir, inner))
+        {
+            new_stmts.extend(statements);
+            changed = true;
+            continue;
+        }
+        let spliced = match statement {
             IrExpr::Return(Some(inner)) => value_block(ir, inner)
                 .filter(|_| !ir.intrinsic_suspension_points.contains_key(&inner))
                 .map(|(bs, bv)| {
@@ -480,6 +1108,20 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
                 .map(|(bs, bv)| {
                     new_stmts.extend(bs);
                     ir.add_expr(IrExpr::SetValue { var, value: bv })
+                }),
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value: inner,
+            } if matches!(ir.exprs[holder as usize], IrExpr::GetValue(_)) => value_block(ir, inner)
+                .filter(|_| !ir.intrinsic_suspension_points.contains_key(&inner))
+                .map(|(bs, bv)| {
+                    new_stmts.extend(bs);
+                    ir.add_expr(IrExpr::RefSet {
+                        holder,
+                        elem,
+                        value: bv,
+                    })
                 }),
             _ => None,
         };
@@ -513,13 +1155,41 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
     }
 }
 
+/// Statements of a structural block that cannot produce a value or fall through. Checked
+/// coercions around it are observationally irrelevant because control never reaches the coercion.
+fn diverging_block_statements(ir: &IrFile, expression: ExprId) -> Option<Vec<ExprId>> {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Block { stmts, value: None } if stmt_diverges(ir, expression) => {
+            Some(stmts.clone())
+        }
+        IrExpr::TypeOp { arg, .. } => diverging_block_statements(ir, *arg),
+        _ => None,
+    }
+}
+
 /// If `e` is a value-bearing `Block`, return `(its statements, its value)`; else `None`.
-fn value_block(ir: &IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
-    match &ir.exprs[e as usize] {
+fn value_block(ir: &mut IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
+    match ir.exprs[e as usize].clone() {
         IrExpr::Block {
             stmts,
-            value: Some(v),
-        } => Some((stmts.clone(), *v)),
+            value: Some(value),
+        } => Some((stmts, value)),
+        // Checked result coercions do not make a source grouping block semantically observable.
+        // Lift the block's statements and reapply the exact operation to its value; no type or
+        // conversion decision is repeated here.
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } => {
+            let (statements, value) = value_block(ir, arg)?;
+            let value = ir.add_expr(IrExpr::TypeOp {
+                op,
+                arg: value,
+                type_operand,
+            });
+            Some((statements, value))
+        }
         _ => None,
     }
 }
@@ -564,6 +1234,25 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
             value,
         };
     }
+}
+
+/// A checked block can retain an exhaustive conditional as its syntactic value even when every arm
+/// returns or throws. Such a value never reaches the operand stack; make it an ordinary terminal
+/// statement so suspension normalization can descend into its arms and the state-machine builder
+/// does not mistake it for an unsupported value-producing tail.
+fn promote_diverging_tail_to_statement(ir: &mut IrFile, body: ExprId) {
+    let IrExpr::Block {
+        mut stmts,
+        value: Some(value),
+    } = ir.exprs[body as usize].clone()
+    else {
+        return;
+    };
+    if !stmt_diverges(ir, value) {
+        return;
+    }
+    stmts.push(value);
+    ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
 }
 
 /// Apply [`desugar_tail_suspend`]'s rewrite to the `return`s nested inside a statement — the arms of a
@@ -619,19 +1308,9 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if let Some(parts) = suspending_value_try(ir, e, suspend_set) {
-                let tmp = max_value_index(ir) + 1;
-                let dflt = zero_value(ir, ret_ty);
-                let decl = ir.add_expr(IrExpr::Variable {
-                    index: tmp,
-                    ty: *ret_ty,
-                    init: Some(dflt),
-                    named: false,
-                });
-                // Add the target declaration before rewriting branches: a suspending branch may
-                // allocate another temporary via `max_value_index`, which must not reuse `tmp`.
-                let new_try = bind_value_try_to_local(ir, parts, tmp, ret_ty, suspend_set);
-                let get = ir.add_expr(IrExpr::GetValue(tmp));
+            if let Some((decl, new_try, get)) =
+                bind_value_try_to_fresh_local(ir, e, ret_ty, suspend_set)
+            {
                 let ret = ir.add_expr(IrExpr::Return(Some(get)));
                 new_stmts.push(decl);
                 new_stmts.push(new_try);
@@ -666,6 +1345,58 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
                 continue;
             }
         }
+        // Storage writes do not acquire their new value until the complete `try` expression returns.
+        // Bind the selected body/catch result to a fresh local first, then perform the original write.
+        // Local/static targets and a captured-cell holder read have no receiver effect to reorder.
+        match ir.exprs[s as usize].clone() {
+            IrExpr::SetValue { var, value } => {
+                if let Some(ty) = ir.logical_types.get(&value).copied() {
+                    if let Some((decl, new_try, get)) =
+                        bind_value_try_to_fresh_local(ir, value, &ty, suspend_set)
+                    {
+                        new_stmts.push(decl);
+                        new_stmts.push(new_try);
+                        new_stmts.push(ir.add_expr(IrExpr::SetValue { var, value: get }));
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+            IrExpr::SetStatic { index, value } => {
+                let ty = ir.statics.get(index as usize).map(|field| field.ty);
+                if let Some(ty) = ty {
+                    if let Some((decl, new_try, get)) =
+                        bind_value_try_to_fresh_local(ir, value, &ty, suspend_set)
+                    {
+                        new_stmts.push(decl);
+                        new_stmts.push(new_try);
+                        new_stmts.push(ir.add_expr(IrExpr::SetStatic { index, value: get }));
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value,
+            } if matches!(ir.exprs[holder as usize], IrExpr::GetValue(_)) => {
+                if let Some((decl, new_try, get)) =
+                    bind_value_try_to_fresh_local(ir, value, &elem, suspend_set)
+                {
+                    new_stmts.push(decl);
+                    new_stmts.push(new_try);
+                    new_stmts.push(ir.add_expr(IrExpr::RefSet {
+                        holder,
+                        elem,
+                        value: get,
+                    }));
+                    changed = true;
+                    continue;
+                }
+            }
+            _ => {}
+        }
         new_stmts.push(s);
     }
     if changed {
@@ -674,6 +1405,28 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
             value,
         };
     }
+}
+
+fn bind_value_try_to_fresh_local(
+    ir: &mut IrFile,
+    expression: ExprId,
+    ty: &Ty,
+    suspend_set: &HashSet<u32>,
+) -> Option<(ExprId, ExprId, ExprId)> {
+    let parts = suspending_value_try(ir, expression, suspend_set)?;
+    let target = max_value_index(ir) + 1;
+    let dflt = zero_value(ir, ty);
+    let declaration = ir.add_expr(IrExpr::Variable {
+        index: target,
+        ty: *ty,
+        init: Some(dflt),
+        named: false,
+    });
+    // Publish the declaration before rewriting branches: a suspending branch may allocate another
+    // temporary via `max_value_index`, which must not reuse the result slot.
+    let value_try = bind_value_try_to_local(ir, parts, target, ty, suspend_set);
+    let value = ir.add_expr(IrExpr::GetValue(target));
+    Some((declaration, value_try, value))
 }
 
 /// Recognize the one semantic value-`try` shape supported by the state-machine desugar. The source
@@ -692,7 +1445,16 @@ fn suspending_value_try(
             arg,
             type_operand,
         } if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) => {
-            (arg, Some((op, type_operand)))
+            (arg, Some(ValueBranchWrap::TypeOp(op, type_operand)))
+        }
+        IrExpr::Call {
+            callee,
+            dispatch_receiver: None,
+            args,
+        } if matches!(&callee, Callee::Static { name, .. } if name == "box-impl")
+            && matches!(args.as_slice(), [arg] if matches!(ir.exprs[*arg as usize], IrExpr::Try { .. })) =>
+        {
+            (args[0], Some(ValueBranchWrap::ValueClassBox(callee)))
         }
         _ => (expression, None),
     };
@@ -726,7 +1488,14 @@ fn bind_value_try_to_local(
     ty: &Ty,
     suspend_set: &HashSet<u32>,
 ) -> ExprId {
-    let new_body = assign_branch_to_tmp(ir, parts.body, target, ty, suspend_set, parts.branch_wrap);
+    let new_body = assign_branch_to_tmp(
+        ir,
+        parts.body,
+        target,
+        ty,
+        suspend_set,
+        parts.branch_wrap.clone(),
+    );
     let new_catches: Vec<crate::ir::IrCatch> = parts
         .catches
         .into_iter()
@@ -734,7 +1503,14 @@ fn bind_value_try_to_local(
             var: catch.var,
             name: catch.name,
             exc_internal: catch.exc_internal,
-            body: assign_branch_to_tmp(ir, catch.body, target, ty, suspend_set, parts.branch_wrap),
+            body: assign_branch_to_tmp(
+                ir,
+                catch.body,
+                target,
+                ty,
+                suspend_set,
+                parts.branch_wrap.clone(),
+            ),
         })
         .collect();
     ir.add_expr(IrExpr::Try {
@@ -749,9 +1525,7 @@ fn bind_value_try_to_local(
 /// CONDITIONS do not — a suspending condition is hoisted earlier) into a STATEMENT-position `when` binding
 /// a temp: `return when (x) { a -> v0; else -> v1 }` becomes `var tmp = <default>; when (x) { a -> { …
 /// tmp = v0 }; else -> { … tmp = v1 } }; return tmp`. The flattener models a `when` STATEMENT with
-/// suspending branch bodies (`emit_when_stmt`), so each branch's suspension surfaces there. Only
-/// `return <when>` is rewritten (the production apply-operation shape); a `val`/assignment of a
-/// suspending value-`when` is left to the flattener's `stmt_cond_suspension` / a skip.
+/// suspending branch bodies (`emit_when_stmt`), so each branch's suspension surfaces there.
 fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
@@ -760,48 +1534,9 @@ fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, re
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            // Move a result cast onto each selected branch.
-            let (when_expr, branch_wrap) = match ir.exprs[e as usize].clone() {
-                IrExpr::When { .. } => (e, None),
-                IrExpr::TypeOp {
-                    op,
-                    arg,
-                    type_operand,
-                } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
-                    (arg, Some((op, type_operand)))
-                }
-                _ => (e, None),
-            };
-            // Only a `when` whose BRANCH values suspend and whose CONDITIONS do NOT (those are hoisted
-            // before this pass) — otherwise leave it to the condition-hoist / a skip.
-            if matches!(ir.exprs[when_expr as usize], IrExpr::When { .. })
-                && expr_calls_suspend(ir, when_expr, suspend_set)
-                && !when_cond_suspends(ir, when_expr, suspend_set)
+            if let Some((decl, new_when, get)) =
+                bind_value_when_to_fresh_local(ir, e, ret_ty, suspend_set)
             {
-                let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
-                    unreachable!()
-                };
-                let tmp = max_value_index(ir) + 1;
-                let dflt = zero_value(ir, ret_ty);
-                let decl = ir.add_expr(IrExpr::Variable {
-                    index: tmp,
-                    ty: *ret_ty,
-                    init: Some(dflt),
-                    named: false,
-                });
-                let new_branches: Branches = branches
-                    .into_iter()
-                    .map(|(cond, body)| {
-                        (
-                            cond,
-                            assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set, branch_wrap),
-                        )
-                    })
-                    .collect();
-                let new_when = ir.add_expr(IrExpr::When {
-                    branches: new_branches,
-                });
-                let get = ir.add_expr(IrExpr::GetValue(tmp));
                 let ret = ir.add_expr(IrExpr::Return(Some(get)));
                 new_stmts.push(decl);
                 new_stmts.push(new_when);
@@ -820,6 +1555,57 @@ fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, re
     }
 }
 
+/// Bind a suspending value-`when` to one fresh typed local and return the declaration, the
+/// statement-position conditional, and the final read. This is the one normalization shared by
+/// returns and storage writes; callers decide only where the final read is consumed.
+fn bind_value_when_to_fresh_local(
+    ir: &mut IrFile,
+    expression: ExprId,
+    ty: &Ty,
+    suspend_set: &HashSet<u32>,
+) -> Option<(ExprId, ExprId, ExprId)> {
+    // A result coercion belongs on each selected branch, after its suspension resumes.
+    let (when_expr, branch_wrap) = match ir.exprs[expression as usize].clone() {
+        IrExpr::When { .. } => (expression, None),
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
+            (arg, Some(ValueBranchWrap::TypeOp(op, type_operand)))
+        }
+        _ => return None,
+    };
+    let suspends = expr_calls_suspend(ir, when_expr, suspend_set);
+    let exits_loop = expr_contains_owned_loop_jump(ir, when_expr);
+    if !suspends && !exits_loop {
+        return None;
+    }
+    let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
+        return None;
+    };
+    let tmp = max_value_index(ir) + 1;
+    let dflt = zero_value(ir, ty);
+    let declaration = ir.add_expr(IrExpr::Variable {
+        index: tmp,
+        ty: *ty,
+        init: Some(dflt),
+        named: false,
+    });
+    let branches = branches
+        .into_iter()
+        .map(|(condition, body)| {
+            (
+                condition,
+                assign_branch_to_tmp(ir, body, tmp, ty, suspend_set, branch_wrap.clone()),
+            )
+        })
+        .collect();
+    let conditional = ir.add_expr(IrExpr::When { branches });
+    let value = ir.add_expr(IrExpr::GetValue(tmp));
+    Some((declaration, conditional, value))
+}
+
 /// Rewrite a `try`/`catch` branch into a value-LESS block that runs its statements and assigns its VALUE
 /// to `tmp`. A suspending value is bound to a fresh `Variable` (so the flattener handles the suspension),
 /// then copied to `tmp`; a non-suspending value is assigned directly. A branch with no value (a divergent
@@ -830,7 +1616,7 @@ fn assign_branch_to_tmp(
     tmp: u32,
     ty: &Ty,
     suspend_set: &HashSet<u32>,
-    wrap: Option<(IrTypeOp, Ty)>,
+    wrap: Option<ValueBranchWrap>,
 ) -> ExprId {
     let (mut stmts, value) = match ir.exprs[branch as usize].clone() {
         IrExpr::Block { stmts, value } => (stmts, value),
@@ -844,14 +1630,27 @@ fn assign_branch_to_tmp(
             // `stmt_diverges` on this same value suppresses that trailing goto.
             stmts.push(v);
         } else {
-            if let Some((op, type_operand)) = wrap {
-                v = ir.add_expr(IrExpr::TypeOp {
-                    op,
-                    arg: v,
-                    type_operand,
-                });
+            if let Some(wrap) = wrap {
+                v = match wrap {
+                    ValueBranchWrap::TypeOp(op, type_operand) => ir.add_expr(IrExpr::TypeOp {
+                        op,
+                        arg: v,
+                        type_operand,
+                    }),
+                    ValueBranchWrap::ValueClassBox(callee) => ir.add_expr(IrExpr::Call {
+                        callee,
+                        dispatch_receiver: None,
+                        args: vec![v],
+                    }),
+                };
             }
-            if expr_calls_suspend(ir, v, suspend_set) {
+            if let Some((declaration, value_try, value)) =
+                bind_value_try_to_fresh_local(ir, v, ty, suspend_set)
+            {
+                stmts.push(declaration);
+                stmts.push(value_try);
+                stmts.push(ir.add_expr(IrExpr::SetValue { var: tmp, value }));
+            } else if expr_calls_suspend(ir, v, suspend_set) {
                 let fresh = max_value_index(ir) + 1;
                 let var = ir.add_expr(IrExpr::Variable {
                     index: fresh,
@@ -888,42 +1687,171 @@ fn when_cond_suspends(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
         if branches.iter().any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set))))
 }
 
-/// If `when_expr` is an `if`/`when` EXPRESSION with a suspension in one of its CONDITIONS (which evaluate
-/// unconditionally, before any branch), hoist those conditions to preceding bound temps (pushed onto
-/// `out`) and return a NEW `When` whose conditions read the temps. `None` when `when_expr` isn't a `When`
-/// or no condition suspends — the caller keeps the original. Branch VALUES are left untouched (a
-/// branch-value suspension is the flattener's job). Shared by the tail-value / `return` / `val =` arms.
+fn value_when(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
+    match ir.exprs[expression as usize] {
+        IrExpr::When { .. } => Some(expression),
+        IrExpr::TypeOp { arg, .. } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
+            Some(arg)
+        }
+        _ => None,
+    }
+}
+
+/// Expose a checked conversion wrapped around a value conditional by applying that same operation
+/// to each selected branch value. This is a structural equality:
+/// `convert(if (c) a else b)` becomes `if (c) convert(a) else convert(b)`; branch statements and
+/// divergent branches remain inside their original control-flow region.
+fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
+    match ir.exprs[expression as usize].clone() {
+        IrExpr::When { .. } => Some(expression),
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } => {
+            let IrExpr::When { branches } = ir.exprs[arg as usize].clone() else {
+                return None;
+            };
+            let branches = branches
+                .into_iter()
+                .map(|(condition, body)| {
+                    let body = if let Some((stmts, value)) = value_block(ir, body) {
+                        let value = ir.add_expr(IrExpr::TypeOp {
+                            op,
+                            arg: value,
+                            type_operand,
+                        });
+                        ir.add_expr(IrExpr::Block {
+                            stmts,
+                            value: Some(value),
+                        })
+                    } else if matches!(ir.exprs[body as usize], IrExpr::Block { value: None, .. }) {
+                        body
+                    } else {
+                        ir.add_expr(IrExpr::TypeOp {
+                            op,
+                            arg: body,
+                            type_operand,
+                        })
+                    };
+                    (condition, body)
+                })
+                .collect();
+            Some(ir.add_expr(IrExpr::When { branches }))
+        }
+        _ => None,
+    }
+}
+
+/// Turn a value `when` with a suspending condition into a result local plus a statement decision tree.
+/// A Kotlin `when` does *not* evaluate all conditions eagerly: condition `n + 1` is reached only after
+/// condition `n` was false. Consequently a suspending condition cannot simply be hoisted into the
+/// surrounding statement prelude. [`hoist_when_statement_branches`] nests the remaining conditions in
+/// the preceding arm's `else`, preserving that scope-tower-like evaluation order exactly.
 fn hoist_when_cond_suspensions(
     ir: &mut IrFile,
-    when_expr: ExprId,
+    expression: ExprId,
+    expected_ty: Option<Ty>,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
     value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) -> Option<ExprId> {
-    let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
-        return None;
-    };
-    let cond_suspends = branches
-        .iter()
-        .any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set)));
-    if !cond_suspends {
+    let when_expr = value_when(ir, expression)?;
+    if !when_cond_suspends(ir, when_expr, suspend_set) {
         return None;
     }
-    let mut prelude: Vec<ExprId> = Vec::new();
-    let new_branches: Branches = branches
-        .into_iter()
-        .map(|(cond, body)| {
-            (
-                cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, value_types, &mut prelude)),
-                body,
-            )
+    let ty = expected_ty
+        .or_else(|| match ir.exprs[expression as usize] {
+            IrExpr::TypeOp { type_operand, .. } => Some(type_operand),
+            _ => ir.logical_types.get(&expression).copied(),
         })
-        .collect();
-    out.extend(prelude);
-    Some(ir.add_expr(IrExpr::When {
-        branches: new_branches,
-    }))
+        .or_else(|| ir.logical_types.get(&when_expr).copied())?;
+    let (declaration, conditional, value) =
+        bind_value_when_to_fresh_local(ir, expression, &ty, suspend_set)?;
+    value_types.insert(
+        match ir.exprs[declaration as usize] {
+            IrExpr::Variable { index, .. } => index,
+            _ => unreachable!("value-when binding must declare its result local"),
+        },
+        ty,
+    );
+    out.push(declaration);
+    let IrExpr::When { branches } = ir.exprs[conditional as usize].clone() else {
+        unreachable!("value-when binding must produce a statement conditional")
+    };
+    out.extend(hoist_when_statement_branches(
+        ir,
+        branches,
+        suspend_set,
+        orig_rets,
+        value_types,
+    ));
+    Some(value)
+}
+
+/// Normalize a statement `when` into a left-to-right decision tree. Each condition's hoisted prelude
+/// stays immediately before that condition; later conditions live in the previous condition's `else`
+/// block and therefore remain unevaluated after a match.
+fn hoist_when_statement_branches(
+    ir: &mut IrFile,
+    branches: Branches,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+) -> Vec<ExprId> {
+    let Some(((condition, body), rest)) = branches.split_first() else {
+        return Vec::new();
+    };
+    let body = normalize_when_statement_body(ir, *body, suspend_set, orig_rets, value_types);
+    let Some(condition) = *condition else {
+        debug_assert!(rest.is_empty(), "checked when else branch must be last");
+        return vec![body];
+    };
+
+    let mut out = Vec::new();
+    let condition = hoist_expr(ir, condition, suspend_set, orig_rets, value_types, &mut out);
+    let remaining =
+        hoist_when_statement_branches(ir, rest.to_vec(), suspend_set, orig_rets, value_types);
+    let else_body = ir.add_expr(IrExpr::Block {
+        stmts: remaining,
+        value: None,
+    });
+    out.push(ir.add_expr(IrExpr::When {
+        branches: vec![(Some(condition), body), (None, else_body)],
+    }));
+    out
+}
+
+fn normalize_when_statement_body(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+) -> ExprId {
+    if matches!(ir.exprs[body as usize], IrExpr::Block { .. }) {
+        demote_block_value_to_statement(ir, body);
+        hoist_suspensions(ir, body, suspend_set, orig_rets, value_types);
+        return body;
+    }
+    let mut statements = Vec::new();
+    hoist_stmt(
+        ir,
+        body,
+        suspend_set,
+        orig_rets,
+        value_types,
+        &mut statements,
+    );
+    if let [only] = statements.as_slice() {
+        *only
+    } else {
+        ir.add_expr(IrExpr::Block {
+            stmts: statements,
+            value: None,
+        })
+    }
 }
 
 fn hoist_suspensions(
@@ -945,7 +1873,7 @@ fn hoist_suspensions(
     // `return if (susp()) …` statement above, so the flattener never meets a condition-suspending When it
     // can't model.
     let new_value = value.map(|v| {
-        hoist_when_cond_suspensions(ir, v, suspend_set, orig_rets, value_types, &mut out)
+        hoist_when_cond_suspensions(ir, v, None, suspend_set, orig_rets, value_types, &mut out)
             .unwrap_or(v)
     });
     ir.exprs[b as usize] = IrExpr::Block {
@@ -963,35 +1891,83 @@ fn hoist_stmt(
     value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) {
+    if let IrExpr::Variable {
+        index,
+        ty,
+        init: Some(init),
+        named,
+    } = ir.exprs[stmt as usize].clone()
+    {
+        if let IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } = ir.exprs[init as usize].clone()
+        {
+            if !ir.intrinsic_suspension_points.contains_key(&init)
+                && (expr_calls_suspend(ir, init, suspend_set)
+                    || expr_contains_owned_loop_jump(ir, init))
+            {
+                for statement in stmts {
+                    hoist_stmt(ir, statement, suspend_set, orig_rets, value_types, out);
+                }
+                let rebound = ir.add_expr(IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(value),
+                    named,
+                });
+                hoist_stmt(ir, rebound, suspend_set, orig_rets, value_types, out);
+                return;
+            }
+        }
+    }
+    // A bare registered suspension point is atomic even when its physical node is an inlined
+    // value-bearing `Block`. Its value is the CPS result that must be compared with
+    // `COROUTINE_SUSPENDED`; treating it as an ordinary statement block would discard that value
+    // before `emit_suspension` can bind it. Callable points take the same path, so operand hoisting
+    // remains uniform and selected-call agnostic.
+    if is_suspension_point(ir, stmt, suspend_set) {
+        hoist_call_operands_in_order(ir, stmt, suspend_set, orig_rets, value_types, out);
+        out.push(stmt);
+        return;
+    }
     // Statements the flattener handles directly keep their suspension in place.
     match &ir.exprs[stmt as usize] {
-        // An `if`/`when` STATEMENT: its CONDITIONS evaluate unconditionally (before any branch), so a
-        // suspension there (`if (c && check())`) is hoisted to a preceding bound temp; the BODIES stay
-        // for the flattener (`emit_when_stmt`). A `while` keeps its suspension in place.
+        // A statement `when` with suspending conditions becomes a nested decision tree. Keeping the
+        // remaining conditions inside the preceding `else` is essential: Kotlin stops testing after
+        // the first match. A `while` keeps its suspension in its repeatedly evaluated header.
         IrExpr::When { branches } => {
             let branches = branches.clone();
             let cond_suspends = branches
                 .iter()
                 .any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set)));
             if !cond_suspends {
+                let branches = branches
+                    .into_iter()
+                    .map(|(condition, body)| {
+                        (
+                            condition,
+                            normalize_when_statement_body(
+                                ir,
+                                body,
+                                suspend_set,
+                                orig_rets,
+                                value_types,
+                            ),
+                        )
+                    })
+                    .collect();
+                ir.exprs[stmt as usize] = IrExpr::When { branches };
                 out.push(stmt);
                 return;
             }
-            let mut prelude: Vec<ExprId> = Vec::new();
-            let new_branches: Branches = branches
-                .into_iter()
-                .map(|(cond, body)| {
-                    let nc = cond.map(|c| {
-                        hoist_expr(ir, c, suspend_set, orig_rets, value_types, &mut prelude)
-                    });
-                    (nc, body)
-                })
-                .collect();
-            out.extend(prelude);
-            let nw = ir.add_expr(IrExpr::When {
-                branches: new_branches,
-            });
-            out.push(nw);
+            out.extend(hoist_when_statement_branches(
+                ir,
+                branches,
+                suspend_set,
+                orig_rets,
+                value_types,
+            ));
             return;
         }
         // A `return if (susp()) a else b` / `return when (susp()) { … }` — the tail `if`/`when` EXPRESSION's
@@ -1000,21 +1976,51 @@ fn hoist_stmt(
         // the flattener meets a `Return(When{cond suspends})` it can't model and bails. (Only the condition
         // is hoisted; a branch VALUE that suspends stays for the flattener / a later skip.)
         IrExpr::Return(Some(v)) if when_cond_suspends(ir, *v, suspend_set) => {
-            let nw = hoist_when_cond_suspensions(ir, *v, suspend_set, orig_rets, value_types, out)
-                .expect("guard ensured a condition suspends");
+            let nw =
+                hoist_when_cond_suspensions(ir, *v, None, suspend_set, orig_rets, value_types, out)
+                    .expect("guard ensured a condition suspends");
             let nr = ir.add_expr(IrExpr::Return(Some(nw)));
             out.push(nr);
             return;
         }
-        IrExpr::While { body, .. } => {
+        IrExpr::While {
+            cond,
+            body,
+            update,
+            post_test,
+            label,
+        } => {
             // The loop CONDITION/update stay for the flattener; but a statement in the loop BODY with a
             // suspension buried in a call argument (`list.addAll(repo.get())` in a `for`) must be hoisted
             // to `val tmp = repo.get(); list.addAll(tmp)` — the flattener models a bound-local suspension,
             // not one in an argument. Recurse into the body block (in place); nested loops recurse too.
-            let body = *body;
+            let (cond, body, update, post_test, label) =
+                (*cond, *body, *update, *post_test, label.clone());
             if matches!(ir.exprs[body as usize], IrExpr::Block { .. }) {
                 hoist_suspensions(ir, body, suspend_set, orig_rets, value_types);
             }
+            // A loop condition is conditional with respect to entering the loop, but every time the
+            // HEADER is reached its operands evaluate unconditionally. Keep its hoisted suspension
+            // temporaries inside a value-bearing block on the condition itself so they run on EVERY
+            // test (and, for a post-test loop, only after the first body iteration). The state flattener
+            // turns that block into the header's state sequence below.
+            let cond = if expr_calls_suspend(ir, cond, suspend_set) {
+                let mut prelude = Vec::new();
+                let value = hoist_expr(ir, cond, suspend_set, orig_rets, value_types, &mut prelude);
+                ir.add_expr(IrExpr::Block {
+                    stmts: prelude,
+                    value: Some(value),
+                })
+            } else {
+                cond
+            };
+            ir.exprs[stmt as usize] = IrExpr::While {
+                cond,
+                body,
+                update,
+                post_test,
+                label,
+            };
             out.push(stmt);
             return;
         }
@@ -1048,14 +2054,22 @@ fn hoist_stmt(
             body,
             catches,
             finally,
-            ..
+            result,
         } => {
-            let blocks: Vec<ExprId> = std::iter::once(*body)
-                .chain(catches.iter().map(|c| c.body))
-                .chain(*finally)
+            let value_region = *result != Ty::Unit;
+            let mut regions: Vec<(ExprId, bool)> = std::iter::once((*body, value_region))
+                .chain(catches.iter().map(|catch| (catch.body, value_region)))
                 .collect();
-            for b in blocks {
-                hoist_suspensions(ir, b, suspend_set, orig_rets, value_types);
+            regions.extend(finally.iter().map(|finally| (*finally, false)));
+            for (region, produces_value) in regions {
+                hoist_protected_region(
+                    ir,
+                    region,
+                    produces_value,
+                    suspend_set,
+                    orig_rets,
+                    value_types,
+                );
             }
             out.push(stmt);
             return;
@@ -1075,31 +2089,91 @@ fn hoist_stmt(
             index,
             ty,
             named,
-        } if matches!(ir.exprs[*i as usize], IrExpr::When { .. }) => {
+        } if value_when(ir, *i).is_some() => {
             let (i, index, ty, named) = (*i, *index, *ty, *named);
+            let i = normalize_value_when(ir, i).expect("guard selected a value conditional");
             // `val a = if (susp()) x else y` — hoist the CONDITION suspension to a preceding temp, then
             // re-bind `a` to the When with the hoisted condition. A branch VALUE that suspends stays for
             // the flattener's `stmt_cond_suspension` (`val a = when { … -> susp() }`), which this arm still
             // routes to (`hoist_when_cond_suspensions` returns `None`) when the condition doesn't suspend.
-            match hoist_when_cond_suspensions(ir, i, suspend_set, orig_rets, value_types, out) {
-                Some(nw) => {
-                    let nv = ir.add_expr(IrExpr::Variable {
-                        index,
-                        ty,
-                        init: Some(nw),
-                        named,
-                    });
-                    out.push(nv);
-                }
-                None => out.push(stmt),
+            let i = hoist_when_cond_suspensions(
+                ir,
+                i,
+                Some(ty),
+                suspend_set,
+                orig_rets,
+                value_types,
+                out,
+            )
+            .unwrap_or(i);
+            if when_has_non_direct_suspending_branch(ir, i, suspend_set)
+                || expr_contains_owned_loop_jump(ir, i)
+            {
+                let (declaration, conditional, value) =
+                    bind_value_when_to_fresh_local(ir, i, &ty, suspend_set)
+                        .expect("non-direct suspending branch must bind as a value conditional");
+                out.push(declaration);
+                out.push(conditional);
+                out.push(ir.add_expr(IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(value),
+                    named,
+                }));
+            } else {
+                ir.exprs[stmt as usize] = IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(i),
+                    named,
+                };
+                out.push(stmt);
             }
             return;
         }
-        // A bare suspension-call STATEMENT keeps its suspension in place, but its operands hoist
-        // exactly as in the bound form above.
-        _ if is_suspension_point(ir, stmt, suspend_set) => {
-            hoist_call_operands_in_order(ir, stmt, suspend_set, orig_rets, value_types, out);
-            out.push(stmt);
+        // A captured-variable write whose RHS is a value conditional (`captured = if (check())
+        // await() else fallback`). The holder is an already-evaluated lexical capture, so it has no
+        // source-visible effect to reorder. Hoist suspending CONDITIONS first, then bind suspending
+        // BRANCH values through the same typed normalization used by `return when` above. This
+        // leaves the flattener a statement-position conditional followed by one ordinary holder
+        // write instead of teaching it a storage-specific conditional grammar.
+        IrExpr::RefSet {
+            holder,
+            elem,
+            value,
+        } if matches!(ir.exprs[*holder as usize], IrExpr::GetValue(_))
+            && value_when(ir, *value).is_some()
+            && expr_calls_suspend(ir, *value, suspend_set) =>
+        {
+            let (holder, elem, mut value) = (*holder, *elem, *value);
+            if let Some(conditional) = hoist_when_cond_suspensions(
+                ir,
+                value,
+                Some(elem),
+                suspend_set,
+                orig_rets,
+                value_types,
+                out,
+            ) {
+                value = conditional;
+            }
+            if let Some((declaration, conditional, value)) =
+                bind_value_when_to_fresh_local(ir, value, &elem, suspend_set)
+            {
+                out.push(declaration);
+                out.push(conditional);
+                out.push(ir.add_expr(IrExpr::RefSet {
+                    holder,
+                    elem,
+                    value,
+                }));
+            } else {
+                out.push(ir.add_expr(IrExpr::RefSet {
+                    holder,
+                    elem,
+                    value,
+                }));
+            }
             return;
         }
         _ => {}
@@ -1107,6 +2181,62 @@ fn hoist_stmt(
     // Hoist suspensions in the statement's unconditional sub-expressions.
     let new_stmt = hoist_expr(ir, stmt, suspend_set, orig_rets, value_types, out);
     out.push(new_stmt);
+}
+
+fn hoist_protected_region(
+    ir: &mut IrFile,
+    region: ExprId,
+    produces_value: bool,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+) {
+    if matches!(ir.exprs[region as usize], IrExpr::Block { .. }) {
+        if !produces_value {
+            demote_block_value_to_statement(ir, region);
+        }
+        hoist_suspensions(ir, region, suspend_set, orig_rets, value_types);
+        return;
+    }
+    let original = ir.add_expr(ir.exprs[region as usize].clone());
+    if produces_value {
+        let mut stmts = Vec::new();
+        let value = hoist_expr(
+            ir,
+            original,
+            suspend_set,
+            orig_rets,
+            value_types,
+            &mut stmts,
+        );
+        ir.exprs[region as usize] = IrExpr::Block {
+            stmts,
+            value: Some(value),
+        };
+    } else {
+        let mut stmts = Vec::new();
+        hoist_stmt(
+            ir,
+            original,
+            suspend_set,
+            orig_rets,
+            value_types,
+            &mut stmts,
+        );
+        ir.exprs[region as usize] = IrExpr::Block { stmts, value: None };
+    }
+}
+
+fn demote_block_value_to_statement(ir: &mut IrFile, block: ExprId) {
+    let IrExpr::Block {
+        mut stmts,
+        value: Some(value),
+    } = ir.exprs[block as usize].clone()
+    else {
+        return;
+    };
+    stmts.push(value);
+    ir.exprs[block as usize] = IrExpr::Block { stmts, value: None };
 }
 
 /// Replace each unconditional suspension call in `e` with a fresh `tmp`, appending `val tmp = <call>` to
@@ -1129,7 +2259,9 @@ fn hoist_expr(
         }
         // Logical return type of the suspension: from ir_lower for a cross-unit call or intrinsic
         // point, else the callee's `orig_rets` entry (a same-file callee), else `Object`.
-        let ty = recorded_suspension_result(ir, e)
+        let ty = value_class_suspension_result(ir, e, suspend_set)
+            .map(crate::ir::IrValueClassSuspendResult::boundary_ty)
+            .or_else(|| recorded_suspension_result(ir, e))
             .or_else(|| {
                 suspend_call_fid(ir, e, suspend_set)
                     .and_then(|fid| orig_rets.get(fid as usize).cloned())
@@ -1150,46 +2282,111 @@ fn hoist_expr(
         );
         return ir.add_expr(IrExpr::GetValue(tmp));
     }
+
+    // A value conditional nested in an otherwise-unconditional expression position must become a
+    // statement conditional before its branch suspension can be state-split. This is the same typed
+    // transformation used for a top-level variable/return value: declare one result local, assign it
+    // in every selected branch (binding a direct suspension there), then let the enclosing expression
+    // consume the local. The enclosing ordered-operand planner has already snapshotted every earlier
+    // operand, so lifting these statements into `prelude` preserves Kotlin evaluation order.
+    if let Some(when_expr) = value_when(ir, e) {
+        if expr_calls_suspend(ir, e, suspend_set) && when_cond_suspends(ir, when_expr, suspend_set)
+        {
+            if let Some(value) = hoist_when_cond_suspensions(
+                ir,
+                e,
+                None,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) {
+                return value;
+            }
+        }
+        if !expr_calls_suspend(ir, e, suspend_set) {
+            return e;
+        }
+        let semantic_ty = match ir.exprs[e as usize] {
+            IrExpr::TypeOp { type_operand, .. } => Some(type_operand),
+            _ => ir.logical_types.get(&e).copied(),
+        };
+        if let Some(ty) = semantic_ty {
+            if let Some((declaration, conditional, value)) =
+                bind_value_when_to_fresh_local(ir, e, &ty, suspend_set)
+            {
+                if let IrExpr::Variable { index, .. } = ir.exprs[declaration as usize] {
+                    value_types.insert(index, ty);
+                }
+                // The branch binder exposes the conditional at statement level, but a branch value
+                // can still wrap its suspension in checked coercions and a value block (notably a
+                // nullable `Unit` safe call). Normalize each selected branch in its own block so its
+                // effects remain conditional while the direct suspension becomes visible to `Flat`.
+                if let IrExpr::When { branches } = ir.exprs[conditional as usize].clone() {
+                    for (_, branch) in branches {
+                        if matches!(ir.exprs[branch as usize], IrExpr::Block { .. }) {
+                            hoist_suspensions(ir, branch, suspend_set, orig_rets, value_types);
+                        }
+                    }
+                }
+                prelude.push(declaration);
+                prelude.push(conditional);
+                return value;
+            }
+        }
+    }
     match ir.exprs[e as usize].clone() {
         // Unconditional value nodes: recurse, rewriting children.
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-            // Hoisting a suspension out of the right operand must not leapfrog evaluation of the
-            // left operand. In `effect() + await()`, rewriting only the suspension to a preceding
-            // temp produces `val r = await(); effect() + r`, reversing Kotlin's left-to-right order.
-            // Bind the complete left value first whenever the right subtree suspends. This rule is
-            // based solely on ordered IR operands and their semantic value type; it does not depend
-            // on the call's source spelling, package, or provider.
-            let rhs_suspends = expr_calls_suspend(ir, rhs, suspend_set);
-            // If both operands contain a suspension, moving the right one ahead of the left would be
-            // wrong and no single prelude can preserve the conditional state structure. Keep the
-            // binary expression intact so the state-machine validator declines the unsupported shape.
-            if expr_calls_suspend(ir, lhs, suspend_set) && rhs_suspends {
+            // Primitive operations have the same unconditional left-to-right operand contract as
+            // calls, constructors, templates, and varargs. The shared planner can sequence any
+            // number of direct suspension points (`await() + await()`) and snapshots an effectful
+            // left subtree only when a later suspension would otherwise move ahead of it.
+            let operands = [Some(lhs), Some(rhs)];
+            let Some(new_operands) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
                 return e;
-            }
-            let mut nl = hoist_expr(ir, lhs, suspend_set, orig_rets, value_types, prelude);
-            if rhs_suspends && operand_needs_snapshot(ir, nl, value_types) {
-                let Some(ty) = hoisted_value_ty(ir, nl, orig_rets, value_types) else {
-                    // An untyped/unmodeled left value cannot be materialized safely. Leave this shape
-                    // for the existing backend-decline path instead of guessing a verifier type.
-                    return e;
-                };
-                let tmp = max_value_index(ir) + 1;
-                let bound = ir.add_expr(IrExpr::Variable {
-                    index: tmp,
-                    ty,
-                    init: Some(nl),
-                    named: false,
-                });
-                value_types.insert(tmp, ty);
-                prelude.push(bound);
-                nl = ir.add_expr(IrExpr::GetValue(tmp));
-            }
-            let nr = hoist_expr(ir, rhs, suspend_set, orig_rets, value_types, prelude);
+            };
+            let nl = new_operands[0].expect("binary operands have no default-argument holes");
+            let nr = new_operands[1].expect("binary operands have no default-argument holes");
             ir.exprs[e as usize] = IrExpr::PrimitiveBinOp {
                 op,
                 lhs: nl,
                 rhs: nr,
             };
+            e
+        }
+        IrExpr::ReifiedTypeOp {
+            cast,
+            negated,
+            arg,
+            name,
+            erased,
+        } => {
+            let arg = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::ReifiedTypeOp {
+                cast,
+                negated,
+                arg,
+                name,
+                erased,
+            };
+            e
+        }
+        IrExpr::NotNullAssert { operand, message } => {
+            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, message };
+            e
+        }
+        IrExpr::LateinitCheck { operand, name } => {
+            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::LateinitCheck { operand, name };
             e
         }
         IrExpr::PrimitiveNeg { operand, ty } => {
@@ -1251,6 +2448,14 @@ fn hoist_expr(
             ir.exprs[e as usize] = IrExpr::SetValue { var, value: nv };
             e
         }
+        // A top-level-property write evaluates its right-hand side unconditionally just like a local
+        // write. Hoist a suspend function-value invocation before the store so the state machine binds
+        // and resumes the call, then performs the write exactly once with the resumed value.
+        IrExpr::SetStatic { index, value } => {
+            let value = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::SetStatic { index, value };
+            e
+        }
         // A write to a captured `var` (a `Ref`-cell field) or any object field whose right-hand side
         // suspends (`result = await(…)`): hoist the receiver then the value so the suspension becomes a
         // preceding bound temp (`val tmp = await(…); ref.element = tmp`), which the flattener handles.
@@ -1283,6 +2488,11 @@ fn hoist_expr(
             elem,
             value,
         } => {
+            crate::trace_compiler!(
+                "suspend",
+                "hoist captured write expression={e} holder={holder} value={value} suspends={}",
+                expr_calls_suspend(ir, value, suspend_set)
+            );
             let nh = hoist_expr(ir, holder, suspend_set, orig_rets, value_types, prelude);
             let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::RefSet {
@@ -1334,6 +2544,39 @@ fn hoist_expr(
             }
             e
         }
+        // A vararg literal evaluates every listed/spread element unconditionally and in source
+        // order before the receiving call. Treat it as the same ordered operand container as a
+        // constructor or string template: each suspension becomes a bound temp, and any earlier
+        // effectful element is snapshotted before that suspension. `spreads` describes packing only;
+        // it does not alter element evaluation order and therefore survives unchanged.
+        IrExpr::Vararg {
+            array_type,
+            spreads,
+            elements,
+        } => {
+            let operands: Vec<Option<ExprId>> =
+                elements.iter().map(|&element| Some(element)).collect();
+            let Some(new_operands) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
+                return e;
+            };
+            let new_elements = new_operands
+                .into_iter()
+                .map(|element| element.expect("vararg operands have no default-argument holes"))
+                .collect();
+            ir.exprs[e as usize] = IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements: new_elements,
+            };
+            e
+        }
         IrExpr::GetField {
             receiver,
             class,
@@ -1353,17 +2596,17 @@ fn hoist_expr(
             name,
             ty,
             interface,
-            field,
             operation,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let nr = receiver.map(|receiver| {
+                hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude)
+            });
             ir.exprs[e as usize] = IrExpr::PropertyRead {
                 receiver: nr,
                 owner,
                 name,
                 ty,
                 interface,
-                field,
                 operation,
             };
             e
@@ -1375,10 +2618,11 @@ fn hoist_expr(
             value,
             ty,
             interface,
-            field,
             operation,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let nr = receiver.map(|receiver| {
+                hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude)
+            });
             let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PropertyWrite {
                 receiver: nr,
@@ -1387,7 +2631,6 @@ fn hoist_expr(
                 value: nv,
                 ty,
                 interface,
-                field,
                 operation,
             };
             e
@@ -1616,21 +2859,30 @@ fn hoisted_value_ty(
         // declaration with the same numeric index in an unrelated method and poison the verifier type
         // of the new temp. The caller supplies the current function's parameter/local environment.
         IrExpr::GetValue(index) => value_types.get(index).copied(),
-        IrExpr::Call { callee, .. } => match callee {
-            Callee::Local(function)
-            | Callee::LocalDefault(function)
-            | Callee::ClassStatic { function, .. } => orig_rets.get(*function as usize).copied(),
-            Callee::CrossFile { ret, .. } => Some(*ret),
-            Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
-                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
+        IrExpr::Call { callee, .. } => {
+            if let Some(function) = callee.source_function() {
+                orig_rets.get(function as usize).copied()
+            } else {
+                match callee {
+                    Callee::CrossFile { ret, .. }
+                    | Callee::Module { ret, .. }
+                    | Callee::Super { ret, .. }
+                    | Callee::External { ret, .. } => Some(*ret),
+                    Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
+                        crate::jvm::ir_emit::parse_physical_method_desc(descriptor)
+                            .map(|(_, ret)| ret)
+                    }
+                    Callee::Virtual {
+                        descriptor, params, ..
+                    } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
+                        crate::jvm::ir_emit::parse_physical_method_desc(descriptor)
+                            .map(|(_, ret)| ret)
+                    }),
+                    Callee::Intrinsic { ret, .. } => Some(*ret),
+                    _ => unreachable!("source-function callees were handled above"),
+                }
             }
-            Callee::Virtual {
-                descriptor, params, ..
-            } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
-                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
-            }),
-            Callee::Intrinsic { ret, .. } => Some(*ret),
-        },
+        }
         IrExpr::MethodCall { class, index, .. } => ir
             .classes
             .get(*class as usize)
@@ -1686,14 +2938,13 @@ fn hoisted_value_ty(
             let ty = crate::jvm::ir_emit::ty_from_field_descriptor(descriptor);
             (!matches!(ty, Ty::Unit | Ty::Error)).then_some(ty)
         }
-        IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => ir
-            .classes
-            .get(*class as usize)
-            .map(|class| Ty::obj(&class.fq_name())),
-        IrExpr::EnumValues { class } => ir
-            .classes
-            .get(*class as usize)
-            .map(|class| Ty::array(Ty::obj(&class.fq_name()))),
+        IrExpr::EnumEntry { classifier, .. } => Some(Ty::obj_name(*classifier)),
+        IrExpr::EnumValueOf { classifier, .. } => Some(Ty::obj_name(*classifier)),
+        IrExpr::EnumValues { classifier } => Some(Ty::array(Ty::obj_name(*classifier))),
+        IrExpr::EnumEntries { classifier } => Some(Ty::obj_args_name(
+            crate::types::type_name("kotlin/enums/EnumEntries"),
+            &[Ty::obj_name(*classifier)],
+        )),
         IrExpr::UnitInstance => Some(Ty::obj("kotlin/Unit")),
         IrExpr::GetField { class, index, .. } => ir
             .classes
@@ -1733,9 +2984,10 @@ fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty>
     }
 
     let function = &ir.functions[fid as usize];
-    let receiver_offset = u32::from(function.dispatch_receiver.is_some());
+    let physical_receiver = function.dispatch_receiver.filter(|_| !function.is_static);
+    let receiver_offset = u32::from(physical_receiver.is_some());
     let mut out = HashMap::new();
-    if let Some(receiver) = function.dispatch_receiver {
+    if let Some(receiver) = physical_receiver {
         out.insert(0, Ty::obj_name(receiver));
     }
     for (index, ty) in function.params.iter().copied().enumerate() {
@@ -1804,10 +3056,21 @@ fn is_suspension_point(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bo
 /// `orig_rets` through [`suspend_call_fid`]; the two side maps cover only nodes whose result cannot be
 /// recovered from a local `FunId`.
 fn recorded_suspension_result(ir: &IrFile, e: ExprId) -> Option<Ty> {
-    ir.suspend_calls
-        .get(&e)
-        .or_else(|| ir.intrinsic_suspension_points.get(&e))
-        .cloned()
+    ir.suspend_calls.get(&e).copied().or_else(|| {
+        ir.intrinsic_suspension_points
+            .get(&e)
+            .map(|point| point.result)
+    })
+}
+
+fn value_class_suspension_result(
+    ir: &IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Option<crate::ir::IrValueClassSuspendResult> {
+    suspend_call_fid(ir, e, suspend_set)
+        .and_then(|fid| ir.value_class_suspend_returns.get(&fid).copied())
+        .or_else(|| ir.value_class_suspend_calls.get(&e).copied())
 }
 
 /// Peel a single `TypeOp::Cast`/`ImplicitCoercion` off `e` when its arg is a suspend call, returning
@@ -1832,12 +3095,40 @@ fn unwrap_suspend_cast(
     } else {
         &[IrTypeOp::Cast, IrTypeOp::ImplicitCoercion]
     };
-    if let IrExpr::TypeOp { op, arg, .. } = ir.exprs[e as usize] {
-        if ops.contains(&op) && is_suspension_point(ir, arg, suspend_set) {
-            return arg;
+    let original = e;
+    let mut peeled = e;
+    while let IrExpr::TypeOp { op, arg, .. } = ir.exprs[peeled as usize] {
+        if !ops.contains(&op) {
+            break;
         }
+        peeled = arg;
     }
-    e
+    if is_suspension_point(ir, peeled, suspend_set) {
+        peeled
+    } else {
+        original
+    }
+}
+
+fn when_has_non_direct_suspending_branch(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> bool {
+    let Some(when) = value_when(ir, expression) else {
+        return false;
+    };
+    let IrExpr::When { branches } = &ir.exprs[when as usize] else {
+        return false;
+    };
+    branches.iter().any(|(_, branch)| {
+        expr_calls_suspend(ir, *branch, suspend_set)
+            && !is_suspension_point(
+                ir,
+                unwrap_suspend_cast(ir, *branch, suspend_set, false),
+                suspend_set,
+            )
+    })
 }
 
 /// Whether EXACTLY ONE suspension point is reachable from `e`. Iterative with a visited set (the expr arena
@@ -1878,30 +3169,51 @@ fn tail_forward_call(
     if !exactly_one_suspension_point(ir, b, set) {
         return None;
     }
-    let tail = match &ir.exprs[b as usize] {
-        IrExpr::Return(Some(e)) => *e,
-        IrExpr::Block { value: Some(v), .. } => *v,
-        IrExpr::Block {
-            value: None, stmts, ..
-        } => match stmts.last() {
-            Some(&last) => match ir.exprs[last as usize] {
-                IrExpr::Return(Some(e)) => e,
-                // A `Unit` fn whose LAST statement is a BARE `Unit` suspend call
-                // (`suspend fun delete(id) { repository.delete(id) }`) — kotlinc forwards it identically
-                // (`areturn` the callee's Object result: COROUTINE_SUSPENDED or the boxed `Unit`). Gated
-                // on the CALLEE returning `Unit` too, so the forwarded value is what the caller expects.
-                _ if unit_ret
-                    && is_suspension_point(ir, last, set)
-                    && suspension_ret_unit(ir, last, set, orig_rets) =>
-                {
-                    last
-                }
-                _ => return None,
+    fn tail_expression(
+        ir: &IrFile,
+        expression: ExprId,
+        set: &HashSet<u32>,
+        unit_ret: bool,
+        orig_rets: &[Ty],
+    ) -> Option<ExprId> {
+        let tail = match &ir.exprs[expression as usize] {
+            IrExpr::Return(Some(e)) => *e,
+            IrExpr::Block { value: Some(v), .. }
+                if matches!(ir.exprs[*v as usize], IrExpr::Block { .. }) =>
+            {
+                return tail_expression(ir, *v, set, unit_ret, orig_rets);
+            }
+            IrExpr::Block { value: Some(v), .. } => *v,
+            IrExpr::Block {
+                value: None, stmts, ..
+            } => match stmts.last() {
+                Some(&last) => match ir.exprs[last as usize] {
+                    IrExpr::Return(Some(e)) => e,
+                    // A `Unit` fn whose LAST statement is a BARE `Unit` suspend call
+                    // (`suspend fun delete(id) { repository.delete(id) }`) — kotlinc forwards it identically
+                    // (`areturn` the callee's Object result: COROUTINE_SUSPENDED or the boxed `Unit`). Gated
+                    // on the CALLEE returning `Unit` too, so the forwarded value is what the caller expects.
+                    _ if unit_ret
+                        && is_suspension_point(ir, last, set)
+                        && suspension_ret_unit(ir, last, set, orig_rets) =>
+                    {
+                        last
+                    }
+                    // FIR preserves source grouping as nested statement-only blocks. They do not alter
+                    // control flow or evaluation order, so tail position passes through them exactly as
+                    // it does through the equivalent flattened block.
+                    _ if matches!(ir.exprs[last as usize], IrExpr::Block { .. }) => {
+                        return tail_expression(ir, last, set, unit_ret, orig_rets);
+                    }
+                    _ => return None,
+                },
+                None => return None,
             },
-            None => return None,
-        },
-        _ => return None,
-    };
+            _ => return None,
+        };
+        Some(tail)
+    }
+    let tail = tail_expression(ir, b, set, unit_ret, orig_rets)?;
     // A generic suspend call's erased result is cast to the declared type at the call site; a
     // tail-forward returns the callee's Object result verbatim (no checkcast), so peel the wrapper.
     let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true);
@@ -1984,6 +3296,11 @@ fn default_suspend_continuation_index(params: &[Ty]) -> Option<usize> {
 /// by its logical signature), also rewrite the descriptor to the physical CPS form so the emitted
 /// `invokestatic` matches the callee. Returns the (unchanged) `ExprId`.
 fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId {
+    crate::trace_compiler!(
+        "suspend",
+        "append continuation call={call_e} continuation={cont} node={:?}",
+        ir.exprs.get(call_e as usize),
+    );
     match &mut ir.exprs[call_e as usize] {
         IrExpr::Call {
             args,
@@ -2001,8 +3318,16 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
                     return call_e;
                 };
                 let Some(index) = default_suspend_continuation_index(&params) else {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "default suspend call={call_e} has no continuation slot descriptor={descriptor} params={params:?}"
+                    );
                     return call_e;
                 };
+                crate::trace_compiler!(
+                    "suspend",
+                    "insert default continuation call={call_e} index={index} descriptor={descriptor} args_before={args:?}"
+                );
                 args.insert(index, cont);
             } else {
                 *descriptor = cps_descriptor(descriptor);
@@ -2054,64 +3379,74 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
     call_e
 }
 
-/// Rewrite each top-level `Variable { init: Block { stmts: prelude, value: Some(inner) } }` into the
+/// Rewrite each `Variable { init: Block { stmts: prelude, value: Some(inner) } }` into the
 /// `prelude` statements followed by `Variable { init: inner }`. Elvis (`x ?: foo()`) and primitive
 /// safe-call elvis lower to such a block-valued initializer; unwrapping it lifts the inner `When` (whose
-/// branch value suspends) to a position the flattener's `stmt_cond_suspension` recognizes.
-fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
-    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
+/// branch value suspends) to a position the flattener's `stmt_cond_suspension` recognizes. Traversal
+/// covers nested protected/loop/branch regions but stops at lambdas, whose bodies own another value
+/// namespace and state machine.
+fn normalize_block_inits(ir: &mut IrFile, expression: ExprId) {
+    if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
         return;
-    };
-    let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
-    let mut changed = false;
-    for s in stmts {
-        if let IrExpr::Variable {
-            index,
-            ref ty,
-            init: Some(init),
-            named,
-        } = ir.exprs[s as usize].clone()
-        {
-            if let IrExpr::Block {
-                stmts: pre,
-                value: inner_val,
-            } = ir.exprs[init as usize].clone()
+    }
+    if let IrExpr::Block { stmts, value } = ir.exprs[expression as usize].clone() {
+        let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
+        let mut changed = false;
+        for s in stmts {
+            if let IrExpr::Variable {
+                index,
+                ref ty,
+                init: Some(init),
+                named,
+            } = ir.exprs[s as usize].clone()
             {
-                if ir.intrinsic_suspension_points.contains_key(&init) {
-                    // A registered suspension point (a `suspendCoroutineUninterceptedOrReturn`
-                    // block), not an elvis/safe-call grouping — leave bound.
-                    out.push(s);
-                    continue;
-                }
-                // Bind to the block's value; a value-less `Unit` block (`val x: Unit = { …stmts… }`, e.g.
-                // a lambda whose tail expression is an assignment) runs its statements then binds the
-                // `Unit` singleton — so the binding always leaves a value for its `astore`.
-                let inner = match inner_val {
-                    Some(inner) => Some(inner),
-                    None if *ty == Ty::Unit => Some(ir.add_expr(IrExpr::UnitInstance)),
-                    None => None,
-                };
-                if let Some(inner) = inner {
-                    out.extend(pre);
-                    let nv = ir.add_expr(IrExpr::Variable {
-                        index,
-                        ty: ty.clone(),
-                        init: Some(inner),
-                        named,
-                    });
-                    out.push(nv);
-                    changed = true;
-                    continue;
+                if let IrExpr::Block {
+                    stmts: pre,
+                    value: inner_val,
+                } = ir.exprs[init as usize].clone()
+                {
+                    if ir.intrinsic_suspension_points.contains_key(&init) {
+                        // A registered suspension point (a `suspendCoroutineUninterceptedOrReturn`
+                        // block), not an elvis/safe-call grouping — leave bound.
+                        out.push(s);
+                        continue;
+                    }
+                    // Bind to the block's value; a value-less `Unit` block (`val x: Unit = { …stmts… }`, e.g.
+                    // a lambda whose tail expression is an assignment) runs its statements then binds the
+                    // `Unit` singleton — so the binding always leaves a value for its `astore`.
+                    let inner = match inner_val {
+                        Some(inner) => Some(inner),
+                        None if *ty == Ty::Unit => Some(ir.add_expr(IrExpr::UnitInstance)),
+                        None => None,
+                    };
+                    if let Some(inner) = inner {
+                        out.extend(pre);
+                        let nv = ir.add_expr(IrExpr::Variable {
+                            index,
+                            ty: *ty,
+                            init: Some(inner),
+                            named,
+                        });
+                        out.push(nv);
+                        changed = true;
+                        continue;
+                    }
                 }
             }
+            out.push(s);
         }
-        out.push(s);
+        ir.exprs[expression as usize] = IrExpr::Block { stmts: out, value };
+        // A lifted prelude may itself contain another block-valued initializer. Reach a fixed point
+        // before descending into the now-stable child regions.
+        if changed {
+            normalize_block_inits(ir, expression);
+            return;
+        }
     }
-    ir.exprs[b as usize] = IrExpr::Block { stmts: out, value };
-    // A lifted prelude may itself contain another block-valued initializer. Reach a fixed point so
-    // the suspension-hoist pass that follows sees every unconditional nested call.
-    if changed {
-        normalize_block_inits(ir, b);
+    let mut children = Vec::new();
+    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        normalize_block_inits(ir, child);
     }
 }
 
@@ -2120,6 +3455,15 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
 fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
     if is_suspension_point(ir, e, suspend_set) {
         return true;
+    }
+    // Constructing a lambda evaluates its captures, but its body belongs to the generated invoke
+    // method and cannot suspend the enclosing body. `for_each_child` deliberately exposes the
+    // `inline_body` for generic IR transforms, so suspension analysis must enforce this semantic
+    // ownership boundary itself.
+    if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
+        return captures
+            .iter()
+            .any(|&capture| expr_calls_suspend(ir, capture, suspend_set));
     }
     let mut found = false;
     for_each_child(&ir.exprs, e, &mut |c| {
@@ -2201,14 +3545,6 @@ fn build_state_machine(
         );
         return false;
     }
-    if binds_value_class_suspension(ir, b, &suspend_set) {
-        crate::trace_compiler!(
-            "suspend",
-            "build_state_machine fid={fid} BAIL: inline-class suspension result across CPS boundary"
-        );
-        return false; // an inline-class suspension result across the CPS boundary isn't modeled
-    }
-
     // Spilled locals: any local read at or after the first statement that contains a suspension — a
     // sound over-approximation of "live across a suspension point". Each maps to its declared type.
     let Some(first) = stmts
@@ -2228,15 +3564,23 @@ fn build_state_machine(
     reads.sort_unstable();
     reads.dedup();
 
-    // For an instance method `this` is value-index 0, so params (and the appended continuation) shift up
-    // by one; the receiver's class internal name is the dispatch receiver (the continuation captures it).
-    let receiver: Option<TypeName> = ir.functions[fid as usize].dispatch_receiver;
+    // Keep semantic ownership separate from physical JVM layout. A value-class member retains its
+    // owner in `dispatch_receiver` so it remains a class member and names its continuation correctly,
+    // but value-class lowering has already made it static and inserted the carrier as parameter zero.
+    // Such a method has no JVM `this` slot and its continuation must not capture one.
+    let semantic_owner: Option<TypeName> = ir.functions[fid as usize].dispatch_receiver;
+    let receiver: Option<TypeName> =
+        semantic_owner.filter(|_| !ir.functions[fid as usize].is_static);
     let this_offset = u32::from(receiver.is_some());
     // Real value parameters (excluding the appended CPS `Continuation`), at value-indices
     // `this_offset .. this_offset + real_params.len()`.
     let real_params: Vec<Ty> = {
         let p = &ir.functions[fid as usize].params;
-        p[..p.len().saturating_sub(1)].to_vec()
+        p[..p.len().saturating_sub(1)]
+            .iter()
+            .enumerate()
+            .map(|(parameter, ty)| suspend_parameter_ty(ir, fid, parameter, *ty))
+            .collect()
     };
     let completion_idx = real_params.len() as u32 + this_offset;
     // Type of a value PARAMETER at value-index `idx` (not `this`, not the continuation). A param read
@@ -2409,7 +3753,7 @@ fn build_state_machine(
     // kotlinc nests a suspend method's continuation class under its ENCLOSING class
     // (`Svc$work$1`), and a top-level suspend fun's under the file facade (`FooKt$foo$1`). The
     // dispatch receiver is the enclosing class internal name; a top-level/extension fun has none.
-    let cont_owner = receiver
+    let cont_owner = semantic_owner
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
     // The continuation class uses the SOURCE method name, never the value-class-mangled JVM name:
@@ -2428,7 +3772,8 @@ fn build_state_machine(
     // suspension: allocate a fresh, collision-free value-index per such catch (above `base + 3`), rewrite
     // the catch body's reads of the user variable to it, and add it to the spill set BEFORE the
     // continuation class is built so it gets an `L$i` field. The handler binds it from `r_v` on entry.
-    let mut catch_spills: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut catch_spills: std::collections::HashMap<ExprId, u32> = std::collections::HashMap::new();
+    let mut catch_spill_sources: Vec<(u32, ExprId, u32)> = Vec::new();
     let mut next_ev = base + 4;
     {
         let mut tries: Vec<(u32, ExprId, crate::types::TypeName)> = Vec::new();
@@ -2442,7 +3787,8 @@ fn build_state_machine(
                 ir.exprs[n as usize] = IrExpr::GetValue(ev);
             }
             spilled.push((ev, spill_field_ty(Ty::obj(&exc_internal.render()))));
-            catch_spills.insert(cvar, ev);
+            catch_spills.insert(cbody, ev);
+            catch_spill_sources.push((cvar, cbody, ev));
         }
     }
     // Derive the flattener's first fresh local from the actual number of exception spills allocated
@@ -2469,15 +3815,20 @@ fn build_state_machine(
     // The hoisted temps of a multi-suspension expression exist only in the FINAL body, so they are
     // collected here and merged into the pre-splice named-by-scope lists.
     merge_live_temps(&mut susp_scopes, live_temp_scopes(ir, b, &suspend_set));
-    for (cvar, ev) in &catch_spills {
-        for scope in susp_scopes.values_mut() {
+    for &(cvar, cbody, ev) in &catch_spill_sources {
+        let mut catch_points = HashSet::new();
+        collect_suspension_points(ir, cbody, &suspend_set, &mut catch_points);
+        for (point, scope) in &mut susp_scopes {
+            if !catch_points.contains(point) {
+                continue;
+            }
             for e in &mut scope.values {
-                if e.0 == *cvar {
-                    e.0 = *ev;
+                if e.0 == cvar {
+                    e.0 = ev;
                 }
             }
-            if let Some(name) = scope.names.remove(cvar) {
-                scope.names.insert(*ev, name);
+            if let Some(name) = scope.names.remove(&cvar) {
+                scope.names.insert(ev, name);
             }
         }
     }
@@ -2495,14 +3846,16 @@ fn build_state_machine(
     // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified). Validate after
     // positional reconciliation because scope-only locals are real spills too.
-    if spills_bottom_typed_local(&spilled) || suspending_over_progression(ir, b, &suspend_set) {
+    if spills_bottom_typed_local(&spilled) {
         return false;
     }
     crate::trace_compiler!(
         "suspend",
-        "build_state_machine fid={fid} this_offset={this_offset} completion_idx={completion_idx} spilled={:?} param_caps={:?}",
-        spilled.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
-        param_caps.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+        "build_state_machine fid={fid} this_offset={this_offset} completion_idx={completion_idx} real_params={real_params:?} shared={:?} spilled={spilled:?} param_caps={param_caps:?}",
+        ir.shared_capture_parameters
+            .iter()
+            .filter(|((function, _), _)| *function == fid)
+            .collect::<Vec<_>>()
     );
     let mut layout = SpillLayout::default();
     for (call, scope) in &susp_scopes {
@@ -2550,6 +3903,7 @@ fn build_state_machine(
         assigned: param_caps.iter().map(|(l, _)| *l).collect(),
         next_local: flat_next_local,
         loop_targets: Vec::new(),
+        jump_finalizers: Vec::new(),
         failed: false,
     };
     flat.flatten(&stmts, 0, None);
@@ -2566,7 +3920,8 @@ fn build_state_machine(
         let mut slot_name: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
         if let Some(names) = ir.param_names(fid) {
-            let this_off = u32::from(ir.functions[fid as usize].dispatch_receiver.is_some());
+            let function = &ir.functions[fid as usize];
+            let this_off = u32::from(function.dispatch_receiver.is_some() && !function.is_static);
             for (i, nm) in names.iter().enumerate() {
                 slot_name.insert(this_off + i as u32, nm.clone());
             }
@@ -2869,13 +4224,6 @@ fn build_lambda_state_machine(
     // bind it to the lambda machine itself (`this` = value-index 0) so `c.resume(v)` re-enters
     // THIS machine at the resume label.
     rewrite_current_continuation(ir, b, 0);
-    if binds_value_class_suspension(ir, b, &suspend_set) {
-        crate::trace_compiler!(
-            "suspend",
-            "build_lambda_sm fid={fid} SKIP: value-class suspension result not modeled"
-        );
-        return false;
-    }
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         crate::trace_compiler!(
             "suspend",
@@ -2980,7 +4328,6 @@ fn build_lambda_state_machine(
     reconcile_positional_spill_locals(ir, b, &susp_scopes, &live_calls, &mut spilled);
     if (receiver_lambda && spill_shape_unmodeled(&spilled))
         || spills_bottom_typed_local(&spilled)
-        || suspending_over_progression(ir, b, &suspend_set)
         || tail_suspending_loop(ir, &stmts, &suspend_set)
     {
         return false;
@@ -3036,6 +4383,7 @@ fn build_lambda_state_machine(
         assigned: std::collections::HashSet::new(),
         next_local: base + 3,
         loop_targets: Vec::new(),
+        jump_finalizers: Vec::new(),
         failed: false,
     };
     for (n, &s) in stmts.iter().enumerate() {
@@ -3300,11 +4648,11 @@ struct Flat<'a> {
     /// exception into the `result` field for the handler state to read back through `r_v`).
     catch_var: u32,
     /// For a `try { … } catch (e) { …; suspend(); … }` whose CATCH body ITSELF suspends: maps the
-    /// user catch variable's value-index to a fresh, spilled value-index holding the caught exception.
+    /// catch body's stable IR region to a fresh, spilled value-index holding the caught exception.
     /// The catch body's reads of `e` are pre-rewritten to this index; the handler state binds it from
     /// `r_v` (`e = (E) r_v`) once on entry, and it is spilled/restored like any local so it survives the
     /// catch's own suspension (after which `r_v` holds the resume value, no longer the exception).
-    catch_spills: std::collections::HashMap<u32, u32>,
+    catch_spills: std::collections::HashMap<ExprId, u32>,
     /// Per-suspension lexical scope lists (kotlinc's positional-spill model, see
     /// docs/POSITIONAL_SPILLS.md): suspend-call expr id → `params ++ in-scope locals`.
     scopes: SuspensionScopes,
@@ -3325,6 +4673,10 @@ struct Flat<'a> {
     /// `Continue`/`Break` node can't survive flattening (at emit it would target the dispatch `while(true)`
     /// loop, not the user's logical loop). Pushed around the body in the `While`-suspending-body handler.
     loop_targets: Vec<(Option<String>, usize, usize)>,
+    /// Active non-suspending `finally` regions which an outward loop jump must execute. The boundary
+    /// is the number of loop frames active on entry to the protected region; a jump to an older frame
+    /// exits that region. The saved handler is the enclosing handler under which cleanup executes.
+    jump_finalizers: Vec<(usize, ExprId, Option<usize>)>,
     failed: bool,
 }
 
@@ -3584,18 +4936,28 @@ impl Flat<'_> {
         _resume: usize,
         call: ExprId,
     ) {
+        let rg = self.gv(self.r_v);
+        let realization = value_class_suspension_result(self.ir, call, self.suspend);
         crate::trace_compiler!(
             "suspend",
-            "bind_from_r local={local} ty={ty:?} spilled={}",
+            "bind_from_r local={local} ty={ty:?} realization={realization:?} spilled={}",
             self.is_spilled(local)
         );
-        let rg = self.gv(self.r_v);
-        // A value-class result crossed the `Object` CPS boundary BOXED (the value-class pass boxed the
-        // callee's tail); the local holds the erased underlying, so undo the box here.
-        let unb = match suspend_call_fid(self.ir, call, self.suspend)
-            .and_then(|fid| self.ir.suspend_boxed_value_class_returns.get(&fid).copied())
-        {
-            Some(x) => unbox_value_class(self.ir, rg, x, ty),
+        // A CPS result always arrives as a VALUE. In particular semantic `Unit` is the
+        // `kotlin.Unit` singleton here, never a JVM `void` result. Record the stored physical type
+        // on the resume local so later checked coercions consume the existing operand instead of
+        // materializing a second singleton and leaving the first one on the stack.
+        let physical_ty = realization.map_or_else(
+            || crate::types::stored_value_ty(*ty),
+            crate::ir::IrValueClassSuspendResult::boundary_ty,
+        );
+        let unb = match realization {
+            Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }) => {
+                unbox(self.ir, rg, &Ty::obj_name(classifier))
+            }
+            Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier)) => {
+                unbox(self.ir, rg, &carrier)
+            }
             None => unbox(self.ir, rg, ty),
         };
         self.mark_assigned(local);
@@ -3607,7 +4969,7 @@ impl Flat<'_> {
         } else {
             out.push(self.add(IrExpr::Variable {
                 index: local,
-                ty: ty.clone(),
+                ty: physical_ty,
                 init: Some(unb),
                 named: false,
             }));
@@ -3666,16 +5028,54 @@ impl Flat<'_> {
     /// The state a `continue`/`break` transfers to: the `cont`/`exit` of the innermost active loop frame,
     /// or the frame whose label matches. `None` when no such loop is being flattened (a jump the caller
     /// leaves structural).
-    fn loop_jump_target(&self, label: Option<&str>, is_break: bool) -> Option<usize> {
-        let frame = match label {
-            Some(l) => self
+    fn loop_jump_target_with_frame(
+        &self,
+        label: Option<&str>,
+        is_break: bool,
+    ) -> Option<(usize, usize)> {
+        let (frame_index, (_, cont, exit)) = match label {
+            Some(label) => self
                 .loop_targets
                 .iter()
+                .enumerate()
                 .rev()
-                .find(|(fl, _, _)| fl.as_deref() == Some(l)),
-            None => self.loop_targets.last(),
+                .find(|(_, (frame_label, _, _))| frame_label.as_deref() == Some(label))?,
+            None => self.loop_targets.iter().enumerate().next_back()?,
         };
-        frame.map(|&(_, cont, exit)| if is_break { exit } else { cont })
+        Some((frame_index, if is_break { *exit } else { *cont }))
+    }
+    /// Transfer a loop completion through every `finally` region it exits. Cleanup runs in a fresh
+    /// state outside the protected region's own handler; the original jump is appended after cleanup
+    /// and recursively routes through any next enclosing `finally`.
+    fn emit_loop_jump(
+        &mut self,
+        out: &mut Vec<ExprId>,
+        jump: ExprId,
+        label: Option<&str>,
+        is_break: bool,
+    ) -> bool {
+        let Some((frame_index, target)) = self.loop_jump_target_with_frame(label, is_break) else {
+            return false;
+        };
+        let Some(finalizer_index) = self
+            .jump_finalizers
+            .iter()
+            .rposition(|(boundary, _, _)| frame_index < *boundary)
+        else {
+            self.goto(out, target);
+            return true;
+        };
+        let finalizer = self.jump_finalizers.remove(finalizer_index);
+        let saved_handler = self.cur_handler;
+        self.cur_handler = finalizer.2;
+        let cleanup = self.new_state();
+        self.goto(out, cleanup);
+        let mut cleanup_stmts = self.block_stmts(finalizer.1);
+        cleanup_stmts.push(jump);
+        self.flatten(&cleanup_stmts, cleanup, None);
+        self.cur_handler = saved_handler;
+        self.jump_finalizers.insert(finalizer_index, finalizer);
+        true
     }
     fn stmt_suspension(&self, stmt: ExprId) -> Option<Suspension> {
         match &self.ir.exprs[stmt as usize] {
@@ -3693,7 +5093,15 @@ impl Flat<'_> {
                 is_suspension_point(self.ir, call, self.suspend)
                     .then(|| (Some((*index, ty.clone())), call))
             }
-            _ => is_suspension_point(self.ir, stmt, self.suspend).then_some((None, stmt)),
+            _ => {
+                // A provider boundary may wrap a physical suspend call in an implicit coercion to
+                // its checked semantic result (notably a bare `Unit` call). Bind/forward the raw call
+                // just as the variable-initializer path above does; appending a continuation to the
+                // wrapper itself is a no-op and leaves a `$default` descriptor one operand short.
+                let call =
+                    unwrap_suspend_cast(self.ir, stmt, self.suspend, /* ref_only */ false);
+                is_suspension_point(self.ir, call, self.suspend).then_some((None, call))
+            }
         }
     }
     /// If `stmt` is `val L = when { … }` where a branch value is a direct suspension, return
@@ -3731,13 +5139,7 @@ impl Flat<'_> {
         // structured `Continue`/`Break` sits in the merge's value slot → a stackmap/verify mismatch.
         let any_jump = branches
             .iter()
-            .any(|(_, v)| match &self.ir.exprs[*v as usize] {
-                IrExpr::Break { label } => self.loop_jump_target(label.as_deref(), true).is_some(),
-                IrExpr::Continue { label } => {
-                    self.loop_jump_target(label.as_deref(), false).is_some()
-                }
-                _ => false,
-            });
+            .any(|(_, value)| self.expr_jumps_to_active_frame(*value));
         if !any_susp && !any_jump {
             // No DIRECT branch suspension/jump — but one hiding DEEPER in a branch value (`val q =
             // f() ?: if (c) break else error("")`) would be emitted structurally with a mis-framed
@@ -3748,17 +5150,24 @@ impl Flat<'_> {
             }
             return None;
         }
-        // A branch value must be either a direct suspension (possibly cast/coercion-wrapped),
-        // a direct loop-jump, or free of both.
+        // A branch value must be a direct suspension/jump, a nested decision that can be split into
+        // another state, or free of both. Arbitrary expressions with hidden control flow remain invalid:
+        // the earlier hoist pass is responsible for exposing those as statements.
         for (_, v) in &branches {
             let direct_jump = matches!(
                 self.ir.exprs[*v as usize],
                 IrExpr::Break { .. } | IrExpr::Continue { .. }
             );
             let uv = unwrap_suspend_cast(self.ir, *v, self.suspend, /* ref_only */ false);
+            let nested_control = matches!(
+                self.ir.exprs[*v as usize],
+                IrExpr::When { .. } | IrExpr::Block { .. }
+            );
             if !is_suspension_point(self.ir, uv, self.suspend)
                 && !direct_jump
-                && (expr_calls_suspend(self.ir, *v, self.suspend) || self.expr_has_loop_jump(*v))
+                && !nested_control
+                && (expr_calls_suspend(self.ir, *v, self.suspend)
+                    || self.expr_jumps_to_active_frame(*v))
             {
                 self.failed = true;
                 return None;
@@ -3789,10 +5198,9 @@ impl Flat<'_> {
                 unwrap_suspend_cast(self.ir, *value, self.suspend, /* ref_only */ false);
             if let Some((label, is_break)) = jump {
                 // A loop-jump branch: transfer to the loop's cont/break state; bind nothing (it diverges).
-                let target = self
-                    .loop_jump_target(label.as_deref(), is_break)
-                    .unwrap_or(merge);
-                self.goto(&mut bb, target);
+                if !self.emit_loop_jump(&mut bb, *value, label.as_deref(), is_break) {
+                    self.goto(&mut bb, merge);
+                }
             } else if is_suspension_point(self.ir, uvalue, self.suspend) {
                 let br_resume = self.new_state();
                 let bottom = self.emit_suspension(&mut bb, uvalue, br_resume);
@@ -3804,22 +5212,63 @@ impl Flat<'_> {
                     self.goto(&mut rs, merge);
                 }
                 self.states[br_resume] = rs;
-            } else {
-                if self.is_spilled(local) {
-                    bb.push(self.add(IrExpr::SetValue {
-                        var: local,
-                        value: *value,
-                    }));
-                } else {
-                    bb.push(self.add(IrExpr::Variable {
+            } else if matches!(
+                self.ir.exprs[*value as usize],
+                IrExpr::When { .. } | IrExpr::Block { .. }
+            ) && (expr_calls_suspend(self.ir, *value, self.suspend)
+                || self.expr_jumps_to_active_frame(*value))
+            {
+                // Preserve source decision order while recursively exposing control flow. The outer
+                // branch merely enters a state whose ordinary statement is the same binding; `flatten`
+                // then applies this rule again to the nested `when`. This handles arbitrarily deep
+                // Elvis/if/when trees without embedding a structured jump into a dispatch-loop value.
+                let branch_entry = self.new_state();
+                self.goto(&mut bb, branch_entry);
+                let branch_stmts = match self.ir.exprs[*value as usize].clone() {
+                    IrExpr::Block { mut stmts, value } => {
+                        if let Some(value) = value {
+                            stmts.push(self.add(IrExpr::Variable {
+                                index: local,
+                                ty: ty.clone(),
+                                init: Some(value),
+                                named: false,
+                            }));
+                        }
+                        stmts
+                    }
+                    IrExpr::When { .. } => vec![self.add(IrExpr::Variable {
                         index: local,
                         ty: ty.clone(),
                         init: Some(*value),
                         named: false,
-                    }));
+                    })],
+                    _ => unreachable!("nested conditional branch shape was checked above"),
+                };
+                self.flatten(&branch_stmts, branch_entry, Some(merge));
+            } else {
+                let diverges = stmt_diverges(self.ir, *value);
+                if diverges {
+                    // A bottom-valued branch never produces the value to store. Keeping the binding
+                    // wrapper would emit an unreachable `astore` immediately after `athrow`, for which
+                    // the JVM verifier correctly requires a separate frame.
+                    bb.push(*value);
+                } else {
+                    if self.is_spilled(local) {
+                        bb.push(self.add(IrExpr::SetValue {
+                            var: local,
+                            value: *value,
+                        }));
+                    } else {
+                        bb.push(self.add(IrExpr::Variable {
+                            index: local,
+                            ty: ty.clone(),
+                            init: Some(*value),
+                            named: false,
+                        }));
+                    }
+                    self.mark_assigned(local);
+                    self.goto(&mut bb, merge);
                 }
-                self.mark_assigned(local);
-                self.goto(&mut bb, merge);
             }
             let block = self.add(IrExpr::Block {
                 stmts: bb,
@@ -3952,8 +5401,7 @@ impl Flat<'_> {
                 self.ir.exprs[stmt as usize].clone()
             {
                 let is_break = matches!(self.ir.exprs[stmt as usize], IrExpr::Break { .. });
-                if let Some(target) = self.loop_jump_target(label.as_deref(), is_break) {
-                    self.goto(&mut out, target);
+                if self.emit_loop_jump(&mut out, stmt, label.as_deref(), is_break) {
                     self.states[cur] = out;
                     return;
                 }
@@ -4036,8 +5484,9 @@ impl Flat<'_> {
                     return;
                 }
             }
-            // A `while`/`do`-`while` loop whose body suspends: header (test) ↔ body ↔ exit. A pre-test
-            // loop enters at the header; a post-test (`do`-`while`) enters at the body (runs once first).
+            // A `while`/`do`-`while` loop whose condition, body, or update suspends: header (test) ↔
+            // body ↔ exit. A pre-test loop enters at the header; a post-test (`do`-`while`) enters at
+            // the body (runs once first).
             if let IrExpr::While {
                 cond,
                 body,
@@ -4046,7 +5495,9 @@ impl Flat<'_> {
                 label,
             } = &self.ir.exprs[stmt as usize]
             {
-                if expr_calls_suspend(self.ir, *body, self.suspend)
+                if expr_calls_suspend(self.ir, *cond, self.suspend)
+                    || expr_calls_suspend(self.ir, *body, self.suspend)
+                    || update.is_some_and(|u| expr_calls_suspend(self.ir, u, self.suspend))
                     || self.expr_jumps_to_active_frame(*body)
                 {
                     let (cond, body, update, post_test, label) =
@@ -4065,6 +5516,28 @@ impl Flat<'_> {
                         Some(a) if rest_empty => a,
                         _ => self.new_state(),
                     };
+                    // A suspending condition was normalized to `Block { prelude, value: bool }` by
+                    // `hoist_stmt`. Its prelude belongs to the header state and therefore re-runs on
+                    // every back-edge. Refuse any residual suspension in the Boolean value itself: it
+                    // means the generic expression hoister could not preserve that shape safely.
+                    let (mut condition_stmts, condition_value) =
+                        match self.ir.exprs[cond as usize].clone() {
+                            IrExpr::Block {
+                                stmts,
+                                value: Some(value),
+                            } => (stmts, value),
+                            _ => (Vec::new(), cond),
+                        };
+                    if expr_calls_suspend(self.ir, condition_value, self.suspend) {
+                        crate::trace_compiler!(
+                            "suspend",
+                            "flatten BAIL: residual suspension in loop condition value {:?}",
+                            self.ir.exprs[condition_value as usize]
+                        );
+                        self.failed = true;
+                        self.states[cur] = out;
+                        return;
+                    }
                     // cur → header (pre-test) or → body (post-test runs the body once before testing)
                     self.goto(&mut out, if post_test { body_entry } else { header });
                     self.states[cur] = out;
@@ -4087,16 +5560,17 @@ impl Flat<'_> {
                         })
                     };
                     let hwhen = self.add(IrExpr::When {
-                        branches: vec![(Some(cond), t_block), (None, e_block)],
+                        branches: vec![(Some(condition_value), t_block), (None, e_block)],
                     });
                     hs.push(hwhen);
-                    self.states[header] = hs;
+                    condition_stmts.extend(hs);
                     // body → cont (back to header after the update). A `continue` in the body targets
                     // `cont` (the update+re-test), a `break` targets `exit`; push the frame so a
                     // `Continue`/`Break` statement flattens to the right `goto` rather than surviving as a
                     // structured node aimed at the dispatch loop.
                     let body_stmts = self.block_stmts(body);
                     self.loop_targets.push((label, cont, exit));
+                    self.flatten(&condition_stmts, header, None);
                     self.flatten(&body_stmts, body_entry, Some(cont));
                     // cont: run the loop update (a `for`-loop increment + the counted-loop bound-check
                     // `break`), then back to header. FLATTEN it (with the loop frame still active) rather
@@ -4131,11 +5605,6 @@ impl Flat<'_> {
             {
                 if expr_calls_suspend(self.ir, stmt, self.suspend) {
                     let (body, catches, finally) = (*body, catches.clone(), *finally);
-                    // A BRANCH (`When`) in the catch body — a `?.`/elvis/`if` — introduces a temp/local
-                    // whose slot the state machine's exception-handler frame can't reconcile with the try
-                    // region (the handler range spans states where that slot is uninitialized), producing
-                    // a stack-map mismatch. Skip the file rather than miscompile; a straight-line catch
-                    // body (the common `catch (e) { log(e); default }` shape) is fine.
                     // A try-FINALLY (no catch): the finally must run on BOTH exits of the suspending try
                     // body — normal completion (→ continue after the try) and an exception (→ run finally,
                     // then re-throw). Model it with a `fin_normal` state (normal path) and a `fin_handler`
@@ -4160,7 +5629,10 @@ impl Flat<'_> {
                             // the handler is reached exceptionally WITHOUT those writes.
                             let a_entry = self.assigned.clone();
                             let body_stmts = self.block_stmts(body);
+                            self.jump_finalizers
+                                .push((self.loop_targets.len(), fin, saved));
                             self.flatten(&body_stmts, try_entry, Some(fin_normal));
+                            self.jump_finalizers.pop();
                             let a_body = self.assigned.clone();
                             self.cur_handler = saved;
                             // Normal path: run the finally, then fall through to after the try. The body
@@ -4192,32 +5664,29 @@ impl Flat<'_> {
                         }
                         // A finally combined with a catch, a suspending finally, or a return in the try
                         // body is unmodeled — skip the file rather than miscompile.
+                        crate::trace_compiler!(
+                            "suspend",
+                            "flatten BAIL: unnormalized finally catches={} fin_suspends={} body_returns={} try={:?}",
+                            catches.len(),
+                            expr_calls_suspend(self.ir, fin, self.suspend),
+                            expr_has_return(self.ir, body),
+                            self.ir.exprs[stmt as usize]
+                        );
                         self.failed = true;
                         self.states[cur] = out;
                         return;
                     }
-                    // Multiple catches are modeled only when NO catch body suspends (each arm then
-                    // emits entirely inside the one handler state); a suspending catch body is
-                    // modeled only when it is the sole catch.
-                    let catch_suspends = catches
-                        .iter()
-                        .any(|c| expr_calls_suspend(self.ir, c.body, self.suspend));
-                    if catches.is_empty() || (catches.len() > 1 && catch_suspends) {
-                        self.failed = true;
-                        self.states[cur] = out;
-                        return;
-                    }
-                    // A SUSPENDING catch that additionally branches (`When` from a `?.`/elvis/`if`)
-                    // spans resume states with branch temps the handler frame can't reconcile — skip.
-                    // A NON-suspending catch emits entirely inside its handler state (its temps are
-                    // ordinary state-local declarations), so branches there are fine.
-                    if catch_suspends
-                        && (expr_contains_when(self.ir, catches[0].body)
-                            // A suspending catch must have been pre-allocated an exception spill in
-                            // `build_state_machine`; if not (e.g. a shape reached only after a lambda
-                            // boundary), skip rather than emit an unbound read.
-                            || !self.catch_spills.contains_key(&catches[0].var))
+                    if catches.is_empty()
+                        || catches.iter().any(|catch| {
+                            expr_calls_suspend(self.ir, catch.body, self.suspend)
+                                && !self.catch_spills.contains_key(&catch.body)
+                        })
                     {
+                        crate::trace_compiler!(
+                            "suspend",
+                            "flatten BAIL: catch spill invariant failed catches={catches:?} spills={:?}",
+                            self.catch_spills
+                        );
                         self.failed = true;
                         self.states[cur] = out;
                         return;
@@ -4251,14 +5720,15 @@ impl Flat<'_> {
                     for catch in catches {
                         let exc_internal = catch.exc_internal.render();
                         let exc_ty = Ty::obj(&exc_internal);
-                        let arm_stmts: Vec<ExprId> = if catch_suspends {
+                        let arm_suspends = expr_calls_suspend(self.ir, catch.body, self.suspend);
+                        let arm_stmts: Vec<ExprId> = if arm_suspends {
                             // The catch body itself suspends, so `r_v` is clobbered by its own
                             // resume. Bind the exception ONCE from `r_v` on arm entry into its
                             // spilled local `ev` (whose reads were pre-rewritten in
                             // `build_state_machine`); the spill machinery then carries it across
                             // the catch's suspension and restores it for the later reads
                             // (`throw e`).
-                            let ev = self.catch_spills[&catch.var];
+                            let ev = self.catch_spills[&catch.body];
                             let rv = self.gv(self.r_v);
                             let cast = self.add(IrExpr::TypeOp {
                                 op: IrTypeOp::Cast,
@@ -4361,6 +5831,7 @@ impl Flat<'_> {
             }
             if expr_calls_suspend(self.ir, stmt, self.suspend) {
                 trace_residual_suspension(self.ir, stmt, 0);
+                trace_residual_parents(self.ir, stmt);
                 if let IrExpr::Variable { init: Some(i), .. } = self.ir.exprs[stmt as usize] {
                     crate::trace_compiler!(
                         "suspend",
@@ -4396,6 +5867,8 @@ impl Flat<'_> {
                     "flatten BAIL: unmodeled loop-jump in plain stmt {:?}",
                     self.ir.exprs[stmt as usize]
                 );
+                trace_residual_suspension(self.ir, stmt, 0);
+                trace_residual_parents(self.ir, stmt);
                 self.failed = true;
                 self.states[cur] = out;
                 return;
@@ -4409,12 +5882,35 @@ impl Flat<'_> {
         // VerifyError. A `return` STATEMENT inside a suspend `try` body, or a `throw` ending a catch body,
         // both hit this.
         let diverges = stmts.last().is_some_and(|&s| stmt_diverges(self.ir, s));
+        crate::trace_compiler!(
+            "suspend",
+            "flatten exit state={cur} after={after:?} diverges={diverges} last={:?}",
+            stmts.last().map(|&s| &self.ir.exprs[s as usize])
+        );
         if !diverges {
             if let Some(a) = after {
                 self.goto(&mut out, a);
             }
         }
         self.states[cur] = out;
+    }
+}
+
+/// Whether `expression` contains a `break`/`continue` that must escape this value position. A nested
+/// loop owns its own unlabeled exits, and a lambda is always a control-flow boundary. A labeled exit
+/// is safe to expose without resolving it here: branch binding preserves its label and `Flat` uses
+/// the active loop stack to route that exact target.
+fn expr_contains_owned_loop_jump(ir: &IrFile, expression: ExprId) -> bool {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
+        IrExpr::While { .. } | IrExpr::Lambda { .. } => false,
+        _ => {
+            let mut found = false;
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                found = found || expr_contains_owned_loop_jump(ir, child);
+            });
+            found
+        }
     }
 }
 
@@ -4438,19 +5934,20 @@ fn expr_has_return(ir: &IrFile, e: ExprId) -> bool {
 /// Whether statement `s` always transfers control away (never falls through): a `return`/`throw`, or a
 /// block/`when` all of whose exits do. Used to suppress a dead fall-through transition after it.
 fn stmt_diverges(ir: &IrFile, s: ExprId) -> bool {
-    match &ir.exprs[s as usize] {
-        IrExpr::Return(_) | IrExpr::Throw { .. } => true,
-        IrExpr::Block { stmts, value: None } => {
-            stmts.last().is_some_and(|&last| stmt_diverges(ir, last))
-        }
-        IrExpr::When { branches } => {
-            // A `when` diverges only if it is exhaustive (has an `else`) AND every arm diverges.
-            !branches.is_empty()
-                && branches.last().is_some_and(|(cond, _)| cond.is_none())
-                && branches.iter().all(|(_, body)| stmt_diverges(ir, *body))
-        }
-        _ => false,
+    if ir
+        .logical_types
+        .get(&s)
+        .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing)
+    {
+        return true;
     }
+    ir.expr_diverges_by(s, &|expression, value| {
+        matches!(value, IrExpr::Call { .. } | IrExpr::MethodCall { .. })
+            && ir
+                .logical_types
+                .get(&expression)
+                .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing)
+    })
 }
 
 /// Collect the value-indices read (`GetValue`) anywhere in `e`'s subtree.
@@ -4826,6 +6323,12 @@ fn collect_suspension_points(
 ) {
     if is_suspension_point(ir, e, suspend_set) {
         out.insert(e);
+    }
+    if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
+        for &capture in captures {
+            collect_suspension_points(ir, capture, suspend_set, out);
+        }
+        return;
     }
     for_each_child(&ir.exprs, e, &mut |c| {
         collect_suspension_points(ir, c, suspend_set, out)
@@ -5223,6 +6726,7 @@ fn build_get_or_create(
             args,
             ctor_params: None,
             ctor_desc: None,
+            external_target: None,
         });
         if param_caps.is_empty() {
             return new;
@@ -5565,6 +7069,7 @@ fn build_continuation_class(
         ctor_args.push(IrCtorArg {
             name: None,
             ty: recv_ty,
+            declared_ty: None,
             is_field: false,
             has_default: false,
             is_vararg: false,
@@ -5576,6 +7081,7 @@ fn build_continuation_class(
     ctor_args.push(IrCtorArg {
         name: None,
         ty: continuation_ty(),
+        declared_ty: None,
         is_field: false,
         has_default: false,
         is_vararg: false,
@@ -5602,6 +7108,7 @@ fn build_continuation_class(
         properties: Vec::new(),
         fields,
         ctor_param_count: 0,
+        constructor_prefix_count: 0,
         ctor_args,
         ctor_param_annotations: Vec::new(),
         init_body: None,
@@ -5773,30 +7280,6 @@ fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
     })
 }
 
-/// Unwrap a BOXED value-class resume value: `checkcast X` then `X.unbox-impl()`, yielding the erased
-/// underlying `target` the resumed local is typed as. Mirrors kotlinc, which boxes a value-class result
-/// at the CPS `areturn` (`X.box-impl`) because the continuation boundary is `Object`-typed.
-fn unbox_value_class(ir: &mut IrFile, value: ExprId, x: TypeName, target: &Ty) -> ExprId {
-    let boxed = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: value,
-        type_operand: Ty::obj_name(x),
-    });
-    let descriptor =
-        crate::jvm::names::method_descriptor(&[], super::ir_emit::ir_ty_to_jvm(&target.non_null()));
-    ir.add_expr(IrExpr::Call {
-        callee: crate::ir::Callee::Virtual {
-            owner: x,
-            name: "unbox-impl".to_string(),
-            descriptor,
-            params: None,
-            interface: false,
-        },
-        dispatch_receiver: Some(boxed),
-        args: vec![],
-    })
-}
-
 /// Whether narrowing an erased `Object` resume value to `t` needs an explicit `checkcast` — a concrete
 /// reference class (`Config`), `String`, or an array. `kotlin/Any` (already `Object`) and primitives do
 /// NOT; crucially a BOXED-primitive object type (`Obj("kotlin/Int")`, a spilled `Int`) also does not —
@@ -5928,12 +7411,7 @@ fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
         None => {
             // Statement body. If it doesn't already terminate, return `Unit.INSTANCE` (a leaf suspend fn
             // with a `Unit`/no-value body).
-            let terminates = stmts.last().is_some_and(|&s| {
-                matches!(
-                    ir.exprs[s as usize],
-                    IrExpr::Return(_) | IrExpr::Throw { .. }
-                )
-            });
+            let terminates = stmts.last().is_some_and(|&s| stmt_diverges(ir, s));
             if !terminates {
                 let unit = ir.add_expr(IrExpr::UnitInstance);
                 stmts.push(ir.add_expr(IrExpr::Return(Some(unit))));
@@ -6111,34 +7589,6 @@ fn spills_bottom_typed_local(spilled: &[(u32, Ty)]) -> bool {
         .any(|(_, t)| matches!(t.non_null(), Ty::Nothing))
 }
 
-/// A suspending body iterating a `kotlin.ranges` PROGRESSION object (`for (x in 20L..30L step 5L)` —
-/// the stepped/long form kotlinc iterates via `LongProgression.iterator()`, unlike the optimized
-/// counted `Int` loop): the induction state across a suspension isn't modeled yet — the loop resumes
-/// at its first element. Bail (skip, never miscompile).
-fn suspending_over_progression(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if !expr_calls_suspend(ir, b, suspend_set) {
-        return false;
-    }
-    let mut found = false;
-    let mut walk = |e: ExprId| {
-        if matches!(&ir.exprs[e as usize], IrExpr::Variable { ty, .. }
-            if ty.non_null().obj_internal().is_some_and(|n| n.render().starts_with("kotlin/ranges/")))
-        {
-            found = true;
-        }
-    };
-    let mut seen: HashSet<ExprId> = HashSet::new();
-    let mut stack = vec![b];
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur) {
-            continue;
-        }
-        walk(cur);
-        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
-    }
-    found
-}
-
 /// Whether the statement is (or contains) a loop — the loop-carried spill rule's trigger.
 fn stmt_contains_loop(ir: &IrFile, e: ExprId) -> bool {
     if matches!(&ir.exprs[e as usize], IrExpr::While { .. }) {
@@ -6288,6 +7738,14 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     dispatch_receiver.is_none().then_some(())?;
                     params.clone()
                 }
+                Callee::Module { params, .. } => {
+                    dispatch_receiver.is_none().then_some(())?;
+                    params.clone()
+                }
+                Callee::External { params, .. } => {
+                    dispatch_receiver.is_none().then_some(())?;
+                    params.clone()
+                }
                 Callee::Static {
                     descriptor,
                     name,
@@ -6317,6 +7775,8 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                         None => crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0,
                     }
                 }
+                // Realized into `Callee::Special` before this pass runs.
+                Callee::Super { .. } => return None,
                 Callee::Special {
                     owner,
                     name,
@@ -6331,7 +7791,9 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     ));
                     crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
                 }
-                Callee::Intrinsic { .. } | Callee::LocalDefault(_) => return None,
+                Callee::Intrinsic { .. }
+                | Callee::LocalDefault(_)
+                | Callee::ClassStaticDefault { .. } => return None,
             };
             zip(args, &params, &mut out)?;
         }
@@ -6359,34 +7821,6 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
         .then_some(out)
 }
 
-/// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An
-/// inline-class value returned across the `Object`-typed CPS resume boundary needs box-impl/unbox-impl
-/// handling that the state-machine restore doesn't model yet, so such a suspend body is SKIPPED (the file
-/// cleanly falls back to unsupported — never a miscompile). The common (non-value-class) result path is
-/// unaffected.
-fn binds_value_class_suspension(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if let IrExpr::Variable {
-        ty: Ty::Obj(internal, _),
-        init: Some(init),
-        ..
-    } = &ir.exprs[e as usize]
-    {
-        if is_suspension_point(ir, *init, suspend_set)
-            && ir
-                .classes
-                .iter()
-                .any(|c| c.fq_name_id() == *internal && c.is_value)
-        {
-            return true;
-        }
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, e, &mut |c| {
-        found = found || binds_value_class_suspension(ir, c, suspend_set);
-    });
-    found
-}
-
 fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
     match ir.exprs[e as usize].clone() {
         IrExpr::Return(None) => {
@@ -6409,85 +7843,19 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
             ir.exprs[e as usize] = IrExpr::Return(Some(boxed));
             box_returns(ir, v)
         }
-        IrExpr::Block { stmts, value } => {
-            for s in stmts {
-                if !box_returns(ir, s) {
-                    return false;
-                }
-            }
-            value.is_none_or(|val| box_returns(ir, val))
-        }
-        IrExpr::When { branches } => branches
-            .into_iter()
-            .all(|(cond, body)| cond.is_none_or(|c| box_returns(ir, c)) && box_returns(ir, body)),
-        IrExpr::Const(_)
-        | IrExpr::GetValue(_)
-        | IrExpr::GetStatic(_)
-        | IrExpr::StaticInstance { .. }
-        | IrExpr::ExternalStaticField { .. }
-        | IrExpr::UnitInstance => true,
-        IrExpr::TypeOp { arg, .. }
-        | IrExpr::ReifiedTypeOp { arg, .. }
-        | IrExpr::NotNullAssert { operand: arg, .. } => box_returns(ir, arg),
-        IrExpr::Throw { operand } => box_returns(ir, operand),
-        IrExpr::StringConcat(parts) => parts.into_iter().all(|p| box_returns(ir, p)),
-        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => box_returns(ir, lhs) && box_returns(ir, rhs),
-        IrExpr::PrimitiveNeg { operand, .. } => box_returns(ir, operand),
-        IrExpr::SetValue { value, .. } => box_returns(ir, value),
-        IrExpr::SetField { value, .. } => box_returns(ir, value),
-        // A top-level `var` write (`saved = c` inside an intrinsic block) — traverse the value.
-        IrExpr::SetStatic { value, .. } => box_returns(ir, value),
-        IrExpr::RefGet { holder, .. } => box_returns(ir, holder),
-        IrExpr::RefSet { holder, value, .. } => box_returns(ir, holder) && box_returns(ir, value),
-        IrExpr::Variable { init, .. } => init.is_none_or(|i| box_returns(ir, i)),
-        IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => {
-            box_returns(ir, receiver)
-        }
-        IrExpr::PropertyWrite {
-            receiver, value, ..
-        } => box_returns(ir, receiver) && box_returns(ir, value),
-        IrExpr::Call { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
-        // A function-value invoke (`f(x)` on a `Function{n}` value) — traverse like a call; the
-        // machine has already threaded its continuation if it suspends.
-        IrExpr::InvokeFunction { func, args, .. } => {
-            box_returns(ir, func) && args.into_iter().all(|a| box_returns(ir, a))
-        }
-        IrExpr::MethodCall { receiver, args, .. } => {
-            box_returns(ir, receiver) && args.into_iter().flatten().all(|a| box_returns(ir, a))
-        }
-        IrExpr::New { args, .. } => args.into_iter().all(|a| box_returns(ir, a)),
-        IrExpr::While {
-            cond, body, update, ..
-        } => {
-            box_returns(ir, cond)
-                && box_returns(ir, body)
-                && update.is_none_or(|u| box_returns(ir, u))
-        }
         // A lambda argument (`m.map { it.value }`) is a VALUE — its body is a separate impl function,
         // not a `return` of the suspend function being boxed — so it is a leaf here (no outer return to
-        // box inside it). Its captures are ordinary outer-scope value reads handled by the other arms.
+        // box inside it). `for_each_child` deliberately exposes retained inline bodies, so this ownership
+        // boundary must remain explicit.
         IrExpr::Lambda { .. } => true,
-        // A `vararg` argument's elements evaluate in the enclosing expression — validate each.
-        IrExpr::Vararg { elements, .. } => elements.into_iter().all(|el| box_returns(ir, el)),
-        // `try { … } catch … finally { … }`: box a `return` in the try body, in each catch body, and in
-        // the finally. The try/finally is emitted with its own exception table (unchanged by the CPS
-        // return-boxing); a suspension INSIDE the try body is a separate case the flattener still
-        // declines (its `finally`-across-states isn't modeled), so this only enables non-suspending try
-        // bodies inside a suspend function.
-        IrExpr::Try {
-            body,
-            catches,
-            finally,
-            ..
-        } => {
-            box_returns(ir, body)
-                && catches.into_iter().all(|c| box_returns(ir, c.body))
-                && finally.is_none_or(|f| box_returns(ir, f))
-        }
-        IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
-        other => {
-            crate::trace_compiler!("suspend", "box_returns BAIL: unhandled node {other:?}");
-            false
+        // Return boxing is a tree rewrite, not an IR-shape validator. Use the canonical child relation
+        // so adding an unrelated expression kind cannot make an otherwise valid suspend function
+        // unsupported. Unsupported coroutine control-flow is rejected by the state-machine flattener,
+        // where that decision belongs.
+        _ => {
+            let mut children = Vec::new();
+            for_each_child(&ir.exprs, e, &mut |child| children.push(child));
+            children.into_iter().all(|child| box_returns(ir, child))
         }
     }
 }
@@ -6502,25 +7870,6 @@ fn rewrite_subtree(ir: &mut IrFile, e: ExprId, f: &mut impl FnMut(&mut IrExpr)) 
     for c in kids {
         rewrite_subtree(ir, c, f);
     }
-}
-
-/// Whether `e`'s subtree contains a `When` (a branch — `if`/`when`/`?.`/elvis) in its OWN (directly
-/// flattened) flow. A branch in a suspend try's CATCH body creates a temp whose slot the exception-
-/// handler frame can't reconcile → skip. A `When` nested inside a `Lambda` is compiled to a SEPARATE
-/// method (not inlined into the handler state), so it is NOT a conflict — don't descend into lambdas.
-fn expr_contains_when(ir: &IrFile, e: ExprId) -> bool {
-    match &ir.exprs[e as usize] {
-        IrExpr::When { .. } => return true,
-        IrExpr::Lambda { .. } => return false,
-        _ => {}
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, e, &mut |c| {
-        if !found && expr_contains_when(ir, c) {
-            found = true;
-        }
-    });
-    found
 }
 
 /// Collect the node ids of every `GetValue(var)` in `e`'s subtree (a catch body) that means the catch
@@ -6546,13 +7895,10 @@ fn collect_getvalue(ir: &IrFile, e: ExprId, var: u32, out: &mut Vec<ExprId>) {
     for_each_child(&ir.exprs, e, &mut |c| collect_getvalue(ir, c, var, out));
 }
 
-/// Collect `(catch_var, catch_body, exc_internal)` for each `try { … } catch (e) { … }` in `e`'s
-/// subtree whose CATCH body itself suspends and matches the state machine's straight-line single-catch
-/// shape — so [`build_state_machine`] can spill each caught exception across the catch's own suspension
-/// (`r_v` no longer holds it once the catch resumes). Does NOT descend into `Lambda` bodies (a suspend
-/// lambda has its own state machine, and its value-indices are numbered independently). Skips a catch
-/// whose body nests another suspending catch: the two exception variables may alias the same reused
-/// value-index, which would make the scoped read-rewrite unsound — `flatten` then bails that shape.
+/// Collect every suspending catch body so [`build_state_machine`] can spill its caught exception across
+/// that body's suspension (`r_v` no longer holds it once the catch resumes). Catch BODY identity—not
+/// the lexically reused catch-variable slot—distinguishes sibling arms. Does not descend into lambdas,
+/// whose bodies own separate state machines and value namespaces.
 fn find_suspending_catch_tries(
     ir: &IrFile,
     e: ExprId,
@@ -6563,14 +7909,14 @@ fn find_suspending_catch_tries(
         IrExpr::Lambda { .. } => return,
         IrExpr::Try {
             catches, finally, ..
-        } if finally.is_none()
-            && catches.len() == 1
-            && expr_calls_suspend(ir, catches[0].body, suspend_set)
-            && !expr_contains_when(ir, catches[0].body)
-            && !catch_body_nests_suspending_catch(ir, catches[0].body, suspend_set) =>
-        {
-            let c = &catches[0];
-            out.push((c.var, c.body, c.exc_internal));
+        } if finally.is_none() => {
+            for catch in catches {
+                if expr_calls_suspend(ir, catch.body, suspend_set)
+                    && !catch_body_nests_suspending_catch(ir, catch.body, suspend_set)
+                {
+                    out.push((catch.var, catch.body, catch.exc_internal));
+                }
+            }
         }
         _ => {}
     }
@@ -6623,13 +7969,61 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
     crate::ir::shift_value_indices(ir, e, threshold, 1);
 }
 
-/// Resolve every `CurrentContinuation` placeholder in `e` to read the continuation value at `slot` (the
-/// trailing `Continuation` parameter's value-index). Emitted by `ir_lower` for the lambda parameter of
-/// `suspendCoroutineUninterceptedOrReturn { c -> … }`.
+/// Resolve every current-coroutine placeholder in `e` against the continuation value at `slot` (the
+/// trailing `Continuation` parameter's value-index). `CurrentContinuation` becomes a direct local
+/// read; the checked `coroutineContext` intrinsic becomes the ordinary interface call on that same
+/// value. Neither realization repeats property lookup or invokes the stdlib's private throwing getter.
 fn rewrite_current_continuation(ir: &mut IrFile, e: ExprId, slot: u32) {
+    let mut reads_context = false;
+    visit_subtree(&ir.exprs, e, &mut |node| {
+        reads_context |= matches!(
+            node,
+            IrExpr::Call {
+                callee: Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::CoroutineContext,
+                    ..
+                },
+                ..
+            }
+        );
+    });
+    let context_receiver = reads_context.then(|| ir.add_expr(IrExpr::GetValue(slot)));
     rewrite_subtree(ir, e, &mut |node| {
         if matches!(node, IrExpr::CurrentContinuation) {
             *node = IrExpr::GetValue(slot);
+            return;
+        }
+        if matches!(
+            node,
+            IrExpr::Call {
+                callee: Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::CoroutineContext,
+                    ..
+                },
+                ..
+            }
+        ) {
+            let IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } = node
+            else {
+                unreachable!("matched coroutine-context call")
+            };
+            debug_assert!(dispatch_receiver.is_none());
+            debug_assert!(args.is_empty());
+            *node = IrExpr::Call {
+                callee: Callee::Virtual {
+                    owner: type_name("kotlin/coroutines/Continuation"),
+                    name: "getContext".to_string(),
+                    descriptor: "()Lkotlin/coroutines/CoroutineContext;".to_string(),
+                    params: None,
+                    interface: true,
+                },
+                dispatch_receiver: context_receiver,
+                args: Vec::new(),
+            };
         }
     });
 }

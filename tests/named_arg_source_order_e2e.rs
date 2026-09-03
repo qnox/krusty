@@ -57,3 +57,20 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("mixed named and positional args"), "OK");
 }
+
+#[test]
+fn positional_arguments_after_a_named_prefix_remain_vararg_elements() {
+    const SOURCE: &str = r#"
+        fun collect(first: Int, vararg values: String, tail: Double) {}
+
+        fun box(): String {
+            collect(first = 1, "a", "b", tail = 2.0)
+            return "OK"
+        }
+    "#;
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(SOURCE, &[stdlib], Some(jdk.as_path()));
+    assert_eq!(diagnostics, Vec::<String>::new());
+}

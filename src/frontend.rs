@@ -3,10 +3,14 @@
 //! Source analysis: lexing, parsing, signature collection, and checking.
 
 use crate::ast::File;
-use crate::diag::{DiagSink, Severity};
+use crate::diag::{DiagSink, Severity, Span};
 use crate::features::LangFeatures;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
+
+mod header_validation;
+mod inline_preparation;
+mod retained_syntax;
 pub(crate) use crate::resolve::class_internal_resolver;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassModel as FrontendClassModel;
@@ -29,7 +33,7 @@ pub(crate) use crate::resolve::{
     ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
     ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
     ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
-    SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    SingletonValue, StmtLowering,
 };
 pub(crate) use crate::resolve::{selected_context_values, SelectedContextSources};
 /// Types carried by the public source-set analysis signatures, re-exported here so process
@@ -47,11 +51,190 @@ pub struct CheckedFile<'a> {
     pub module_name: &'a str,
 }
 
-/// Parsed and checked state for a jointly compiled source set.
+/// Analysis result for a jointly compiled source set.
+///
+/// Inspection-oriented entry points retain `files`/`types`. Emission-oriented analysis deliberately
+/// returns those vectors empty after inline FIR preparation; Pass 2 reparses through
+/// `reparse_sources` and never observes the Pass-1 arenas.
 pub struct SourceSetAnalysis {
     pub files: Vec<File>,
     pub symbols: FrontendSymbols,
     pub types: Vec<Option<FrontendTypeInfo>>,
+    pub(crate) reparse_sources: Vec<ReparseSource>,
+    pub(crate) streamed: Option<StreamedPassState>,
+}
+
+/// Production result after Pass 1 has been consumed.
+///
+/// Unlike [`SourceSetAnalysis`], this type has no slot for parsed files, AST-keyed type tables, or
+/// the Pass-1 signature graph.  A successful value owns only the external semantic platform, the
+/// finalized FIR module, and the source text that the driver will sequentially reparse in Pass 2.
+pub struct StreamingSourceSetAnalysis {
+    pub(crate) symbols: crate::resolve::PassTwoSymbols,
+    pub(crate) reparse_sources: Vec<ReparseSource>,
+    pub(crate) streamed: Option<StreamedPassState>,
+}
+
+impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
+    fn from(analysis: SourceSetAnalysis) -> Self {
+        let SourceSetAnalysis {
+            files,
+            symbols,
+            types,
+            reparse_sources,
+            streamed,
+        } = analysis;
+        drop(files);
+        drop(types);
+        let symbols = symbols.into_pass_two_symbols();
+        Self {
+            symbols,
+            reparse_sources,
+            streamed,
+        }
+    }
+}
+
+/// Owned source input used only to materialize one active Pass-2 file. It is compilation
+/// orchestration state, not part of [`crate::fir::FrontendModule`], and cannot retain an AST.
+pub(crate) struct ReparseSource {
+    kind: SourceKind,
+    is_common: bool,
+    text: Box<str>,
+    file_stem: Option<Box<str>>,
+    features: LangFeatures,
+    #[cfg(test)]
+    parse_count: std::cell::Cell<usize>,
+    #[cfg(test)]
+    released_before_collection: bool,
+}
+
+impl ReparseSource {
+    pub(crate) fn visit_declaration_units(
+        &self,
+        diags: &mut DiagSink,
+        mut visit: impl FnMut(File, &mut DiagSink),
+    ) {
+        assert_eq!(
+            self.kind,
+            SourceKind::Kotlin,
+            "production declaration-unit streaming accepts Kotlin files only"
+        );
+        #[cfg(test)]
+        self.parse_count.set(self.parse_count.get() + 1);
+        let tokens = crate::lexer::lex(&self.text, diags);
+        let mut anonymous_counters = std::collections::HashMap::new();
+        crate::parser::visit_declaration_units_with_features(
+            &self.text,
+            &tokens,
+            diags,
+            &self.features,
+            |mut file, diags| {
+                file.is_common = self.is_common;
+                if let Some(stem) = self.file_stem.as_deref() {
+                    name_anonymous_classes_with_counters(
+                        &mut file,
+                        &format!("{stem}Kt"),
+                        &mut anonymous_counters,
+                    );
+                }
+                visit(file, diags);
+            },
+        );
+    }
+
+    pub(crate) fn is_script(&self) -> bool {
+        self.kind == SourceKind::KotlinScript
+    }
+
+    pub(crate) fn is_java(&self) -> bool {
+        self.kind == SourceKind::Java
+    }
+
+    /// Run the ordinary checker during Pass 2 when Pass 1 published only a partial semantic index.
+    /// Invalid modules never enter FIR/lowering, but Kotlin still requires diagnostics from every
+    /// independently checkable body. This is still the second source parse and the transient file
+    /// drops before the next source. Stable declaration inventory binds each fresh parser unit; no
+    /// Pass-1 parser coordinate or signature graph survives. Java bodies remain owned by javac.
+    pub(crate) fn visit_diagnostic_units(
+        &self,
+        diags: &mut DiagSink,
+        mut visit: impl FnMut(File, &mut DiagSink),
+    ) {
+        match self.kind {
+            // Invalid stable signatures cannot enter checked FIR, but ordinary Kotlin declarations
+            // still recover diagnostics through the same bounded Pass-2 parser used by successful
+            // modules. Keeping the whole reparsed file alive here would make error recovery a hidden
+            // non-streaming architecture.
+            SourceKind::Kotlin => self.visit_declaration_units(diags, visit),
+            SourceKind::KotlinScript => {
+                #[cfg(test)]
+                self.parse_count.set(self.parse_count.get() + 1);
+                let mut file = parse_source_kind(&self.text, self.kind, &self.features, diags);
+                file.is_common = self.is_common;
+                visit(file, diags);
+            }
+            SourceKind::Java => {}
+        }
+    }
+
+    #[cfg(test)]
+    fn parse_count(&self) -> usize {
+        self.parse_count.get()
+    }
+
+    #[cfg(test)]
+    fn released_before_collection(&self) -> bool {
+        self.released_before_collection
+    }
+}
+
+/// Connected stable-identity product of Pass 1. It is kept beside the legacy AST result only while
+/// callers migrate; none of its fields can retain syntax or a temporary signature graph.
+pub(crate) struct StreamedPassState {
+    pub module: crate::fir::FrontendModule,
+    pub diagnostic_recovery: bool,
+}
+
+fn diagnostic_streamed_state(
+    mut index: crate::fir::ResolvedModuleIndex,
+    sources: crate::fir::SourceMap,
+) -> StreamedPassState {
+    index.release_source_coordinates();
+    assert!(
+        !index.retains_source_coordinates(),
+        "diagnostic Pass 2 must not retain Pass-1 source coordinates"
+    );
+    StreamedPassState {
+        module: crate::fir::FrontendModule::new(
+            index,
+            crate::fir::InlineBodyStore::default(),
+            crate::fir::DefaultArgumentStore::default(),
+            sources,
+        ),
+        diagnostic_recovery: true,
+    }
+}
+
+#[cfg(test)]
+impl StreamedPassState {
+    /// Same-parse adapter for focused FIR unit tests. Production discovers bodies only inside the
+    /// bounded Pass-2 callback; tests that intentionally retain a whole AST can enumerate that live
+    /// syntax without recreating the removed cross-pass body queue.
+    pub(crate) fn ordinary_body_work(
+        &self,
+        file: &File,
+        source: crate::fir::SourceFileId,
+    ) -> Vec<crate::fir::BodyWorkItem> {
+        let mut cursor = crate::fir::ActiveSourceCursor::new(source, self.module.index());
+        let active = cursor
+            .bind_next(file, source, self.module.index())
+            .expect("test AST must bind to the stable declaration stream");
+        assert!(cursor.is_finished(), "test AST must consume every header");
+        active
+            .ordinary_body_work(file, source, self.module.index())
+            .expect("test AST bodies must bind to stable declarations")
+    }
 }
 
 /// Multiplatform `expect`/`actual` resolution over ONE compiled source set (kotlinc's JVM MPP
@@ -64,47 +247,49 @@ pub struct SourceSetAnalysis {
 /// The package-qualified expect/actual match key: `(package, kind, name, ext-receiver, arity)`.
 type ExpectKey = (String, u8, String, String, usize);
 
+fn expect_key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
+    let pkg = file.package.clone().unwrap_or_default();
+    let (kind, name, recv, arity) = match file.decl(id) {
+        crate::ast::Decl::Fun(function) => (
+            0,
+            function.name.clone(),
+            function
+                .receiver
+                .as_ref()
+                .map(|receiver| receiver.name.clone())
+                .unwrap_or_default(),
+            function.params.len(),
+        ),
+        crate::ast::Decl::Class(class) => (1, class.name.clone(), String::new(), 0),
+        crate::ast::Decl::Property(property) => (
+            2,
+            property.name.clone(),
+            property
+                .receiver
+                .as_ref()
+                .map(|receiver| receiver.name.clone())
+                .unwrap_or_default(),
+            0,
+        ),
+    };
+    (pkg, kind, name, recv, arity)
+}
+
 pub fn strip_matched_expects(files: &mut [File]) {
-    use crate::ast::Decl;
     // The match key is PACKAGE-qualified (expect/actual couple by FqName) but deliberately omits
     // the RETURN/property type and the receiver's TYPE ARGUMENTS (`List<String>.foo` keys as
     // `List`) — an `actual` routinely INFERS it (`actual fun greet() = "O"`), so a
     // type component would wrongly leave such pairs unmatched. kotlinc validates actual/expect
     // compatibility upstream; krusty trusts that and lets an incompatible pair fail checking on
     // its own terms downstream.
-    fn key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
-        let pkg = file.package.clone().unwrap_or_default();
-        let (kind, name, recv, arity) = match file.decl(id) {
-            Decl::Fun(f) => (
-                0,
-                f.name.clone(),
-                f.receiver
-                    .as_ref()
-                    .map(|r| r.name.clone())
-                    .unwrap_or_default(),
-                f.params.len(),
-            ),
-            Decl::Class(c) => (1, c.name.clone(), String::new(), 0),
-            Decl::Property(p) => (
-                2,
-                p.name.clone(),
-                p.receiver
-                    .as_ref()
-                    .map(|r| r.name.clone())
-                    .unwrap_or_default(),
-                0,
-            ),
-        };
-        (pkg, kind, name, recv, arity)
-    }
-    // Pass 1: every NON-expect top-level declaration's key across the whole set. An
+    // Actualization stage A: every NON-expect top-level declaration's key across the whole set. An
     // `actual typealias S = String` also actualizes an `expect class S` — typealiases live in
     // `File.type_aliases`, so add each alias NAME as a class-kind actual.
     let mut actuals: std::collections::HashSet<ExpectKey> = std::collections::HashSet::new();
     for file in files.iter() {
         for &d in &file.decls {
             if !file.expect_decls.contains(&d) {
-                actuals.insert(key(file, d));
+                actuals.insert(expect_key(file, d));
             }
         }
         for (alias, _) in &file.type_aliases {
@@ -117,200 +302,265 @@ pub fn strip_matched_expects(files: &mut [File]) {
             ));
         }
     }
-    // Pass 1b: DEFAULT-ARGUMENT transplant. Parameter defaults live on the EXPECT declaration
-    // (kotlinc forbids them on the actual), so dropping the expect would lose them and an
-    // omitted-argument call site would mis-resolve. Harvest each matched expect fun's defaults as
-    // COPYABLE expression trees; pass 2b grafts them onto the matching actual's parameters. A
-    // default outside the copyable subset (literals/names/simple operators) is skipped — the
-    // actual stays default-less there and an omitting call fails to resolve (skip, never wrong).
-    // Alongside the defaults, the expect's PARAMETER NAMES: a default may reference a prior
-    // parameter (`b: Int = a`), which only stays meaningful if the actual's names match — kotlinc
-    // enforces exactly that (actual/expect parameter-name mismatch is an error), so a mismatch
-    // here means invalid input; the graft is skipped rather than silently re-binding the name.
-    type FunDefaults = (Vec<String>, Vec<Option<CopyExpr>>);
-    fn harvest_fun(file: &File, f: &crate::ast::FunDecl) -> Option<FunDefaults> {
-        if !f.params.iter().any(|p| p.default.is_some()) {
-            return None;
-        }
-        let defs: Vec<Option<CopyExpr>> = f
-            .params
-            .iter()
-            .map(|p| p.default.and_then(|e| CopyExpr::lift(file, e)))
-            .collect();
-        Some((f.params.iter().map(|p| p.name.clone()).collect(), defs))
-    }
-    fn graft_fun(
-        f: &mut crate::ast::FunDecl,
-        names: &[String],
-        defs: &[Option<crate::ast::ExprId>],
-    ) {
-        let names_match = f
-            .params
-            .iter()
-            .map(|p| p.name.as_str())
-            .eq(names.iter().map(String::as_str));
-        if !names_match {
-            return; // invalid expect/actual pair (kotlinc rejects it) — don't graft
-        }
-        for (p, def) in f.params.iter_mut().zip(defs) {
-            if p.default.is_none() {
-                p.default = *def;
-            }
-        }
-    }
-    let mut expect_defaults: std::collections::HashMap<ExpectKey, FunDefaults> =
-        std::collections::HashMap::new();
-    // Member defaults of an `expect class`, keyed by the CLASS key + `(member name, arity)`.
-    let mut expect_member_defaults: std::collections::HashMap<
-        (ExpectKey, String, usize),
-        FunDefaults,
-    > = std::collections::HashMap::new();
-    // Same-name same-arity member OVERLOADS (`f(Int = 1)` / `f(String = "b")`) collide on this
-    // key; grafting either set of defaults onto both actuals would be type-wrong — poison the key
-    // so neither is grafted (the omitting call then fails to resolve: skip, never wrong).
-    let mut ambiguous_members: std::collections::HashSet<(ExpectKey, String, usize)> =
-        std::collections::HashSet::new();
-    for file in files.iter() {
-        for &d in &file.expect_decls {
-            match file.decl(d) {
-                Decl::Fun(f) => {
-                    if let Some(h) = harvest_fun(file, f) {
-                        expect_defaults.insert(key(file, d), h);
-                    }
+    let matched = files
+        .iter()
+        .enumerate()
+        .flat_map(|(file_index, file)| {
+            file.expect_decls.iter().copied().filter_map({
+                let actuals = &actuals;
+                move |declaration| {
+                    actuals
+                        .contains(&expect_key(file, declaration))
+                        .then_some((file_index as u32, declaration))
                 }
-                Decl::Class(c) => {
-                    for m in &c.methods {
-                        let k = (key(file, d), m.name.clone(), m.params.len());
-                        if ambiguous_members.contains(&k) {
-                            continue;
-                        }
-                        if let Some(h) = harvest_fun(file, m) {
-                            if expect_member_defaults.insert(k.clone(), h).is_some() {
-                                expect_member_defaults.remove(&k);
-                                ambiguous_members.insert(k);
-                            }
-                        } else if expect_member_defaults.remove(&k).is_some() {
-                            // A defaulted overload next to a default-less same-key sibling is just
-                            // as ambiguous for the graft target filter.
-                            ambiguous_members.insert(k);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    // Pass 2: drop each matched expect declaration from its file's decl list; graft harvested
-    // defaults onto the surviving actuals.
-    for file in files.iter_mut() {
+            })
+        })
+        .collect::<std::collections::HashSet<_>>();
+    strip_selected_expects(files, &matched);
+}
+
+fn strip_selected_expects(
+    files: &mut [File],
+    matched: &std::collections::HashSet<(u32, crate::ast::DeclId)>,
+) {
+    // Actualization removes only declarations selected by compact stable-header matching. Defaults
+    // are checked from the still-live expect syntax and stored as target-owned FIR in Pass 1.
+    for (file_index, file) in files.iter_mut().enumerate() {
         let expects = std::mem::take(&mut file.expect_decls);
         let drop: Vec<crate::ast::DeclId> = expects
             .iter()
-            .filter(|&&d| actuals.contains(&key(file, d)))
+            .filter(|&&declaration| matched.contains(&(file_index as u32, declaration)))
             .copied()
             .collect();
         file.decls.retain(|d| !drop.contains(d));
         file.expect_decls = expects.into_iter().filter(|d| !drop.contains(d)).collect();
-        // Pass 2b: graft defaults. Two loops because materializing allocates into the file's
-        // expr arena while the decl is temporarily detached.
-        let decls: Vec<crate::ast::DeclId> = file.decls.clone();
-        for d in decls {
-            let k = key(file, d);
-            if let Some((names, defs)) = expect_defaults.get(&k) {
-                let materialized: Vec<Option<crate::ast::ExprId>> = defs
-                    .iter()
-                    .map(|c| c.as_ref().map(|c| c.materialize(file)))
-                    .collect();
-                let names = names.clone();
-                if let Decl::Fun(f) = file.decl_mut(d) {
-                    graft_fun(f, &names, &materialized);
-                }
-            }
-            // Member defaults: an actual CLASS whose key matches an expect class with
-            // defaulted members.
-            let member_keys: Vec<(String, usize)> = expect_member_defaults
-                .keys()
-                .filter(|(ck, _, _)| *ck == k)
-                .map(|(_, n, a)| (n.clone(), *a))
-                .collect();
-            for (mname, arity) in member_keys {
-                let (names, materialized) = {
-                    let (names, defs) = &expect_member_defaults[&(k.clone(), mname.clone(), arity)];
-                    let m: Vec<Option<crate::ast::ExprId>> = defs
-                        .iter()
-                        .map(|c| c.as_ref().map(|c| c.materialize(file)))
-                        .collect();
-                    (names.clone(), m)
-                };
-                if let Decl::Class(c) = file.decl_mut(d) {
-                    for m in c
-                        .methods
-                        .iter_mut()
-                        .filter(|m| m.name == mname && m.params.len() == arity)
-                    {
-                        graft_fun(m, &names, &materialized);
-                    }
-                }
-            }
-        }
     }
 }
 
-/// A detached, owned copy of a SIMPLE expression tree (literals, names, unary/binary operators) —
-/// enough for realistic parameter defaults — that can be re-materialized into another file's
-/// arena. `lift` returns `None` for anything richer.
-enum CopyExpr {
-    Leaf(crate::ast::Expr),
-    Binary {
-        op: crate::ast::BinOp,
-        lhs: Box<CopyExpr>,
-        rhs: Box<CopyExpr>,
-    },
-}
-
-impl CopyExpr {
-    fn lift(file: &File, e: crate::ast::ExprId) -> Option<CopyExpr> {
-        use crate::ast::Expr;
-        Some(match file.expr(e) {
-            leaf @ (Expr::IntLit(_)
-            | Expr::LongLit(_)
-            | Expr::UIntLit(_)
-            | Expr::ULongLit(_)
-            | Expr::DoubleLit(_)
-            | Expr::FloatLit(_)
-            | Expr::BoolLit(_)
-            | Expr::StringLit(_)
-            | Expr::CharLit(_)
-            | Expr::NullLit
-            | Expr::Name(_)) => CopyExpr::Leaf(leaf.clone()),
-            Expr::Binary { op, lhs, rhs, .. } => CopyExpr::Binary {
-                op: *op,
-                lhs: Box::new(CopyExpr::lift(file, *lhs)?),
-                rhs: Box::new(CopyExpr::lift(file, *rhs)?),
-            },
-            _ => return None,
+/// Publish expect-owned default presence on surviving actual headers and return the stable
+/// provider→target work. Matched expect syntax remains in the active Pass-1 parser stream only
+/// until those defaults become checked FIR; compact-header exclusion keeps it out of signatures.
+fn actualize_headers_and_collect_inherited_defaults(
+    headers: &mut crate::fir::StreamedHeaderModule,
+) -> (
+    std::collections::HashSet<crate::fir::DeclarationId>,
+    Vec<crate::fir::DefaultArgumentProvider>,
+) {
+    let inherited_defaults = crate::fir::actualized_declaration_pairs(headers)
+        .into_iter()
+        .filter_map(|pair| {
+            let source_parameters = match headers.syntax.declaration(pair.expect)?.kind {
+                crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
+                | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
+                _ => return None,
+            };
+            let target_parameters = match headers.syntax.declaration(pair.actual)?.kind {
+                crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
+                | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
+                _ => return None,
+            };
+            let defaults = headers
+                .syntax
+                .parameters(source_parameters)
+                .iter()
+                .map(|parameter| parameter.flags.has_default())
+                .collect::<Vec<_>>();
+            (headers.syntax.parameters(target_parameters).len() == defaults.len()
+                && defaults.iter().any(|default| *default))
+            .then_some((pair, target_parameters, defaults))
         })
+        .collect::<Vec<_>>();
+    let work = inherited_defaults
+        .iter()
+        .map(|(pair, _, _)| crate::fir::DefaultArgumentProvider {
+            target: pair.actual,
+            provider: pair.expect,
+            relation: crate::fir::DefaultArgumentRelation::ActualizedDeclaration,
+        })
+        .collect::<Vec<_>>();
+    for (_, parameters, defaults) in inherited_defaults {
+        headers.syntax.set_parameter_defaults(parameters, &defaults);
     }
+    // Keep matched expect syntax in the active Pass-1 parser stream. Compact-header exclusion is
+    // already authoritative for signature collection, while inherited defaults still need their
+    // provider declaration long enough to become checked target-owned FIR. Removing the parser
+    // declaration here forced later code to recover it by `(file, TextRange)`.
+    (crate::fir::matched_expect_declarations(headers), work)
+}
 
-    fn materialize(&self, file: &mut File) -> crate::ast::ExprId {
-        let span = crate::diag::Span::new(0, 0); // synthetic — diags never point at a grafted default
-        match self {
-            CopyExpr::Leaf(e) => file.add_expr(e.clone(), span),
-            CopyExpr::Binary { op, lhs, rhs } => {
-                let l = lhs.materialize(file);
-                let r = rhs.materialize(file);
-                file.add_expr(
-                    crate::ast::Expr::Binary {
-                        op: *op,
-                        lhs: l,
-                        rhs: r,
-                        operator_span: span,
-                    },
-                    span,
-                )
+fn signature_default_work(
+    headers: &crate::fir::StreamedHeaderModule,
+    inherited: &[crate::fir::DefaultArgumentProvider],
+) -> Vec<crate::fir::DefaultArgumentProvider> {
+    let inherited_declarations = inherited
+        .iter()
+        .flat_map(|work| [work.provider, work.target])
+        .collect::<std::collections::HashSet<_>>();
+    let mut work = headers
+        .stubs
+        .iter()
+        .filter(|stub| !inherited_declarations.contains(&stub.id))
+        .filter_map(|stub| {
+            let parameters = match headers.syntax.declaration(stub.id)?.kind {
+                crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
+                | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
+                _ => return None,
+            };
+            headers
+                .syntax
+                .parameters(parameters)
+                .iter()
+                .any(|parameter| parameter.flags.has_default())
+                .then_some(crate::fir::DefaultArgumentProvider {
+                    target: stub.id,
+                    provider: stub.id,
+                    relation: crate::fir::DefaultArgumentRelation::SameDeclaration,
+                })
+        })
+        .collect::<Vec<_>>();
+    work.extend_from_slice(inherited);
+    work.sort_by_key(|work| (work.provider, work.target, work.relation));
+    work.dedup();
+    work
+}
+
+/// Extend the Pass-1 default store across exact module override edges. The overriding callable is
+/// the semantic call target, while the nearest overridden declaration remains the expression
+/// provider. Both are stable declaration identities; no source coordinate or reparsed body crosses
+/// the pass boundary.
+fn inherit_override_default_work(
+    headers: &mut crate::fir::StreamedHeaderModule,
+    index: &crate::fir::ResolvedModuleIndex,
+    work: &mut Vec<crate::fir::DefaultArgumentProvider>,
+) {
+    let classifiers = headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+        .map(|stub| stub.id)
+        .collect::<Vec<_>>();
+    loop {
+        let providers = work
+            .iter()
+            .map(|item| (item.target, item.provider))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut additions = Vec::new();
+        for classifier in &classifiers {
+            for edge in index.function_overrides(*classifier) {
+                let (
+                    crate::fir::ResolvedFunctionOverrideTarget::Module(implementation),
+                    crate::fir::ResolvedFunctionOverrideTarget::Module(overridden),
+                ) = (edge.implementation, edge.overridden)
+                else {
+                    continue;
+                };
+                let Some(target) = index
+                    .callable(implementation)
+                    .map(|callable| callable.declaration)
+                else {
+                    continue;
+                };
+                if providers.contains_key(&target)
+                    || additions
+                        .iter()
+                        .any(|item: &crate::fir::DefaultArgumentProvider| item.target == target)
+                {
+                    continue;
+                }
+                let Some(overridden) = index
+                    .callable(overridden)
+                    .map(|callable| callable.declaration)
+                else {
+                    continue;
+                };
+                let Some(provider) = providers.get(&overridden).copied() else {
+                    continue;
+                };
+                let defaults = match headers
+                    .syntax
+                    .declaration(provider)
+                    .map(|declaration| declaration.kind)
+                {
+                    Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
+                    | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
+                        headers
+                            .syntax
+                            .parameters(parameters)
+                            .iter()
+                            .map(|parameter| parameter.flags.has_default())
+                            .collect::<Vec<_>>()
+                    }
+                    _ => continue,
+                };
+                let target_parameters = match headers
+                    .syntax
+                    .declaration(target)
+                    .map(|declaration| declaration.kind)
+                {
+                    Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
+                    | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
+                        parameters
+                    }
+                    _ => continue,
+                };
+                if defaults.len() != headers.syntax.parameters(target_parameters).len()
+                    || !defaults.iter().any(|default| *default)
+                {
+                    continue;
+                }
+                headers
+                    .syntax
+                    .set_parameter_defaults(target_parameters, &defaults);
+                additions.push(crate::fir::DefaultArgumentProvider {
+                    target,
+                    provider,
+                    relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
+                });
             }
         }
+        if additions.is_empty() {
+            break;
+        }
+        work.extend(additions);
     }
+    work.sort_by_key(|item| (item.provider, item.target, item.relation));
+    work.dedup();
+}
+
+fn has_signature_defaults(file: &File) -> bool {
+    file.decl_arena.iter().any(|declaration| match declaration {
+        crate::ast::Decl::Fun(function) => function
+            .params
+            .iter()
+            .any(|parameter| parameter.default.is_some()),
+        crate::ast::Decl::Property(_) => false,
+        crate::ast::Decl::Class(class) => {
+            class
+                .props
+                .iter()
+                .any(|parameter| parameter.default.is_some())
+                || class.methods.iter().any(|method| {
+                    method
+                        .params
+                        .iter()
+                        .any(|parameter| parameter.default.is_some())
+                })
+                || class.secondary_ctors.iter().any(|constructor| {
+                    constructor
+                        .params
+                        .iter()
+                        .any(|parameter| parameter.default.is_some())
+                })
+                || class.enum_entries.iter().any(|entry| {
+                    entry.methods.iter().any(|method| {
+                        method
+                            .params
+                            .iter()
+                            .any(|parameter| parameter.default.is_some())
+                    })
+                })
+        }
+    })
 }
 
 /// Lex and parse one source string with an explicit feature set.
@@ -356,12 +606,16 @@ pub fn analyze_source_set_with_features(
     project_features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis {
-    analyze_source_set_with_features_and_prepare(
+    analyze_source_set_impl(
         sources,
+        sources.len(),
+        sources.len(),
         platform,
         project_features,
         |_, _| {},
         diags,
+        false,
+        true,
     )
 }
 
@@ -374,7 +628,7 @@ pub fn analyze_source_set_prefix_with_features(
     project_features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis {
-    analyze_source_set_with_features_and_prepare_prefix(
+    analyze_source_set_impl(
         sources,
         checked_count,
         inferred_count,
@@ -382,6 +636,8 @@ pub fn analyze_source_set_prefix_with_features(
         project_features,
         |_, _| {},
         diags,
+        false,
+        true,
     )
 }
 
@@ -402,6 +658,7 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
         project_features,
         |_, _| {},
         diags,
+        true,
         true,
     )
 }
@@ -427,6 +684,30 @@ where
     )
 }
 
+/// Analyze a source set for the production two-pass pipeline without allowing a target to mutate
+/// frontend semantic state. Target layout is realized only after checked common IR exists; file
+/// containers, physical names, and descriptors therefore cannot influence Pass-1 signature
+/// solving or Pass-2 body checking.
+pub fn analyze_source_set_streaming_with_features(
+    sources: &[SourceInput<'_>],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    diags: &mut DiagSink,
+) -> StreamingSourceSetAnalysis {
+    analyze_source_set_impl(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform,
+        project_features,
+        |_, _| {},
+        diags,
+        false,
+        false,
+    )
+    .into()
+}
+
 fn analyze_source_set_with_features_and_prepare_prefix<F>(
     sources: &[SourceInput<'_>],
     checked_count: usize,
@@ -448,6 +729,7 @@ where
         prepare_symbols,
         diags,
         false,
+        false,
     )
 }
 
@@ -461,6 +743,7 @@ fn analyze_source_set_impl<F>(
     prepare_symbols: F,
     diags: &mut DiagSink,
     trim_support_bodies: bool,
+    retain_legacy_analysis: bool,
 ) -> SourceSetAnalysis
 where
     F: FnOnce(&[File], &mut FrontendSymbols),
@@ -468,32 +751,143 @@ where
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
-    let mut multiplatform = project_features.has("MultiPlatformProjects");
+    let mut reparse_sources = Vec::with_capacity(sources.len());
+    let mut pass1_builder = crate::fir::HeaderInventoryBuilder::default();
+    let mut signature_constraints = crate::fir::SignatureConstraintExtractor::default();
+    let mut source_contracts = Vec::new();
+    let mut local_class_contexts = Vec::with_capacity(sources.len());
+    // Decide this before parsing the first file. A per-source language directive in a later file
+    // applies to the jointly compiled source set; discovering it incrementally would let an earlier
+    // expect/default body be released before actualization has harvested it.
+    let multiplatform = project_features.has("MultiPlatformProjects")
+        || sources.iter().any(|source| {
+            let mut features = project_features.clone();
+            features.apply_source_directives(source.text);
+            features.has("MultiPlatformProjects")
+        });
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
         let mut features = project_features.clone();
         features.apply_source_directives(source.text);
-        multiplatform |= features.has("MultiPlatformProjects");
+        reparse_sources.push(ReparseSource {
+            kind: source.kind,
+            is_common: source.is_common,
+            text: source.text.into(),
+            file_stem: source.file_stem.map(Into::into),
+            features: features.clone(),
+            #[cfg(test)]
+            parse_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            released_before_collection: false,
+        });
         let diagnostics_before = diags.diags.len();
         let mut file = parse_source_kind(source.text, source.kind, &features, diags);
+        file.is_common = source.is_common;
         if source.kind == SourceKind::Kotlin {
             if let Some(stem) = source.file_stem {
                 name_anonymous_classes(&mut file, &format!("{stem}Kt"));
             }
+            header_validation::validate(&file, diags);
         }
-        parse_errors.push(
-            source.kind == SourceKind::Java
-                || diags.diags[diagnostics_before..]
-                    .iter()
-                    .any(|diagnostic| diagnostic.severity == Severity::Error),
+        let parse_error = source.kind != SourceKind::Java
+            && diags.diags[diagnostics_before..]
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error);
+        parse_errors.push(parse_error);
+        let extracted = pass1_builder.add_source(
+            index,
+            source,
+            (index < inferred_count && !parse_error && source.kind != SourceKind::Java)
+                .then_some(&file),
         );
+        if let Some((source, stubs)) = extracted {
+            source_contracts.extend(crate::resolve::extract_source_contract_candidates(
+                &file, source, &stubs,
+            ));
+            signature_constraints.extract_file(&file, source, &stubs, |span| {
+                pass1_builder.source_origin(source, span)
+            });
+            // Compact signature extraction has consumed every ordinary expression dependency for
+            // this source. Production keeps the parser body arenas only for bounded Pass-1 work
+            // that has not moved to its own store yet: inline checking, const evaluation, and MPP
+            // actualization matching. Dependency-prefix and inspection entry points retain their
+            // legacy view until their separate migration boundary.
+            let needs_bounded_pass_one_syntax = multiplatform
+                || has_signature_defaults(&file)
+                || stubs.iter().any(|stub| {
+                    stub.flags.has(crate::fir::DeclarationFlags::INLINE)
+                        || stub.flags.has(crate::fir::DeclarationFlags::CONST)
+                });
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &stubs));
+            if !retain_legacy_analysis && index < inferred_count && !multiplatform {
+                if needs_bounded_pass_one_syntax {
+                    retained_syntax::compact(&mut file);
+                } else {
+                    file.release_body_arenas();
+                }
+                #[cfg(test)]
+                {
+                    reparse_sources
+                        .last_mut()
+                        .expect("the active source owns reparse state")
+                        .released_before_collection = true;
+                }
+            }
+        } else {
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &[]));
+        }
         files.push(file);
     }
 
     assert!(checked_count <= inferred_count && inferred_count <= files.len());
-    if multiplatform {
-        strip_matched_expects(&mut files);
+    let mut pass1_headers = pass1_builder.finish();
+    let source_classifiers = pass1_headers.source_classifier_names();
+    let platform_sources = sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| source.kind == SourceKind::Java)
+        .map(
+            |(source, input)| crate::libraries::PlatformSourceHeaderInput {
+                source,
+                file_stem: input.file_stem,
+                text: input.text,
+            },
+        )
+        .collect::<Vec<_>>();
+    if let Err(error) =
+        platform.install_source_module_headers(&platform_sources, &source_classifiers)
+    {
+        diags.set_file(error.source as u32);
+        diags.error(Span::new(0, 0), error.message);
     }
+    let mut signature_default_work_items = if multiplatform {
+        let (matched, defaults) =
+            actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
+        pass1_headers.exclude_declaration_subtrees(&matched);
+        // Explicit expect→actual default mappings remain valid after exclusion because their
+        // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
+        // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
+        // an orphan target with no surviving signature or callable.
+        let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
+        // Actualization publishes stable expect-default providers before syntax is compacted. Once
+        // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
+        if !retain_legacy_analysis {
+            for (file, _source) in files
+                .iter_mut()
+                .zip(&mut reparse_sources)
+                .take(inferred_count)
+            {
+                retained_syntax::compact(file);
+                #[cfg(test)]
+                {
+                    _source.released_before_collection = true;
+                }
+            }
+        }
+        signature_default_work_items
+    } else {
+        signature_default_work(&pass1_headers, &[])
+    };
     let platform = if inferred_count < files.len() {
         let mut dependency_diags = DiagSink::new();
         let mut dependency_symbols =
@@ -516,27 +910,183 @@ where
             file.release_body_arenas();
         }
     }
-    let mut symbols = collect_signatures_with_cp(&files[..inferred_end], platform, diags);
+    let mut symbols = crate::resolve::collect_signatures_with_cp_headers_and_local_contexts(
+        &files[..inferred_end],
+        &pass1_headers,
+        &local_class_contexts[..inferred_end],
+        platform,
+        diags,
+    );
     prepare_symbols(&files, &mut symbols);
-    // Anonymous-object CAPTURES, which the retired return pre-inference used to discover on its way
-    // past. It is not return inference and the engine does not replace it: a capture field and its
-    // constructor parameter are facts about the synthesized class, and without them an anonymous
-    // object cannot be lowered at all — `object : Sink { override fun take(v: String) { … } }` is
-    // refused by the backend rather than mistyped.
-    crate::resolve::discover_anonymous_object_captures(&files[..inferred_end], &mut symbols);
+    let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
+    let has_inline_capture_roots = inline_capture_selection
+        .roots
+        .iter()
+        .take(inferred_end)
+        .any(|roots| !roots.is_empty());
+    if retain_legacy_analysis {
+        crate::resolve::discover_anonymous_object_captures(&files[..inferred_end], &mut symbols);
+    } else if has_inline_capture_roots {
+        crate::resolve::discover_inline_anonymous_object_captures(
+            &files[..inferred_end],
+            &inline_capture_selection.roots[..inferred_end],
+            &inline_capture_selection.bodies[..inferred_end],
+            &mut symbols,
+        );
+    }
+    if retain_legacy_analysis || has_inline_capture_roots {
+        crate::resolve::install_streamed_anonymous_capture_declarations(
+            &files[..inferred_end],
+            &mut pass1_headers,
+            &mut symbols,
+        );
+    }
+    if !retain_legacy_analysis {
+        // Signature collection, target preparation, and inline-capture projection are the last
+        // consumers of declaration-only legacy `File` views. From here on, retain a parser fragment
+        // only when it still owns executable syntax that Pass 1 must turn into checked FIR
+        // (inline/default/const work). The compact headers and signature graph are authoritative for
+        // every declaration fact used by finalization, including enum-entry member signatures.
+        for file in files.iter_mut().take(inferred_end) {
+            if file.expr_arena.is_empty() && file.stmt_arena.is_empty() {
+                *file = File::default();
+            }
+        }
+    }
+    let streamed_index = crate::resolve::finalized_streamed_signature_index(
+        &pass1_headers,
+        &mut symbols,
+        signature_constraints,
+        source_contracts,
+        diags,
+    );
+    let mut recovery_streamed = None;
+    let pending_streamed = if streamed_index.failures.is_empty() {
+        let mut index = streamed_index.index;
+        crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
+        // A `const val` initializer is a stable declaration dependency. Check each such bounded
+        // fragment now, while Pass 1 still owns its AST and exact operator selections can be
+        // consumed; retain only the folded payload before the signature graph and arenas die.
+        crate::resolve::publish_checked_compile_time_constants(
+            &files[..inferred_end],
+            &mut symbols,
+        );
+        crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
+        crate::resolve::publish_override_plans(&mut index, &symbols);
+        inherit_override_default_work(
+            &mut pass1_headers,
+            &index,
+            &mut signature_default_work_items,
+        );
+        pass1_headers.publish_declaration_inventory(&mut index);
+        // Defaults are signature-owned executable fragments. Check and detach them before the
+        // compact header environment is consumed; no provider root or source locator crosses
+        // this boundary.
+        let default_arguments = inline_preparation::defaults(
+            &mut pass1_headers,
+            &mut index,
+            std::mem::take(&mut signature_default_work_items),
+            &files[..inferred_end],
+            &parse_errors,
+            checked_count,
+            &mut symbols,
+            diags,
+        );
+        match default_arguments {
+            Some(default_arguments) => {
+                let (index, sources, body_work) = pass1_headers.finish(index);
+                let bodies = body_work.partition_by_inline(&index);
+                let module = crate::fir::FrontendModule::new(
+                    index,
+                    crate::fir::InlineBodyStore::default(),
+                    crate::fir::DefaultArgumentStore::default(),
+                    sources,
+                );
+                Some((module, bodies, default_arguments))
+            }
+            None => {
+                let (index, sources, _) = pass1_headers.finish(index);
+                recovery_streamed = Some(diagnostic_streamed_state(index, sources));
+                None
+            }
+        }
+    } else {
+        crate::trace_compiler!(
+            "fir",
+            "Pass 1 signature finalization failed for declarations {:?}",
+            streamed_index.failures,
+        );
+        // Keep only successfully finalized declarations for diagnostic recovery. Failed
+        // signatures are absent—not represented by `Pending` or `Error`—and the complete lazy
+        // graph/header syntax is consumed here before the second source pass begins.
+        let mut index = streamed_index.index;
+        pass1_headers.publish_declaration_inventory(&mut index);
+        let (index, sources, _) = pass1_headers.finish(index);
+        recovery_streamed = Some(diagnostic_streamed_state(index, sources));
+        None
+    };
     if trim_support_bodies {
         for file in &mut files[checked_count.min(inferred_end)..inferred_end] {
             file.release_body_arenas();
         }
     }
-    let types =
-        check_source_set_skipping(&files, &mut symbols, &parse_errors, checked_count, diags);
+    let (types, streamed) = if retain_legacy_analysis {
+        let types =
+            check_source_set_skipping(&files, &mut symbols, &parse_errors, checked_count, diags);
+        let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
+            inline_preparation::from_checked_analysis(
+                module,
+                bodies,
+                default_arguments,
+                &files,
+                &types,
+                &mut symbols,
+            )
+        });
+        (types, streamed)
+    } else {
+        // Inline preparation consumes the bounded syntax retained from the initial parse. It moves
+        // checked inline FIR into `InlineBodyStore` and releases every remaining parser body arena;
+        // there is no separate inline-source parse between the two source passes.
+        let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
+            inline_preparation::streaming(
+                module,
+                bodies,
+                default_arguments,
+                &mut files,
+                &parse_errors,
+                checked_count,
+                &mut symbols,
+                diags,
+            )
+        });
+        (Vec::new(), streamed)
+    };
+    let streamed = streamed.or(recovery_streamed);
     diags.collapse_duplicates_from(diagnostics_start);
-    SourceSetAnalysis {
-        files,
+    let analysis = SourceSetAnalysis {
+        files: if retain_legacy_analysis {
+            files
+        } else {
+            Vec::new()
+        },
         symbols,
         types,
+        reparse_sources,
+        streamed,
+    };
+    if let Some(streamed) = &analysis.streamed {
+        assert!(
+            streamed.module.index().declaration_count() >= streamed.module.index().len(),
+            "resolved signatures must be owned by the stable declaration index",
+        );
+        assert!(
+            streamed.module.sources().len() <= sources.len(),
+            "the stable source map cannot grow beyond the input source set",
+        );
     }
+    analysis
 }
 
 fn check_source_set_skipping(
@@ -626,10 +1176,19 @@ pub fn analyze_source_standalone(
 /// kotlinc's enclosing-scoped spelling (`P2$Companion$build$1`): the innermost enclosing FUNCTION
 /// body (a member's or a top-level one) names the scope, with a per-scope 1-based ordinal in
 /// source order. Must run BEFORE checking — the checker records these internals in every type it
-/// hands the backend. A construction outside any function body (a property initializer, an `init`
-/// block) keeps the placeholder for now; a nested anonymous class picks up its enclosing anonymous
-/// class's fresh name because constructions rename in source order.
+/// hands the backend. A construction outside a function uses its innermost enclosing classifier, or
+/// the file facade at top level. No parse-time placeholder may survive as semantic identity: offsets
+/// repeat across files and would make unrelated anonymous classifiers overwrite one another.
 pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) {
+    let mut counters = std::collections::HashMap::new();
+    name_anonymous_classes_with_counters(file, facade_simple, &mut counters);
+}
+
+fn name_anonymous_classes_with_counters(
+    file: &mut crate::ast::File,
+    facade_simple: &str,
+    counters: &mut std::collections::HashMap<String, u32>,
+) {
     use crate::ast::{Decl, Expr};
     let mut anons: Vec<(crate::ast::ExprId, crate::ast::DeclId)> = file
         .anonymous_object_classes
@@ -637,7 +1196,6 @@ pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) 
         .map(|(&construction, &decl)| (construction, decl))
         .collect();
     anons.sort_by_key(|(construction, _)| file.expr_spans[construction.0 as usize].lo);
-    let mut counters: std::collections::HashMap<String, u32> = Default::default();
     for (construction, decl) in anons {
         let span = file.expr_spans[construction.0 as usize];
         let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction)> = None;
@@ -685,11 +1243,32 @@ pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) 
                 _ => {}
             }
         }
-        let Some((_, scope, enclosing)) = best else {
-            continue;
+        let (scope, enclosing) = match best {
+            Some((_, scope, enclosing)) => (scope, Some(enclosing)),
+            None => {
+                let classifier_scope = file
+                    .decls
+                    .iter()
+                    .filter_map(|&candidate| match file.decl(candidate) {
+                        Decl::Class(class)
+                            if candidate != decl
+                                && class.span.lo <= span.lo
+                                && span.hi <= class.span.hi =>
+                        {
+                            Some((class.span.hi - class.span.lo, class.name.replace('.', "$")))
+                        }
+                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+                    })
+                    .min_by_key(|(size, _)| *size)
+                    .map(|(_, scope)| scope)
+                    .unwrap_or_else(|| facade_simple.to_string());
+                (classifier_scope, None)
+            }
         };
-        file.anonymous_object_enclosing_functions
-            .insert(decl, enclosing);
+        if let Some(enclosing) = enclosing {
+            file.anonymous_object_enclosing_functions
+                .insert(decl, enclosing);
+        }
         let ordinal = counters.entry(scope.clone()).or_insert(0);
         *ordinal += 1;
         let fresh = format!("{scope}${ordinal}");
@@ -697,8 +1276,49 @@ pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) 
             continue;
         };
         let callee = *callee;
-        if let Decl::Class(class) = file.decl_mut(decl) {
-            class.name = fresh.clone();
+        let old = match file.decl(decl) {
+            Decl::Class(class) => class.name.clone(),
+            Decl::Fun(_) | Decl::Property(_) => continue,
+        };
+        let declarations = file.decls.clone();
+        let class_ownership = declarations
+            .iter()
+            .filter_map(|declaration| match file.decl(*declaration) {
+                Decl::Class(class) => Some((class.name.clone(), class.inner_of.clone())),
+                Decl::Fun(_) | Decl::Property(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut renamed = std::collections::HashMap::from([(old.clone(), fresh.clone())]);
+        for _ in 0..class_ownership.len() {
+            let mut changed = false;
+            for (name, owner) in &class_ownership {
+                if renamed.contains_key(name) {
+                    continue;
+                }
+                let Some(owner) = owner else { continue };
+                let Some(new_owner) = renamed.get(owner) else {
+                    continue;
+                };
+                let simple = name.rsplit('.').next().unwrap_or(name);
+                renamed.insert(name.clone(), format!("{new_owner}.{simple}"));
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+        for declaration in declarations {
+            let Decl::Class(class) = file.decl_mut(declaration) else {
+                continue;
+            };
+            if let Some(name) = renamed.get(&class.name) {
+                class.name = name.clone();
+            }
+            if let Some(owner) = class.inner_of.as_mut() {
+                if let Some(name) = renamed.get(owner) {
+                    *owner = name.clone();
+                }
+            }
         }
         if let Expr::Name(name) = &mut file.expr_arena[callee.0 as usize] {
             *name = fresh;
@@ -707,1788 +1327,4 @@ pub fn name_anonymous_classes(file: &mut crate::ast::File, facade_simple: &str) 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::diag::{Diagnostic, Span};
-    use crate::libraries::{
-        CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryCallable,
-        LibraryType, PropKind, PropertyInfo, PropertySet, ResolvedSymbols, TypeKind,
-    };
-    use crate::source::SourceInput;
-    use crate::types::{Ty, TypeName, TypeNameList, Visibility};
-
-    #[test]
-    fn source_set_assigns_anonymous_identity_from_the_real_file_stem() {
-        let source = "fun build(): Any = object {}";
-        let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];
-        let mut diagnostics = DiagSink::new();
-        let analysis = analyze_source_set_with_features(
-            &inputs,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let declaration = *analysis.files[0]
-            .anonymous_object_classes
-            .values()
-            .next()
-            .expect("anonymous declaration");
-        let crate::ast::Decl::Class(class) = analysis.files[0].decl(declaration) else {
-            panic!("anonymous declaration was not a class");
-        };
-        assert_eq!(class.name, "WidgetKt$build$1");
-        let enclosing = analysis.files[0]
-            .anonymous_object_enclosing_functions
-            .get(&declaration)
-            .copied()
-            .expect("anonymous enclosure identity");
-        let crate::ast::AnonymousEnclosingFunction::TopLevel(function) = enclosing else {
-            panic!("top-level build owner was not recorded exactly");
-        };
-        assert!(matches!(
-            analysis.files[0].decl(function),
-            crate::ast::Decl::Fun(function) if function.name == "build"
-        ));
-    }
-
-    struct ExistingLibrary;
-
-    impl ExistingLibrary {
-        fn classifier_internal(
-            namespace: crate::symbol_source::SymbolNamespace,
-            name: &str,
-        ) -> Option<&'static str> {
-            use crate::symbol_source::SymbolNamespace;
-            match namespace {
-                SymbolNamespace::Package(package) if package.matches("fixture") => match name {
-                    "Present" => Some("fixture/Present"),
-                    "Stable" => Some("fixture/Stable"),
-                    "Qualified" => Some("fixture/Qualified"),
-                    "Container" => Some("fixture/Container"),
-                    "Outer" => Some("fixture/Outer"),
-                    "CollisionEnum" => Some("fixture/CollisionEnum"),
-                    _ => None,
-                },
-                SymbolNamespace::Package(package) if package.matches("support") => match name {
-                    "BaseScope" => Some("support/BaseScope"),
-                    "BaseTarget" => Some("support/BaseTarget"),
-                    "Target" => Some("support/Target"),
-                    _ => None,
-                },
-                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Stable") => {
-                    (name == "Companion").then_some("fixture/Stable$Companion")
-                }
-                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Qualified") => {
-                    (name == "Companion").then_some("fixture/Qualified$Companion")
-                }
-                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Container") => {
-                    (name == "Labels").then_some("fixture/Container$Labels")
-                }
-                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Outer") => {
-                    (name == "Hidden").then_some("fixture/Outer$Hidden")
-                }
-                SymbolNamespace::Classifier(owner) if owner.matches("fixture/Outer$Hidden") => {
-                    (name == "Context").then_some("fixture/Outer$Hidden$Context")
-                }
-                _ => None,
-            }
-        }
-
-        fn classifier_record(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
-            let known = [
-                "fixture/Present",
-                "fixture/Stable",
-                "fixture/Stable$Companion",
-                "fixture/Qualified",
-                "fixture/Qualified$Companion",
-                "fixture/Container",
-                "fixture/Container$Labels",
-                "support/BaseScope",
-                "support/BaseTarget",
-                "support/Target",
-                "fixture/Outer",
-                "fixture/Outer$Hidden",
-                "fixture/Outer$Hidden$Context",
-                "fixture/CollisionEnum",
-            ];
-            known.iter().any(|name| internal.matches(name)).then(|| {
-                let mut supertypes = TypeNameList::new();
-                if internal.matches("support/Target") {
-                    supertypes.push("support/BaseTarget");
-                }
-                let mut declared_callables = std::collections::HashMap::new();
-                if internal.matches("fixture/Container$Labels") {
-                    let receiver = Ty::obj_name(internal);
-                    declared_callables.insert(
-                        "marker".to_string(),
-                        Callables::Properties(PropertySet {
-                            overloads: vec![PropertyInfo {
-                                name: "marker".to_string(),
-                                kind: PropKind::Member,
-                                receiver: Some(receiver),
-                                formals: Vec::new(),
-                                ty: Ty::Int,
-                                context_count: 0,
-                                context_param_names: Vec::new(),
-                                getter: LibraryCallable::library(
-                                    internal,
-                                    "getMarker",
-                                    Vec::new(),
-                                    Ty::Int,
-                                    Ty::Int,
-                                    "()I",
-                                ),
-                                setter: None,
-                                setter_visibility: crate::types::Visibility::Public,
-                                is_const: false,
-                                visibility: Visibility::Private,
-                                owner: internal,
-                                receiver_rank: 0,
-                                source_key: None,
-                                source_member: None,
-                                accessor_derived: false,
-                            }],
-                        }),
-                    );
-                }
-                if internal.matches("fixture/Stable$Companion") {
-                    let receiver = Ty::obj_name(internal);
-                    let callable = LibraryCallable::library(
-                        internal,
-                        "current",
-                        Vec::new(),
-                        Ty::Int,
-                        Ty::Int,
-                        "()I",
-                    );
-                    declared_callables.insert(
-                        "current".to_string(),
-                        Callables::Functions(FunctionSet {
-                            overloads: vec![FunctionInfo::plain(
-                                FnKind::Member,
-                                Some(receiver),
-                                callable,
-                            )],
-                        }),
-                    );
-                }
-                if internal.matches("fixture/Qualified$Companion") {
-                    let receiver = Ty::obj_name(internal);
-                    let callable = LibraryCallable::library(
-                        internal,
-                        "select",
-                        vec![Ty::obj("right/Token")],
-                        Ty::Int,
-                        Ty::Int,
-                        "(Lright/Token;)I",
-                    );
-                    declared_callables.insert(
-                        "select".to_string(),
-                        Callables::Functions(FunctionSet {
-                            overloads: vec![FunctionInfo::plain(
-                                FnKind::Member,
-                                Some(receiver),
-                                callable,
-                            )],
-                        }),
-                    );
-                }
-                let companion_object = if internal.matches("fixture/Stable") {
-                    Some((
-                        "Companion".to_string(),
-                        crate::types::type_name("fixture/Stable$Companion"),
-                    ))
-                } else if internal.matches("fixture/Qualified") {
-                    Some((
-                        "Companion".to_string(),
-                        crate::types::type_name("fixture/Qualified$Companion"),
-                    ))
-                } else {
-                    None
-                };
-                std::sync::Arc::new(LibraryType {
-                    is_kotlin: true,
-                    access: crate::libraries::ClassifierAccess::Public,
-                    source_file: None,
-                    is_nested: internal.contains("$"),
-                    outer_instance: None,
-                    kind: if internal.matches("fixture/Container$Labels") {
-                        TypeKind::Object
-                    } else {
-                        TypeKind::Class
-                    },
-                    inheritance: Default::default(),
-                    supertypes,
-                    supertype_templates: Vec::new(),
-                    constructors: Vec::new(),
-                    fields: Vec::new(),
-                    declared_callables,
-                    members: Vec::new(),
-                    companion: Vec::new(),
-                    constants: std::collections::HashMap::new(),
-                    sam_eligible: false,
-                    callable_signature: None,
-                    companion_object,
-                    value_underlying: None,
-                    value_underlying_property: None,
-                    alias_target: None,
-                    type_parameters: crate::types::TypeParameters::default(),
-                    sealed_subclasses: TypeNameList::new(),
-                    enum_entries: Vec::new(),
-                    enum_entries_accessor: None,
-                    named_parameter_lists: Vec::new(),
-                    retention: None,
-                    annotation_targets: None,
-                })
-            })
-        }
-    }
-
-    impl crate::symbol_source::SymbolSource for ExistingLibrary {
-        fn symbols(
-            &self,
-            namespace: crate::symbol_source::SymbolNamespace,
-            name: &str,
-        ) -> std::rc::Rc<ResolvedSymbols> {
-            let classifier_name =
-                Self::classifier_internal(namespace, name).map(crate::types::type_name);
-            let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
-            let Some(name) = (namespace
-                == crate::symbol_source::SymbolNamespace::Package(crate::types::type_name(
-                    "support",
-                )))
-            .then_some(name)
-            .filter(|name| matches!(*name, "adjust" | "configure" | "transform")) else {
-                return std::rc::Rc::new(ResolvedSymbols {
-                    classifier_name: classifier.as_ref().and(classifier_name),
-                    classifier,
-                    ..ResolvedSymbols::default()
-                });
-            };
-            let receiver = Ty::obj("support/Target");
-            let lambda_receiver = Ty::obj("support/BaseScope");
-            let mut value_params = Vec::new();
-            if name == "adjust" {
-                value_params.push(Ty::Int);
-            }
-            value_params.push(Ty::fun_with_shape(
-                vec![lambda_receiver],
-                Ty::Unit,
-                0,
-                true,
-                false,
-            ));
-            let mut physical_params = vec![receiver];
-            physical_params.extend(value_params.iter().copied());
-            let callable = LibraryCallable::library(
-                "support/SupportKt",
-                name,
-                physical_params,
-                Ty::Unit,
-                Ty::Unit,
-                "",
-            );
-            let mut function = FunctionInfo::plain(FnKind::Extension, Some(receiver), callable);
-            let lambda_param_types = vec![Vec::new(); value_params.len()];
-            let mut lambda_receivers = vec![None; value_params.len()];
-            *lambda_receivers.last_mut().unwrap() = Some(lambda_receiver);
-            let mut lambda_receiver_params = vec![false; value_params.len()];
-            *lambda_receiver_params.last_mut().unwrap() = true;
-            function.call_sig = CallSig {
-                lambda_param_types,
-                lambda_receivers,
-                lambda_receiver_params,
-                required: value_params.len(),
-                ..CallSig::default()
-            };
-            function.generic_sig = Some(GenericSig {
-                formals: Vec::new(),
-                formal_bounds: Vec::new(),
-                receiver: Some(receiver),
-                params: value_params,
-                ret: Ty::Unit,
-                return_policy: Default::default(),
-            });
-            std::rc::Rc::new(ResolvedSymbols {
-                classifier_name: classifier.as_ref().map(|classifier| {
-                    classifier
-                        .alias_target
-                        .unwrap_or_else(|| classifier_name.expect("classifier identity"))
-                }),
-                classifier,
-                callables: Callables::Functions(FunctionSet {
-                    overloads: vec![function],
-                }),
-                importable_declaration: false,
-            })
-        }
-    }
-
-    impl SemanticPlatform for ExistingLibrary {
-        fn static_field(
-            &self,
-            internal: &str,
-            name: &str,
-        ) -> Option<crate::libraries::StaticFieldRef> {
-            (internal == "fixture/CollisionEnum" && name == "ANY").then(|| {
-                crate::libraries::StaticFieldRef {
-                    owner: crate::types::type_name(internal),
-                    name: name.to_string(),
-                    descriptor: Some("Lfixture/CollisionEnum;".to_string()),
-                    ty: Ty::obj("fixture/CollisionEnum"),
-                    constant: None,
-                    visibility: crate::types::Visibility::Public,
-                    is_final: true,
-                }
-            })
-        }
-
-        fn static_field_name(
-            &self,
-            internal: crate::types::TypeName,
-            name: &str,
-        ) -> Option<crate::libraries::StaticFieldRef> {
-            self.static_field(&internal.render(), name)
-        }
-    }
-
-    #[test]
-    fn standalone_analysis_accepts_simple_function() {
-        let mut diags = DiagSink::new();
-        let (_file, syms, info) =
-            analyze_source_standalone("fun box(): String = \"OK\"", &mut diags);
-        assert!(!diags.has_errors(), "{:?}", diags.diags);
-        assert!(syms.is_some());
-        assert!(info.is_some());
-    }
-
-    #[test]
-    fn standalone_analysis_reports_checker_errors() {
-        let mut diags = DiagSink::new();
-        let (_file, syms, info) = analyze_source_standalone("fun f(): Int = \"no\"", &mut diags);
-        assert!(diags.has_errors());
-        assert!(syms.is_some());
-        assert!(info.is_some());
-    }
-
-    #[test]
-    fn checked_prefix_reports_cross_file_conflicting_overloads_and_candidates() {
-        let target = "fun namedPair(left: Int, right: String): Int = left\n\
-                      fun missingNamedArgument(): Int = namedPair(left = 1)";
-        let inputs = [
-            SourceInput::kotlin(target),
-            SourceInput::kotlin("fun namedPair(left: Int, right: String): String = right"),
-            SourceInput::kotlin("fun namedPair(left: Int, right: String): String = right"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(analysis.types[0].is_some());
-        assert_eq!(
-            diagnostics
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.file == 0)
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "conflicting overloads:\n\
-                 fun namedPair(left: Int, right: String): String\n\
-                 fun namedPair(left: Int, right: String): String",
-                "no value passed for parameter 'right'.",
-                "none of the following candidates is applicable:\n\n\
-                 fun namedPair(left: Int, right: String): Int\n\
-                 fun namedPair(left: Int, right: String): String\n\
-                 fun namedPair(left: Int, right: String): String",
-            ]
-        );
-        let target_diagnostics = diagnostics
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.file == 0)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            &target[target_diagnostics[0].span.lo as usize..target_diagnostics[0].span.hi as usize],
-            "fun namedPair(left: Int, right: String): Int"
-        );
-        for diagnostic in &target_diagnostics[1..] {
-            let editor_span = diagnostic.editor_span.unwrap_or(diagnostic.span);
-            assert_eq!(
-                &target[editor_span.lo as usize..editor_span.hi as usize],
-                "namedPair"
-            );
-        }
-    }
-
-    #[test]
-    fn conflicting_top_level_bodies_use_their_own_declared_return_types() {
-        let inputs = [
-            SourceInput::kotlin("fun choose(value: Int): Int = value"),
-            SourceInput::kotlin("fun choose(value: Int): String = \"ok\""),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            inputs.len(),
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "conflicting overloads:\nfun choose(value: Int): String",
-                "conflicting overloads:\nfun choose(value: Int): Int",
-            ]
-        );
-    }
-
-    #[test]
-    fn jvm_name_decides_the_top_level_clash() {
-        // A platform declaration clash is keyed on the EMITTED name. `g(String)` and `g(String?)`
-        // erase to the same JVM descriptor, so they clash while both are spelled `g`…
-        let clash = |sources: &[&str]| {
-            // This unit test deliberately uses no platform provider. Supply the annotation as an
-            // ordinary source classifier and import it, so the signature pass exercises resolved
-            // annotation identity instead of recognizing the spelling `JvmName` intrinsically.
-            let mut inputs = vec![SourceInput::kotlin(
-                "package kotlin.jvm\nannotation class JvmName(val name: String)",
-            )];
-            let imported = sources
-                .iter()
-                .map(|source| format!("import kotlin.jvm.JvmName\n{source}"))
-                .collect::<Vec<_>>();
-            inputs.extend(imported.iter().map(|source| SourceInput::kotlin(source)));
-            let mut diagnostics = DiagSink::new();
-            analyze_source_set_prefix_with_features(
-                &inputs,
-                inputs.len(),
-                inputs.len(),
-                Box::new(EmptySymbolSource),
-                &LangFeatures::new(),
-                &mut diagnostics,
-            );
-            diagnostics
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
-                .count()
-        };
-        assert_eq!(
-            clash(&["fun g(x: String): String = \"nn\"\nfun g(x: String?): String = \"nl\""]),
-            2,
-        );
-        // …and stop clashing once `@JvmName` gives one of them a different bytecode name.
-        assert_eq!(
-            clash(&["fun g(x: String): String = \"nn\"\n\
-                 @JvmName(\"gNullable\")\n\
-                 fun g(x: String?): String = \"nl\""]),
-            0,
-        );
-        // The same key catches the reverse: distinct SOURCE names collapsed onto one JVM name do
-        // clash, which the source-name key could never see.
-        assert_eq!(
-            clash(&["@JvmName(\"same\")\n\
-                 fun a(x: Int): String = \"a\"\n\
-                 @JvmName(\"same\")\n\
-                 fun b(x: Int): String = \"b\""]),
-            2,
-        );
-    }
-
-    #[test]
-    fn inferred_conflict_displays_only_source_signature_types() {
-        let inputs = [
-            SourceInput::kotlin("package sample\nclass Result\nfun choose(value: Int) = Result()"),
-            SourceInput::kotlin("package sample\nfun choose(value: Int) = Result()"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            inputs.len(),
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            diagnostics
-                .diags
-                .iter()
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "conflicting overloads:\nfun choose(value: Int)",
-                "conflicting overloads:\nfun choose(value: Int)",
-            ]
-        );
-    }
-
-    #[test]
-    fn mixed_private_public_conflicts_retain_visible_representatives_in_either_order() {
-        for public_first in [false, true] {
-            let private_declarations = (0..64)
-                .map(|index| {
-                    format!(
-                        "private fun crowded(value: Int, required: String): Int = value // {index}\n"
-                    )
-                })
-                .collect::<String>();
-            let public_declarations = (0..64)
-                .map(|index| {
-                    format!(
-                        "fun crowded(value: Int, required: String): String = required // {index}\n"
-                    )
-                })
-                .collect::<String>();
-            let source = if public_first {
-                format!(
-                    "{public_declarations}{private_declarations}\
-                     fun use(): Int = crowded(value = 1)"
-                )
-            } else {
-                format!(
-                    "{private_declarations}{public_declarations}\
-                     fun use(): Int = crowded(value = 1)"
-                )
-            };
-            let inputs = [SourceInput::kotlin(&source)];
-            let mut diagnostics = DiagSink::new();
-
-            analyze_source_set_prefix_with_features(
-                &inputs,
-                inputs.len(),
-                inputs.len(),
-                Box::new(EmptySymbolSource),
-                &LangFeatures::new(),
-                &mut diagnostics,
-            );
-
-            let candidate_report = diagnostics
-                .diags
-                .iter()
-                .find(|diagnostic| {
-                    diagnostic
-                        .msg
-                        .starts_with("none of the following candidates is applicable:")
-                })
-                .expect("conflicting call should report its retained candidates");
-            assert!(
-                candidate_report
-                    .msg
-                    .contains("fun crowded(value: Int, required: String): String"),
-                "public declaration must survive private candidates when public_first={public_first}"
-            );
-            assert!(
-                candidate_report
-                    .msg
-                    .contains("private fun crowded(value: Int, required: String): Int")
-                    || candidate_report
-                        .msg
-                        .contains("fun crowded(value: Int, required: String): Int"),
-                "private declaration must survive public candidates when public_first={public_first}"
-            );
-            assert!(candidate_report.msg.lines().skip(2).count() <= 64);
-        }
-    }
-
-    #[test]
-    fn conflicting_overload_diagnostics_sort_candidate_displays_stably() {
-        let inputs = [
-            SourceInput::kotlin(
-                "fun namedPair(left: Int, right: String): String = right\n\
-                 fun use(): String = namedPair(left = 1, unknown = 2, right = \"ok\")",
-            ),
-            SourceInput::kotlin("fun namedPair(left: Int, right: String): String = right"),
-            SourceInput::kotlin("fun namedPair(left: Int, right: String): Int = left"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            diagnostics
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.file == 0)
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "conflicting overloads:\n\
-                 fun namedPair(left: Int, right: String): Int\n\
-                 fun namedPair(left: Int, right: String): String",
-                "no parameter with name 'unknown' found.",
-                "none of the following candidates is applicable:\n\n\
-                 fun namedPair(left: Int, right: String): Int\n\
-                 fun namedPair(left: Int, right: String): String\n\
-                 fun namedPair(left: Int, right: String): String",
-            ]
-        );
-    }
-
-    #[test]
-    fn conflict_recovery_uses_alias_and_qualified_scopes() {
-        let target = "package use\n\
-                      import a.pick as choose\n\
-                      fun aliasUse(): Int = choose(value = 1)\n\
-                      fun qualifiedUse(): Int = a.pick(value = 1)";
-        let inputs = [
-            SourceInput::kotlin(target),
-            SourceInput::kotlin("package a\nfun pick(value: Int, other: String): Int = value"),
-            SourceInput::kotlin("package a\nfun pick(value: Int, other: String): String = other"),
-            SourceInput::kotlin("package b\nfun pick(value: Int, other: String): Boolean = true"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        let messages = diagnostics
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.file == 0)
-            .map(|diagnostic| diagnostic.msg.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            messages
-                .iter()
-                .filter(|message| message.starts_with("no value passed"))
-                .count(),
-            2,
-            "target diagnostics: {messages:?}"
-        );
-        let candidates = messages
-            .iter()
-            .filter(|message| {
-                message.starts_with("none of the following candidates is applicable:")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().all(|message| {
-            message.contains("fun pick(value: Int, other: String): Int")
-                && message.contains("fun pick(value: Int, other: String): String")
-                && !message.contains("Boolean")
-        }));
-    }
-
-    #[test]
-    fn conflicting_overload_diagnostics_are_deterministic_and_bounded() {
-        let sources = (0..70)
-            .map(|index| format!("fun crowded(value: Int): Int = value // {index}"))
-            .collect::<Vec<_>>();
-        let inputs = sources
-            .iter()
-            .map(|source| SourceInput::kotlin(source))
-            .collect::<Vec<_>>();
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        let conflicts = diagnostics
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
-            .collect::<Vec<_>>();
-        assert_eq!(conflicts.len(), 70);
-        assert_eq!(
-            conflicts
-                .iter()
-                .map(|diagnostic| diagnostic.file)
-                .collect::<Vec<_>>(),
-            (0..70).collect::<Vec<_>>()
-        );
-        assert_eq!(conflicts[0].msg.lines().skip(1).count(), 64);
-        assert!(conflicts
-            .iter()
-            .all(|diagnostic| diagnostic.msg.len() <= 64 * 1024));
-        assert!(
-            conflicts
-                .iter()
-                .map(|diagnostic| diagnostic.msg.len())
-                .sum::<usize>()
-                <= 4 * 1024 * 1024
-        );
-    }
-
-    #[test]
-    fn exhausted_conflict_display_budget_preserves_qualified_call_diagnostics() {
-        let parameter = "p".repeat(70 * 1024);
-        let declarations = [
-            format!("package sample\nfun crowded({parameter}: Int): Int = {parameter}"),
-            format!("package sample\nfun crowded({parameter}: Int): String = \"value\""),
-        ];
-        let inputs = [
-            SourceInput::kotlin("package use\nfun use(): Int = sample.crowded(unknown = 1)"),
-            SourceInput::kotlin(&declarations[0]),
-            SourceInput::kotlin(&declarations[1]),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        let target_messages = diagnostics
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.file == 0)
-            .map(|diagnostic| diagnostic.msg.as_str())
-            .collect::<Vec<_>>();
-        assert!(target_messages.contains(&"no parameter with name 'unknown' found."));
-        assert!(!target_messages.contains(&"none of the following candidates is applicable:"));
-        assert!(!target_messages
-            .iter()
-            .any(|message| message.starts_with("unresolved reference")));
-    }
-
-    #[test]
-    fn unrelated_inferred_return_arity_diagnostic_keeps_return_type() {
-        let inputs = [SourceInput::kotlin(
-            "fun inferred() = 1\nfun use(): Int = inferred(1)",
-        )];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            inputs.len(),
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(diagnostics.diags.iter().any(|diagnostic| {
-            diagnostic.msg == "too many arguments for 'fun inferred(): Int'."
-        }));
-    }
-
-    #[test]
-    fn cross_file_private_top_level_function_conflicts_with_public_but_does_not_escape_scope() {
-        let target = "fun namedPair(left: Int, right: String): Int = left\n\
-                      fun missingNamedArgument(): Int = namedPair(left = 1)";
-        let inputs = [
-            SourceInput::kotlin(target),
-            SourceInput::kotlin("private fun namedPair(left: Int, right: String): String = right"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            diagnostics
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.file == 0)
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            ["no value passed for parameter 'right'."]
-        );
-        assert_eq!(
-            diagnostics
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.file == 1)
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            ["conflicting overloads:\nfun namedPair(left: Int, right: String): Int"]
-        );
-    }
-
-    #[test]
-    fn cross_file_private_top_level_callable_reference_reports_visibility() {
-        let inputs = [
-            SourceInput::kotlin("val reference: (Int) -> Int = ::hidden"),
-            SourceInput::kotlin("private fun hidden(value: Int): Int = value"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            inputs.len(),
-            inputs.len(),
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            diagnostics
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.file == 0)
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            ["cannot access 'hidden': it is private in its file"]
-        );
-    }
-
-    #[test]
-    fn unavailable_context_does_not_hide_inapplicable_candidate_family() {
-        let source = "class Scope\n\
-                      context(scope: Scope) fun choose(value: Int): Int = value\n\
-                      context(scope: Scope) fun choose(other: Int): String = \"\"\n\
-                      fun use(): Int = choose(value = 1)";
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &[SourceInput::kotlin(source)],
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(
-            diagnostics.diags.iter().any(|diagnostic| {
-                diagnostic.msg
-                    == "none of the following candidates is applicable:\n\n\
-                        context(scope: Scope) fun choose(other: Int): String\n\
-                        context(scope: Scope) fun choose(value: Int): Int"
-            }),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn script_analysis_respects_declaration_order() {
-        let mut diags = DiagSink::new();
-        let inputs = [SourceInput::new(
-            SourceKind::KotlinScript,
-            "fun read(): Int = value\nval value = 1",
-        )];
-        analyze_source_set_with_features(
-            &inputs,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diags,
-        );
-        assert!(diags.has_errors());
-
-        let mut diags = DiagSink::new();
-        let inputs = [SourceInput::new(
-            SourceKind::KotlinScript,
-            "val value = 1\nfun read(): Int = value\nread()",
-        )];
-        analyze_source_set_with_features(
-            &inputs,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diags,
-        );
-        assert!(!diags.has_errors(), "{:?}", diags.diags);
-    }
-
-    #[test]
-    fn script_declarations_do_not_enter_module_scope() {
-        let mut diags = DiagSink::new();
-        let inputs = [
-            SourceInput::new(
-                SourceKind::KotlinScript,
-                "fun scriptFunction(): Int = 1\n\
-                 class ScriptClass\n\
-                 ScriptClass()\n\
-                 scriptFunction()",
-            ),
-            SourceInput::kotlin(
-                "fun useFunction(): Int = scriptFunction()\n\
-                 fun useClass(): ScriptClass = ScriptClass()",
-            ),
-            SourceInput::new(
-                SourceKind::KotlinScript,
-                "class ScriptClass\nval instance = ScriptClass()",
-            ),
-        ];
-        analyze_source_set_with_features(
-            &inputs,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diags,
-        );
-
-        assert!(diags.diags.iter().any(|diagnostic| diagnostic.file == 1));
-        assert!(!diags.diags.iter().any(|diagnostic| diagnostic.file == 0));
-        assert!(!diags.diags.iter().any(|diagnostic| diagnostic.file == 2));
-    }
-
-    #[test]
-    fn script_analysis_rejects_jumps_without_an_enclosing_target() {
-        let mut diags = DiagSink::new();
-        let inputs = [SourceInput::new(
-            SourceKind::KotlinScript,
-            "return\nbreak\ncontinue",
-        )];
-        analyze_source_set_with_features(
-            &inputs,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diags,
-        );
-
-        assert_eq!(diags.diags.len(), 3);
-    }
-
-    #[test]
-    fn dependency_symbols_keep_compiled_declarations_and_add_missing_overloads() {
-        let features = LangFeatures::new();
-        let mut diagnostics = DiagSink::new();
-        let analysis = analyze_source_set_prefix_with_features(
-            &[
-                SourceInput::kotlin(
-                    "package feature\n\
-                     import fixture.Qualified\n\
-                     import fixture.Stable\n\
-                     import fixture.added\n\
-                     import left.Token\n\
-                     fun use(): Int = Stable.current() + Stable.current(1) + Qualified.select(Token()) + added(1)",
-                ),
-                SourceInput::kotlin(
-                    "package fixture\nimport left.Token\n\
-                     fun added(value: Int): Int = value\n\
-                     class Present\n\
-                     class Stable { companion object {\n\
-                     \u{20} fun current(): String = \"source\"\n\
-                     \u{20} fun current(value: Int): Int = value\n\
-                     } }\n\
-                     class Qualified { companion object {\n\
-                     \u{20} fun select(value: Token): Int = 1\n\
-                     } }\n\
-                     class Added",
-                ),
-                SourceInput::kotlin("package left\nclass Token"),
-            ],
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &features,
-            &mut diagnostics,
-        );
-        let stable = analysis
-            .symbols
-            .libraries
-            .classifier(crate::types::type_name("fixture/Stable$Companion"))
-            .expect("compiled and declaration-only companion");
-        let stable_current = stable
-            .declared_callables
-            .get("current")
-            .expect("current candidates")
-            .functions();
-        assert_eq!(
-            stable_current
-                .iter()
-                .map(|candidate| (candidate.semantic_params().to_vec(), candidate.callable.ret))
-                .collect::<Vec<_>>(),
-            [(Vec::new(), Ty::Int), (vec![Ty::Int], Ty::Int)]
-        );
-        assert!(
-            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
-            "diagnostics={:?}, calls={:?}",
-            diagnostics.diags,
-            analysis.types[0]
-                .as_ref()
-                .map(|types| &types.resolved_calls)
-        );
-        let added = analysis.symbols.libraries.symbols(
-            crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
-            "added",
-        );
-        let Callables::Functions(functions) = added.callables.clone() else {
-            panic!("missing dependency-source function")
-        };
-        assert_eq!(functions.overloads[0].source_key.map(|key| key.0), Some(1));
-    }
-
-    #[test]
-    fn dependency_callables_use_compiled_shapes_and_add_source_overloads() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import support.BaseScope\n\
-                 import support.Target\n\
-                 import support.adjust\n\
-                 import support.configure\n\
-                 import support.transform\n\
-                 object Owner {\n\
-                     fun create(target: Target) = target.configure { assign() }\n\
-                     fun update(target: Target) = target.transform { assign() }\n\
-                     fun change(target: Target) = target.adjust(1) { assign() }\n\
-                     private fun BaseScope.assign() {}\n\
-                 }",
-            ),
-            SourceInput::kotlin(
-                "package support\n\
-                 open class BaseTarget\n\
-                 class Target : BaseTarget()\n\
-                 open class BaseScope\n\
-                 inline fun Target.configure(block: BaseScope.() -> Unit) {}\n\
-                 inline fun BaseTarget.transform(block: BaseScope.() -> Unit) {}\n\
-                 inline fun Target.adjust(value: String, block: BaseScope.() -> Unit) {}",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(
-            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn declaration_only_sources_hide_internal_classifiers() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import dependency.Hidden\n\
-                 import dependency.Visible\n\
-                 fun hidden(): Any = Hidden()\n\
-                 fun visible(): Any = Visible()",
-            ),
-            SourceInput::kotlin(
-                "package dependency\n\
-                 internal class Hidden\n\
-                 class Visible",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(diagnostics
-            .diags
-            .iter()
-            .any(|diagnostic| diagnostic.msg.contains("'Hidden'")));
-        assert!(!diagnostics
-            .diags
-            .iter()
-            .any(|diagnostic| diagnostic.msg.contains("'Visible'")));
-    }
-
-    #[test]
-    fn declaration_only_extension_calls_resolve_and_type() {
-        // An imported extension from a DECLARATION-ONLY dependency file (beyond the inferred
-        // prefix): its `Signature` lives in the dependency table behind the platform seam, not in
-        // the checked prefix's symbol table, and the call must still resolve — including an
-        // omitted defaulted parameter — and type as the declared return, not `Unit`.
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import dependency.render\n\
-                 import dependency.tag\n\
-                 class C {\n\
-                 \u{20} fun go(): Int {\n\
-                 \u{20}\u{20} val r = build()\n\
-                 \u{20}\u{20} if (r == null) { return 0 }\n\
-                 \u{20}\u{20} return r.length\n\
-                 \u{20} }\n\
-                 \u{20} fun build() = \"x\".tag()?.render()\n\
-                 }",
-            ),
-            SourceInput::kotlin(
-                "package dependency\n\
-                 fun String?.tag(): String? = this\n\
-                 fun String.render(prefix: (String) -> String = { it }): String = prefix(this)",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(
-            diagnostics.diags.iter().all(|d| d.file != 0),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn modifier_prefixed_local_functions_parse_in_bodies() {
-        // `tailrec fun`/`suspend fun` LOCAL declarations are statements in any body, not just
-        // scripts — the soft-keyword prefix must not parse as an expression name.
-        let inputs = [SourceInput::kotlin(
-            "fun outer(n: Int): Int {\n\
-             \u{20} tailrec fun down(k: Int): Int = if (k <= 0) 0 else down(k - 1)\n\
-             \u{20} return down(n)\n\
-             }",
-        )];
-        let mut diagnostics = DiagSink::new();
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    }
-
-    #[test]
-    fn local_suspend_functions_reach_semantic_analysis() {
-        // Local suspension is part of the function signature. Whether a backend can CPS-lower the
-        // lifted local body must not make otherwise valid Kotlin fail in parsing.
-        let inputs = [SourceInput::kotlin(
-            "fun outer() {\n\
-             \u{20} suspend fun inner() {}\n\
-             \u{20} println(\"x\")\n\
-             }",
-        )];
-        let mut diagnostics = DiagSink::new();
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    }
-
-    #[test]
-    fn declaration_only_source_exposes_qualified_nested_enum_entry() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import dependency.Model\n\
-                 val context: Model.Context = Model.Context.ANY",
-            ),
-            SourceInput::kotlin(
-                "package dependency\n\
-                 class Model { enum class Context { ANY } }",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    }
-
-    #[test]
-    fn declaration_only_source_hides_public_nested_enum_of_internal_class() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import dependency.Hidden.Context\n\
-                 val context: Any = Context.ANY",
-            ),
-            SourceInput::kotlin(
-                "package dependency\n\
-                 internal class Hidden { enum class Context { ANY } }",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(
-            diagnostics.diags.iter().any(|diagnostic| diagnostic
-                .msg
-                .contains("cannot access 'Context': it is internal")),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn declaration_only_source_hides_public_enum_below_internal_nested_class() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import dependency.Outer\n\
-                 val context: Outer.Hidden.Context? = null",
-            ),
-            SourceInput::kotlin(
-                "package dependency\n\
-                 class Outer { internal class Hidden { enum class Context { ANY } } }",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(
-            diagnostics.diags.iter().any(|diagnostic| {
-                diagnostic
-                    .msg
-                    .contains("cannot access 'Outer.Hidden.Context': it is internal")
-            }),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn declaration_only_internal_class_shadows_public_platform_type() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import fixture.*\n\
-                 val hidden: Present? = null",
-            ),
-            SourceInput::kotlin("package fixture\ninternal class Present"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(diagnostics.diags.iter().any(|diagnostic| diagnostic
-            .msg
-            .contains("cannot access 'Present': it is internal")));
-        assert!(analysis
-            .symbols
-            .libraries
-            .symbols(
-                crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
-                "Present",
-            )
-            .classifier
-            .as_ref()
-            .is_some_and(
-                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
-            ));
-    }
-
-    #[test]
-    fn declaration_only_internal_nested_class_shadows_public_platform_path() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import fixture.Outer\n\
-                 val hidden: Outer.Hidden.Context? = null",
-            ),
-            SourceInput::kotlin(
-                "package fixture\n\
-                 class Outer { internal class Hidden { class Context } }",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(diagnostics.diags.iter().any(|diagnostic| {
-            diagnostic
-                .msg
-                .contains("cannot access 'Outer.Hidden.Context': it is internal")
-        }));
-        assert!(analysis
-            .symbols
-            .libraries
-            .symbols(
-                crate::symbol_source::SymbolNamespace::Classifier(crate::types::type_name(
-                    "fixture/Outer$Hidden",
-                )),
-                "Context",
-            )
-            .classifier
-            .as_ref()
-            .is_some_and(
-                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
-            ));
-        // Every classifier API must report the enclosing source restriction. Returning the public
-        // leaf visibility here would let the resolver's public fast path disagree with the type and
-        // package-access queries above.
-        assert_eq!(
-            analysis
-                .symbols
-                .libraries
-                .classifier(crate::types::type_name("fixture/Outer$Hidden$Context"))
-                .map(|classifier| classifier.access.visibility()),
-            Some(Visibility::Internal)
-        );
-        assert_eq!(
-            analysis
-                .symbols
-                .libraries
-                .classifier(crate::types::type_name("fixture/Outer$Hidden$Context"))
-                .map(|classifier| classifier.access),
-            Some(crate::libraries::ClassifierAccess::Internal)
-        );
-    }
-
-    #[test]
-    fn declaration_only_internal_ancestor_shadows_absent_platform_descendant() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import fixture.Outer\n\
-                 val hidden: Outer.Hidden.Context? = null",
-            ),
-            SourceInput::kotlin("package fixture\nclass Outer { internal class Hidden }"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-        let hidden = crate::types::type_name("fixture/Outer$Hidden$Context");
-
-        assert!(
-            diagnostics.diags.iter().any(|diagnostic| {
-                diagnostic
-                    .msg
-                    .contains("cannot access 'Outer.Hidden.Context': it is internal")
-            }),
-            "{:?}",
-            diagnostics.diags
-        );
-        assert!(analysis
-            .symbols
-            .libraries
-            .classifier(hidden)
-            .is_some_and(
-                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
-            ));
-        assert!(analysis
-            .symbols
-            .libraries
-            .symbols(
-                crate::symbol_source::SymbolNamespace::Classifier(crate::types::type_name(
-                    "fixture/Outer$Hidden",
-                )),
-                "Context",
-            )
-            .classifier
-            .as_ref()
-            .is_some_and(
-                |classifier| classifier.access == crate::libraries::ClassifierAccess::Internal
-            ));
-        // Although the leaf exists only on the platform, its source-declared internal owner claims
-        // the path. The visibility/access APIs must carry that owner restriction instead of falling
-        // through to the platform leaf and describing the same rejected type as public.
-        assert_eq!(
-            analysis
-                .symbols
-                .libraries
-                .classifier(hidden)
-                .map(|classifier| classifier.access.visibility()),
-            Some(Visibility::Internal)
-        );
-        assert_eq!(
-            analysis
-                .symbols
-                .libraries
-                .classifier(hidden)
-                .map(|classifier| classifier.access),
-            Some(crate::libraries::ClassifierAccess::Internal)
-        );
-    }
-
-    #[test]
-    fn declaration_only_public_ancestors_allow_absent_platform_descendant() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import fixture.Outer\n\
-                 val visible: Outer.Hidden.Context? = null",
-            ),
-            SourceInput::kotlin("package fixture\nclass Outer { class Hidden }"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-        let visible = crate::types::type_name("fixture/Outer$Hidden$Context");
-
-        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        assert!(analysis.symbols.libraries.classifier(visible).is_some());
-    }
-
-    #[test]
-    fn declaration_only_internal_class_shadows_platform_static_field() {
-        let inputs = [
-            SourceInput::kotlin("package consumer\nval checked = Unit"),
-            SourceInput::kotlin("package fixture\ninternal class CollisionEnum"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-        let collision = crate::types::type_name("fixture/CollisionEnum");
-
-        assert_eq!(
-            analysis
-                .symbols
-                .libraries
-                .classifier(collision)
-                .map(|classifier| classifier.access.visibility()),
-            Some(Visibility::Internal)
-        );
-        assert!(analysis
-            .symbols
-            .libraries
-            .static_field("fixture/CollisionEnum", "ANY")
-            .is_none());
-        assert!(analysis
-            .symbols
-            .libraries
-            .static_field_name(collision, "ANY")
-            .is_none());
-    }
-
-    #[test]
-    fn inferred_friend_sources_expose_internal_classifiers() {
-        let inputs = [
-            SourceInput::kotlin(
-                "package consumer\n\
-                 import dependency.Hidden\n\
-                 fun hidden(): Any = Hidden()",
-            ),
-            SourceInput::kotlin("package dependency\ninternal class Hidden"),
-        ];
-        let mut diagnostics = DiagSink::new();
-
-        analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            2,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    }
-
-    #[test]
-    fn dependency_symbols_expose_inherited_nested_classifier_to_subclass() {
-        let features = LangFeatures::new();
-        let mut diagnostics = DiagSink::new();
-        let analysis = analyze_source_set_prefix_with_features(
-            &[
-                SourceInput::kotlin(
-                    "package consumer\n\
-                     import support.Parent\n\
-                     class Child(category: Category) : Parent()",
-                ),
-                SourceInput::kotlin(
-                    "package support\n\
-                     open class Parent { enum class Category { FIRST } }",
-                ),
-            ],
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &features,
-            &mut diagnostics,
-        );
-
-        assert!(
-            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
-            "{:?}",
-            diagnostics.diags
-        );
-        assert_eq!(
-            analysis
-                .symbols
-                .classes
-                .get(&crate::types::type_name("consumer/Child"))
-                .expect("consumer class")
-                .ctor_params,
-            [Ty::obj("support/Parent$Category")]
-        );
-    }
-
-    #[test]
-    fn dependency_symbols_preserve_protected_classifier_for_subclass_only() {
-        let mut diagnostics = DiagSink::new();
-        let analysis = analyze_source_set_prefix_with_features(
-            &[
-                SourceInput::kotlin(
-                    "package consumer\n\
-                     import support.Parent\n\
-                     class Child : Parent() {\n\
-                         fun String.read(): String =\n\
-                             Category(\"O\").value() + Category(second = \"K\").value()\n\
-                         fun value(): String = \"\".read()\n\
-                     }",
-                ),
-                SourceInput::kotlin(
-                    "package support\n\
-                     open class Parent {\n\
-                         protected class Category(\n\
-                             private val first: String = \"O\",\n\
-                             private val second: String = \"K\",\n\
-                         ) { fun value(): String = first + second }\n\
-                     }",
-                ),
-            ],
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(
-            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn dependency_symbols_do_not_globally_expose_protected_classifier() {
-        let mut diagnostics = DiagSink::new();
-        analyze_source_set_prefix_with_features(
-            &[
-                SourceInput::kotlin(
-                    "package consumer\n\
-                     import support.Parent\n\
-                     class Unrelated { fun make(): Any = Category() }",
-                ),
-                SourceInput::kotlin(
-                    "package support\n\
-                     open class Parent { protected class Category }",
-                ),
-            ],
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diagnostics,
-        );
-
-        assert!(
-            diagnostics
-                .diags
-                .iter()
-                .any(|diagnostic| diagnostic.msg.contains("Category")),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn dependency_symbols_do_not_expose_nested_classifier_outside_subclass() {
-        let features = LangFeatures::new();
-        let mut diagnostics = DiagSink::new();
-        analyze_source_set_prefix_with_features(
-            &[
-                SourceInput::kotlin(
-                    "package consumer\n\
-                     import support.Parent\n\
-                     class Unrelated(category: Category)",
-                ),
-                SourceInput::kotlin(
-                    "package support\n\
-                     open class Parent { enum class Category { FIRST } }",
-                ),
-            ],
-            1,
-            1,
-            Box::new(EmptySymbolSource),
-            &features,
-            &mut diagnostics,
-        );
-
-        assert!(
-            diagnostics
-                .diags
-                .iter()
-                .any(|diagnostic| diagnostic.msg.contains("unresolved reference 'Category'")),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn dependency_symbols_add_a_source_property_missing_from_the_public_api() {
-        let features = LangFeatures::new();
-        let inputs = [
-            SourceInput::kotlin(
-                "package feature\n\
-                 import fixture.Container\n\
-                 fun use(): Int = Container.Labels.marker",
-            ),
-            SourceInput::kotlin(
-                "package fixture\n\
-                 class Container {\n\
-                     object Labels { val marker: Int = 1 }\n\
-                 }",
-            ),
-        ];
-        let mut diagnostics = DiagSink::new();
-        let analysis = analyze_source_set_prefix_with_features(
-            &inputs,
-            1,
-            1,
-            Box::new(ExistingLibrary),
-            &features,
-            &mut diagnostics,
-        );
-        assert!(
-            analysis.types[0].is_some() && diagnostics.diags.is_empty(),
-            "{:?}",
-            diagnostics.diags
-        );
-    }
-
-    #[test]
-    fn source_set_analysis_applies_multiplatform_actualization() {
-        let source = "// LANGUAGE: +MultiPlatformProjects\n\
-                      expect fun value(): String\n\
-                      actual fun value(): String = \"OK\"\n\
-                      fun box(): String = value()";
-        let inputs = [SourceInput::kotlin(source)];
-        let mut diags = DiagSink::new();
-        let analysis = analyze_source_set_with_features(
-            &inputs,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diags,
-        );
-        assert!(!diags.has_errors(), "{:?}", diags.diags);
-        assert!(analysis.types[0].is_some());
-    }
-
-    #[test]
-    fn preexisting_warning_does_not_mark_a_source_as_unparseable() {
-        let mut diags = DiagSink::new();
-        diags.diags.push(Diagnostic {
-            span: Span::new(0, 0),
-            editor_span: None,
-            severity: Severity::Warning,
-            kind: crate::diag::DiagnosticKind::Compiler,
-            msg: "existing warning".to_string(),
-            identity: None,
-            file: 0,
-        });
-        let inputs = [SourceInput::kotlin("fun value(): Int = 1")];
-        let analysis = analyze_source_set_with_features(
-            &inputs,
-            Box::new(EmptySymbolSource),
-            &LangFeatures::new(),
-            &mut diags,
-        );
-        assert!(analysis.types[0].is_some());
-    }
-}
+mod tests;

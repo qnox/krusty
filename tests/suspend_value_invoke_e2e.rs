@@ -78,3 +78,23 @@ fun box(): String {\n\
     let out = run(SRC).expect("value-class-param suspend lambda should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn resumed_value_class_param_suspend_lambda_writes_top_level_result() {
+    const SRC: &str = "import kotlin.coroutines.*\n\
+fun builder(c: suspend () -> Unit) {\n\
+    c.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+}\n\
+@JvmInline value class IC(val value: String)\n\
+var pending: Continuation<String>? = null\n\
+var result = \"FAIL\"\n\
+fun box(): String {\n\
+    val lambda: suspend (IC, IC) -> String = { _, _ -> suspendCoroutine { pending = it } }\n\
+    builder { result = lambda(IC(\"left\"), IC(\"right\")) }\n\
+    if (result != \"FAIL\") return \"completed before resume: $result\"\n\
+    pending!!.resume(\"OK\")\n\
+    return result\n\
+}\n";
+    let out = run(SRC).expect("resumed value-class-param suspend lambda should compile + run");
+    assert_eq!(out, "OK");
+}

@@ -18,6 +18,7 @@ pub(crate) const STUB_DEFAULT: u16 = 0x8000;
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
     Ident(String),
+    StringLiteral(String),
     Punct(char),
 }
 
@@ -51,7 +52,28 @@ pub(crate) fn lex_java(src: &str) -> LexedJava {
                 i += src[i..].chars().next().unwrap().len_utf8();
             }
             i = (i + 2).min(src.len());
-        } else if c == '"' || c == '\'' {
+        } else if c == '"' {
+            let quote = c;
+            let start = i;
+            i += width;
+            let content_start = i;
+            while i < src.len() {
+                let next = src[i..].chars().next().unwrap();
+                let next_start = i;
+                i += next.len_utf8();
+                if next == '\\' {
+                    if i < src.len() {
+                        i += src[i..].chars().next().unwrap().len_utf8();
+                    }
+                } else if next == quote {
+                    tokens.push(Tok::StringLiteral(
+                        src[content_start..next_start].to_string(),
+                    ));
+                    spans.push(Span::new(start as u32, i as u32));
+                    break;
+                }
+            }
+        } else if c == '\'' {
             let quote = c;
             i += width;
             while i < src.len() {
@@ -94,13 +116,32 @@ pub(crate) struct FileCtx {
     pub(crate) imports: Vec<JavaImport>,
 }
 
-/// A source-level type reference: base name (dotted as written), generic args, array depth.
+/// One dotted segment of a source-level type, retaining the arguments attached to that exact
+/// classifier segment. Java permits parameterized owners (`Outer<T>.Inner<U>`), whose generic JVM
+/// signature cannot be reconstructed from one flattened argument list.
+#[derive(Clone, Debug)]
+pub(crate) struct SrcTypeSegment {
+    pub(crate) name: String,
+    pub(crate) args: Vec<SrcType>,
+}
+
+/// A source-level type reference: dotted name as written, its qualified segments, and array depth.
 #[derive(Clone, Debug)]
 pub(crate) struct SrcType {
     pub(crate) name: String,
-    pub(crate) args: Vec<SrcType>,
+    pub(crate) segments: Vec<SrcTypeSegment>,
     pub(crate) array: u32,
     pub(crate) span: Option<Span>,
+}
+
+impl SrcType {
+    pub(crate) fn arguments(&self) -> impl Iterator<Item = &SrcType> {
+        self.segments.iter().flat_map(|segment| &segment.args)
+    }
+
+    pub(crate) fn has_type_arguments(&self) -> bool {
+        self.segments.iter().any(|segment| !segment.args.is_empty())
+    }
 }
 
 /// A member signature: name, params, return (`None` for a constructor), flags, own type params.
@@ -111,6 +152,12 @@ pub(crate) struct Member {
     pub(crate) ret: Option<SrcType>,
     pub(crate) throws: Vec<SrcType>,
     pub(crate) access: u16,
+    pub(crate) has_annotation_default: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum JavaConstant {
+    String(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,7 +190,7 @@ pub(crate) struct RawDecl {
     pub(crate) permits: Vec<SrcType>,
     pub(crate) ctors: Vec<Member>,
     pub(crate) methods: Vec<Member>,
-    pub(crate) fields: Vec<(String, SrcType, u16)>,
+    pub(crate) fields: Vec<(String, SrcType, u16, Option<JavaConstant>)>,
     pub(crate) enum_constants: Vec<String>,
     /// Whether any enum constant declares an anonymous class body. Such an enum is not `final` even
     /// when it has no abstract member; the classfile and `InnerClasses` flags must agree on that fact.
@@ -277,7 +324,7 @@ pub fn parse_source_file(source: &str) -> Option<JavaSourceFile> {
             .interfaces
             .iter()
             .chain(&declaration.permits)
-            .chain(declaration.fields.iter().map(|(_, ty, _)| ty))
+            .chain(declaration.fields.iter().map(|(_, ty, _, _)| ty))
             .chain(declaration.record_components.iter().map(|(_, ty)| ty))
         {
             collect_source_type_references(
@@ -359,7 +406,7 @@ fn collect_source_type_references(
             });
         }
     }
-    for argument in &reference.args {
+    for argument in reference.arguments() {
         collect_source_type_references(argument, type_parameters, owner, out);
     }
 }
@@ -491,6 +538,82 @@ impl P<'_> {
             }
         }
     }
+
+    /// Consume one field initializer without consuming its following comma/semicolon. A constant is
+    /// returned only when the complete expression is one string literal; compound Java constant
+    /// evaluation remains outside this bounded source-header parser.
+    fn field_initializer(&mut self) -> Option<Option<JavaConstant>> {
+        if !self.eat_punct('=') {
+            return Some(None);
+        }
+        let start = self.i;
+        let mut parens = 0i32;
+        let mut brackets = 0i32;
+        let mut braces = 0i32;
+        loop {
+            match self.peek() {
+                Some(Tok::Punct(',' | ';')) if parens == 0 && brackets == 0 && braces == 0 => {
+                    break;
+                }
+                Some(Tok::Punct('(')) => parens += 1,
+                Some(Tok::Punct(')')) => parens -= 1,
+                Some(Tok::Punct('[')) => brackets += 1,
+                Some(Tok::Punct(']')) => brackets -= 1,
+                Some(Tok::Punct('{')) => braces += 1,
+                Some(Tok::Punct('}')) => braces -= 1,
+                Some(_) => {}
+                None => return None,
+            }
+            self.i += 1;
+        }
+        Some(match &self.t[start..self.i] {
+            [Tok::StringLiteral(raw)] => decode_java_string(raw).map(JavaConstant::String),
+            _ => None,
+        })
+    }
+}
+
+fn decode_java_string(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let escaped = chars.next()?;
+        match escaped {
+            'b' => out.push('\u{0008}'),
+            't' => out.push('\t'),
+            'n' => out.push('\n'),
+            'f' => out.push('\u{000c}'),
+            'r' => out.push('\r'),
+            '"' => out.push('"'),
+            '\'' => out.push('\''),
+            '\\' => out.push('\\'),
+            'u' => {
+                while chars.peek() == Some(&'u') {
+                    chars.next();
+                }
+                let digits = (0..4).map(|_| chars.next()).collect::<Option<String>>()?;
+                let value = u32::from_str_radix(&digits, 16).ok()?;
+                out.push(char::from_u32(value)?);
+            }
+            first @ '0'..='7' => {
+                let mut value = first.to_digit(8)?;
+                for _ in 0..2 {
+                    let Some(next @ '0'..='7') = chars.peek().copied() else {
+                        break;
+                    };
+                    chars.next();
+                    value = value * 8 + next.to_digit(8)?;
+                }
+                out.push(char::from_u32(value)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 const MODIFIERS: &[&str] = &[
@@ -574,7 +697,26 @@ fn tparam_list(p: &mut P) -> Option<Vec<(String, Option<SrcType>)>> {
     }
 }
 
-/// A source type: `int`, `java.util.List<String>[]`, `E`, `Map.Entry<K,V>`, `?`, `? extends X`.
+fn src_type_arguments(p: &mut P) -> Option<Vec<SrcType>> {
+    if !p.eat_punct('<') {
+        return Some(Vec::new());
+    }
+    if p.eat_punct('>') {
+        return Some(Vec::new());
+    }
+    let mut arguments = Vec::new();
+    loop {
+        arguments.push(src_type(p)?);
+        if p.eat_punct(',') {
+            continue;
+        }
+        p.eat_punct('>').then_some(())?;
+        return Some(arguments);
+    }
+}
+
+/// A source type: `int`, `java.util.List<String>[]`, `E`, `Map.Entry<K,V>`,
+/// `Outer<T>.Inner<U>`, `?`, or `? extends X`.
 fn src_type(p: &mut P) -> Option<SrcType> {
     skip_type_annotations(p)?;
     if p.eat_punct('?') {
@@ -584,25 +726,34 @@ fn src_type(p: &mut P) -> Option<SrcType> {
         }
         return Some(SrcType {
             name: "java.lang.Object".into(),
-            args: Vec::new(),
+            segments: ["java", "lang", "Object"]
+                .into_iter()
+                .map(|name| SrcTypeSegment {
+                    name: name.to_string(),
+                    args: Vec::new(),
+                })
+                .collect(),
             array: 0,
             span: None,
         });
     }
-    let (name, span) = p.dotted_spanned()?;
-    let mut args = Vec::new();
-    if p.eat_punct('<') && !p.eat_punct('>') {
-        loop {
-            args.push(src_type(p)?);
-            if p.eat_punct(',') {
-                continue;
-            }
-            if p.eat_punct('>') {
-                break;
-            }
-            return None;
+    let start = p.span()?;
+    let mut segments = Vec::new();
+    loop {
+        let name = p.ident()?;
+        let args = src_type_arguments(p)?;
+        segments.push(SrcTypeSegment { name, args });
+        if p.peek() != Some(&Tok::Punct('.')) || !matches!(p.t.get(p.i + 1), Some(Tok::Ident(_))) {
+            break;
         }
+        p.i += 1;
     }
+    let end = p.spans.get(p.i.saturating_sub(1)).copied().unwrap_or(start);
+    let name = segments
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect::<Vec<_>>()
+        .join(".");
     let mut array = 0;
     loop {
         skip_type_annotations(p)?;
@@ -616,9 +767,9 @@ fn src_type(p: &mut P) -> Option<SrcType> {
     }
     Some(SrcType {
         name,
-        args,
+        segments,
         array,
-        span: Some(span),
+        span: Some(Span::new(start.lo, end.hi)),
     })
 }
 
@@ -873,6 +1024,7 @@ fn type_decl_with_access(
                 throws,
                 access: (macc & (ACC_PUBLIC | ACC_PROTECTED | ACC_PRIVATE))
                     | if varargs { ACC_VARARGS } else { 0 },
+                has_annotation_default: false,
             });
             continue;
         }
@@ -889,33 +1041,21 @@ fn type_decl_with_access(
                 ret: Some(ty),
                 throws,
                 access: macc | if varargs { ACC_VARARGS } else { 0 },
+                has_annotation_default: false,
             });
         } else {
-            // Field, possibly a list (`int a, b = 1;`); initializers are skipped balancedly.
-            decl.fields.push((name, ty.clone(), macc));
+            // Field, possibly a list (`int a, b = 1;`). Each initializer is bounded independently
+            // so an exact literal constant can enter the semantic source header.
+            let mut name = name;
             loop {
+                let constant = p.field_initializer()?;
+                decl.fields.push((name, ty.clone(), macc, constant));
                 if p.eat_punct(',') {
-                    let n = p.ident()?;
-                    decl.fields.push((n, ty.clone(), macc));
+                    name = p.ident()?;
                     continue;
                 }
-                if p.eat_punct(';') {
-                    break;
-                }
-                match p.bump()? {
-                    Tok::Punct('{') => p.skip_braces(),
-                    Tok::Punct('(') => {
-                        let mut d = 1;
-                        while d > 0 {
-                            match p.bump()? {
-                                Tok::Punct('(') => d += 1,
-                                Tok::Punct(')') => d -= 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                p.eat_punct(';').then_some(())?;
+                break;
             }
         }
     }
@@ -994,7 +1134,8 @@ fn annotation_type_decl(
         let name = p.ident()?;
         p.eat_punct('(').then_some(())?;
         p.eat_punct(')').then_some(())?;
-        if p.eat_ident("default") {
+        let has_annotation_default = p.eat_ident("default");
+        if has_annotation_default {
             p.skip_default_value()?;
         }
         p.eat_punct(';').then_some(())?;
@@ -1005,6 +1146,7 @@ fn annotation_type_decl(
             ret: Some(ty),
             throws: Vec::new(),
             access: macc,
+            has_annotation_default,
         });
     }
     out.push(decl);

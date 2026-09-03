@@ -66,3 +66,27 @@ fn classpath_nested_type_static_member_via_outer_name() {
         None => eprintln!("skipping: box runner unavailable"),
     }
 }
+
+#[test]
+fn classpath_classifier_star_import_exposes_its_direct_nested_classifier() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let Some(libout) = common::compile_lib(
+        "nested_star_import",
+        "package fixtures\n\
+         class Outer {\n\
+         \x20 class Nested { fun text(): String = \"OK\" }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    let cp = vec![libout.clone(), sl.clone()];
+    let main = "import fixtures.Outer.*\n\
+                fun box(): String = Nested().text()\n";
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
+        .expect("krusty failed to resolve a nested classifier from a classifier star import");
+    match common::run_box(&classes, "MainKt", &[libout, sl]) {
+        Some(output) => assert_eq!(output.trim(), "OK", "box() = {output:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}

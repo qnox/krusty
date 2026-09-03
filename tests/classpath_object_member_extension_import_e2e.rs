@@ -16,6 +16,42 @@
 //! extension property of `Duration.Companion`, so the argument was `Error` and no overload applied.
 use super::common;
 
+#[test]
+fn imports_inherited_object_members_through_the_common_hierarchy() {
+    let source = r#"
+        package test
+
+        import test.C.fromClass
+        import test.C.fromInterface
+        import test.C.genericFromSuper
+
+        interface I<G> {
+            fun <T> T.fromInterface(): T = this
+            fun genericFromSuper(value: G): G = value
+        }
+
+        open class BaseClass {
+            val <T> T.fromClass: T
+                get() = this
+        }
+
+        object C : BaseClass(), I<String> {
+            fun anchor() = Unit
+        }
+
+        fun box(): String {
+            if (9.fromInterface() != 9) return "interface extension"
+            if ("ten".fromClass != "ten") return "class extension"
+            return genericFromSuper("OK")
+        }
+    "#;
+
+    assert_eq!(
+        common::module_front_end_diagnostics(&[("InheritedObjectImports", source)]),
+        Some(Vec::<String>::new()),
+    );
+}
+
 const LIB: &str = r#"
     package lib
 

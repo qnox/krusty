@@ -334,8 +334,9 @@ fun box(): String = with(C()) { "a".x }
     }
 }
 
-/// The exact corpus cases. `traits/doubleDiamond.kt` additionally needs an `object` with a base
-/// class (`gate:object`, a separate feature) — pinned as a boundary below.
+/// The exact corpus cases, including the object/class/interface double diamond. That case used to
+/// be gated on object-with-base support; it is a positive regression now that the production FIR
+/// path realizes the inherited interface default without backend source lookup.
 #[test]
 fn corpus_interface_default_getters_box_ok() {
     if !common::corpus_ready() {
@@ -351,32 +352,13 @@ fn corpus_interface_default_getters_box_ok() {
         "bridges/covariantGenericDiamond.kt",
         "bridges/propertyDiamondFakeOverride.kt",
         "classes/kt2532.kt",
+        "traits/doubleDiamond.kt",
+        "traits/traitWithPrivateMember.kt",
     ] {
         assert_eq!(
             common::run_box_corpus_case(case).as_deref(),
             Some("OK"),
             "{case} must execute successfully, not silently skip"
-        );
-    }
-}
-
-/// The corpus diamond needs `object CImpl : BImpl(), C` — an object with a base class, which the
-/// `gate:object` feature gate covers separately. And `traitWithPrivateMember.kt` needs a PRIVATE
-/// computed property's accessor emitted private (accessor privacy isn't modeled — see the
-/// `IfacePrivateComputed` rejection guard). Both must stay skipped (never a partial miscompile).
-#[test]
-fn corpus_gated_interface_property_shapes_stay_skipped() {
-    if !common::corpus_ready() {
-        return;
-    }
-    for case in [
-        "traits/doubleDiamond.kt",
-        "traits/traitWithPrivateMember.kt",
-    ] {
-        assert_eq!(
-            common::run_box_corpus_case(case),
-            None,
-            "{case} needs an unmodeled feature — must stay skipped"
         );
     }
 }

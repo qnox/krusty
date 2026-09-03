@@ -1,11 +1,11 @@
 //! `@JvmName` on a top-level function names the emitted method. The SOURCE name still resolves the
 //! call, so every path that reaches the declaration must emit the annotated spelling: a same-file
 //! direct call, a callable reference (whose invoke targets the JVM name), and a cross-file call —
-//! whose caller cannot see the callee's AST and so reads the rename from the module symbol table.
+//! whose caller cannot see the callee's AST and so receives the compact resolved annotation header
+//! attached to the stable callable identity.
 //!
-//! (The reference is taken in the declaring file: a CROSS-file callable reference is an unrelated,
-//! still-unsupported shape. `KFunction.name` is likewise not resolvable yet, so the reflection half
-//! of the reference — which keeps the Kotlin spelling — is not asserted here.)
+//! (`KFunction.name` is not resolvable yet, so the reflection half of the reference — which keeps
+//! the Kotlin spelling — is not asserted here.)
 
 use super::common;
 

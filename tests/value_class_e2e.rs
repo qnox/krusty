@@ -41,7 +41,7 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     let facade = file_class_name("S", None);
     // The value-class `-impl` members are synthesized by the JVM passes (not `ir_lower`).
-    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
+    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms, &cp)
         .expect("backend passes should accept this value class");
     let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
 
@@ -107,7 +107,7 @@ fn value_class_is_property_uses_javabean_getter_name() {
     let runtime = JvmLibraries::new(cp.clone());
     let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     let facade = file_class_name("Flag", None);
-    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
+    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms, &cp)
         .expect("backend passes should accept this value class");
     let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
 
@@ -148,6 +148,27 @@ fun box(): String {
     assert_eq!(
         common::compile_and_run_box(src, "IdBox", &[stdlib], Some(&jdk)).as_deref(),
         Some("OK")
+    );
+}
+
+#[test]
+fn value_class_secondary_constructor_may_delegate_through_a_sibling() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = r#"
+// LANGUAGE: +ValueClassesSecondaryConstructorWithBody
+@JvmInline
+value class Wrapped(val value: String) {
+    constructor(value: Int) : this(value.toString())
+    constructor(value: Double) : this(value.toInt())
+}
+
+fun box(): String = Wrapped(42.0).value
+"#;
+    assert_eq!(
+        common::compile_and_run_box(src, "ValueClassSecondaryChain", &[stdlib], Some(&jdk))
+            .as_deref(),
+        Some("42")
     );
 }
 
@@ -254,6 +275,23 @@ fun box(): String {
 }
 
 #[test]
+fn top_level_and_nested_reference_arrays_keep_value_class_boxes() {
+    common::expect_box_ok_with_stdlib(
+        "@JvmInline value class Scalar(val value: Int)\n\
+         @JvmInline value class Data(val values: Array<UInt>)\n\
+         val scalars = Array(2) { Scalar(42) }\n\
+         val nested = Array(2) { i -> Data(Array(2) { j -> (i + j).toUInt() }) }\n\
+         fun box(): String {\n\
+             scalars[0] = Scalar(12)\n\
+             if (scalars[0].value != 12) return \"scalar\"\n\
+             if (nested[1].values[1].toInt() != 2) return \"nested\"\n\
+             return \"OK\"\n\
+         }\n",
+        "NestedValueClassReferenceArrays",
+    );
+}
+
+#[test]
 fn covariant_override_unboxed_return_is_check() {
     let stdlib = common::stdlib_jar();
     let java_home = common::java_home();
@@ -287,5 +325,67 @@ fun box(): String {
         common::compile_and_run_box(src, "CovariantOverrideUnboxedIs", &[stdlib], Some(&jdk))
             .as_deref(),
         Some("OK")
+    );
+}
+
+#[test]
+fn callable_reference_keeps_a_nullable_value_class_parameter_boxed() {
+    common::expect_box_ok_with_stdlib(
+        "@JvmInline value class Wrapped(val value: Int)\n\
+         var result: Int? = 0\n\
+         object Target { fun accept(value: Wrapped?) { result = value?.value } }\n\
+         fun box(): String {\n\
+             Wrapped(42).let(Target::accept)\n\
+             if (result != 42) return \"value:$result\"\n\
+             null.let(Target::accept)\n\
+             return if (result == null) \"OK\" else \"null:$result\"\n\
+         }\n",
+        "NullableValueClassCallableReference",
+    );
+}
+
+#[test]
+fn generic_underlying_metadata_keeps_the_owners_type_parameter() {
+    common::expect_box_ok_with_stdlib(
+        "inline class ICInt<T : Int>(val value: T)\n\
+         inline class ICIcInt<T : ICInt<Int>>(val value: T)\n\
+         fun box(): String {\n\
+             if (ICInt(1).value != 1) return \"first\"\n\
+             return if (ICIcInt(ICInt(1)).value.value == 1) \"OK\" else \"second\"\n\
+         }\n",
+        "GenericUnderlyingMetadata",
+    );
+}
+
+#[test]
+fn generic_interface_delegation_publishes_the_forwarders_type_parameter() {
+    common::expect_box_ok_with_stdlib(
+        "inline class S<T : String>(val value: T)\n\
+         interface Consumer<T> { fun <X> consume(value: T, suffix: X): String }\n\
+         object Impl : Consumer<S<String>> {\n\
+             override fun <X> consume(value: S<String>, suffix: X): String =\n\
+                 value.value + suffix.toString()\n\
+         }\n\
+         class Delegating : Consumer<S<String>> by Impl\n\
+         fun box(): String = Delegating().consume(S(\"O\"), \"K\")\n",
+        "GenericValueClassInterfaceDelegation",
+    );
+}
+
+#[test]
+fn synthesized_metadata_uses_properties_not_erased_value_class_fields() {
+    common::expect_box_ok_with_stdlib(
+        "inline class V<T : Int>(val value: T)\n\
+         data class Data(val item: V<Int>)\n\
+         class Entry : Map.Entry<V<Int>, V<Int>> {\n\
+             override val key: V<Int> get() = V(2)\n\
+             override val value: V<Int> get() = V(3)\n\
+         }\n\
+         fun box(): String {\n\
+             if (Data(V(1)).component1().value != 1) return \"component\"\n\
+             val entry: Map.Entry<V<Int>, V<Int>> = Entry()\n\
+             return if (entry.key.value + entry.value.value == 5) \"OK\" else \"entry\"\n\
+         }\n",
+        "SemanticPropertyMetadata",
     );
 }

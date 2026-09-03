@@ -2,8 +2,11 @@
 //! shapes.
 //! Backend-specific names and descriptors are kept out of this module.
 
+mod interning;
+
 use crate::name_tree::{NameId, NameTree};
-use std::collections::{HashMap, HashSet};
+use interning::ShardedInterner;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
@@ -21,6 +24,7 @@ static TYPE_NAMES: OnceLock<NameTree> = OnceLock::new();
 static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
     OnceLock::new();
 
+#[inline]
 fn type_names() -> &'static NameTree {
     TYPE_NAMES.get_or_init(|| {
         let names = NameTree::default();
@@ -149,10 +153,15 @@ pub fn existing_type_name(internal: &str) -> Option<TypeName> {
 }
 
 pub fn existing_type_name_child(parent: TypeName, segment: &str) -> Option<TypeName> {
+    // Generated local/anonymous classifier names are exact declaration identities and may contain
+    // `$` without having separately interned every synthetic owner prefix. Prefer that already-
+    // interned child before interpreting a source-qualified/nested spelling segment by segment.
+    // This performs no interning: a miss still falls through to the structural lookup below.
+    if let Some(exact) = type_names().existing_child_of(parent.name_id(), segment) {
+        return Some(TypeName(exact));
+    }
     let Some((base, nested)) = split_nested_name(segment) else {
-        return type_names()
-            .existing_child_of(parent.name_id(), segment)
-            .map(TypeName);
+        return None;
     };
     let mut name = TypeName(type_names().existing_child_of(parent.name_id(), base)?);
     for segment in nested
@@ -179,15 +188,9 @@ impl From<&String> for TypeName {
 /// Intern a generic type-parameter name. This must not be used for class/FQN storage; class names live
 /// in the type name tree as [`TypeName`].
 pub fn intern(name: &str) -> &'static str {
-    static I: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let set = I.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut set = set.lock().unwrap();
-    if let Some(&v) = set.get(name) {
-        return v;
-    }
-    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-    set.insert(leaked);
-    leaked
+    static I: OnceLock<ShardedInterner<str>> = OnceLock::new();
+    I.get_or_init(ShardedInterner::default)
+        .intern_ref_with(name, |value| Box::leak(value.to_owned().into_boxed_str()))
 }
 
 /// Intern one declaration-owned type-parameter identity and retain its source spelling separately.
@@ -215,12 +218,13 @@ pub(crate) fn declaration_type_parameter(
 impl TypeName {
     pub const ROOT: TypeName = TypeName(NameId(0));
 
+    #[inline]
     fn name_id(self) -> NameId {
         self.0
     }
 
     pub fn matches(self, internal: &str) -> bool {
-        type_names().get(internal) == Some(self.0)
+        type_names().matches_path(self.name_id(), internal)
     }
 
     pub fn starts_with(self, prefix: &str) -> bool {
@@ -272,6 +276,7 @@ impl TypeName {
     }
 
     /// Immediate lexical classifier owner, decoded from the interned nested-class segment.
+    #[inline]
     pub fn nested_owner(self) -> Option<TypeName> {
         type_names().nested_owner(self.name_id()).map(TypeName)
     }
@@ -281,6 +286,13 @@ impl TypeName {
         type_names()
             .existing_nested_child_of(self.name_id(), nested)
             .map(TypeName)
+    }
+
+    /// Intern a classifier nested directly in this classifier. This is the identity-preserving
+    /// construction used for compiler-generated nested classes; callers must not render, append a
+    /// `$` spelling, and intern the result again.
+    pub fn nested_child(self, nested: &str) -> TypeName {
+        TypeName(type_names().nested_child_of(self.name_id(), nested))
     }
 
     pub fn strip_prefix(self, prefix: &str) -> Option<String> {
@@ -502,15 +514,8 @@ pub mod wk {
 /// compares by value — the derived `Eq`/`Hash` follow the reference, so equal inner types must share
 /// one pointer.
 pub fn intern_ty(t: Ty) -> &'static Ty {
-    static I: OnceLock<Mutex<HashSet<&'static Ty>>> = OnceLock::new();
-    let set = I.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut set = set.lock().unwrap();
-    if let Some(&v) = set.get(&t) {
-        return v;
-    }
-    let leaked: &'static Ty = Box::leak(Box::new(t));
-    set.insert(leaked);
-    leaked
+    static I: OnceLock<ShardedInterner<Ty>> = OnceLock::new();
+    I.get_or_init(ShardedInterner::default).intern_owned(t)
 }
 
 /// Intern a generic type-argument list to a canonical `&'static [Ty]` so equal instantiations share a
@@ -519,15 +524,9 @@ pub fn intern_tys(ts: &[Ty]) -> &'static [Ty] {
     if ts.is_empty() {
         return &[];
     }
-    static I: OnceLock<Mutex<HashSet<&'static [Ty]>>> = OnceLock::new();
-    let set = I.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut set = set.lock().unwrap();
-    if let Some(&v) = set.get(ts) {
-        return v;
-    }
-    let leaked: &'static [Ty] = Box::leak(ts.to_vec().into_boxed_slice());
-    set.insert(leaked);
-    leaked
+    static I: OnceLock<ShardedInterner<[Ty]>> = OnceLock::new();
+    I.get_or_init(ShardedInterner::default)
+        .intern_ref_with(ts, |value| Box::leak(value.to_vec().into_boxed_slice()))
 }
 
 /// A function type's signature: parameter types and return type. Interned (`intern_fnsig`) so
@@ -546,15 +545,8 @@ pub struct FnSig {
 
 /// Intern a `FnSig` to a canonical `&'static FnSig` (leaked; the compiler is short-lived).
 pub fn intern_fnsig(s: FnSig) -> &'static FnSig {
-    static I: OnceLock<Mutex<HashSet<&'static FnSig>>> = OnceLock::new();
-    let set = I.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut set = set.lock().unwrap();
-    if let Some(&v) = set.get(&s) {
-        return v;
-    }
-    let leaked: &'static FnSig = Box::leak(Box::new(s));
-    set.insert(leaked);
-    leaked
+    static I: OnceLock<ShardedInterner<FnSig>> = OnceLock::new();
+    I.get_or_init(ShardedInterner::default).intern_owned(s)
 }
 
 /// The element type of a primitive specialized array class (`kotlin/IntArray` → `Int`), or `None` for a
@@ -579,6 +571,10 @@ pub fn prim_array_element(internal: impl InternalName) -> Option<Ty> {
         Some(Ty::Float)
     } else if internal.internal_matches("kotlin/DoubleArray") {
         Some(Ty::Double)
+    } else if internal.internal_matches("kotlin/UByteArray") {
+        Some(Ty::UByte)
+    } else if internal.internal_matches("kotlin/UShortArray") {
+        Some(Ty::UShort)
     } else if internal.internal_matches("kotlin/UIntArray") {
         Some(Ty::UInt)
     } else if internal.internal_matches("kotlin/ULongArray") {
@@ -601,6 +597,8 @@ pub fn primitive_array_creator_element(name: &str) -> Option<Ty> {
         "CharArray" | "charArrayOf" => Ty::Char,
         "FloatArray" | "floatArrayOf" => Ty::Float,
         "DoubleArray" | "doubleArrayOf" => Ty::Double,
+        "UByteArray" | "ubyteArrayOf" => Ty::UByte,
+        "UShortArray" | "ushortArrayOf" => Ty::UShort,
         "UIntArray" | "uintArrayOf" => Ty::UInt,
         "ULongArray" | "ulongArrayOf" => Ty::ULong,
         _ => return None,
@@ -619,6 +617,8 @@ pub fn prim_array_name(elem: Ty) -> Option<&'static str> {
         Ty::Char => "kotlin/CharArray",
         Ty::Float => "kotlin/FloatArray",
         Ty::Double => "kotlin/DoubleArray",
+        Ty::UByte => "kotlin/UByteArray",
+        Ty::UShort => "kotlin/UShortArray",
         Ty::UInt => "kotlin/UIntArray",
         Ty::ULong => "kotlin/ULongArray",
         _ => return None,
@@ -729,10 +729,13 @@ pub enum Ty {
     /// A Java platform type `T!`: flexible between `T` and `T?`. Unlike [`Nullable`](Ty::Nullable),
     /// direct member access is permitted; assignability accepts it at either nullability bound.
     PlatformNullable(&'static Ty),
-    /// Use-site type projections. These occur only as generic arguments (`Box<in T>` / `Box<out T>`)
-    /// and remain semantic until assignability/inference consumes their variance.
+    /// Use-site type projections. These occur only as generic arguments (`Box<in T>`, `Box<out T>`,
+    /// and `Box<*>`) and remain semantic until assignability/inference consumes their variance. A
+    /// star retains its readable upper bound, but stays distinct from an explicitly written `out`
+    /// projection because Kotlin metadata and JVM generic signatures encode those forms differently.
     InProjection(&'static Ty),
     OutProjection(&'static Ty),
+    StarProjection(&'static Ty),
     /// A generic type-parameter reference (`T`), carrying its name and declared upper bound
     /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
@@ -881,6 +884,7 @@ impl Ty {
             Ty::PlatformNullable(inner) => Ty::platform_nullable(inner.substitute_erased(bindings)),
             Ty::InProjection(inner) => Ty::in_projection(inner.substitute_erased(bindings)),
             Ty::OutProjection(inner) => Ty::out_projection(inner.substitute_erased(bindings)),
+            Ty::StarProjection(inner) => Ty::star_projection(inner.substitute_erased(bindings)),
             Ty::Obj(internal, arguments) if !arguments.is_empty() => {
                 let arguments = arguments
                     .iter()
@@ -922,7 +926,7 @@ impl Ty {
     /// array exposes only nullable `Any`. Primitive and invariant arrays keep their declared element.
     pub fn array_read_elem(self) -> Option<Ty> {
         Some(match self.array_elem()? {
-            Ty::OutProjection(inner) => *inner,
+            Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
             Ty::InProjection(_) => Ty::nullable(Ty::obj("kotlin/Any")),
             element => element,
         })
@@ -970,10 +974,28 @@ impl Ty {
         Ty::OutProjection(intern_ty(inner))
     }
 
+    pub fn star_projection(upper_bound: Ty) -> Ty {
+        Ty::StarProjection(intern_ty(upper_bound))
+    }
+
     pub fn projection_inner(self) -> Option<Ty> {
         match self {
-            Ty::InProjection(inner) | Ty::OutProjection(inner) => Some(*inner),
+            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                Some(*inner)
+            }
             _ => None,
+        }
+    }
+
+    /// The expression type obtained by reading a value through a use-site projection. Projection
+    /// wrappers describe a classifier argument/capture, not a type an expression can retain:
+    /// covariant reads expose their upper bound, while a contravariant capture can only be read as
+    /// nullable `Any`. Non-projected types are already valid read types.
+    pub fn projection_read_ty(self) -> Ty {
+        match self {
+            Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
+            Ty::InProjection(_) => Ty::nullable(Ty::obj("kotlin/Any")),
+            ty => ty,
         }
     }
 
@@ -1015,6 +1037,17 @@ impl Ty {
         }
     }
 
+    /// Kotlin's definitely-non-null form (`T & Any`). Unlike [`Self::non_null`], this retains a
+    /// type parameter's identity while making its occurrence bound non-null, so substituting a
+    /// nullable type argument through a metadata or source signature cannot erase the intersection.
+    pub fn definitely_non_null(self) -> Ty {
+        match self {
+            Ty::Null => Ty::Nothing,
+            Ty::TyParam(name, bound) => Ty::ty_param(name, bound.definitely_non_null()),
+            _ => self.non_null(),
+        }
+    }
+
     /// Lower bound of a flexible Java platform type; fixed Kotlin types are unchanged.
     pub fn platform_lower_bound(self) -> Ty {
         match self {
@@ -1041,7 +1074,7 @@ impl Ty {
     /// arrive from classpath metadata.
     pub fn is_erased_top(self) -> bool {
         self.non_null()
-            .obj_internal()
+            .kotlin_class_internal()
             .is_some_and(|n| same(n, wk::any()) || same(n, wk::java_object()))
     }
 
@@ -1183,7 +1216,9 @@ impl Ty {
         }
         match self {
             Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.mentions_marker(marker),
-            Ty::InProjection(inner) | Ty::OutProjection(inner) => inner.mentions_marker(marker),
+            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                inner.mentions_marker(marker)
+            }
             Ty::Obj(_, args) => args.iter().any(|a| a.mentions_marker(marker)),
             Ty::Fun(signature) => {
                 signature.ret.mentions_marker(marker)
@@ -1196,7 +1231,11 @@ impl Ty {
     pub fn mentions_ty_param(self) -> bool {
         match self {
             Ty::TyParam(..) => true,
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.mentions_ty_param(),
+            Ty::Nullable(inner)
+            | Ty::PlatformNullable(inner)
+            | Ty::InProjection(inner)
+            | Ty::OutProjection(inner)
+            | Ty::StarProjection(inner) => inner.mentions_ty_param(),
             Ty::Obj(_, args) => args.iter().any(|a| a.mentions_ty_param()),
             Ty::Fun(signature) => {
                 signature.ret.mentions_ty_param()
@@ -1307,6 +1346,77 @@ impl Ty {
         match self {
             Ty::Fun(s) => Some(&s.params),
             _ => None,
+        }
+    }
+
+    /// Normalize Kotlin builtin classifier objects to their dedicated semantic variants, including
+    /// occurrences nested under generic, nullable, projected, function, and type-parameter shapes.
+    /// Type substitution can reconstruct `Obj(kotlin/Int)` even though source `Int` is `Ty::Int`;
+    /// leaving both representations alive makes representation-sensitive semantic operations disagree.
+    pub fn canonical_semantic(self) -> Ty {
+        match self {
+            Ty::Obj(name, arguments) if arguments.is_empty() => {
+                if name.matches("kotlin/Int") {
+                    Ty::Int
+                } else if name.matches("kotlin/Byte") {
+                    Ty::Byte
+                } else if name.matches("kotlin/Short") {
+                    Ty::Short
+                } else if name.matches("kotlin/Long") {
+                    Ty::Long
+                } else if name.matches("kotlin/Float") {
+                    Ty::Float
+                } else if name.matches("kotlin/Double") {
+                    Ty::Double
+                } else if name.matches("kotlin/Boolean") {
+                    Ty::Boolean
+                } else if name.matches("kotlin/Char") {
+                    Ty::Char
+                } else if name.matches("kotlin/UByte") {
+                    Ty::UByte
+                } else if name.matches("kotlin/UShort") {
+                    Ty::UShort
+                } else if name.matches("kotlin/UInt") {
+                    Ty::UInt
+                } else if name.matches("kotlin/ULong") {
+                    Ty::ULong
+                } else if name.matches("kotlin/String") {
+                    Ty::String
+                } else if name.matches("kotlin/Unit") {
+                    Ty::Unit
+                } else if name.matches("kotlin/Nothing") {
+                    Ty::Nothing
+                } else {
+                    Ty::obj_name(name)
+                }
+            }
+            Ty::Obj(name, arguments) => Ty::obj_args_name(
+                name,
+                &arguments
+                    .iter()
+                    .copied()
+                    .map(Ty::canonical_semantic)
+                    .collect::<Vec<_>>(),
+            ),
+            Ty::Nullable(inner) => Ty::nullable(inner.canonical_semantic()),
+            Ty::PlatformNullable(inner) => Ty::platform_nullable(inner.canonical_semantic()),
+            Ty::InProjection(inner) => Ty::in_projection(inner.canonical_semantic()),
+            Ty::OutProjection(inner) => Ty::out_projection(inner.canonical_semantic()),
+            Ty::StarProjection(inner) => Ty::star_projection(inner.canonical_semantic()),
+            Ty::TyParam(name, bound) => Ty::ty_param(name, bound.canonical_semantic()),
+            Ty::Fun(signature) => Ty::fun_with_shape(
+                signature
+                    .params
+                    .iter()
+                    .copied()
+                    .map(Ty::canonical_semantic)
+                    .collect(),
+                signature.ret.canonical_semantic(),
+                signature.context_count,
+                signature.has_receiver,
+                signature.suspend,
+            ),
+            _ => self,
         }
     }
 
@@ -1486,6 +1596,7 @@ impl Ty {
                 "out {}",
                 inner.source_name_with_type_parameter_in(context, type_parameter)
             ),
+            Ty::StarProjection(_) => "*".to_string(),
             Ty::TyParam(n, _) => type_parameter(n),
             // Only reachable from a diagnostic rendered while the declaration is still being
             // resolved; it never names a real type.
@@ -1511,7 +1622,8 @@ impl Ty {
             Ty::Nullable(inner)
             | Ty::PlatformNullable(inner)
             | Ty::InProjection(inner)
-            | Ty::OutProjection(inner) => {
+            | Ty::OutProjection(inner)
+            | Ty::StarProjection(inner) => {
                 inner.contains_distinct_classifier_with_segment(classifier)
             }
             _ => false,
@@ -1544,6 +1656,7 @@ impl Ty {
             Ty::PlatformNullable(inner) => format!("{}!", inner.name()),
             Ty::InProjection(inner) => format!("in {}", inner.name()),
             Ty::OutProjection(inner) => format!("out {}", inner.name()),
+            Ty::StarProjection(_) => "*".to_string(),
             Ty::TyParam(name, _) => name.to_string(),
         }
     }
@@ -1583,8 +1696,9 @@ impl Ty {
         self.is_numeric() || self == Ty::Char
     }
 
-    /// True for a member/property read result that can be used as an expression value in the current
-    /// lowering model. `Unit`/`Error` entries are ignored when resolving zero-arg property-like reads.
+    /// True when a zero-argument callable may supply an inferred property-like read facet. Real
+    /// [`PropertyInfo`](crate::libraries::PropertyInfo) declarations do not use this predicate:
+    /// `Unit` is a valid property value and `Error` still reserves the declared name.
     pub fn is_read_value_result(self) -> bool {
         !matches!(self, Ty::Unit | Ty::Error)
     }
@@ -1620,6 +1734,7 @@ impl Ty {
     pub fn range_operand_bound(self) -> Ty {
         match self {
             Ty::TyParam(_, bound) => bound.range_operand_bound(),
+            Ty::PlatformNullable(inner) => inner.range_operand_bound(),
             other => other,
         }
     }
@@ -1631,6 +1746,27 @@ impl Ty {
             Ty::Byte | Ty::Short => Ty::Int,
             Ty::UByte | Ty::UShort => Ty::UInt,
             Ty::Int | Ty::Long | Ty::UInt | Ty::ULong | Ty::Char => operand,
+            _ => return None,
+        })
+    }
+
+    /// Counted-loop element selected by the built-in range overload for a pair of bounds.
+    /// Mixed signed integral bounds widen exactly as the corresponding range value does
+    /// (`Int until Long` produces a `LongRange`); unsigned and character ranges remain uniform.
+    pub fn range_counter_type_for(lo: Ty, hi: Ty) -> Option<Ty> {
+        let lo = lo.range_operand_bound();
+        let hi = hi.range_operand_bound();
+        Some(match (lo, hi) {
+            (Ty::Char, Ty::Char) => Ty::Char,
+            (Ty::UInt, Ty::UInt) => Ty::UInt,
+            (Ty::ULong, Ty::ULong) => Ty::ULong,
+            (left, right) if left.is_int_range_operand() && right.is_int_range_operand() => Ty::Int,
+            (left, right)
+                if (left.is_int_range_operand() || left == Ty::Long)
+                    && (right.is_int_range_operand() || right == Ty::Long) =>
+            {
+                Ty::Long
+            }
             _ => return None,
         })
     }
@@ -1827,7 +1963,8 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
         Ty::Nullable(inner)
         | Ty::PlatformNullable(inner)
         | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => ty_mentions_param(*inner, names),
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner) => ty_mentions_param(*inner, names),
         _ => false,
     }
 }
@@ -1851,7 +1988,8 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
         Ty::Nullable(inner)
         | Ty::PlatformNullable(inner)
         | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => ty_mentions_any_param(*inner),
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner) => ty_mentions_any_param(*inner),
         _ => false,
     }
 }
@@ -2132,13 +2270,14 @@ fn substitute_type_parameters(
     ty: Ty,
     bindings: &std::collections::HashMap<String, Ty>,
     preserve_unbound: bool,
+    enforce_bound_nullability: bool,
 ) -> Ty {
     match ty {
         Ty::TyParam(name, bound) => bindings
             .get(name)
             .copied()
             .map(|binding| {
-                if bound.upper_bound_admits_null() {
+                if !enforce_bound_nullability || bound.upper_bound_admits_null() {
                     binding
                 } else {
                     binding.non_null()
@@ -2155,9 +2294,21 @@ fn substitute_type_parameters(
             signature
                 .params
                 .iter()
-                .map(|parameter| substitute_type_parameters(*parameter, bindings, preserve_unbound))
+                .map(|parameter| {
+                    substitute_type_parameters(
+                        *parameter,
+                        bindings,
+                        preserve_unbound,
+                        enforce_bound_nullability,
+                    )
+                })
                 .collect(),
-            substitute_type_parameters(signature.ret, bindings, preserve_unbound),
+            substitute_type_parameters(
+                signature.ret,
+                bindings,
+                preserve_unbound,
+                enforce_bound_nullability,
+            ),
             signature.context_count,
             signature.has_receiver,
             signature.suspend,
@@ -2166,27 +2317,44 @@ fn substitute_type_parameters(
             *inner,
             bindings,
             preserve_unbound,
+            enforce_bound_nullability,
         )),
         Ty::PlatformNullable(inner) => Ty::platform_nullable(substitute_type_parameters(
             *inner,
             bindings,
             preserve_unbound,
+            enforce_bound_nullability,
         )),
         Ty::InProjection(inner) => Ty::in_projection(substitute_type_parameters(
             *inner,
             bindings,
             preserve_unbound,
+            enforce_bound_nullability,
         )),
         Ty::OutProjection(inner) => Ty::out_projection(substitute_type_parameters(
             *inner,
             bindings,
             preserve_unbound,
+            enforce_bound_nullability,
+        )),
+        Ty::StarProjection(inner) => Ty::star_projection(substitute_type_parameters(
+            *inner,
+            bindings,
+            preserve_unbound,
+            enforce_bound_nullability,
         )),
         Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
                 .iter()
-                .map(|argument| substitute_type_parameters(*argument, bindings, preserve_unbound))
+                .map(|argument| {
+                    substitute_type_parameters(
+                        *argument,
+                        bindings,
+                        preserve_unbound,
+                        enforce_bound_nullability,
+                    )
+                })
                 .collect::<Vec<_>>(),
         ),
         _ => ty,
@@ -2194,7 +2362,7 @@ fn substitute_type_parameters(
 }
 
 pub(crate) fn ty_subst(ty: Ty, bindings: &std::collections::HashMap<String, Ty>) -> Ty {
-    substitute_type_parameters(ty, bindings, false)
+    substitute_type_parameters(ty, bindings, false, true)
 }
 
 pub(crate) fn ty_subst_all(
@@ -2227,6 +2395,7 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &std::collections::HashMap<St
         Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_with_param_bounds(*inner, bounds)),
         Ty::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(*inner, bounds)),
         Ty::OutProjection(inner) => Ty::out_projection(ty_with_param_bounds(*inner, bounds)),
+        Ty::StarProjection(inner) => Ty::star_projection(ty_with_param_bounds(*inner, bounds)),
         Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
@@ -2265,6 +2434,7 @@ pub(crate) fn ty_rename_params(
         Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_rename_params(*inner, identities)),
         Ty::InProjection(inner) => Ty::in_projection(ty_rename_params(*inner, identities)),
         Ty::OutProjection(inner) => Ty::out_projection(ty_rename_params(*inner, identities)),
+        Ty::StarProjection(inner) => Ty::star_projection(ty_rename_params(*inner, identities)),
         Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
@@ -2276,11 +2446,38 @@ pub(crate) fn ty_rename_params(
     }
 }
 
+/// Canonicalize declaration-owned type-parameter identities by their ordinal. This is used for
+/// declaration-shape equality: two independently declared `<T>` parameters have different semantic
+/// identities during inference, but occupy the same slot when comparing callable signatures.
+pub(crate) fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
+    let identities = formals
+        .iter()
+        .enumerate()
+        .map(|(ordinal, formal)| {
+            (
+                formal.as_str(),
+                intern(&format!("\0signature-parameter:{ordinal}")),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    ty_rename_params(ty, &identities)
+}
+
 pub(crate) fn ty_subst_keep_unbound(
     ty: Ty,
     bindings: &std::collections::HashMap<String, Ty>,
 ) -> Ty {
-    substitute_type_parameters(ty, bindings, true)
+    substitute_type_parameters(ty, bindings, true, true)
+}
+
+/// Apply arguments from an already-validated classifier use without narrowing them against the
+/// inline bound carried by a symbolic occurrence. Type checking validated `KFunction1<String?, R>`
+/// when the classifier was formed; projecting its `invoke` shape must retain `String?` exactly.
+pub(crate) fn ty_subst_applied_arguments(
+    ty: Ty,
+    bindings: &std::collections::HashMap<String, Ty>,
+) -> Ty {
+    substitute_type_parameters(ty, bindings, true, false)
 }
 
 #[cfg(test)]
@@ -2330,9 +2527,40 @@ mod tests {
     }
 
     #[test]
+    fn exact_generated_package_child_wins_before_nested_spelling_decomposition() {
+        let generated = type_name("GeneratedKt$box$1");
+        assert_eq!(
+            existing_type_name_child(TypeName::ROOT, "GeneratedKt$box$1"),
+            Some(generated)
+        );
+    }
+
+    #[test]
     fn builtin_aliases_are_the_ordinary_classifier_types() {
         assert_eq!(Ty::Int, Ty::obj("kotlin/Int"));
         assert_eq!(Ty::String, Ty::obj("kotlin/String"));
+        assert_eq!(Ty::obj("kotlin/Int").canonical_semantic(), Ty::Int);
+        assert_eq!(Ty::obj("kotlin/String").canonical_semantic(), Ty::String);
+        assert_eq!(Ty::obj("kotlin/Unit").canonical_semantic(), Ty::Unit);
+        assert_eq!(Ty::obj("kotlin/Nothing").canonical_semantic(), Ty::Nothing);
+    }
+
+    #[test]
+    fn nullable_any_upper_bound_is_still_the_erased_top_domain() {
+        assert!(Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any"))).is_erased_top());
+    }
+
+    #[test]
+    fn mixed_signed_integral_range_uses_long_counter() {
+        assert_eq!(
+            Ty::range_counter_type_for(Ty::Int, Ty::Long),
+            Some(Ty::Long)
+        );
+        assert_eq!(
+            Ty::range_counter_type_for(Ty::Short, Ty::Byte),
+            Some(Ty::Int)
+        );
+        assert_eq!(Ty::range_counter_type_for(Ty::Int, Ty::UInt), None);
     }
 
     #[test]
@@ -2491,6 +2719,27 @@ mod tests {
     fn non_null_type_is_not_nullable() {
         assert!(!Ty::Int.is_nullable());
         assert_eq!(Ty::Int.non_null(), Ty::Int);
+    }
+
+    #[test]
+    fn definitely_non_null_type_parameter_retains_identity_with_non_null_bound() {
+        let nullable_any = Ty::nullable(Ty::obj("kotlin/Any"));
+        assert_eq!(
+            Ty::ty_param("T", nullable_any).definitely_non_null(),
+            Ty::ty_param("T", Ty::obj("kotlin/Any"))
+        );
+    }
+
+    #[test]
+    fn substitution_preserves_definitely_non_null_type_parameter_occurrence() {
+        let declared = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let argument = Ty::nullable(Ty::ty_param("F", Ty::obj("kotlin/Any")));
+        let bindings = HashMap::from([("T".to_string(), argument)]);
+
+        assert_eq!(
+            ty_subst(declared, &bindings),
+            Ty::ty_param("F", Ty::obj("kotlin/Any"))
+        );
     }
 
     #[test]

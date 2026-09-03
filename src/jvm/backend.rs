@@ -2,7 +2,9 @@
 //! the class bytes) and emits the `META-INF/<module>.kotlin_module` package → facade mapping.
 
 use crate::ast::{Decl, File};
-use crate::backend::{Artifact, Backend};
+use crate::backend::{
+    Artifact, Backend, BackendClassifierSource, BackendModuleFacts, CheckedBackendClassifiers,
+};
 use crate::diag::DiagSink;
 use crate::frontend::{CheckedFile, FrontendSymbols};
 use crate::jvm::names::{file_class_name, type_descriptor};
@@ -40,10 +42,11 @@ pub enum SkipReason {
 /// 5. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
 /// 6. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
-/// 7. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
-/// 8. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 7. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
+/// 8. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 9. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///    (`require`/`check`) message lambda; it is spliced at the call site.
-/// 9. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 10. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///    its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///    be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///    ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -56,9 +59,10 @@ pub fn run_backend_passes(
     facade: &str,
     module_name: &str,
     syms: &FrontendSymbols,
+    classpath: &crate::jvm::classpath::Classpath,
 ) -> Result<(), SkipReason> {
     let mut discard = crate::jvm::suspend::ContinuationMetadataMap::default();
-    run_backend_passes_with_metadata(ir, file, facade, module_name, syms, &mut discard)
+    run_backend_passes_with_metadata(ir, file, facade, module_name, syms, classpath, &mut discard)
 }
 
 /// Run the JVM pass pipeline and retain continuation metadata for class emission.
@@ -68,6 +72,7 @@ pub fn run_backend_passes_with_metadata(
     facade: &str,
     module_name: &str,
     syms: &FrontendSymbols,
+    classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
     let resolve_class_name = |name: &str| syms.class_names.get(name);
@@ -78,6 +83,52 @@ pub fn run_backend_passes_with_metadata(
         &resolve_class_name,
         jvm_plugin_type_descriptor,
     );
+    let module_value_classes: std::collections::HashMap<_, _> = syms
+        .classes
+        .values()
+        .filter_map(|class| {
+            class
+                .value_field
+                .as_ref()
+                .map(|(_, ty)| (class.internal_name(), *ty))
+        })
+        .collect();
+    run_backend_passes_after_plugins(
+        ir,
+        facade,
+        &module_value_classes,
+        classpath,
+        continuation_metadata,
+    )
+}
+
+/// Streaming JVM pipeline entry. Native plugins consume only checked common-IR declaration
+/// metadata; the reparsed Pass-2 source unit is not part of their contract.
+pub fn run_backend_passes_with_checked_metadata(
+    ir: &mut crate::ir::IrFile,
+    facade: &str,
+    module_name: &str,
+    module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
+    classpath: &crate::jvm::classpath::Classpath,
+    continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
+) -> Result<(), SkipReason> {
+    crate::plugins::run_enabled_from_ir(ir, module_name, jvm_plugin_type_descriptor);
+    run_backend_passes_after_plugins(
+        ir,
+        facade,
+        module_value_classes,
+        classpath,
+        continuation_metadata,
+    )
+}
+
+fn run_backend_passes_after_plugins(
+    ir: &mut crate::ir::IrFile,
+    facade: &str,
+    module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
+    classpath: &crate::jvm::classpath::Classpath,
+    continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
+) -> Result<(), SkipReason> {
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
@@ -89,30 +140,23 @@ pub fn run_backend_passes_with_metadata(
     // The JVM supplies default field values before any constructor runs. Elide only source
     // declaration stores recorded by exact ExprId; common IR and other targets keep them.
     crate::jvm::property_storage::elide_default_property_stores(ir);
+    // Common IR retains source type-parameter identities and complete intersections. Select the JVM
+    // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
+    crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
-    crate::jvm::bridges::derive_bridges(ir, syms)?;
-    apply_collection_bridge_barriers(ir, syms);
-    let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
-    let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
-        &*syms.libraries,
-        &vc_module,
-        &[],
-    );
+    crate::jvm::bridges::derive_bridges(ir, classpath)?;
+    apply_collection_bridge_barriers(ir);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
     // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
     // construction/member resolution for source value classes).
-    let module_value_classes: std::collections::HashMap<_, _> = syms
-        .classes
-        .values()
-        .filter_map(|c| c.value_field.as_ref().map(|(_, t)| (c.internal_name(), *t)))
-        .collect();
-    crate::jvm::value_classes::apply_override_final_drop(ir, &vc_resolver);
-    if !crate::jvm::value_classes::lower_value_classes(ir, &vc_resolver, &module_value_classes) {
+    crate::jvm::value_classes::apply_override_final_drop(ir);
+    if !crate::jvm::value_classes::lower_value_classes(ir, classpath, module_value_classes) {
         return Err(SkipReason::ValueClasses);
     }
+    crate::jvm::shared_captures::lower_class_capture_slots(ir);
     if !crate::jvm::suspend::lower_suspend(ir, facade, continuation_metadata) {
         return Err(SkipReason::Suspend);
     }
@@ -134,7 +178,7 @@ pub(crate) struct BridgeBarrier {
     pub outcome: BridgeBarrierOutcome,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum CollectionOwner {
     Collection,
     MutableCollection,
@@ -233,18 +277,32 @@ pub(crate) fn bridge_barrier(bridge: &crate::ir::Bridge) -> Option<BridgeBarrier
         .map(|(_, barrier)| barrier)
 }
 
-fn apply_collection_bridge_barriers(ir: &mut crate::ir::IrFile, syms: &FrontendSymbols) {
+fn apply_collection_bridge_barriers(ir: &mut crate::ir::IrFile) {
     for class in &mut ir.classes {
-        let owners = syms
-            .applied_hierarchy(crate::types::Ty::obj_name(class.fq_name))
-            .into_iter()
-            .map(|(owner, _, _)| owner)
-            .collect::<Vec<_>>();
+        let owners = ir
+            .classifier_hierarchies
+            .get(&class.fq_name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         for bridge in &mut class.bridges {
-            bridge.type_safe_barrier =
-                collection_bridge_semantics(bridge).is_some_and(|(required, _)| {
-                    owners.iter().copied().any(|owner| required.matches(owner))
-                });
+            let semantics = collection_bridge_semantics(bridge);
+            bridge.type_safe_barrier = semantics.is_some_and(|(required, _)| {
+                owners
+                    .iter()
+                    .any(|entry| required.matches(entry.classifier))
+            });
+            crate::trace_compiler!(
+                "lower",
+                "collection bridge class={} name={} hierarchy={:?} semantics={:?} barrier={}",
+                class.fq_name,
+                bridge.name,
+                owners
+                    .iter()
+                    .map(|entry| entry.classifier)
+                    .collect::<Vec<_>>(),
+                semantics,
+                bridge.type_safe_barrier,
+            );
         }
     }
 }
@@ -367,6 +425,62 @@ pub fn module_inner_class_resolver(
     syms: &FrontendSymbols,
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::classfile::InnerClassResolver {
+    module_inner_class_resolver_from_shapes(
+        syms.classes
+            .iter()
+            .map(|(classifier, class)| InnerModuleClassifier {
+                classifier: *classifier,
+                visibility: class.visibility,
+                inner: class.inner_of_name().is_some(),
+                annotation: class.is_annotation(),
+                interface: class.is_interface(),
+                enum_class: syms
+                    .enum_entries_of(class.internal_name())
+                    .is_some_and(|entries| !entries.is_empty()),
+                abstract_class: class.is_sealed() || class.is_abstract(),
+                final_class: class.is_final(),
+            }),
+        cp,
+    )
+}
+
+fn checked_module_inner_class_resolver(
+    module: &BackendModuleFacts,
+    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+) -> crate::jvm::classfile::InnerClassResolver {
+    module_inner_class_resolver_from_shapes(
+        module
+            .classifiers()
+            .map(|(classifier, shape)| InnerModuleClassifier {
+                classifier,
+                visibility: shape.access.visibility(),
+                inner: shape.outer_instance.is_some(),
+                annotation: shape.is_annotation(),
+                interface: shape.is_interface(),
+                enum_class: shape.is_enum(),
+                abstract_class: shape.is_abstract,
+                final_class: !shape.is_abstract && !shape.is_extensible,
+            }),
+        cp,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct InnerModuleClassifier {
+    classifier: crate::types::TypeName,
+    visibility: crate::types::Visibility,
+    inner: bool,
+    annotation: bool,
+    interface: bool,
+    enum_class: bool,
+    abstract_class: bool,
+    final_class: bool,
+}
+
+fn module_inner_class_resolver_from_shapes(
+    classes: impl IntoIterator<Item = InnerModuleClassifier>,
+    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+) -> crate::jvm::classfile::InnerClassResolver {
     const PUBLIC: u16 = 0x0001;
     const PROTECTED: u16 = 0x0004;
     const PRIVATE: u16 = 0x0002;
@@ -377,10 +491,14 @@ pub fn module_inner_class_resolver(
     const ANNOTATION: u16 = 0x2000;
     const ENUM: u16 = 0x4000;
 
-    let mut source: std::collections::HashMap<String, crate::jvm::classfile::InnerClassDetails> =
-        std::collections::HashMap::new();
-    for (type_name, class) in &syms.classes {
-        let internal = type_name.render();
+    let classes = classes.into_iter().collect::<Vec<_>>();
+    let module_names = classes
+        .iter()
+        .map(|class| class.classifier)
+        .collect::<std::collections::HashSet<_>>();
+    let mut source = std::collections::HashMap::new();
+    for class in classes {
+        let internal = class.classifier.render();
         // Only MEMBER-nested classes get snapshot entries, and the outer boundary is NOT the last
         // `$` (mirroring `register_inner_classes`): the boundary is the longest proper prefix that
         // is itself a module class. A name whose remainder still carries `$` past that boundary is
@@ -394,10 +512,7 @@ pub fn module_inner_class_resolver(
             .char_indices()
             .filter(|&(_, ch)| ch == '$')
             .map(|(at, _)| at)
-            .filter(|&at| {
-                syms.classes
-                    .contains_key(&crate::types::type_name(&internal[..at]))
-            })
+            .filter(|&at| module_names.contains(&crate::types::type_name(&internal[..at])))
             .max()
         else {
             continue; // top-level (or nested under nothing this module declares)
@@ -411,24 +526,16 @@ pub fn module_inner_class_resolver(
             crate::types::Visibility::Private => PRIVATE,
             _ => PUBLIC,
         };
-        let mut access = visibility
-            | if class.inner_of_name().is_some() {
-                0
-            } else {
-                STATIC
-            };
-        if class.is_annotation() {
+        let mut access = visibility | if class.inner { 0 } else { STATIC };
+        if class.annotation {
             access |= INTERFACE | ABSTRACT | ANNOTATION;
-        } else if class.is_interface() {
+        } else if class.interface {
             access |= INTERFACE | ABSTRACT;
-        } else if syms
-            .enum_entries_of(class.internal_name())
-            .is_some_and(|entries| !entries.is_empty())
-        {
+        } else if class.enum_class {
             access |= FINAL | ENUM;
-        } else if class.is_sealed() || class.is_abstract() {
+        } else if class.abstract_class {
             access |= ABSTRACT;
-        } else if class.is_final() {
+        } else if class.final_class {
             access |= FINAL;
         }
         source.insert(
@@ -551,52 +658,26 @@ pub struct JvmState {
     module_packages: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-impl Backend for JvmBackend {
-    type State = JvmState;
+enum BackendReadyClassifiers<'a> {
+    Legacy(&'a FrontendSymbols),
+    Checked(&'a dyn BackendClassifierSource),
+}
 
-    fn lower_file(
+impl JvmBackend {
+    fn emit_legacy_ir(
         &self,
-        checked: CheckedFile<'_>,
+        mut ir: crate::ir::IrFile,
+        checked: &CheckedFile<'_>,
         stem: &str,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
-        let mut outputs = Vec::new();
         let file = checked.file;
-        let info = checked.info;
         let syms = checked.symbols;
         let module_name = checked.module_name;
-
-        let mut emit_opts =
-            shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
-                .with_jvm_default(self.jvm_default)
-                .with_lambda_modes(self.lambda_modes);
-        // The shipping resolver sees only the classpath; a nested class declared in ANOTHER FILE of
-        // this module also needs an `InnerClasses` entry, and only the checked symbols know it.
-        emit_opts.inner_class_resolver = Some(module_inner_class_resolver(syms, self.cp.clone()));
-
-        // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
-        // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
+        let package = file.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, file.package.as_deref());
-        let runtime = crate::jvm::jvm_libraries::JvmLibraries::new(self.cp.clone());
-        let lower_bail = std::cell::RefCell::new(String::new());
-        let Some(mut ir) = crate::ir_lower::lower_file_at_reporting(
-            file,
-            checked.file_index,
-            info,
-            syms,
-            &runtime,
-            &lower_bail,
-        ) else {
-            crate::trace_compiler!("lower", "bail: {}", lower_bail.borrow());
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                "krusty: this construct is not yet supported by the IR backend".to_string(),
-            );
-            return outputs;
-        };
-        // The shared post-lowering pass pipeline (see `run_backend_passes`); an unlowerable shape →
-        // diagnose and skip the file rather than miscompile.
+
         let mut continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
         if let Err(reason) = run_backend_passes_with_metadata(
             &mut ir,
@@ -604,47 +685,143 @@ impl Backend for JvmBackend {
             &facade_name,
             module_name,
             syms,
+            &self.cp,
             &mut continuation_metadata,
         ) {
-            let what = match reason {
-                SkipReason::ValueClasses => "value-class",
-                SkipReason::Suspend => "suspend-function",
-                SkipReason::Bridges => "bridge-method",
-            };
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                format!("krusty: this {what} shape is not yet supported by the IR backend"),
-            );
-            return outputs;
+            report_backend_pass_failure(reason, diags);
+            return Vec::new();
         }
-        // `-Xno-param-assertions` is applied to the lowered IR, after the pass pipeline and before
-        // emission, so every consumer of the guards — the guards themselves and the debug tables
-        // whose start offsets are measured past them — sees the same thing.
+        let metadata =
+            facade_package_metadata_with_ir(file, checked.file_index, syms, &ir, module_name);
+        let has_facade_members =
+            file.decls.iter().any(|&declaration| {
+                matches!(file.decl(declaration), Decl::Fun(_) | Decl::Property(_))
+            }) || !file.type_alias_fun.is_empty();
+        let inner_class_resolver = module_inner_class_resolver(syms, self.cp.clone());
+        self.emit_backend_ready_ir(
+            ir,
+            stem,
+            module_name,
+            facade_name,
+            package,
+            BackendReadyClassifiers::Legacy(syms),
+            inner_class_resolver,
+            continuation_metadata,
+            metadata,
+            has_facade_members,
+            crate::jvm::module_calls::ModulePropertyRealizations::default(),
+            state,
+            diags,
+        )
+    }
+
+    fn emit_streamed_ir(
+        &self,
+        mut ir: crate::ir::IrFile,
+        classifiers: &CheckedBackendClassifiers<'_>,
+        module_name: &str,
+        stem: &str,
+        module_property_realizations: crate::jvm::module_calls::ModulePropertyRealizations,
+        state: &mut JvmState,
+        diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        let package = ir.package.clone().unwrap_or_default();
+        let facade_name = file_class_name(stem, ir.package.as_deref());
+        let mut continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
+        if let Err(reason) = run_backend_passes_with_checked_metadata(
+            &mut ir,
+            &facade_name,
+            module_name,
+            classifiers.module().source_value_classes(),
+            &self.cp,
+            &mut continuation_metadata,
+        ) {
+            report_backend_pass_failure(reason, diags);
+            return Vec::new();
+        }
+        let metadata = facade_package_metadata_from_ir(&ir, module_name);
+        let has_facade_members = metadata.is_some();
+        let inner_class_resolver =
+            checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
+        self.emit_backend_ready_ir(
+            ir,
+            stem,
+            module_name,
+            facade_name,
+            package,
+            BackendReadyClassifiers::Checked(classifiers),
+            inner_class_resolver,
+            continuation_metadata,
+            metadata,
+            has_facade_members,
+            module_property_realizations,
+            state,
+            diags,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_backend_ready_ir(
+        &self,
+        mut ir: crate::ir::IrFile,
+        stem: &str,
+        module_name: &str,
+        facade_name: String,
+        package: String,
+        signature_symbols: BackendReadyClassifiers<'_>,
+        inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
+        continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
+        metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
+        has_facade_members: bool,
+        module_property_realizations: crate::jvm::module_calls::ModulePropertyRealizations,
+        state: &mut JvmState,
+        diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        let mut outputs = Vec::new();
         if !self.param_assertions {
             crate::jvm::ir_emit::strip_param_assertions(&mut ir);
         }
         if !self.call_assertions {
             crate::jvm::ir_emit::strip_call_assertions(&mut ir);
         }
-        let emit_opts = emit_opts.with_param_assertions(self.param_assertions);
-        let metadata =
-            facade_package_metadata_with_ir(file, checked.file_index, syms, &ir, module_name);
-        // `emit_all` returns `None` when the IR uses a JVM-unsupported construct. Inline splice failures
-        // are reported separately (via `run.inline_bail`): selected inline calls are required to splice,
-        // so those are backend errors to fix rather than silent skips.
+        let mut emit_opts =
+            shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
+                .with_jvm_default(self.jvm_default)
+                .with_lambda_modes(self.lambda_modes)
+                .with_param_assertions(self.param_assertions);
+        emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
-        let Some(classes) = crate::jvm::ir_emit::emit_all_with_opts_and_metadata(
-            &ir,
-            &facade_name,
-            &*self.cp,
-            crate::jvm::ir_emit::EmitMetadata {
-                facade: metadata.as_ref(),
-                continuations: &continuation_metadata,
-            },
-            &emit_opts,
-            &run,
-            syms,
-        ) else {
+        let emit_metadata = crate::jvm::ir_emit::EmitMetadata {
+            facade: metadata.as_ref(),
+            continuations: &continuation_metadata,
+        };
+        let classes = match signature_symbols {
+            BackendReadyClassifiers::Legacy(symbols) => {
+                crate::jvm::ir_emit::emit_all_with_opts_and_metadata_and_realizations(
+                    &ir,
+                    &facade_name,
+                    &*self.cp,
+                    emit_metadata,
+                    &emit_opts,
+                    &run,
+                    symbols,
+                    &module_property_realizations,
+                )
+            }
+            BackendReadyClassifiers::Checked(classifiers) => {
+                crate::jvm::ir_emit::emit_all_with_checked_classifiers(
+                    &ir,
+                    &facade_name,
+                    &*self.cp,
+                    emit_metadata,
+                    &emit_opts,
+                    &run,
+                    classifiers,
+                    &module_property_realizations,
+                )
+            }
+        };
+        let Some(classes) = classes else {
             if let Some(reason) = run.inline_bail() {
                 diags.error(
                     crate::diag::Span::new(0, 0),
@@ -666,14 +843,6 @@ impl Backend for JvmBackend {
             outputs.push((format!("{internal}.class"), bytes));
         }
 
-        // Record the file facade (`<File>Kt`) for the `.kotlin_module` mapping when the file has
-        // top-level functions/props — or TYPEALIASES: an alias-only facade is still emitted (its
-        // `Package.typeAlias` records live there) and kotlinc lists it.
-        let has_facade_members = file
-            .decls
-            .iter()
-            .any(|&d| matches!(file.decl(d), Decl::Fun(_) | Decl::Property(_)))
-            || !file.type_alias_fun.is_empty();
         if has_facade_members {
             let facade = facade_name
                 .rsplit('/')
@@ -682,11 +851,130 @@ impl Backend for JvmBackend {
                 .to_string();
             state
                 .module_packages
-                .entry(file.package.clone().unwrap_or_default())
+                .entry(package)
                 .or_default()
                 .push(facade);
         }
         outputs
+    }
+}
+
+fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
+    let what = match reason {
+        SkipReason::ValueClasses => "value-class",
+        SkipReason::Suspend => "suspend-function",
+        SkipReason::Bridges => "bridge-method",
+    };
+    diags.error(
+        crate::diag::Span::new(0, 0),
+        format!("krusty: this {what} shape is not yet supported by the IR backend"),
+    );
+}
+
+impl Backend for JvmBackend {
+    type State = JvmState;
+
+    fn lower_file(
+        &self,
+        checked: CheckedFile<'_>,
+        stem: &str,
+        state: &mut JvmState,
+        diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        let file = checked.file;
+        let info = checked.info;
+        let syms = checked.symbols;
+        let runtime = crate::jvm::jvm_libraries::JvmLibraries::new(self.cp.clone());
+        let lower_bail = std::cell::RefCell::new(String::new());
+        let Some(ir) = crate::ir_lower::lower_file_at_reporting(
+            file,
+            checked.file_index,
+            info,
+            syms,
+            &runtime,
+            &lower_bail,
+        ) else {
+            crate::trace_compiler!("lower", "bail: {}", lower_bail.borrow());
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "krusty: this construct is not yet supported by the IR backend".to_string(),
+            );
+            return Vec::new();
+        };
+        self.emit_legacy_ir(ir, &checked, stem, state, diags)
+    }
+
+    fn lower_ir_file(
+        &self,
+        mut file: crate::backend::CheckedIrFile<'_>,
+        state: &mut JvmState,
+        diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        let stem = &file.stems[file.source.raw() as usize];
+        let facade = file_class_name(stem, file.ir.package.as_deref());
+        if let Err(error) = crate::jvm::ranges::realize(&mut file.ir, self.cp.clone()) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: cannot realize checked range operation: {error:?}"),
+            );
+            return Vec::new();
+        }
+        if let Err(target) =
+            crate::jvm::function_references::realize(&mut file.ir, &self.cp, &facade)
+        {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!(
+                    "internal error: missing JVM function-reference realization for {target:?}"
+                ),
+            );
+            return Vec::new();
+        }
+        if let Err(target) =
+            crate::jvm::property_references::realize(&mut file.ir, file.stems, &self.cp, &facade)
+        {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!(
+                    "internal error: missing JVM property-reference realization for {target:?}"
+                ),
+            );
+            return Vec::new();
+        }
+        if let Err(target) = crate::jvm::external_calls::realize(&mut file.ir, &self.cp) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: missing JVM dependency realization for {target}"),
+            );
+            return Vec::new();
+        }
+        if let Err(target) = crate::jvm::local_properties::realize(&mut file.ir) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: cannot realize local JVM property access for {target:?}"),
+            );
+            return Vec::new();
+        }
+        let module_property_realizations =
+            match crate::jvm::module_calls::realize(&mut file.ir, file.stems, &self.cp) {
+                Ok(realizations) => realizations,
+                Err(target) => {
+                    diags.error(
+                        crate::diag::Span::new(0, 0),
+                        format!("internal error: missing JVM module layout for {target:?}"),
+                    );
+                    return Vec::new();
+                }
+            };
+        self.emit_streamed_ir(
+            file.ir,
+            &file.classifiers,
+            file.module_name,
+            stem,
+            module_property_realizations,
+            state,
+            diags,
+        )
     }
 
     fn finalize(&self, state: JvmState, module_name: &str) -> Vec<Artifact> {
@@ -702,6 +990,211 @@ impl Backend for JvmBackend {
             module_bytes,
         )]
     }
+}
+
+/// Build file-facade metadata from common IR alone. Semantic declaration records were copied from
+/// finalized Pass-1 headers before bodies streamed; this step combines them only with physical
+/// function names/descriptors chosen by JVM representation passes.
+pub fn facade_package_metadata_from_ir(
+    ir: &crate::ir::IrFile,
+    module_name: &str,
+) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    let functions = ir
+        .package_functions
+        .iter()
+        .map(|declaration| {
+            let mentions_type_parameter = matches!(declaration.ret, Ty::TyParam(..))
+                || declaration
+                    .params
+                    .iter()
+                    .any(|(_, parameter)| matches!(parameter, Ty::TyParam(..)));
+            let records_an_array = declaration
+                .receiver
+                .into_iter()
+                .chain(declaration.params.iter().map(|(_, parameter)| *parameter))
+                .chain(std::iter::once(declaration.ret))
+                .any(crate::metadata::descriptor_needs_recording);
+            let jvm_desc = (declaration.suspend
+                || mentions_type_parameter
+                || records_an_array
+                || declaration.context_count > 0)
+                .then(|| {
+                    let mut physical = declaration
+                        .params
+                        .iter()
+                        .map(|(_, parameter)| *parameter)
+                        .collect::<Vec<_>>();
+                    if let Some(receiver) = declaration.receiver {
+                        physical.insert(declaration.context_count.min(physical.len()), receiver);
+                    }
+                    let mut descriptor = physical
+                        .iter()
+                        .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+                        .collect::<String>();
+                    if declaration.suspend {
+                        descriptor.push_str("Lkotlin/coroutines/Continuation;");
+                    }
+                    format!(
+                        "({descriptor}){}",
+                        if declaration.suspend {
+                            "Ljava/lang/Object;".to_owned()
+                        } else {
+                            crate::jvm::names::type_descriptor(declaration.ret)
+                        }
+                    )
+                });
+            let physical = ir.functions.get(declaration.function as usize);
+            let jvm_name = physical
+                .filter(|function| function.name != declaration.name)
+                .map(|function| function.name.clone());
+            let jvm_desc = if ir.vc_declared_sigs.contains_key(&declaration.function) {
+                physical.map(|function| {
+                    crate::jvm::names::method_descriptor(&function.params, function.ret)
+                })
+            } else {
+                jvm_desc
+            };
+            let mut param_annotations = ir
+                .fn_param_annotations
+                .get(&declaration.function)
+                .cloned()
+                .unwrap_or_default();
+            if declaration.receiver.is_some() && declaration.context_count < param_annotations.len()
+            {
+                param_annotations.remove(declaration.context_count);
+            }
+            let mut no_infer_params = ir
+                .fn_param_no_infer
+                .get(&declaration.function)
+                .cloned()
+                .unwrap_or_default();
+            if declaration.receiver.is_some() && declaration.context_count < no_infer_params.len() {
+                no_infer_params.remove(declaration.context_count);
+            }
+            crate::metadata::builder::FnMeta {
+                name: declaration.name.clone(),
+                params: declaration.params.clone(),
+                ret: declaration.ret,
+                decl_order: declaration.source_order as usize,
+                annotations: ir
+                    .function_annotations
+                    .get(&declaration.function)
+                    .map(|annotations| annotations.applications().cloned().collect())
+                    .unwrap_or_default(),
+                receiver: declaration.receiver,
+                param_defaults: declaration.param_defaults.clone(),
+                suspend: declaration.suspend,
+                jvm_desc,
+                jvm_name,
+                inline: declaration.inline,
+                operator: declaration.operator,
+                infix: declaration.infix,
+                contract: declaration
+                    .contract
+                    .as_ref()
+                    .map(|contract| contract.to_arc()),
+                type_params: declaration
+                    .type_params
+                    .iter()
+                    .map(|parameter| (parameter.name.clone(), parameter.reified))
+                    .collect(),
+                semantic_type_params: declaration
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.semantic_name.clone())
+                    .collect(),
+                type_param_bounds: declaration
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.bounds.clone())
+                    .collect(),
+                context_count: declaration.context_count,
+                vararg_index: declaration.vararg_index,
+                visibility: declaration.visibility,
+                spellings: declaration.spellings.clone(),
+                param_annotations: param_annotations
+                    .iter()
+                    .map(|annotations| annotations.applications().cloned().collect())
+                    .collect(),
+                no_infer_params,
+                equality_bound: declaration.equality_bound,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let properties = ir
+        .package_properties
+        .iter()
+        .map(|declaration| {
+            let accessor_parameters = declaration
+                .context_parameters
+                .iter()
+                .copied()
+                .chain(declaration.receiver)
+                .collect::<Vec<_>>();
+            let descriptor_parameters = accessor_parameters
+                .iter()
+                .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+                .collect::<String>();
+            let ty_descriptor = crate::jvm::names::type_descriptor(declaration.ty);
+            let getter = (
+                crate::jvm::names::property_getter_name(&declaration.name),
+                format!("({descriptor_parameters}){ty_descriptor}"),
+            );
+            let setter = declaration.mutable.then(|| {
+                let mut parameters = descriptor_parameters;
+                parameters.push_str(&ty_descriptor);
+                (
+                    crate::jvm::names::property_setter_name(&declaration.name),
+                    format!("({parameters})V"),
+                )
+            });
+            crate::metadata::builder::PropMeta {
+                name: declaration.name.clone(),
+                ty: declaration.ty,
+                is_var: declaration.mutable,
+                type_params: declaration
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                semantic_type_params: declaration
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.semantic_name.clone())
+                    .collect(),
+                type_param_bounds: declaration
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.bounds.clone())
+                    .collect(),
+                receiver: declaration.receiver,
+                getter,
+                setter,
+                is_const: declaration.is_const,
+                has_constant: declaration.has_constant,
+                decl_order: declaration.source_order as usize,
+                visibility: declaration.visibility,
+                spellings: declaration.spellings.clone(),
+                has_backing_field: declaration.has_backing_field,
+                has_declared_getter: declaration.has_declared_getter,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let aliases = ir
+        .package_type_aliases
+        .iter()
+        .map(|alias| crate::metadata::builder::TypeAliasMeta {
+            name: alias.name.clone(),
+            formals: alias.formals.clone(),
+            expansion: alias.expansion,
+            visibility: alias.visibility,
+            expansion_spelling: alias.expansion_spelling.clone(),
+            decl_order: alias.source_order as usize,
+        })
+        .collect::<Vec<_>>();
+    build_facade_metadata(functions, properties, aliases, module_name)
 }
 
 /// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every top-level function —
@@ -726,6 +1219,29 @@ pub fn facade_package_metadata_with_ir(
     module_name: &str,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     facade_package_metadata_inner(file, file_index, syms, Some(ir), module_name)
+}
+
+fn build_facade_metadata(
+    functions: Vec<crate::metadata::builder::FnMeta>,
+    properties: Vec<crate::metadata::builder::PropMeta>,
+    aliases: Vec<crate::metadata::builder::TypeAliasMeta>,
+    module_name: &str,
+) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
+        let (d1_bytes, d2) = crate::metadata::builder::build_package(
+            &functions,
+            &properties,
+            &aliases,
+            (module_name != "main").then_some(module_name),
+        );
+        crate::jvm::ir_emit::KotlinMetadata {
+            k: 2,
+            mv: vec![2, 4, 0],
+            xi: 48,
+            d1: vec![d1_bytes.iter().map(|&byte| byte as char).collect()],
+            d2,
+        }
+    })
 }
 
 fn facade_package_metadata_inner(
@@ -843,9 +1359,12 @@ fn facade_package_metadata_inner(
             });
         crate::trace_compiler!(
             "metadata",
-            "emit facade metadata function={} params={:?} context={} contract={}",
+            "emit facade metadata function={} declared_params={:?} physical_params={:?} ret={declared_ret:?} formals={:?} bounds={:?} context={} contract={}",
             f.name,
             params,
+            sig.params,
+            generic.map(|signature| signature.formals.as_slice()),
+            generic.map(|signature| signature.formal_bounds.as_slice()),
             sig.context_count,
             sig.contract.is_some(),
         );
@@ -898,6 +1417,7 @@ fn facade_package_metadata_inner(
             ret: declared_ret,
             receiver,
             param_defaults: sig.param_defaults.clone(),
+            equality_bound: sig.equality_bound,
             // The IR table is parallel to the physical parameter list, so an EXTENSION's leading
             // receiver slot is dropped here — `params` above is the LOGICAL list, receiver excluded.
             // Same no-IR rule as the declaration annotations above: no IR, no user annotations.
@@ -912,6 +1432,7 @@ fn facade_package_metadata_inner(
                         .collect()
                 })
                 .unwrap_or_default(),
+            no_infer_params: sig.no_infer_params.clone(),
             suspend: f.is_suspend(),
             jvm_desc,
             inline: f.is_inline(),
@@ -966,38 +1487,56 @@ fn facade_package_metadata_inner(
         let Decl::Property(p) = file.decl(d) else {
             continue;
         };
-        let (ty, is_var, is_const, has_constant, type_params, receiver, mut accessor_params) =
-            if p.receiver.is_some() {
-                // Match by declaration, not name: extension properties may share a spelling on
-                // different receivers and still denote different declarations.
-                let Some(property) = syms.source_extension_property((file_index, d.0)) else {
-                    continue;
-                };
-                (
-                    property.ty,
-                    property.is_var,
-                    false,
-                    false,
-                    property.formals.clone(),
-                    Some(property.receiver),
-                    std::iter::once(property.receiver)
-                        .chain(property.context_params.iter().copied())
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                let Some(property) = syms.source_props.get(&(file_index, d.0)) else {
-                    continue;
-                };
-                (
-                    property.ty,
-                    property.is_var,
-                    property.is_const,
-                    property.compile_time_constant.is_some(),
-                    Vec::new(),
-                    None,
-                    property.context_params.clone(),
-                )
+        let (
+            ty,
+            is_var,
+            is_const,
+            has_constant,
+            type_params,
+            semantic_type_params,
+            type_param_bounds,
+            receiver,
+            mut accessor_params,
+        ) = if p.receiver.is_some() {
+            // Match by declaration, not name: extension properties may share a spelling on
+            // different receivers and still denote different declarations.
+            let Some(property) = syms.source_extension_property((file_index, d.0)) else {
+                continue;
             };
+            (
+                property.ty,
+                property.is_var,
+                false,
+                false,
+                property.formal_names.clone(),
+                property.formals.clone(),
+                property
+                    .formal_bounds
+                    .iter()
+                    .copied()
+                    .map(|bound| vec![bound])
+                    .collect(),
+                Some(property.receiver),
+                std::iter::once(property.receiver)
+                    .chain(property.context_params.iter().copied())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let Some(property) = syms.source_props.get(&(file_index, d.0)) else {
+                continue;
+            };
+            (
+                property.ty,
+                property.is_var,
+                property.is_const,
+                property.compile_time_constant.is_some(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                property.context_params.clone(),
+            )
+        };
         let descriptor_params = accessor_params
             .iter()
             .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
@@ -1021,6 +1560,13 @@ fn facade_package_metadata_inner(
                 format!("({params})V"),
             )
         });
+        crate::trace_compiler!(
+            "metadata",
+            "emit facade metadata property={} ty={:?} receiver={:?}",
+            p.name,
+            ty,
+            receiver,
+        );
         prop_metas.push(crate::metadata::builder::PropMeta {
             name: p.name.clone(),
             // A DECLARED getter (`val d get() = 5L`, and every extension property, which cannot
@@ -1037,6 +1583,8 @@ fn facade_package_metadata_inner(
             ty,
             is_var,
             type_params,
+            semantic_type_params,
+            type_param_bounds,
             receiver,
             getter,
             setter,

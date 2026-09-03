@@ -134,6 +134,21 @@ fn a_generic_alias_abbreviates_with_its_as_spelled_arity() {
     assert_identical("Boxed", &src, "app/BoxedKt");
 }
 
+/// A formal nested below another alias on the right-hand side must be replaced in both the semantic
+/// expansion and its parallel abbreviation tree. Leaving the declaration's `T` in the spelling
+/// sidecar makes a concrete non-generic function try to emit an out-of-scope type parameter.
+#[test]
+fn a_nested_alias_expansion_substitutes_its_formal_in_abbreviations() {
+    let src = "package app\n\
+        \n\
+        class Inv<K>\n\
+        typealias Inner<V> = Inv<V>\n\
+        typealias Outer<T> = Inv<Inner<T>>\n\
+        \n\
+        fun concrete(): Outer<String>? = null\n";
+    assert_identical("NestedFormal", src, "app/NestedFormalKt");
+}
+
 /// An alias for a FUNCTION type, whose expansion is a synthesized `FunctionN` classifier.
 #[test]
 fn an_alias_for_a_function_type_abbreviates_the_function_classifier() {

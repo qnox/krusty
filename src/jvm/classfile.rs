@@ -521,6 +521,8 @@ struct MethodInfo {
     /// pass owns and OVERWRITES) so the two can be attached in either order; `finish` concatenates
     /// them per parameter, user annotations first — kotlinc's order.
     user_invisible_param_anns: Vec<Vec<Vec<u8>>>,
+    /// Analysis-only Java header stubs preserve whether an annotation element may be omitted.
+    annotation_default: bool,
 }
 
 struct FieldInfo {
@@ -877,7 +879,22 @@ impl ClassWriter {
             param_anns: Vec::new(),
             visible_param_anns: Vec::new(),
             user_invisible_param_anns: Vec::new(),
+            annotation_default: false,
         });
+    }
+
+    pub(crate) fn mark_annotation_default(&mut self, name: &str, desc: &str) {
+        let (Some(name), Some(desc)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc))
+        else {
+            return;
+        };
+        if let Some(method) = self
+            .methods
+            .iter_mut()
+            .find(|method| method.name == name && method.desc == desc)
+        {
+            method.annotation_default = true;
+        }
     }
 
     /// Declare a field (e.g. a backing field for a Kotlin property).
@@ -2024,6 +2041,7 @@ impl ClassWriter {
             param_anns: Vec::new(),
             visible_param_anns: Vec::new(),
             user_invisible_param_anns: Vec::new(),
+            annotation_default: false,
         });
     }
 
@@ -2572,6 +2590,13 @@ impl ClassWriter {
             (self.class_deprecated || !self.deprecated_methods.is_empty())
                 .then(|| self.cp.utf8("Deprecated"))
         });
+        // Source-header annotation stubs carry only the omission policy. The reader deliberately
+        // ignores the default payload, but the attribute body remains structurally valid.
+        let annotation_default_attr = self
+            .methods
+            .iter()
+            .any(|method| method.annotation_default)
+            .then(|| (self.cp.utf8("AnnotationDefault"), self.cp.utf8("")));
         // Field annotation attribute names, interned only when a field actually carries them.
         let field_vis_ann_name = field_rva;
         // Field-level `RuntimeInvisibleAnnotations` reuses the name interned before `Code` (dedup).
@@ -2758,10 +2783,11 @@ impl ClassWriter {
             let rvpa_attr: u16 = u16::from(!m.visible_param_anns.is_empty());
             let ripa_attr: u16 = u16::from(!invisible_params.is_empty());
             let ann_attr = mrva_attr + mria_attr + rvpa_attr + ripa_attr;
+            let default_attr = u16::from(m.annotation_default);
             match &m.code {
-                None => u2(&mut out, sig_attr + dep_attr + ann_attr), // abstract: optional Signature [+ Deprecated] [+ anns]
+                None => u2(&mut out, sig_attr + dep_attr + ann_attr + default_attr), // abstract: optional Signature [+ Deprecated] [+ anns/default]
                 Some(code) => {
-                    u2(&mut out, 1 + sig_attr + dep_attr + ann_attr); // Code [+ Signature] [+ Deprecated] [+ anns]
+                    u2(&mut out, 1 + sig_attr + dep_attr + ann_attr + default_attr); // Code [+ Signature] [+ Deprecated] [+ anns/default]
                     u2(&mut out, code_attr_name);
                     let code_len = code.len();
                     let sm_overhead = match &m.stackmap {
@@ -2850,6 +2876,14 @@ impl ClassWriter {
             if dep_attr == 1 {
                 u2(&mut out, deprecated_attr_name.unwrap());
                 u4(&mut out, 0);
+            }
+            if m.annotation_default {
+                let (name, empty_string) = annotation_default_attr
+                    .expect("annotation-default constants must be reserved before serialization");
+                u2(&mut out, name);
+                u4(&mut out, 3);
+                out.push(b's');
+                u2(&mut out, empty_string);
             }
             // Method-level `RuntimeVisibleAnnotations` (declared user annotations), then
             // `RuntimeInvisibleAnnotations` (the annotated return + BINARY-retained user

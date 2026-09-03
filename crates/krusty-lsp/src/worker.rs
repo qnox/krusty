@@ -206,6 +206,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                         DiagnosticKind::Compiler => 0,
                         DiagnosticKind::IncompatibleEquality => 1,
                         DiagnosticKind::Inspection => 2,
+                        DiagnosticKind::ValReassignment => 3,
                     },
                     message: diagnostic.msg,
                 })
@@ -244,6 +245,7 @@ impl AnalysisResponse {
                     kind: match diagnostic.kind {
                         1 => DiagnosticKind::IncompatibleEquality,
                         2 => DiagnosticKind::Inspection,
+                        3 => DiagnosticKind::ValReassignment,
                         _ => DiagnosticKind::Compiler,
                     },
                     msg: diagnostic.message,
@@ -354,8 +356,7 @@ fn encode_request(
         .map(|source| source.kind.wire_code())
         .collect::<Vec<_>>();
     let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
-    let mut language_features = features.iter().collect::<Vec<_>>();
-    language_features.sort_unstable();
+    let language_features = language_feature_names(features);
     serde_json::to_writer(
         &mut request,
         &AnalysisRequest {
@@ -434,8 +435,7 @@ fn encode_dump_request(
         }
         None => session_features.clone(),
     };
-    let mut language_features = features.iter().collect::<Vec<_>>();
-    language_features.sort_unstable();
+    let language_features = language_feature_names(&features);
     let request = DumpRequest {
         analysis: AnalysisRequest {
             sources: &sources,
@@ -455,6 +455,12 @@ fn encode_dump_request(
     serde_json::to_writer(&mut encoded, &DumpEnvelope { dump: &request })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     Ok(encoded.bytes)
+}
+
+fn language_feature_names(features: &LangFeatures) -> Vec<&str> {
+    let mut names = features.iter().collect::<Vec<_>>();
+    names.sort_unstable();
+    names
 }
 
 fn framed_read_receiver<R>(
@@ -1741,16 +1747,25 @@ mod tests {
         assert_eq!(dump.analysis.classpath.as_deref(), Some(&classpath[..]));
         assert_eq!(dump.analysis.result_count, 1);
         assert_eq!(dump.analysis.inferred_count, Some(2));
+        let mut module_features = LangFeatures::new();
+        for argument in &language_arguments {
+            module_features.apply_cli_arg(argument);
+        }
         assert_eq!(
-            dump.analysis.language_features,
-            vec![
-                "ContextParameters".to_string(),
-                "MultiDollarInterpolation".to_string(),
-                "NameBasedDestructuring".to_string(),
-            ],
+            dump.analysis
+                .language_features
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            language_feature_names(&module_features),
             "the module's own language arguments must reach the worker, and must replace the \
              session features exactly as analyze_inputs_prefix_with_config does"
         );
+        assert!(!dump
+            .analysis
+            .language_features
+            .iter()
+            .any(|feature| feature == "SessionOnly"));
     }
 
     #[test]
@@ -1780,11 +1795,12 @@ mod tests {
             panic!("an encoded dump request must reach the dump arm");
         };
         assert_eq!(
-            dump.analysis.language_features,
-            vec![
-                "ContextParameters".to_string(),
-                "MultiDollarInterpolation".to_string(),
-            ]
+            dump.analysis
+                .language_features
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            language_feature_names(&session)
         );
         assert_eq!(dump.analysis.classpath, None);
     }

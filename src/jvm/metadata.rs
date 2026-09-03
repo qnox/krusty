@@ -7,6 +7,8 @@
 //!   Function extension method_signature = 100 → JvmMethodSignature { name = 1, desc = 2 }.
 //! String ids index the `d2` table.
 
+mod type_annotations;
+
 use super::classfile::{
     ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
     ACC_PUBLIC, ACC_STATIC,
@@ -72,7 +74,7 @@ struct ParsedTypeNode<'a> {
     flexible_upper_bound: Option<&'a [u8]>,
     flexible_upper_bound_id: Option<u64>,
     arguments: Vec<ParsedTypeArgument<'a>>,
-    annotation_ids: Vec<u64>,
+    annotations: Vec<type_annotations::TypeAnnotation>,
 }
 
 #[derive(Clone, Copy)]
@@ -111,7 +113,7 @@ fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
         flexible_upper_bound: None,
         flexible_upper_bound_id: None,
         arguments: Vec::new(),
-        annotation_ids: Vec::new(),
+        annotations: Vec::new(),
     };
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -171,21 +173,12 @@ fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
                 }
             }
             (100, 2) => {
-                // `Type.annotation` is an extension carrying an `Annotation` message whose field 1 is
-                // the annotation class id. Preserve every occurrence; semantic interpretation (for
-                // example `ExtensionFunctionType`) requires the caller's name resolver.
+                // `Type.annotation` is an extension carrying an `Annotation` message. Preserve its
+                // semantic arguments as well as its class id: context-function arity is carried by
+                // `ContextFunctionTypeParams.count` rather than by the function classifier.
                 let n = pb.varint()? as usize;
-                let mut annotation_pb = Pb {
-                    b: pb.bytes(n)?,
-                    i: 0,
-                };
-                while !annotation_pb.at_end() {
-                    let tag = annotation_pb.varint()?;
-                    match (tag >> 3, tag & 7) {
-                        (1, 0) => node.annotation_ids.push(annotation_pb.varint()?),
-                        (_, wire) => annotation_pb.skip(wire)?,
-                    }
-                }
+                node.annotations
+                    .push(type_annotations::parse(pb.bytes(n)?)?);
             }
             (_, wire) => pb.skip(wire)?,
         }
@@ -197,21 +190,22 @@ fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
 /// [`Ty::Fun`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to its dedicated [`Ty`] variant (so
 /// it matches a JVM-descriptor primitive downstream), everything else stays a [`Ty::Obj`].
 ///
-/// `receiver_fun` is the type's `@kotlin.ExtensionFunctionType` mark: a receiver function type carries
-/// its receiver as the FIRST type argument, which [`Ty::Fun`] models as the first parameter binding
-/// `this` (`has_receiver`).
-pub(super) fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>, receiver_fun: bool) -> Ty {
-    let function_classifier = internal
-        .strip_prefix("kotlin/Function")
-        .is_some_and(|segment| {
-            !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit())
-        });
+/// `receiver_fun` and `context_count` come from the type's resolved Kotlin type annotations. A
+/// receiver function type carries its receiver after its context parameters; [`Ty::Fun`] keeps all
+/// implicit parameters at the front and records their semantic shape explicitly.
+pub(super) fn gsig_from_kotlin_class(
+    internal: &str,
+    mut args: Vec<Ty>,
+    receiver_fun: bool,
+    context_count: usize,
+) -> Ty {
+    let function_classifier = is_kotlin_function_classifier(internal);
     if function_classifier && !args.is_empty() {
         // The metadata arguments are the declaration shape: `[P1, …, R]`. The numeric classifier
         // suffix identifies the built-in family but is never parsed to recover or validate arity.
         let ret = args.pop().expect("checked non-empty function arguments");
         let has_receiver = receiver_fun && !args.is_empty();
-        return Ty::fun_with_shape(args, ret, 0, has_receiver, false);
+        return Ty::fun_with_shape(args, ret, context_count, has_receiver, false);
     }
     // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly
     // so a primitive element stays the LOGICAL `Array<Int>` (`Obj("kotlin/Array", [Int])`), NOT the
@@ -234,6 +228,14 @@ pub(super) fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>, receiver
         Some(t) => t,
         None => Ty::obj_args(internal, &args),
     }
+}
+
+fn is_kotlin_function_classifier(internal: &str) -> bool {
+    internal
+        .strip_prefix("kotlin/Function")
+        .is_some_and(|segment| {
+            !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// Convert the metadata/JVM carrier for a suspend function type to its Kotlin source shape.
@@ -307,6 +309,9 @@ struct ParsedTypeParam {
     /// uses instead of the inline `upper_bound`. Empty for the `@Metadata` carrier, which inlines.
     upper_bound_ids: Vec<u64>,
     variance: crate::types::TypeVariance,
+    /// Raw core/builtins `Annotation` messages declared on this type parameter. The two metadata
+    /// protocols use different field numbers but the annotation payload is identical.
+    annotation_bodies: Vec<Vec<u8>>,
 }
 
 fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
@@ -317,6 +322,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
     let mut upper_bound_ids = Vec::new();
     let mut reified = false;
     let mut variance = crate::types::TypeVariance::Invariant;
+    let mut annotation_bodies = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -339,6 +345,12 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
                 let n = pb.varint()? as usize;
                 upper_bound_ids.extend(packed_varints(pb.bytes(n)?));
             }
+            // `ProtoBuf.TypeParameter.annotation` and
+            // `BuiltInsProtoBuf.typeParameterAnnotation`, respectively.
+            (100, 2) | (150, 2) => {
+                let n = pb.varint()? as usize;
+                annotation_bodies.push(pb.bytes(n)?.to_vec());
+            }
             (_, w) => pb.skip(w)?,
         }
     }
@@ -349,6 +361,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
         upper_bound_bodies,
         upper_bound_ids,
         variance,
+        annotation_bodies,
     })
 }
 
@@ -726,6 +739,10 @@ struct ParsedValueParam {
     /// `ValueParameter.vararg_element_type_id` (field 6), the table-backed form of
     /// [`Self::vararg_elem_body`].
     vararg_elem_id: Option<u64>,
+    /// Compiler-known strict-equality refinement (`ValueParameter.equality_bound_type`, fields
+    /// 9/10). This is declaration semantics, not an ordinary retained annotation.
+    equality_bound_body: Option<Vec<u8>>,
+    equality_bound_id: Option<u64>,
 }
 
 /// A decoded `Function` message: whether it's `inline`, whether it's `suspend`, its name string id, its
@@ -738,6 +755,7 @@ struct ParsedFunction {
     /// realization method's classfile access: under `-jvm-default=disable`, a concrete interface
     /// declaration is represented by an abstract interface method plus a static holder body.
     is_abstract: bool,
+    is_final: bool,
     is_operator: bool,
     is_infix: bool,
     visibility: crate::types::Visibility,
@@ -788,6 +806,8 @@ fn parse_value_parameter(body: &[u8]) -> Option<ParsedValueParam> {
     let mut type_id = None;
     let mut vararg_elem_body = None;
     let mut vararg_elem_id = None;
+    let mut equality_bound_body = None;
+    let mut equality_bound_id = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -803,6 +823,11 @@ fn parse_value_parameter(body: &[u8]) -> Option<ParsedValueParam> {
             }
             (5, 0) => type_id = pb.varint(),
             (6, 0) => vararg_elem_id = pb.varint(),
+            (9, 2) => {
+                let len = pb.varint()? as usize;
+                equality_bound_body = Some(pb.bytes(len)?.to_vec());
+            }
+            (10, 0) => equality_bound_id = pb.varint(),
             (_, wire) => pb.skip(wire)?,
         }
     }
@@ -814,6 +839,8 @@ fn parse_value_parameter(body: &[u8]) -> Option<ParsedValueParam> {
         type_id,
         vararg_elem_body,
         vararg_elem_id,
+        equality_bound_body,
+        equality_bound_id,
     })
 }
 
@@ -945,6 +972,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         is_inline: flags & IS_INLINE_BIT != 0,
         is_suspend: flags & IS_SUSPEND_BIT != 0,
         is_abstract: (flags >> 4) & 0x3 == 2,
+        is_final: (flags >> 4) & 0x3 == 0,
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
@@ -1667,6 +1695,7 @@ fn build_property_generic_sig(
     inherited: &[(u64, String)],
     inherited_bounds: &[Vec<Ty>],
     type_params: &[ParsedTypeParam],
+    context_params: &[ParsedValueParam],
     return_body: Option<&[u8]>,
     return_nullable: bool,
     receiver_body: Option<&[u8]>,
@@ -1709,20 +1738,36 @@ fn build_property_generic_sig(
         return_nullable,
         0,
     )?;
+    let params = context_params
+        .iter()
+        .map(|parameter| {
+            let (body, table_nullable) = value_parameter_type(parameter, type_table)?;
+            decode_metadata_type(
+                body,
+                type_table,
+                records,
+                d2,
+                &context.names,
+                &context.erasure_bounds,
+                table_nullable,
+                0,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
     Some(GenericSig {
         formals: context.formals[inherited.len()..].to_vec(),
         formal_bounds: context.formal_bounds[inherited.len()..].to_vec(),
         receiver,
-        params: Vec::new(),
+        params,
         ret,
         return_policy: Default::default(),
     })
 }
 
 /// Bit-packed boolean flags for a [`MetaValueParam`], collapsing its `has_default`/`materialized`/
-/// `vararg`/`recv_fun`/`nullable`/`suspend_fun`/`has_type_facts` bytes into one. Read through
+/// `vararg`/`recv_fun`/`nullable`/`suspend_fun`/`has_type_facts`/`no_infer` bytes into one. Read through
 /// the `MetaValueParam` accessors of the same names; built with the `with_*` chain. Headroom for
-/// one more flag before the byte fills.
+/// their accessors below.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MvpFlags(u8);
 
@@ -1734,6 +1779,7 @@ impl MvpFlags {
     const NULLABLE: u8 = 1 << 4;
     const SUSPEND_FUN: u8 = 1 << 5;
     const HAS_TYPE_FACTS: u8 = 1 << 6;
+    const NO_INFER: u8 = 1 << 7;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1776,6 +1822,11 @@ impl MvpFlags {
     #[inline]
     pub const fn with_has_type_facts(self, on: bool) -> Self {
         self.with(Self::HAS_TYPE_FACTS, on)
+    }
+
+    #[inline]
+    pub const fn with_no_infer(self, on: bool) -> Self {
+        self.with(Self::NO_INFER, on)
     }
 }
 
@@ -1828,6 +1879,10 @@ impl MetaValueParam {
     pub fn has_type_facts(&self) -> bool {
         self.flags.has(MvpFlags::HAS_TYPE_FACTS)
     }
+    #[inline]
+    pub fn no_infer(&self) -> bool {
+        self.flags.has(MvpFlags::NO_INFER)
+    }
 }
 
 /// Bit-packed boolean flags for a [`MetaFn`].
@@ -1844,6 +1899,7 @@ impl MfnFlags {
     const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 6;
     const DEPRECATED_HIDDEN: u16 = 1 << 7;
     const IS_ABSTRACT: u16 = 1 << 8;
+    const IS_FINAL: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1895,6 +1951,10 @@ impl MfnFlags {
     pub const fn with_is_abstract(self, on: bool) -> Self {
         self.with(Self::IS_ABSTRACT, on)
     }
+    #[inline]
+    pub const fn with_is_final(self, on: bool) -> Self {
+        self.with(Self::IS_FINAL, on)
+    }
 }
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
@@ -1938,6 +1998,10 @@ pub struct MetaFn {
     /// contract IR — the effects the checker applies at call sites (`returns(…) implies …`,
     /// `callsInPlace`). `None` when the function declares no contract.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// Compiler-known strict-equality parameter refinement decoded from fields 9/10.
+    pub equality_bound: Option<Ty>,
+    /// Function formals carrying Kotlin's internal `@OnlyInputTypes` inference policy.
+    pub only_input_type_formals: Vec<String>,
     /// Annotation class identities declared on this function (from \`Function.annotation\`).
     /// The decoder keeps these as interned \`TypeName\`s so consumers — overload resolution,
     /// deprecation handling, etc. — can check for the annotations they care about without the
@@ -1961,6 +2025,10 @@ impl MetaFn {
     #[inline]
     pub fn is_abstract(&self) -> bool {
         self.flags.has(MfnFlags::IS_ABSTRACT)
+    }
+    #[inline]
+    pub fn is_final(&self) -> bool {
+        self.flags.has(MfnFlags::IS_FINAL)
     }
     #[inline]
     pub fn is_extension(&self) -> bool {
@@ -2011,6 +2079,11 @@ impl MetaFn {
                 .map(|index| index + self.context_count()),
         );
         sig.platform_nullable_params = parameters.iter().map(|p| p.nullable()).collect();
+        sig.only_input_type_formals = self.only_input_type_formals.clone();
+        sig.no_infer_params = parameters
+            .iter()
+            .map(|parameter| parameter.no_infer())
+            .collect();
         sig
     }
 
@@ -2045,10 +2118,13 @@ pub struct MetaJvmMethodSig {
 }
 
 /// One constructor declaration from Kotlin class metadata. `params` is the complete source shape;
-/// `jvm_desc` is only the exact key of its platform realization.
+/// `jvm_name` + `jvm_desc` are only the exact key of its platform realization. Ordinary classes use
+/// `<init>` while value classes use the static `constructor-impl`; consumers must not recover that
+/// representation choice from the classifier kind.
 #[derive(Clone, Debug)]
 pub struct MetaConstructor {
     pub params: ParamList,
+    pub jvm_name: &'static str,
     pub jvm_desc: Option<&'static str>,
     /// `@Deprecated(level = HIDDEN)`: binary-compatibility-only, never a resolution candidate.
     /// Stamped from the realization method's `kotlin.Deprecated` annotation after decode.
@@ -2070,6 +2146,8 @@ pub struct MetaProp {
     pub ret_nullable: bool,
     /// Metadata-primary generic relation between an extension receiver and its return.
     pub generic_sig: Option<GenericSig>,
+    /// Named context parameters declared by this property.
+    pub context_params: Vec<MetaValueParam>,
     /// The JVM getter method name (`getLength`, or a `@JvmName`/value-class-mangled spelling) + its
     /// descriptor, from the `JvmPropertySignature`. `None` if the metadata omits an explicit getter.
     pub getter: Option<MetaJvmMethodSig>,
@@ -2120,7 +2198,8 @@ pub struct KotlinMeta {
     pub class_properties: std::sync::Arc<[MetaProp]>,
     /// `Package.property` (field 4).
     pub package_properties: std::sync::Arc<[MetaProp]>,
-    /// `Package.typeAlias` (field 5): `(full alias internal name, expanded class internal name)`.
+    /// `Package.typeAlias` (field 5) or `Class.typeAlias` (field 11), normalized to the alias's
+    /// fully qualified source identity.
     pub type_aliases: Vec<MetaTypeAlias>,
     /// `Class.constructor` (field 8): named-parameter lists in declaration order.
     pub constructors: std::sync::Arc<[MetaConstructor]>,
@@ -2290,7 +2369,8 @@ pub fn decode_metadata(
     .into();
     let mut constructors = ctor_params(&ctx);
     for constructor in &mut constructors {
-        constructor.deprecated_hidden = realization_hidden("<init>", constructor.jvm_desc);
+        constructor.deprecated_hidden =
+            realization_hidden(constructor.jvm_name, constructor.jvm_desc);
     }
     let class_properties =
         decode_properties(&ctx, 10, &class_tparams, &class_type_param_bounds).into();
@@ -2310,7 +2390,7 @@ pub fn decode_metadata(
         package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[])).into(),
         class_properties,
         package_properties: decode_properties(&ctx, 4, &[], &[]).into(),
-        type_aliases: type_aliases(&ctx, package.as_deref(), this_class),
+        type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1)),
         constructors: constructors.into(),
         companion_name: companion_name(&ctx),
         sealed_subclasses: sealed_subclasses(&ctx),
@@ -2456,7 +2536,7 @@ fn decode_metadata_type(
                 .map(|ty| project_ty(projection, ty))
             }
             ParsedTypeArgument::Star => {
-                Some(Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any"))))
+                Some(Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))))
             }
         })
         .collect::<Option<Vec<_>>>()?;
@@ -2464,14 +2544,37 @@ fn decode_metadata_type(
     let flexible_upper_bound_id = node.flexible_upper_bound_id;
     let definitely_non_null = node.definitely_non_null;
     let nullable = node.nullable || table_nullable;
-    let receiver_fun = node.annotation_ids.iter().any(|&id| {
-        resolve_class_name(records, d2, id as usize)
+    let receiver_fun = node.annotations.iter().any(|annotation| {
+        annotation
+            .class_id()
+            .and_then(|id| resolve_class_name(records, d2, id as usize))
             .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
     });
+    let context_annotation = node.annotations.iter().find(|annotation| {
+        annotation
+            .class_id()
+            .and_then(|id| resolve_class_name(records, d2, id as usize))
+            .is_some_and(|name| name == "kotlin/ContextFunctionTypeParams")
+    });
+    let context_count = if let Some(annotation) = context_annotation {
+        let count = annotation.int_arguments().find_map(|(name_id, value)| {
+            (resolve_string(records, d2, name_id as usize).as_deref() == Some("count"))
+                .then_some(value)
+        })?;
+        usize::try_from(count).ok()?
+    } else {
+        0
+    };
     let suspend_fun = parse_type_facts(body).suspend_fun;
     let ty = if let Some(id) = node.class_id.or(node.type_alias_id) {
         let internal = resolve_class_name(records, d2, id as usize)?;
-        let decoded = gsig_from_kotlin_class(&internal, args, receiver_fun);
+        if is_kotlin_function_classifier(&internal) {
+            let parameter_count = args.len().checked_sub(1)?;
+            if context_count + usize::from(receiver_fun) > parameter_count {
+                return None;
+            }
+        }
+        let decoded = gsig_from_kotlin_class(&internal, args, receiver_fun, context_count);
         if suspend_fun {
             source_suspend_function_type(decoded)
         } else {
@@ -2494,7 +2597,7 @@ fn decode_metadata_type(
         )
     };
     let ty = if definitely_non_null {
-        ty.non_null()
+        ty.definitely_non_null()
     } else if nullable {
         Ty::nullable(ty)
     } else {
@@ -2670,6 +2773,17 @@ fn decode_functions(
                                 facts
                             })
                             .unwrap_or_default();
+                        let no_infer = resolved_type.is_some_and(|(body, _)| {
+                            parse_type_node(body).is_some_and(|node| {
+                                node.annotations.into_iter().any(|annotation| {
+                                    annotation.class_id().is_some_and(|id| {
+                                        resolve_class_name(records, d2, id as usize).is_some_and(
+                                            |annotation| annotation == "kotlin/internal/NoInfer",
+                                        )
+                                    })
+                                })
+                            })
+                        });
                         MetaValueParam {
                             ty: decoded_type.and_then(declared_classifier),
                             // Param names are plain string-table entries (like the JVM name/desc), not class names.
@@ -2684,12 +2798,19 @@ fn decode_functions(
                                 .with_recv_fun(recv_fun)
                                 .with_nullable(type_facts.nullable)
                                 .with_suspend_fun(type_facts.suspend_fun)
-                                .with_has_type_facts(resolved_type.is_some()),
+                                .with_has_type_facts(resolved_type.is_some())
+                                .with_no_infer(no_infer),
                             recv_fun_receiver,
                         }
                     };
                     let value_params: Vec<MetaValueParam> =
                         pf.value_params.iter().map(decode_parameter).collect();
+                    let equality_bound = pf.value_params.iter().find_map(|parameter| {
+                        decode_type(
+                            parameter.equality_bound_body.as_deref(),
+                            parameter.equality_bound_id,
+                        )
+                    });
                     let context_params = if !pf.context_params.is_empty() {
                         Some(pf.context_params.iter().map(decode_parameter).collect())
                     } else {
@@ -2799,8 +2920,7 @@ fn decode_functions(
                             kotlin_name,
                             pf.value_params.len(),
                             pf.context_params.len(),
-                            pf.context_receiver_bodies.len()
-                                + pf.context_receiver_type_ids.len(),
+                            pf.context_receiver_bodies.len() + pf.context_receiver_type_ids.len(),
                         );
                     }
                     // `JvmMethodSignature.desc` is optional when the physical descriptor is the
@@ -2832,6 +2952,7 @@ fn decode_functions(
                             .with_is_inline(pf.is_inline)
                             .with_is_suspend(pf.is_suspend)
                             .with_is_abstract(pf.is_abstract)
+                            .with_is_final(pf.is_final)
                             .with_is_extension(pf.has_receiver)
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
                             .with_is_operator(pf.is_operator)
@@ -2844,6 +2965,21 @@ fn decode_functions(
                         value_params,
                         generic_sig,
                         contract,
+                        equality_bound,
+                        only_input_type_formals: pf
+                            .type_params
+                            .iter()
+                            .filter(|parameter| {
+                                annotation_names(&parameter.annotation_bodies, records, d2)
+                                    .iter()
+                                    .any(|annotation| {
+                                        annotation.matches("kotlin/internal/OnlyInputTypes")
+                                    })
+                            })
+                            .filter_map(|parameter| {
+                                resolve_string(records, d2, parameter.name_id as usize)
+                            })
+                            .collect(),
                         context_params,
                         annotations: annotation_names(&pf.annotation_bodies, records, d2),
                     });
@@ -2870,7 +3006,7 @@ pub fn package_functions(ci: &ClassInfo) -> &[MetaFn] {
 }
 
 /// Public type aliases declared in a file facade's `Package` `@Metadata`.
-pub fn package_type_aliases(ci: &ClassInfo) -> &[MetaTypeAlias] {
+pub fn metadata_type_aliases(ci: &ClassInfo) -> &[MetaTypeAlias] {
     &ci.meta.type_aliases
 }
 
@@ -2922,11 +3058,35 @@ pub fn class_inline(ci: &ClassInfo) -> Option<&InlineClass> {
 /// underlying type, field 4). This is robust where the older `d2` `$annotations` heuristic was not — a
 /// file facade also carries annotated top-level properties whose `$annotations` markers that heuristic
 /// would misread as aliases.
-fn type_aliases(ctx: &MetaCtx, package: Option<&str>, this_class: &str) -> Vec<MetaTypeAlias> {
+fn decode_type_aliases(
+    ctx: &MetaCtx,
+    package: Option<&str>,
+    this_class: &str,
+    classifier_owner: bool,
+) -> Vec<MetaTypeAlias> {
     // The DECLARING package: `@Metadata`'s `pn` when `@JvmPackageName` moved the facade out of it
     // (`package kotlin.test` emitted to `kotlin/test/junit5/annotations/AnnotationsKt`), the class's
     // own JVM package otherwise. Never inferred from where the class file happens to sit.
     let package = package.unwrap_or_else(|| this_class.rsplit_once('/').map_or("", |(p, _)| p));
+    let owner = if classifier_owner {
+        let classifier = crate::types::type_name(this_class);
+        let mut segments = Vec::new();
+        let mut current = classifier;
+        while let Some(parent) = current.nested_owner() {
+            segments.push(current.nested_segment_ref());
+            current = parent;
+        }
+        segments.push(current.segment_ref());
+        segments.reverse();
+        let mut owner = classifier.namespace();
+        for segment in segments {
+            owner = crate::types::type_name_child(owner, segment);
+        }
+        owner
+    } else {
+        crate::types::type_name(package)
+    };
+    let field = if classifier_owner { 11 } else { 5 };
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
@@ -2934,8 +3094,7 @@ fn type_aliases(ctx: &MetaCtx, package: Option<&str>, this_class: &str) -> Vec<M
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
-            // Package.typeAlias = 5 (length-delimited message).
-            (5, 2) => {
+            (candidate, 2) if candidate == field => {
                 let Some(len) = pb.varint() else { break };
                 let Some(body) = pb.bytes(len as usize) else {
                     break;
@@ -2945,11 +3104,7 @@ fn type_aliases(ctx: &MetaCtx, package: Option<&str>, this_class: &str) -> Vec<M
                     // simple name — so `kotlin/collections/ArrayList` is distinct from any other
                     // package's `ArrayList`. `resolve_type` looks it up by that full name, and an
                     // `import kotlin.test.Test` spells the DECLARED package, never the relocated one.
-                    let full = if package.is_empty() {
-                        alias.name.clone()
-                    } else {
-                        format!("{package}/{}", alias.name)
-                    };
+                    let full = crate::types::type_name_child(owner, &alias.name).render();
                     out.push(MetaTypeAlias {
                         name: full,
                         ..alias
@@ -3051,6 +3206,8 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<MetaT
     // abbreviation (`typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both expanded arguments).
     let expansion_spelling = expanded_body
         .map(|type_body| crate::spelling::Spelled {
+            definitely_non_null: parse_type_node(type_body)
+                .is_some_and(|node| node.definitely_non_null),
             alias: None,
             alias_args: Vec::new(),
             args: parse_type_argument_spellings(type_body, records, d2),
@@ -3120,6 +3277,8 @@ fn parse_argument_spelling(
                     break;
                 };
                 return crate::spelling::Spelled {
+                    definitely_non_null: parse_type_node(inner)
+                        .is_some_and(|node| node.definitely_non_null),
                     alias: parse_type_alias_name(inner, records, d2),
                     alias_args: Vec::new(),
                     args: parse_type_argument_spellings(inner, records, d2),
@@ -3228,6 +3387,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                 let mut types = Vec::new();
                 let mut recv_fun = Vec::new();
                 let mut vararg = None;
+                let mut jvm_name = None;
                 let mut jvm_desc = None;
                 while !cp.at_end() {
                     let Some(ct) = cp.varint() else { break };
@@ -3267,9 +3427,14 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                             let Some(body) = cp.bytes(len as usize) else {
                                 break;
                             };
-                            jvm_desc = parse_jvm_signature(body)
-                                .and_then(|signature| signature.desc_id)
-                                .and_then(|id| resolve_string(records, d2, id as usize));
+                            if let Some(signature) = parse_jvm_signature(body) {
+                                jvm_name = signature
+                                    .name_id
+                                    .and_then(|id| resolve_string(records, d2, id as usize));
+                                jvm_desc = signature
+                                    .desc_id
+                                    .and_then(|id| resolve_string(records, d2, id as usize));
+                            }
                         }
                         (_, w) => {
                             if cp.skip(w).is_none() {
@@ -3296,6 +3461,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                 });
                 out.push(MetaConstructor {
                     params,
+                    jvm_name: intern(jvm_name.as_deref().unwrap_or("<init>")),
                     jvm_desc: jvm_desc.map(|descriptor| intern(&descriptor)),
                     deprecated_hidden: false,
                 });
@@ -3432,6 +3598,10 @@ fn decode_properties(
     class_tparams: &[(u64, String)],
     class_tparam_bounds: &[Vec<Ty>],
 ) -> Vec<MetaProp> {
+    let declared_classifier = |ty: Ty| match ty.non_null() {
+        Ty::Obj(internal, _) => Some(internal),
+        _ => None,
+    };
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
@@ -3490,6 +3660,7 @@ fn decode_properties(
         let mut receiver_body = None;
         let mut receiver_nullable = false;
         let mut type_params = Vec::new();
+        let mut context_params = Vec::new();
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -3512,6 +3683,15 @@ fn decode_properties(
                     };
                     if let Some(parameter) = parse_type_param(body) {
                         type_params.push(parameter);
+                    }
+                }
+                (17, 2) => {
+                    let Some(n) = p.varint() else { break };
+                    let Some(body) = p.bytes(n as usize) else {
+                        break;
+                    };
+                    if let Some(parameter) = parse_value_parameter(body) {
+                        context_params.push(parameter);
                     }
                 }
                 (9, 0) => {
@@ -3584,6 +3764,7 @@ fn decode_properties(
             class_tparams,
             class_tparam_bounds,
             &type_params,
+            &context_params,
             ret_body,
             ret_nullable,
             receiver_body,
@@ -3601,12 +3782,29 @@ fn decode_properties(
                     .and_then(|ty| ty.non_null().obj_internal());
             }
         }
+        let decoded_context_params = context_params
+            .iter()
+            .zip(
+                generic_sig
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|signature| signature.params.iter().copied()),
+            )
+            .map(|(parameter, ty)| MetaValueParam {
+                ty: declared_classifier(ty),
+                name: resolve_string(records, d2, parameter.name_id as usize).unwrap_or_default(),
+                flags: MvpFlags::default()
+                    .with_nullable(ty.is_nullable())
+                    .with_has_type_facts(true),
+                recv_fun_receiver: None,
+            })
+            .collect::<Vec<_>>();
         // `JvmPropertySignature` and each nested `JvmMethodSignature` field are optional when the
         // physical accessor follows Kotlin's default mapping. Complete that metadata declaration
         // here, while its receiver/return types and flags are still together. Downstream symbol
         // sources may verify the resulting handle against bytecode, but must not guess it by name.
         let accessor_types = generic_sig.as_ref().map(|signature| {
-            let mut getter_params = Vec::new();
+            let mut getter_params = signature.params.clone();
             if let Some(receiver) = signature.receiver {
                 getter_params.push(receiver);
             }
@@ -3653,6 +3851,7 @@ fn decode_properties(
             ret_class: ret,
             ret_nullable,
             generic_sig,
+            context_params: decoded_context_params,
             getter,
             setter,
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
@@ -4036,6 +4235,9 @@ pub struct BuiltinMember {
     pub is_operator: bool,
     /// Kotlin's `infix` modifier from the function flags. Properties never set it.
     pub is_infix: bool,
+    /// Semantic declaration modality from the builtins protobuf. A mapped JVM method with the same
+    /// descriptor is only the physical realization and cannot replace this Kotlin fact.
+    pub is_abstract: bool,
     /// The member's OWN type parameters (`<R>` of `fold`), with their declared upper bounds — kept
     /// apart from the class's so a consumer can build a generic signature whose formals shadow
     /// correctly.
@@ -4078,6 +4280,9 @@ pub struct BuiltinPackage {
 /// its value-parameter types and source visibility are the complete semantic signature.
 pub struct BuiltinConstructor {
     pub params: Vec<BuiltinTy>,
+    pub param_names: Vec<String>,
+    pub param_defaults: Vec<bool>,
+    pub vararg: Option<usize>,
     pub visibility: crate::types::Visibility,
 }
 
@@ -4088,6 +4293,7 @@ pub struct BuiltinTypeParam {
     pub name: String,
     pub bounds: Vec<BuiltinTy>,
     pub variance: crate::types::TypeVariance,
+    pub only_input: bool,
 }
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared
@@ -4111,6 +4317,9 @@ pub struct BuiltinClass {
     /// Source visibility from the metadata flag word. This is deliberately separate from `access`:
     /// Kotlin `internal` declarations are public in classfiles after name mangling.
     pub visibility: Visibility,
+    /// Kotlin metadata's `IS_EXPECT_CLASS` declaration flag. KLIB consumers use this semantic bit
+    /// to distinguish common declarations from platform-only classifiers in the same archive.
+    pub is_expect: bool,
     pub is_nested: bool,
     /// The JVM class access flags the same `Class.flags` word describes (`public static interface
     /// abstract` for `kotlin/collections/Map.Entry`) — what an `InnerClasses` entry naming this builtin
@@ -4253,6 +4462,27 @@ impl BuiltinTables<'_> {
             .map(|tp| BuiltinTypeParam {
                 name: self.strings[tp.name_id as usize].clone(),
                 variance: tp.variance,
+                only_input: tp.annotation_bodies.iter().any(|body| {
+                    let mut annotation = Pb { b: body, i: 0 };
+                    let mut class_id = None;
+                    while !annotation.at_end() {
+                        let Some(tag) = annotation.varint() else {
+                            break;
+                        };
+                        match (tag >> 3, tag & 7) {
+                            (1, 0) => class_id = annotation.varint(),
+                            (_, wire) => {
+                                if annotation.skip(wire).is_none() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    class_id.is_some_and(|id| {
+                        resolve_qname(self.qnames, self.strings, id as i64)
+                            == "kotlin/internal/OnlyInputTypes"
+                    })
+                }),
                 bounds: tp
                     .upper_bound_ids
                     .iter()
@@ -4260,7 +4490,7 @@ impl BuiltinTables<'_> {
                     .chain(
                         tp.upper_bound_bodies
                             .iter()
-                            .filter_map(|b| self.ty(b, tparams, 0)),
+                            .filter_map(|body| self.ty(body, tparams, 0)),
                     )
                     .collect(),
             })
@@ -4504,10 +4734,17 @@ fn parse_builtin_package_functions(
 /// .class_name` → `QualifiedNameTable`). The single source for both the collection hierarchy and a
 /// builtin type's API — no curated/hardcoded tables.
 pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
-    let mut out = BuiltinPackage::default();
     let Some(pf) = strip_builtins_header(data) else {
-        return out;
+        return BuiltinPackage::default();
     };
+    parse_package_fragment(pf)
+}
+
+/// Parse one raw Kotlin metadata `PackageFragment`, as stored in a KLIB `.knm` entry. Builtins use
+/// the same protobuf after a small version header; keeping the carrier split at this boundary lets
+/// both providers share the declaration decoder without fabricating a builtins header.
+pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
+    let mut out = BuiltinPackage::default();
     let mut strings: Vec<String> = Vec::new();
     let mut qnames: Vec<QName> = Vec::new();
     let mut package = None;
@@ -4714,6 +4951,9 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                 // Constructor.flags protobuf default is PUBLIC (`6`).
                 let mut flags = 6u64;
                 let mut params = Vec::new();
+                let mut param_names = Vec::new();
+                let mut param_defaults = Vec::new();
+                let mut vararg = None;
                 while !message.at_end() {
                     let Some(tag) = message.varint() else {
                         break;
@@ -4727,6 +4967,18 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                             let Some(value) = message.bytes(len as usize) else {
                                 break;
                             };
+                            let parsed = parse_value_parameter(value)?;
+                            if parsed.vararg_elem_body.is_some() || parsed.vararg_elem_id.is_some()
+                            {
+                                vararg = Some(params.len());
+                            }
+                            param_names.push(
+                                strings
+                                    .get(parsed.name_id as usize)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("p{}", params.len())),
+                            );
+                            param_defaults.push(parsed.has_default);
                             params.push(builtin_value_parameter_type(
                                 value,
                                 &tables,
@@ -4742,6 +4994,9 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                 }
                 Some(BuiltinConstructor {
                     params,
+                    param_names,
+                    param_defaults,
+                    vararg,
                     visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
                 })
             })
@@ -4809,6 +5064,7 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                             is_property: false,
                             is_operator: flags & IS_OPERATOR_BIT != 0,
                             is_infix: flags & IS_INFIX_BIT != 0,
+                            is_abstract: (flags >> 4) & 0x3 == 2,
                             formals,
                             ret_nullable,
                         });
@@ -4826,9 +5082,12 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
             let mut name_id = None;
             let mut ret_body = None;
             let mut ret_id = None;
+            let mut legacy_flags = None;
+            let mut modern_flags = None;
             while !p.at_end() {
                 let Some(tag) = p.varint() else { break };
                 match (tag >> 3, tag & 7) {
+                    (1, 0) => legacy_flags = p.varint(),
                     (2, 0) => name_id = p.varint(),
                     (3, 2) => {
                         let Some(len) = p.varint() else { break };
@@ -4837,6 +5096,7 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                     // `Property.return_type_id` is field 9 (field 7 is the receiver_type_id — distinct
                     // from `Function`, whose return_type_id is field 7). `val length: Int` → field 9 → Int.
                     (9, 0) => ret_id = p.varint(),
+                    (11, 0) => modern_flags = p.varint(),
                     (_, w) => {
                         if p.skip(w).is_none() {
                             break;
@@ -4850,6 +5110,9 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                     builtin_type_ref(ret_body, ret_id, &tables, &prop_tparams),
                 ) {
                     let ret_nullable = ret.nullable();
+                    let flags = modern_flags
+                        .or(legacy_flags)
+                        .unwrap_or(crate::metadata::property_flags::DEFAULT);
                     members.push(BuiltinMember {
                         name,
                         params: vec![],
@@ -4857,6 +5120,8 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                         is_property: true,
                         is_operator: false,
                         is_infix: false,
+                        is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
+                            == crate::metadata::property_flags::MODALITY_ABSTRACT,
                         formals,
                         ret_nullable,
                     });
@@ -4879,6 +5144,7 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
                 nullable_member_returns,
                 kind: builtin_class_kind(flags),
                 visibility: builtin_class_visibility(flags),
+                is_expect: flags & (1 << 12) != 0,
                 is_nested,
                 access: builtin_class_access(flags),
             },
@@ -5129,12 +5395,13 @@ mod builtin_class_access_tests {
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_metadata_type, decode_properties, parse_function, parse_type_alias,
-        parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
-        MetaCtx, ParsedValueParam,
+        decode_metadata_type, decode_properties, parse_function, parse_package_fragment,
+        parse_type_alias, parse_type_facts, primary_erasure_bounds, read_kotlin_module,
+        value_parameter_type, MetaCtx, ParsedValueParam,
     };
+    use crate::libraries::TypeKind;
     use crate::metadata::module::build_kotlin_module;
-    use crate::types::Ty;
+    use crate::types::{Ty, Visibility};
     use std::collections::HashMap;
 
     /// The decoded contract of a stdlib function, or `None` when the stdlib jar is not
@@ -5243,6 +5510,8 @@ mod module_reader_tests {
             type_id,
             vararg_elem_body: None,
             vararg_elem_id: None,
+            equality_bound_body: None,
+            equality_bound_id: None,
         };
         let inline = parameter(Some(declared_type.clone()), None);
         assert_eq!(
@@ -5269,6 +5538,22 @@ mod module_reader_tests {
         assert_eq!(function.value_params.len(), 1);
         assert_eq!(function.value_params[0].type_id, Some(0));
         assert!(function.value_params[0].type_body.is_none());
+    }
+
+    #[test]
+    fn value_parameter_equality_bound_preserves_inline_and_table_fields() {
+        let inline = super::parse_value_parameter(&[0x10, 0x00, 0x4a, 0x02, 0x18, 0x01])
+            .expect("inline equality bound");
+        assert_eq!(
+            inline.equality_bound_body.as_deref(),
+            Some(&[0x18, 0x01][..])
+        );
+        assert_eq!(inline.equality_bound_id, None);
+
+        let table =
+            super::parse_value_parameter(&[0x10, 0x00, 0x50, 0x03]).expect("table equality bound");
+        assert_eq!(table.equality_bound_body, None);
+        assert_eq!(table.equality_bound_id, Some(3));
     }
 
     #[test]
@@ -5417,6 +5702,50 @@ mod module_reader_tests {
     }
 
     #[test]
+    fn context_function_parameter_count_comes_from_type_annotation_argument() {
+        // `context(String) () -> Unit` is physically `Function1<String, Unit>`. Its source shape is
+        // distinguished by `@ContextFunctionTypeParams(count = 1)`: Annotation.argument f2 contains
+        // the `count` name id and an INT value whose f2 payload is zigzag-encoded.
+        let body = [
+            0x30, 0x00, // Function1
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x01, // argument[0] = String context
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x02, // argument[1] = Unit return
+            0xa2, 0x06, 0x0c, // Type.annotation (field 100), 12-byte Annotation
+            0x08, 0x03, // Annotation.id = ContextFunctionTypeParams
+            0x12, 0x08, // Annotation.argument
+            0x08, 0x04, // Argument.name_id = "count"
+            0x12, 0x04, 0x08, 0x03, 0x10, 0x02, // Value(INT, zigzag(1))
+        ];
+        let d2 = [
+            "kotlin/Function1".to_string(),
+            "kotlin/String".to_string(),
+            "kotlin/Unit".to_string(),
+            "kotlin/ContextFunctionTypeParams".to_string(),
+            "count".to_string(),
+        ];
+
+        assert_eq!(
+            decode_metadata_type(
+                &body,
+                None,
+                &[],
+                &d2,
+                &HashMap::new(),
+                &HashMap::new(),
+                false,
+                0,
+            ),
+            Some(Ty::fun_with_shape(
+                vec![Ty::String],
+                Ty::Unit,
+                1,
+                false,
+                false,
+            ))
+        );
+    }
+
+    #[test]
     fn extension_receiver_signature_preserves_top_level_nullability() {
         let nullable_string = [0x30, 0x00, 0x18, 0x01];
         assert_eq!(
@@ -5474,7 +5803,7 @@ mod module_reader_tests {
             decode(3),
             Some(Ty::obj_args(
                 "sample/Box",
-                &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+                &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
             ))
         );
     }
@@ -5682,5 +6011,36 @@ mod module_reader_tests {
         assert_eq!(properties[4].visibility, crate::types::Visibility::Internal);
         assert!(properties[4].is_var);
         assert!(properties[4].is_const);
+    }
+
+    #[test]
+    fn raw_klib_package_fragment_exposes_js_static_annotation() {
+        let Some(library_dir) = crate::toolchain::kotlinc_lib_dir() else {
+            return;
+        };
+        let Ok(file) = std::fs::File::open(library_dir.join("kotlin-stdlib-wasm-js.klib")) else {
+            return;
+        };
+        let mut archive = zip::ZipArchive::new(file).expect("read Kotlin JS stdlib KLIB");
+        let mut entry = archive
+            .by_name("default/linkdata/package_kotlin.js/13_js.knm")
+            .expect("Kotlin common JS annotation header metadata fragment");
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).expect("read KLIB metadata fragment");
+
+        let package = parse_package_fragment(&bytes);
+        let annotation = package
+            .classes
+            .get("kotlin/js/JsStatic")
+            .expect("JsStatic declaration from metadata, not a JVM hardcode");
+        assert_eq!(annotation.kind, TypeKind::Annotation);
+        assert_eq!(annotation.visibility, Visibility::Public);
+        assert!(
+            annotation.is_expect,
+            "JsStatic must come from common expect metadata"
+        );
+        assert!(annotation.constructors.iter().any(|constructor| {
+            constructor.params.is_empty() && constructor.visibility == Visibility::Public
+        }));
     }
 }

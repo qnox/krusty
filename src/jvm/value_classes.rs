@@ -16,7 +16,7 @@
 //! NOTE: box/unbox insertion at representation boundaries (a value flowing to `Any`/generic, or back) is
 //! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
-use crate::ir::{Callee, ExprId, IrExpr, IrFile};
+use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::InlineKind;
@@ -68,7 +68,6 @@ fn is_value_class_internal(internal: TypeName, under: &Under) -> bool {
 /// underlying. Keyed on the getter's IDENTITY (owning class + method slot), not its name, so a
 /// coincidentally-named boxing override does not collide.
 type FieldGetters = HashMap<(u32, u32), Ty>;
-type SuperMemberNames = HashMap<TypeName, Option<HashMap<String, Option<Ty>>>>;
 
 /// Lower all `@JvmInline value class` usage in `ir` to the JVM's unboxed representation: erase the
 /// value-class type to its single field's type, rewrite construction/sole-property access, and insert
@@ -196,103 +195,40 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
     out
 }
 
-fn same_file_super_member_names(ir: &IrFile) -> SuperMemberNames {
-    ir.classes
-        .iter()
-        .filter(|c| !c.is_value)
-        .map(|c| {
-            let mut names: HashMap<String, Option<Ty>> = HashMap::new();
-            let mut work: Vec<TypeName> = c
-                .interfaces
-                .iter_ids()
-                .chain(c.supertypes.iter().filter_map(|t| t.obj_internal()))
-                .chain(c.has_non_top_superclass().then_some(c.superclass))
-                .collect();
-            let mut known = true;
-            let mut seen: HashSet<TypeName> = HashSet::new();
-            while let Some(s) = work.pop() {
-                if s.matches("java/lang/Object") || s.matches("kotlin/Any") || !seen.insert(s) {
-                    continue;
-                }
-                match ir.classes.iter().find(|o| o.fq_name == s) {
-                    Some(sup) => {
-                        for &m in &sup.methods {
-                            if let Some(f) = ir.functions.get(m as usize) {
-                                let getter_ret = (f.name.starts_with("get") && f.params.is_empty())
-                                    .then_some(f.ret);
-                                names.insert(f.name.clone(), getter_ret);
-                            }
-                        }
-                        work.extend(sup.interfaces.iter_ids());
-                        work.extend(sup.supertypes.iter().filter_map(|t| t.obj_internal()));
-                        if sup.has_non_top_superclass() {
-                            work.push(sup.superclass);
-                        }
-                    }
-                    None => {
-                        known = false;
-                        break;
-                    }
-                }
-            }
-            crate::trace_compiler!(
-                "value_classes",
-                "super_member_names {} known={known} names={:?} ifaces={:?} super={:?}",
-                c.fq_name.render(),
-                names,
-                c.interfaces,
-                c.superclass
-            );
-            (c.fq_name, known.then_some(names))
-        })
-        .collect()
-}
-
-pub(crate) fn apply_override_final_drop(
-    ir: &mut IrFile,
-    resolver: &crate::symbol_resolver::SymbolResolver,
-) {
-    let super_member_names = same_file_super_member_names(ir);
-    let mut override_opens: Vec<u32> = Vec::new();
-    for c in &ir.classes {
-        if c.is_interface || c.fq_name.render().ends_with("$$serializer") {
-            continue;
-        }
-        let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
+/// Kotlin override declarations remain overridable unless explicitly final. Pass 1 already
+/// published their exact declaration edges, so this representation pass marks the corresponding
+/// IR methods without searching supertypes or comparing names.
+pub(crate) fn apply_override_final_drop(ir: &mut IrFile) {
+    let mut override_opens = HashSet::new();
+    for (&owner, edges) in &ir.function_overrides {
+        let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
             continue;
         };
-        for &m in &c.methods {
-            if let Some(f) = ir.functions.get(m as usize) {
-                if !f.is_static && names.contains_key(&f.name) {
-                    override_opens.push(m);
-                }
+        if class.is_interface {
+            continue;
+        }
+        for edge in edges {
+            if edge.implementation_owner != owner {
+                continue;
             }
-        }
-    }
-    for c in &ir.classes {
-        if c.is_interface || c.fq_name.render().ends_with("$$serializer") {
-            continue;
-        }
-        if let Some(Some(_)) = super_member_names.get(&c.fq_name) {
-            continue;
-        }
-        let mut supers: Vec<TypeName> = c.interfaces.iter_ids().collect();
-        supers.extend(c.supertypes.iter().filter_map(|t| t.obj_internal()));
-        if c.has_non_top_superclass() {
-            supers.push(c.superclass);
-        }
-        if supers.is_empty() {
-            continue;
-        }
-        for &m in &c.methods {
-            if let Some(f) = ir.functions.get(m as usize) {
-                if !f.is_static
-                    && supers
-                        .iter()
-                        .any(|s| resolver.declares_member(&s.render(), &f.name))
-                {
-                    override_opens.push(m);
-                }
+            let function = edge.implementation_function.or_else(|| {
+                let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
+                    edge.implementation
+                else {
+                    return None;
+                };
+                ir.checked_callable_functions.get(&declaration).copied()
+            });
+            let Some(function) = function else {
+                continue;
+            };
+            if class.methods.contains(&function)
+                && ir
+                    .functions
+                    .get(function as usize)
+                    .is_some_and(|function| !function.is_static)
+            {
+                override_opens.insert(function);
             }
         }
     }
@@ -302,7 +238,7 @@ pub(crate) fn apply_override_final_drop(
 #[must_use]
 pub fn lower_value_classes(
     ir: &mut IrFile,
-    resolver: &crate::symbol_resolver::SymbolResolver,
+    classpath: &crate::jvm::classpath::Classpath,
     // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
     // frontend symbols. A value class declared in ANOTHER file of this module is neither in `ir.classes`
     // (a different file) nor reported by the resolver (whose `value_underlying` only decodes classpath
@@ -351,7 +287,7 @@ pub fn lower_value_classes(
         .filter(|c| c.is_value)
         .filter_map(|c| {
             c.fields.first().map(|f| {
-                let t = &f.ty;
+                let t = f.ty.canonical_semantic();
                 // A type-parameter field is null-capable (the `Object` underlying can hold `null`) UNLESS
                 // it has an explicit NON-NULL bound: `<T>`/`<T: Any?>`/`<T: String?>` → null-capable;
                 // `<T: String>` → not. (Kotlin's default upper bound is the nullable `Any?`.)
@@ -361,7 +297,7 @@ pub fn lower_value_classes(
                         None => true,
                     }
                 });
-                let u = if null_capable { Ty::nullable(*t) } else { *t };
+                let u = if null_capable { Ty::nullable(t) } else { t };
                 (c.fq_name, u)
             })
         })
@@ -382,10 +318,10 @@ pub fn lower_value_classes(
         if crate::types::prim_array_element(&rendered).is_some() {
             continue;
         }
-        let classifier = resolver.classifier(fq);
-        if let Some(property) = classifier
+        let dependency = classpath.value_class_declaration(fq);
+        if let Some(property) = dependency
             .as_ref()
-            .and_then(|classifier| classifier.value_underlying_property.clone())
+            .and_then(|declaration| declaration.property.clone())
         {
             crate::trace_compiler!(
                 "value_classes",
@@ -395,14 +331,15 @@ pub fn lower_value_classes(
             );
             external_underlying_properties.insert(fq, property);
         }
-        if let Some(u) = classifier
-            .and_then(|classifier| classifier.value_underlying)
+        if let Some(u) = dependency
+            .map(|declaration| declaration.underlying)
             .or_else(|| module_value_classes.get(&fq).copied())
         {
             // The underlying carries its own declared nullability — trust it: a NON-NULL reference
             // underlying (`ItemId(val value: String)`) means `ItemId?` stays UNBOXED (null carried by
             // the reference), exactly like a same-file value class. Classpath VCs come from the resolver
             // (decoded from `@Metadata`); same-module source VCs from `module_value_classes`.
+            let u = u.canonical_semantic();
             let ir_under = u.scalar_value_repr().unwrap_or(u);
             under.insert(fq, ir_under);
         }
@@ -517,6 +454,10 @@ pub fn lower_value_classes(
                 .is_some_and(|n| inner_class_names.contains(&n))
         })
     {
+        crate::trace_compiler!(
+            "value_classes",
+            "reject value class whose underlying is an inner-class instance"
+        );
         return false;
     }
 
@@ -578,8 +519,63 @@ pub fn lower_value_classes(
     let orig_secondary: Vec<Vec<Vec<Ty>>> = ir
         .classes
         .iter()
-        .map(|c| c.secondary_ctors.iter().map(|s| s.params.clone()).collect())
+        .map(|c| {
+            c.secondary_ctors
+                .iter()
+                .map(|s| s.prefix_params.iter().chain(&s.params).copied().collect())
+                .collect()
+        })
         .collect();
+    // Slot types inside constructor-owned bodies must be captured before expression erasure. These
+    // bodies contain compiler-introduced temporaries for property initializers and delegation
+    // arguments; rebuilding their maps after erasure turns `val tmp: Money` into `Int` and hides the
+    // required box at a generic `T` constructor slot.
+    let orig_class_init_slots = ir
+        .classes
+        .iter()
+        .enumerate()
+        .map(|(class, declaration)| {
+            declaration
+                .init_body
+                .map(|root| body_slot_map(&ir.exprs, root, &orig_ctor_args[class]))
+        })
+        .collect::<Vec<_>>();
+    let orig_secondary_slots = ir
+        .classes
+        .iter()
+        .enumerate()
+        .map(|(class, declaration)| {
+            declaration
+                .secondary_ctors
+                .iter()
+                .enumerate()
+                .map(|(constructor, body)| {
+                    secondary_ctor_slot_map(&ir.exprs, body, &orig_secondary[class][constructor])
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let orig_super_argument_slots = ir
+        .classes
+        .iter()
+        .enumerate()
+        .map(|(class, declaration)| {
+            declaration
+                .super_args
+                .iter()
+                .map(|argument| body_slot_map(&ir.exprs, *argument, &orig_ctor_args[class]))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    // Top-level initializers also own compiler-generated temporaries (notably the array-constructor
+    // fill loop). Capture their semantic slot types before expression erasure; rebuilding this map
+    // later would turn `Array<Value>` into its carrier-shaped type and hide the boxed reference-array
+    // element boundary from `ArraySet`.
+    let orig_static_slots = ir
+        .statics
+        .iter()
+        .map(|property| body_slot_map(&ir.exprs, property.init, &[]))
+        .collect::<Vec<_>>();
 
     // Value-class-FIELD getters: `(class-index, method-index)` → the field's (pre-erasure) value-class
     // type, for a plain class's property whose type is a value class. A read of one (`Test(val s: S<T>).s`
@@ -661,10 +657,29 @@ pub fn lower_value_classes(
             continue;
         }
         for &fid in &class.methods {
-            if getter[class_index]
-                .as_ref()
-                .is_some_and(|name| ir.functions[fid as usize].name == *name)
-            {
+            let function = &ir.functions[fid as usize];
+            let reads_underlying_field = function.body.is_some_and(|body| {
+                let mut reachable = HashSet::new();
+                collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, body, &mut reachable);
+                reachable
+                    .into_iter()
+                    .any(|expression| match &ir.exprs[expression as usize] {
+                        IrExpr::GetField { class, index, .. } => {
+                            *class as usize == class_index && *index == 0
+                        }
+                        IrExpr::PropertyRead { owner, name, .. } => {
+                            *owner == ir.classes[class_index].fq_name
+                                && ir.classes[class_index]
+                                    .fields
+                                    .first()
+                                    .is_some_and(|field| field.name == *name)
+                        }
+                        _ => false,
+                    })
+            });
+            if getter[class_index].as_ref().is_some_and(|name| {
+                function.name == *name && function.params.is_empty() && reads_underlying_field
+            }) {
                 vc_sole_getter_fids.insert(fid);
             }
         }
@@ -673,7 +688,7 @@ pub fn lower_value_classes(
     // Each source value class's getter name keyed by its internal name (`A2` → `getValue`) — to
     // recognize the legacy call-shaped form. Semantic property nodes use the source property-name map
     // below and never derive meaning from a JVM getter spelling.
-    let vc_getters: HashMap<TypeName, String> = ir
+    let mut vc_getters: HashMap<TypeName, String> = ir
         .classes
         .iter()
         .filter(|c| c.is_value)
@@ -683,6 +698,11 @@ pub fn lower_value_classes(
                 .map(|f| (c.fq_name, property_getter_name(&f.name)))
         })
         .collect();
+    vc_getters.extend(
+        external_underlying_properties
+            .iter()
+            .map(|(owner, property)| (*owner, property_getter_name(property))),
+    );
     let mut vc_properties: HashMap<TypeName, String> = ir
         .classes
         .iter()
@@ -741,6 +761,31 @@ pub fn lower_value_classes(
     // for the declaration sites, and by `(owner, source-name, arity)` for the recompute sites (bridges,
     // fn-references) — keyed BEFORE any name mangling so every site agrees on the same mangled name.
     let suspend_fids: std::collections::HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    // A suspend override whose supertype observes a non-value-class result must preserve the concrete
+    // value class's box across `Object`, even when its carrier happens to have the same JVM descriptor.
+    // Each bridge carries the exact selected target function; emitted names are never lookup input.
+    let force_boxed_suspend_returns: HashSet<u32> = ir
+        .classes
+        .iter()
+        .flat_map(|class| class.bridges.iter())
+        .filter_map(|bridge| {
+            let target = bridge
+                .target_function
+                .filter(|target| suspend_fids.contains(target))?;
+            let classifier = bridge
+                .concrete_ret
+                .non_null()
+                .obj_internal()
+                .filter(|classifier| under.contains_key(classifier))?;
+            let supertype_uses_same_value_class_carrier = bridge
+                .erased_ret
+                .non_null()
+                .obj_internal()
+                .is_some_and(|result| result == classifier)
+                && (!bridge.erased_ret.is_nullable() || !nullable_is_boxed(classifier, &under));
+            (!supertype_uses_same_value_class_carrier).then_some(target)
+        })
+        .collect();
     let suspend_sig: std::collections::HashSet<(Option<TypeName>, String, usize)> = ir
         .functions
         .iter()
@@ -748,23 +793,27 @@ pub fn lower_value_classes(
         .filter(|(fid, _)| suspend_fids.contains(&(*fid as u32)))
         .map(|(fid, f)| (f.dispatch_receiver, f.name.clone(), orig_params[fid].len()))
         .collect();
-    // A suspend fn's result crosses the `Continuation` `Object` boundary BOXED (kotlinc boxes at the
-    // CPS `areturn` and `checkcast X` + `unbox-impl`s on resume), while erasure would otherwise keep it
-    // unboxed. A SAME-FILE declaration is handled: step 6 boxes its tail and records the class in
-    // `suspend_boxed_value_class_returns` for the coroutine pass's resume side. A CROSS-UNIT suspend
-    // call (`ir.suspend_calls` — a callee in another file/dependency, absent from `suspend_funs`) has
-    // no such record, so the resume side would meet a box it does not know to unwrap: still bail there.
-    let mentions_vc = |t: &Ty| {
-        t.non_null()
-            .obj_internal()
-            .is_some_and(|fq| under.contains_key(&fq))
-    };
-    // Only a NON-NULL value-class RETURN is at stake; VC PARAMS pass unboxed through the mangled CPS
-    // signature and work, and a nullable `X?` return is already the boxed form.
-    let vc_ret = |t: &Ty| !t.is_nullable() && mentions_vc(t);
-    if ir.suspend_calls.values().any(vc_ret) {
-        return false;
+    // A suspend result crosses the erased `Continuation` boundary in the representation selected by
+    // the value-class ABI. Record that representation against both local declarations and exact call
+    // identities before either pass rewrites expressions. This includes nullable value classes:
+    // `X<String>?` can use `String` itself as the nullable carrier, whereas `X<Int>?` must remain the
+    // boxed `X` because an `int` cannot represent null.
+    for &fid in &suspend_fids {
+        if let Some(realization) = orig_rets.get(fid as usize).and_then(|result| {
+            suspend_result_representation(
+                result,
+                &under,
+                force_boxed_suspend_returns.contains(&fid),
+            )
+        }) {
+            ir.value_class_suspend_returns.insert(fid, realization);
+        }
     }
+    ir.value_class_suspend_calls
+        .extend(ir.suspend_calls.iter().filter_map(|(&call, result)| {
+            suspend_result_representation(result, &under, false)
+                .map(|realization| (call, realization))
+        }));
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
@@ -915,30 +964,29 @@ pub fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
     // (`super.f(vc)`, an interface method) to the value-class-mangled method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::new();
-    let super_member_names = same_file_super_member_names(ir);
-    // A getter NAME whose override pair DIVERGES in type across the same-file hierarchy (a covariant
-    // `val alt: Vid` overriding `val alt: Vid?`): the two sides would hash differently, and krusty
-    // doesn't emit the bridge kotlinc pairs them with — keep BOTH sides unmangled (consistent).
-    let divergent_getters: HashSet<String> = {
-        let mut out = HashSet::new();
-        for c in &ir.classes {
-            let Some(Some(names)) = super_member_names.get(&c.fq_name) else {
+    // Exact getters whose override pair diverges in semantic type (for example `Vid` over `Vid?`).
+    // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
+    // owns their compatibility and the implementation getter keeps its ordinary spelling.
+    let mut divergent_getters = HashSet::new();
+    for (&owner, edges) in &ir.property_overrides {
+        let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
+            continue;
+        };
+        for edge in edges {
+            if edge.implementation_owner != owner || edge.declared_type == edge.implementation_type
+            {
                 continue;
-            };
-            for &m in &c.methods {
-                if let Some(f) = ir.functions.get(m as usize) {
-                    if f.name.starts_with("get") && f.params.is_empty() {
-                        if let Some(Some(sup_ret)) = names.get(&f.name) {
-                            if *sup_ret != f.ret {
-                                out.insert(f.name.clone());
-                            }
-                        }
-                    }
-                }
+            }
+            if let Some(getter) = class
+                .properties
+                .iter()
+                .find(|property| property.name == edge.name)
+                .and_then(|property| property.getter)
+            {
+                divergent_getters.insert(getter);
             }
         }
-        out
-    };
+    }
     // `(fid, param idx, boxed value-class Ty)` for nullable-underlying value-class params — the base
     // method unboxes them (below), but its `$default` stub + call site keep them boxed (recorded here).
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
@@ -954,30 +1002,11 @@ pub fn lower_value_classes(
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
         // parameters/return stay boxed (a sibling member call passes `this` — a box — directly). The
-        // SYNTHESIZED members (`-impl`, `equals`/`hashCode`/`toString`, the getter, `<init>`) operate on
-        // the underlying representation, so they erase like any other function.
-        // A property GETTER (`getValue` on a value class, `getProperty` for a `val`) takes no value
-        // parameters — match it by the `get` prefix AND an empty parameter list. It stays unmangled UNLESS
-        // its owner is a supertype-free class (`getter_mangle_owners`), where a value-class-returning getter
-        // safely mangles to kotlinc's `getId-<hash>` (no override to keep consistent). A user FUNCTION that
-        // starts with `get` but takes parameters (`suspend fun getById(id: ItemId)`) is a normal member
-        // and always mangles.
-        let is_vc_field_getter = f.name.starts_with("get")
-            && orig_params[fid].is_empty()
-            && !f.dispatch_receiver.is_some_and(|r| {
-                // Mangle this getter only when the owner's WHOLE supertype chain is same-file-known
-                // AND either none of it declares this name (the class's own getter) or the
-                // declaration is the SAME-typed getter (both sides mangle to the same hash). A
-                // type-divergent pair stays unmangled on both sides.
-                !divergent_getters.contains(&f.name)
-                    && super_member_names.get(&r).is_some_and(|sups| {
-                        sups.as_ref().is_some_and(|names| match names.get(&f.name) {
-                            None => true,
-                            Some(Some(t)) => *t == orig_rets[fid],
-                            Some(None) => false,
-                        })
-                    })
-            });
+        // SYNTHESIZED members (`-impl`, `equals`/`hashCode`/`toString`, `<init>`) operate on the
+        // underlying representation, so they erase like any other function. An exact
+        // type-divergent override getter also keeps its ordinary spelling; its bridge owns the
+        // representation difference.
+        let is_divergent_override_getter = divergent_getters.contains(&(fid as u32));
         let synthesized = matches!(
             f.name.as_str(),
             "box-impl"
@@ -991,8 +1020,9 @@ pub fn lower_value_classes(
                 | "hashCode"
                 | "toString"
                 | "<init>"
-        ) || is_vc_field_getter;
+        ) || is_divergent_override_getter;
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
+        let source_name = f.name.clone();
         // Mangle a USER function whose (pre-erasure) signature mentions a value class — kotlinc's
         // `base-<hash>`. Index-resolved `MethodCall`s pick this up automatically; name-resolved calls
         // (super/interface) are rewritten below via `mangle_map`.
@@ -1003,34 +1033,55 @@ pub fn lower_value_classes(
             // Keep the declared signature for `@Metadata`, which names the Kotlin function and its
             // declared types — the mangling and erasure below are a JVM realization it records
             // separately. Only worth keeping when a value class is actually involved.
-            if orig_params[fid]
-                .iter()
-                .chain(std::iter::once(&orig_rets[fid]))
-                .any(is_callable_vc_ty)
+            if vc_member
+                || orig_params[fid]
+                    .iter()
+                    .chain(std::iter::once(&orig_rets[fid]))
+                    .any(is_callable_vc_ty)
             {
                 declared_sigs.push((
                     fid as u32,
-                    f.name.clone(),
+                    source_name.clone(),
                     orig_params[fid].clone(),
                     orig_rets[fid],
                 ));
             }
-            let mangled = vc_mangle(
-                &f.name,
+            let mut mangled = vc_mangle(
+                &source_name,
                 &orig_params[fid],
                 &orig_rets[fid],
                 &callable_under,
                 is_file_class,
                 suspend_fids.contains(&(fid as u32)),
             );
-            if mangled != f.name {
-                if let Some(owner) = &f.dispatch_receiver {
+            // Every ordinary value-class member is physically a static implementation over the
+            // carrier. A signature that independently requires Kotlin's value-class hash keeps that
+            // hash (`same-iUtXLc0`); otherwise kotlinc uses the structural `-impl` suffix. The source
+            // name and source value parameters stay in `vc_declared_sigs` for metadata.
+            let lower_value_member = vc_member && !f.is_static;
+            if lower_value_member && mangled == source_name {
+                mangled.push_str("-impl");
+            }
+            if mangled != source_name {
+                if let Some(owner) = f.dispatch_receiver {
                     mangle_map.insert(
-                        (*owner, f.name.clone(), orig_params[fid].len()),
+                        (owner, source_name.clone(), orig_params[fid].len()),
                         mangled.clone(),
                     );
                 }
                 f.name = mangled;
+            }
+            if lower_value_member {
+                let owner = f
+                    .dispatch_receiver
+                    .expect("a value-class member has a dispatch receiver");
+                let carrier = under.get(&owner).copied().unwrap_or(Ty::Error);
+                f.params.insert(0, carrier);
+                f.is_static = true;
+                // The former `this` and the new explicit carrier are both slot zero. Source value
+                // parameters consequently retain their existing slots (1..), so the body needs no
+                // value-id rewrite; only its representation evidence changes.
+                slot_types[fid].insert(0, carrier);
             }
         }
         let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
@@ -1071,26 +1122,46 @@ pub fn lower_value_classes(
                 *p = Ty::nullable(*p);
                 continue;
             }
-            if !(vc_member && is_vc_ty(p)) {
+            if !vc_member || f.is_static || !is_vc_ty(p) {
                 if vc_underlying_nullable(p, &under) {
                     default_boxed.push((fid as u32, idx, *p));
                 }
                 *p = erase(p, &under);
             }
         }
-        if !(is_box_impl || vc_member && is_vc_ty(&f.ret)) {
-            f.ret = erase(&f.ret, &under);
+        if !(is_box_impl || vc_member && !f.is_static && is_vc_ty(&f.ret)) {
+            f.ret = if suspend_fids.contains(&(fid as u32)) {
+                suspend_result_representation(
+                    &orig_rets[fid],
+                    &under,
+                    force_boxed_suspend_returns.contains(&(fid as u32)),
+                )
+                .map(crate::ir::IrValueClassSuspendResult::boundary_ty)
+                .unwrap_or_else(|| erase(&f.ret, &under))
+            } else {
+                erase(&f.ret, &under)
+            };
         }
         if !f.param_checks.is_empty() {
             for (k, chk) in f.param_checks.iter_mut().enumerate() {
                 // Drop the null-check when the param erased to a non-reference, OR when it was a
                 // value class whose unboxed underlying is itself null-capable (e.g. `X(val v: Int?)`
                 // erases to `Integer`, which the value `X(null)` leaves null) — kotlinc emits no
-                // `checkNotNullParameter` there.
+                // `checkNotNullParameter` there. Ask the declaration-descriptor realization rather
+                // than [`is_ref`]: an ordinary type parameter is a generic reference boundary, but
+                // a value-class carrier can temporarily retain `TyParam<T : Int>` here and is emitted
+                // as the primitive bound (`I`). The guard must agree with that final physical slot.
                 let under_nullable = orig_params[fid]
                     .get(k)
                     .is_some_and(|t| vc_underlying_nullable(t, &under));
-                if chk.is_some() && (!f.params.get(k).is_some_and(is_ref) || under_nullable) {
+                let physical_is_ref = f
+                    .params
+                    .get(k)
+                    .and_then(|parameter| {
+                        jvm_tys(std::slice::from_ref(parameter)).into_iter().next()
+                    })
+                    .is_some_and(|parameter| is_ref(&parameter));
+                if chk.is_some() && (!physical_is_ref || under_nullable) {
                     *chk = None;
                 }
             }
@@ -1113,34 +1184,63 @@ pub fn lower_value_classes(
         }
         m
     };
-    // A value class with a USER instance member that RETURNS a value class (`value class Foo { fun
-    // inc(): Foo }`) is not yet modeled: the member hands back a boxed `X`, and threading that through a
-    // chained call / an unboxed-slot store (or the spliced body of an `inline` such member) needs a
-    // box/unbox dance krusty doesn't do here. SKIP the file — never miscompile — as it was before
-    // value-class construction unified. The value class's own synthesized members (`box-impl`, the
-    // `Any`-overrides) are excluded; a member returning a NON-value-class lowers fine.
-    let vc_member_returns_vc = boxed_ret_methods.keys().any(|&(ci, mi)| {
-        let c = &ir.classes[ci as usize];
-        c.is_value
-            && c.methods
-                .get(mi as usize)
-                .and_then(|&fid| ir.functions.get(fid as usize))
-                .is_some_and(|f| {
-                    let n = f.name.as_str();
-                    // Exclude synthesized members and only a structurally identified FIELD GETTER. A
-                    // user `operator fun get(index): X` shares the `get` prefix but returns a boxed `X`;
-                    // admitting it through a name-shape exception miscompiles its callers. The getter map
-                    // is keyed by its resolved class/method identity and verified to read the field.
-                    !n.contains("-impl")
-                        && !field_getters.contains_key(&(ci, mi))
-                        && !matches!(
-                            n,
-                            "box-impl" | "equals" | "hashCode" | "toString" | "<init>"
-                        )
-                })
-    });
-    if vc_member_returns_vc {
-        return false;
+    // Publish the exact physical result of index-resolved calls whose selected method returns a
+    // value-class box. `Call::source_function` can read the rewritten function return directly, while
+    // `MethodCall` carries only `(class, method-index)`; without this stamp, the two representations
+    // diverge and a direct suspend member call can be treated as its carrier before its required
+    // `unbox-impl` boundary is inserted.
+    let boxed_calls: Vec<(ExprId, TypeName)> = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, expression)| {
+            let id = id as ExprId;
+            let selected = match expression {
+                IrExpr::MethodCall { class, index, .. } => {
+                    boxed_ret_methods.get(&(*class, *index)).copied()
+                }
+                IrExpr::Call { callee, .. } => callee
+                    .source_function()
+                    .and_then(|function| ir.functions.get(function as usize))
+                    .and_then(|function| function.ret.non_null().obj_internal())
+                    .filter(|classifier| under.contains_key(classifier)),
+                _ => None,
+            };
+            let suspended = match ir.value_class_suspend_calls.get(&id) {
+                Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }) => {
+                    Some(*classifier)
+                }
+                _ => None,
+            };
+            selected.or(suspended).map(|classifier| (id, classifier))
+        })
+        .collect();
+    for (call, classifier) in boxed_calls {
+        ir.physical_types.insert(call, Ty::obj_name(classifier));
+    }
+    // `suspendCoroutine<T>` invokes its block with `SafeContinuation<T>` and obtains the result from
+    // `SafeContinuation.getOrThrow(): Object`. A value-class `T` therefore crosses this generic slot as
+    // its box (or null for `T?`), never as the carrier. Preserve that physical fact on the exact FIR-
+    // selected intrinsic point so a value-class suspend-function tail does not descend into the
+    // inlined `Unit`-returning user block and attempt to box that block's `Unit` result.
+    let safe_intrinsic_boxes = ir
+        .intrinsic_suspension_points
+        .iter()
+        .filter_map(|(&expression, point)| {
+            if point.kind != crate::ir::IrIntrinsicSuspensionKind::Safe {
+                return None;
+            }
+            point
+                .result
+                .non_null()
+                .obj_internal()
+                .filter(|classifier| under.contains_key(classifier))
+                .map(|classifier| (expression, classifier))
+        })
+        .collect::<Vec<_>>();
+    for (expression, classifier) in safe_intrinsic_boxes {
+        ir.physical_types
+            .insert(expression, Ty::obj_name(classifier));
     }
     for (fid, name, params, ret) in declared_sigs {
         ir.vc_declared_sigs.insert(fid, (name, params, ret));
@@ -1243,14 +1343,15 @@ pub fn lower_value_classes(
             // MANGLED name — `LambdaMetafactory` binding the original spelling produces a class that
             // implements nothing the interface declares (`AbstractMethodError` at the first call).
             if let IrExpr::Lambda {
-                sam: Some((interface, method, _)),
+                sam: Some(target),
                 arity,
                 ..
             } = e
             {
-                let owner = crate::types::type_name(interface);
-                if let Some(mangled) = mangle_map.get(&(owner, method.clone(), *arity as usize)) {
-                    *method = mangled.clone();
+                if let Some(mangled) =
+                    mangle_map.get(&(target.classifier, target.method.clone(), *arity as usize))
+                {
+                    target.method = mangled.clone();
                 }
             }
         }
@@ -1264,7 +1365,7 @@ pub fn lower_value_classes(
         for expression in &mut ir.exprs {
             let IrExpr::Lambda {
                 impl_fn,
-                sam: Some((_, method, descriptor)),
+                sam: Some(target),
                 ..
             } = expression
             else {
@@ -1273,19 +1374,30 @@ pub fn lower_value_classes(
             let Some((params, ret)) = ir.lambda_sam_signature.get(impl_fn) else {
                 continue;
             };
-            *method = vc_mangle_once(method, params, ret, &callable_under, false, false);
-            if descriptor.is_none() {
-                let physical_params = params
-                    .iter()
-                    .map(|parameter| erase(parameter, &under))
-                    .collect::<Vec<_>>();
-                *descriptor = Some(crate::jvm::names::method_descriptor(
-                    &physical_params,
-                    erase(ret, &under),
-                ));
-            }
+            target.method =
+                vc_mangle_once(&target.method, params, ret, &callable_under, false, false);
         }
     }
+    // Common IR keeps the SAM declaration semantic. Once this backend has chosen value-class
+    // carriers, publish the exact physical interface slot beside it. LambdaMetafactory (and the
+    // class-based SAM strategy) must implement that erased slot, not a descriptor reconstructed
+    // from the value-class classifier spelling.
+    ir.lambda_sam_jvm_signature = ir
+        .lambda_sam_signature
+        .iter()
+        .map(|(&implementation, (parameters, result))| {
+            (
+                implementation,
+                (
+                    parameters
+                        .iter()
+                        .map(|parameter| erase(parameter, &under))
+                        .collect(),
+                    erase(result, &under),
+                ),
+            )
+        })
+        .collect();
     // Rewrite cross-file calls with value-class signatures to their JVM names and types.
     if !callable_under.is_empty() {
         for e in &mut ir.exprs {
@@ -1299,14 +1411,14 @@ pub fn lower_value_classes(
                 ..
             } = e
             {
-                let mangled = vc_mangle(name, params, ret, &callable_under, false, false);
+                let mangled = vc_mangle_once(name, params, ret, &callable_under, false, false);
                 if &mangled != name {
                     *name = mangled;
-                    for p in params.iter_mut() {
-                        *p = erase(p, &under);
-                    }
-                    *ret = erase(ret, &under);
                 }
+                for p in params.iter_mut() {
+                    *p = erase(p, &under);
+                }
+                *ret = erase(ret, &under);
             }
         }
         for e in &mut ir.exprs {
@@ -1333,20 +1445,24 @@ pub fn lower_value_classes(
         let Some(fr) = &mut c.func_ref else {
             continue;
         };
+        let local_target = fr.local_target.and_then(|target| {
+            ir.functions
+                .get(target as usize)
+                .map(|function| (function.name.clone(), function.params.clone(), function.ret))
+        });
         let first_call_arg = match fr.dispatch {
             crate::ir::FrDispatch::VirtualUnbound => 1usize,
-            _ => 0usize,
+            _ => usize::from(fr.reflection_receiver_parameter),
         };
         let call_owner = fr.call_owner;
         // The lowerer records the already-selected callable's exact target signature. Do not rebuild it
         // from `(owner, name, arity)`: overloads with equal arity are deliberately indistinguishable by
         // that key, and whichever declaration was visited last would corrupt every other reference.
-        let target_decl_params = fr.target_param_tys[first_call_arg..].to_vec();
-        let target_decl_ret = fr.target_ret_ty;
-        let target_nullable: Vec<bool> = target_decl_params
-            .iter()
-            .map(|parameter| parameter.is_nullable())
-            .collect();
+        let target_decl_params = fr
+            .reflection_target_param_tys
+            .clone()
+            .unwrap_or_else(|| fr.target_param_tys[first_call_arg..].to_vec());
+        let target_decl_ret = fr.reflection_target_ret_ty.unwrap_or(fr.target_ret_ty);
         // A BOUND extension reference on a VALUE-CLASS receiver (`Z(42)::test`, `FrDispatch::StaticBound`)
         // targets a facade static whose leading param is the receiver — that receiver lives in
         // `target_param_tys` (the `target_override`), NOT in the invoke `param_tys`. Mangle against that
@@ -1354,11 +1470,12 @@ pub fn lower_value_classes(
         // target descriptor keeps the receiver `int`, not an empty `()`), else the impl calls a
         // non-existent unmangled `test()`.
         let staticbound = matches!(fr.dispatch, crate::ir::FrDispatch::StaticBound);
-        let is_file_class = matches!(fr.dispatch, crate::ir::FrDispatch::Static) || staticbound;
-        let mangle_params = if staticbound {
+        let call_is_file_class =
+            matches!(fr.dispatch, crate::ir::FrDispatch::Static) || staticbound;
+        let call_mangle_params = if staticbound {
             fr.target_param_tys.clone()
         } else {
-            target_decl_params.clone()
+            fr.target_param_tys[first_call_arg..].to_vec()
         };
         let fr_suspend =
             suspend_sig.contains(&(call_owner, fr.call_name.clone(), target_decl_params.len()));
@@ -1369,19 +1486,35 @@ pub fn lower_value_classes(
         // already carries exactly the suffix this signature would append. (Origin cannot be the test:
         // this pass sees one FILE, so a sibling source file's target looks foreign while its own run
         // does mangle it — skipping there emitted a call to an unmangled method that never exists.)
-        let mangle_once = |base: &str| {
+        let mangle_call_once = |base: &str| {
             vc_mangle_once(
                 base,
-                &mangle_params,
-                &target_decl_ret,
+                &call_mangle_params,
+                &fr.target_ret_ty,
                 &callable_under,
-                is_file_class,
+                call_is_file_class,
                 fr_suspend,
             )
         };
-        let mangled_call_name = mangle_once(&fr.call_name);
+        let mangle_reflection_once = |base: &str| {
+            vc_mangle_once(
+                base,
+                &target_decl_params,
+                &target_decl_ret,
+                &callable_under,
+                fr.owner_class.is_none(),
+                fr_suspend,
+            )
+        };
+        // A structural adapter invokes an exact generated common-IR function. Its signature has
+        // already gone through the function erasure/boxing pass above; reuse that physical ABI
+        // verbatim instead of independently erasing the adapter's logical function type.
+        let mangled_call_name = local_target
+            .as_ref()
+            .map(|(name, _, _)| name.clone())
+            .unwrap_or_else(|| mangle_call_once(&fr.call_name));
         let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
-        let mangled_reflection_name = mangle_once(reflection_base);
+        let mangled_reflection_name = mangle_reflection_once(reflection_base);
         fr.reflection_name =
             (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
         fr.call_name = mangled_call_name;
@@ -1396,11 +1529,24 @@ pub fn lower_value_classes(
                 .and_then(|t| t.non_null().obj_internal())
                 .filter(|fq| callable_under.contains_key(fq));
         }
-        fr.target_param_tys = erase_src
-            .iter()
-            .map(|t| erase(t, &callable_under))
-            .collect();
-        fr.target_ret_ty = erase(&erase_ret, &callable_under);
+        if let Some((_, parameters, result)) = local_target {
+            fr.target_param_tys = parameters;
+            fr.target_ret_ty = result;
+        } else {
+            fr.target_param_tys = erase_src
+                .iter()
+                .map(|t| erase(t, &callable_under))
+                .collect();
+            fr.target_ret_ty = erase(&erase_ret, &callable_under);
+        }
+        if let Some(parameters) = &mut fr.reflection_target_param_tys {
+            for parameter in parameters {
+                *parameter = erase(parameter, &callable_under);
+            }
+        }
+        if let Some(result) = &mut fr.reflection_target_ret_ty {
+            *result = erase(result, &callable_under);
+        }
         let target_offset = usize::from(staticbound);
         fr.unbox_params = fr
             .param_tys
@@ -1409,35 +1555,26 @@ pub fn lower_value_classes(
             .map(|(i, logical)| {
                 let target = fr.target_param_tys.get(i + target_offset)?;
                 let fq = logical.non_null().obj_internal()?;
-                (callable_under.contains_key(&fq) && logical != target).then_some(fq)
+                // `FunctionN.invoke` always receives the logical value as an Object. Adapt it to
+                // the selected callable's *physical* parameter, not merely to a type with different
+                // nullability. In particular, `Value` passed to `fun f(Value?)` stays the boxed
+                // `Value`: the nullable primitive-backed value class is itself the target JVM
+                // reference. Unboxing it would call `f(int)` although only `f(Value)` exists.
+                (callable_under.contains_key(&fq)
+                    && logical != target
+                    && target.non_null().obj_internal() != Some(fq))
+                .then_some(fq)
             })
             .collect();
         fr.unbox_param_nullable = fr
             .param_tys
             .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let target_i = i.checked_sub(first_call_arg);
-                target_i
-                    .and_then(|j| target_nullable.get(j))
-                    .copied()
-                    .unwrap_or(false)
-            })
+            // Null-preserving unboxing depends on what `FunctionN.invoke` may receive. An
+            // adapted reference can narrow a nullable declaration parameter to a non-null
+            // function parameter; using the declaration's nullability then fabricates a null
+            // branch for a primitive target slot and produces an impossible stack-map join.
+            .map(|parameter| parameter.is_nullable())
             .collect();
-        if fr
-            .unbox_param_nullable
-            .iter()
-            .enumerate()
-            .any(|(i, nullable)| {
-                *nullable
-                    && fr
-                        .target_param_tys
-                        .get(i + target_offset)
-                        .is_some_and(|target| ir_ty_to_jvm(target).jvm_boxed_ref().is_some())
-            })
-        {
-            return false;
-        }
         fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
             (callable_under.contains_key(&fq)
                 && target_decl_ret.non_null().obj_internal() == Some(fq)
@@ -1493,7 +1630,7 @@ pub fn lower_value_classes(
                     });
                 if b.target_name.is_none()
                     && target_mentions_vc
-                    && !is_property_getter_bridge_name(&target)
+                    && b.kind != crate::ir::BridgeKind::PropertyGetter
                 {
                     let mangled = vc_mangle(
                         &target,
@@ -1561,7 +1698,7 @@ pub fn lower_value_classes(
                     // (`fun bar(): Gx`) also mangles by the return; a generic `T` return (erased
                     // `Object`) does not.
                     // A bridge lives on a class (never a file class); its value-class return mangles.
-                    if bridge_mentions_vc && !is_property_getter_bridge_name(&b.name) {
+                    if bridge_mentions_vc && b.kind != crate::ir::BridgeKind::PropertyGetter {
                         b.name = vc_mangle(
                             &b.name,
                             &b.concrete_params,
@@ -1600,6 +1737,7 @@ pub fn lower_value_classes(
                                     && (!b.erased_ret.is_nullable()
                                         || !nullable_is_boxed(fq_name, &under))
                             });
+                    let concrete_carrier = erase(&b.concrete_ret, &under);
                     // An EXTERNAL value class (`Result`) is held unboxed (`Object`) everywhere in krusty —
                     // when the SUPERTYPE also carries it unboxed the bridge returns the override's already-
                     // `Object` result directly, NO `box-impl`. EXCEPTION: a GENERIC boundary — the supertype
@@ -1608,11 +1746,11 @@ pub fn lower_value_classes(
                     // observes the boxed object (its `toString`/identity), and krusty must match: `box_ret`
                     // references the classpath `box-impl`, exactly like a user value class.
                     if supertype_returns_vc {
-                        b.concrete_ret = erase(&b.concrete_ret, &under);
+                        b.concrete_ret = concrete_carrier;
                         b.erased_ret = b.concrete_ret.clone();
                     } else {
                         b.box_ret = Some(fq_name);
-                        b.concrete_ret = erase(&b.concrete_ret, &under);
+                        b.concrete_ret = concrete_carrier;
                     }
                 } else if erased_ret_vc.is_some() {
                     // A bottom/null override (`Nothing`/`Nothing?`) can implement a value-class-returning
@@ -1623,7 +1761,7 @@ pub fn lower_value_classes(
                     if b.target_name.is_none() {
                         b.target_name = Some(b.name.clone());
                     }
-                    if !is_property_getter_bridge_name(&b.name) {
+                    if b.kind != crate::ir::BridgeKind::PropertyGetter {
                         b.name = vc_mangle(
                             &b.name,
                             &b.concrete_params,
@@ -1717,6 +1855,9 @@ pub fn lower_value_classes(
             // this constructor (a synthetic marker-disambiguated ctor keeps its own convention).
             if !sc.synthetic && sc.params.iter().any(is_vc_ty) {
                 sc.vc_params = true;
+            }
+            for parameter in &mut sc.prefix_params {
+                *parameter = erase(parameter, &under);
             }
             for p in &mut sc.params {
                 // A SYNTHETIC marker ctor (the serialization deser ctor, disambiguated by a trailing
@@ -1980,13 +2121,12 @@ pub fn lower_value_classes(
         if let Some(root) = c.init_body {
             s4_bodies.push((
                 root,
-                body_slot_map(&ir.exprs, root, &orig_ctor_args[cidx]),
+                orig_class_init_slots[cidx].clone().unwrap_or_default(),
                 HashSet::new(),
             ));
         }
         for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
-            let params = &orig_secondary[cidx][sidx];
-            let slots = secondary_ctor_slot_map(&ir.exprs, sc, params);
+            let slots = orig_secondary_slots[cidx][sidx].clone();
             if let Some(b) = sc.body {
                 s4_bodies.push((b, slots.clone(), HashSet::new()));
             }
@@ -2005,19 +2145,15 @@ pub fn lower_value_classes(
                 s4_bodies.push((a, HashMap::new(), HashSet::new()));
             }
         }
-        for &a in &c.super_args {
-            s4_bodies.push((
-                a,
-                body_slot_map(&ir.exprs, a, &orig_ctor_args[cidx]),
-                HashSet::new(),
-            ));
+        for (argument, slots) in c.super_args.iter().zip(&orig_super_argument_slots[cidx]) {
+            s4_bodies.push((*argument, slots.clone(), HashSet::new()));
         }
     }
     // Top-level property initializers run in the facade `<clinit>` (static, no params). A value-class
     // construction here (`val p = arrayListOf(X(0))`) must rewrite `new X` → `constructor-impl` too;
     // otherwise a private `<init>` leaks an `IllegalAccessError` from `<clinit>`.
-    for s in &ir.statics {
-        s4_bodies.push((s.init, HashMap::new(), HashSet::new()));
+    for (property, slots) in ir.statics.iter().zip(&orig_static_slots) {
+        s4_bodies.push((property.init, slots.clone(), HashSet::new()));
     }
     // Map each reachable target expr to its body's slot map. A real lambda body belongs only to its
     // lifted function; traversing it from the enclosing `Lambda` expression would interpret the same
@@ -2153,6 +2289,7 @@ pub fn lower_value_classes(
                 args,
                 ctor_params,
                 ctor_desc: None,
+                external_target: _,
             } if under.contains_key(internal) => {
                 let owner = *internal;
                 let u = under
@@ -2200,6 +2337,10 @@ pub fn lower_value_classes(
                     .non_null()
                     .obj_internal()
                     .is_some_and(|fq_name| under.contains_key(&fq_name))
+                // `Nothing?` contributes the null BOX itself to a nullable value-class slot. It is
+                // not an underlying carrier to feed through `box-impl` (primitive-backed classes
+                // would otherwise unbox null and throw before constructing the nullable result).
+                && !repr_ctx.operand_null_only(*arg)
                 && !matches!(repr_ctx.repr(*arg), Repr::Boxed(_)) =>
             {
                 let fq_name = type_operand.non_null().obj_internal().unwrap();
@@ -2232,7 +2373,7 @@ pub fn lower_value_classes(
             // The same read as a PROPERTY: a value class's sole property IS its erased underlying, so
             // reading it never goes through an accessor whatever the owner's declaration says.
             IrExpr::PropertyRead {
-                receiver,
+                receiver: Some(receiver),
                 owner,
                 name,
                 ty,
@@ -2275,6 +2416,30 @@ pub fn lower_value_classes(
                     result: params.as_ref().map_or(under[&owner], |(_, ret)| *ret),
                 })
             }
+            // Checked same-module property reads may already be realized as a selected virtual call.
+            // Once a computed value-class accessor becomes static `getX-impl(U)`, preserve that
+            // selected declaration while adapting its dispatch receiver to parameter zero.
+            IrExpr::Call {
+                callee: Callee::Virtual { owner, name, .. },
+                dispatch_receiver: Some(receiver),
+                args,
+            } if under.contains_key(owner) => cls_by_name.get(owner).and_then(|class| {
+                let expected = format!("{name}-impl");
+                ir.classes[*class]
+                    .methods
+                    .iter()
+                    .filter_map(|function| ir.functions.get(*function as usize))
+                    .find(|function| {
+                        function.is_static && (function.name == *name || function.name == expected)
+                    })
+                    .map(|function| Rw::ImplCall {
+                        receiver: *receiver,
+                        owner: *owner,
+                        name: function.name.clone(),
+                        descriptor: ir_method_desc(&function.params, &function.ret),
+                        args: args.clone(),
+                    })
+            }),
             // A zero-arg `Any`-override dispatched VIRTUALLY on the value class itself (`id.hashCode()`
             // / `id.toString()` — e.g. a data class hashing its value-class field on the field's own
             // class, kotlinc's per-field shape) → the static `-impl` over the unboxed underlying
@@ -2559,9 +2724,10 @@ pub fn lower_value_classes(
     let mut strip: Vec<(ExprId, ExprId)> = Vec::new();
     // `(comparison expr, is_ne)` — a `non-null-vc == null` folded to a constant `false`/`true`.
     let mut vacuous: Vec<(ExprId, bool)> = Vec::new();
-    // `(cast expr, underlying)` — a `checkcast X?` to a NULLABLE reference-underlying value class is
-    // retargeted to its underlying (`Str?` → `checkcast String`): there is no `Str` instance for an
-    // unboxed value, so casting to the box class would `ClassCastException`.
+    // `(type-op expr, underlying)` — casts to NULLABLE reference-underlying value classes and
+    // representation-changing implicit coercions are retargeted to the physical carrier. There is
+    // no box-class instance at either boundary, so retaining the semantic value-class operand would
+    // emit a wrong `checkcast` after the required unbox operation.
     let mut retarget: Vec<(ExprId, Ty)> = Vec::new();
     // Each body to box/unbox: every non-value-class-member function body (with its captured slot types),
     // plus every class `init { … }` block (slots = `this` + the ctor params), so a value-class member
@@ -2591,13 +2757,15 @@ pub fn lower_value_classes(
     }
     for (cidx, c) in ir.classes.iter().enumerate() {
         if let Some(root) = c.init_body {
-            bodies.push((root, body_slot_map(&ir.exprs, root, &orig_ctor_args[cidx])));
+            bodies.push((
+                root,
+                orig_class_init_slots[cidx].clone().unwrap_or_default(),
+            ));
         }
         // A regular class's secondary `<init>` body + its `this(…)` delegation args run over the secondary
         // params — box/unbox their value-class accesses/constructions.
         for (sidx, sc) in c.secondary_ctors.iter().enumerate() {
-            let params = &orig_secondary[cidx][sidx];
-            let slots = secondary_ctor_slot_map(&ir.exprs, sc, params);
+            let slots = orig_secondary_slots[cidx][sidx].clone();
             if let Some(b) = sc.body {
                 bodies.push((b, slots.clone()));
             }
@@ -2612,14 +2780,14 @@ pub fn lower_value_classes(
             }
         }
         // Base-class constructor args run in the subclass `<init>` over its primary ctor params.
-        for &a in &c.super_args {
-            bodies.push((a, body_slot_map(&ir.exprs, a, &orig_ctor_args[cidx])));
+        for (argument, slots) in c.super_args.iter().zip(&orig_super_argument_slots[cidx]) {
+            bodies.push((*argument, slots.clone()));
         }
     }
     // Top-level property initializers (facade `<clinit>`, static) — box/unbox their value-class accesses
     // and boundary constructions just like any function body.
-    for s in &ir.statics {
-        bodies.push((s.init, HashMap::new()));
+    for (property, slots) in ir.statics.iter().zip(&orig_static_slots) {
+        bodies.push((property.init, slots.clone()));
     }
     for (root, slots) in &bodies {
         let root = *root;
@@ -2734,6 +2902,62 @@ pub fn lower_value_classes(
                 type_operand,
             } = &ir.exprs[id as usize]
             {
+                // A declaration-returning value-class call already yields the unboxed carrier. The
+                // semantic coercion to `X` must therefore target that carrier too; retaining `X`
+                // makes the emitter insert `checkcast X` around an `Object` underlying such as
+                // `Result` (`runCatching { 1 }` then casts `Integer` to `kotlin.Result`).
+                if let (Repr::Unboxed(source), Target::UnboxedX(target)) =
+                    (repr_ctx.repr(*arg), target(type_operand, &under))
+                {
+                    if source == target {
+                        retarget.push((id, erase(&under[&source], &under)));
+                        continue;
+                    }
+                }
+                // A nullable/erased read can be physically BOXED even when its smart-cast result is
+                // the non-null value class. Crossing to the value class's ordinary unboxed carrier
+                // is a real representation boundary (`r: Result<T>?; r!!` is the motivating case).
+                // The semantic `TypeOp` records the checked conversion; this pass supplies the
+                // backend-owned box adapter without recovering any source spelling or declaration.
+                if let (Repr::Boxed(source), Target::UnboxedX(target)) =
+                    (repr_ctx.repr(*arg), target(type_operand, &under))
+                {
+                    if source == target {
+                        ops.push((
+                            *arg,
+                            if type_operand.is_nullable() {
+                                BoxOp::UnboxNull(source)
+                            } else {
+                                BoxOp::Unbox(source)
+                            },
+                        ));
+                        retarget.push((id, erase(&under[&source], &under)));
+                        continue;
+                    }
+                }
+                // A checked generic call has a concrete logical result but physically returns its
+                // erased bound. When that bound is `Object`, a value class necessarily occupies the
+                // slot as its box. The frontend lowering records that physical result on the whole
+                // call expression; consume it here rather than re-inferring generic substitution or
+                // teaching the emitter about source declarations.
+                if let Target::UnboxedX(target) = target(type_operand, &under) {
+                    if repr_ctx
+                        .physical
+                        .get(arg)
+                        .is_some_and(|physical| physical.is_erased_top())
+                    {
+                        ops.push((
+                            *arg,
+                            if type_operand.is_nullable() {
+                                BoxOp::UnboxNull(target)
+                            } else {
+                                BoxOp::Unbox(target)
+                            },
+                        ));
+                        retarget.push((id, erase(&under[&target], &under)));
+                        continue;
+                    }
+                }
                 // The sole-field coercion (`w.v` → `ImplicitCoercion(<w>, U)`) over a BOXED receiver
                 // (`w!!` of a boxed `W?` shared cell): unbox the receiver first — otherwise the
                 // emitter coerces the box reference straight to the underlying (`checkcast Integer`
@@ -2757,7 +2981,9 @@ pub fn lower_value_classes(
             // already rewritten to identity; every remaining semantic property read keeps the carrier
             // representation expected by its selected accessor.
             if let IrExpr::PropertyRead {
-                receiver, owner, ..
+                receiver: Some(receiver),
+                owner,
+                ..
             } = &ir.exprs[id as usize]
             {
                 if under.contains_key(owner) {
@@ -2954,7 +3180,11 @@ pub fn lower_value_classes(
                 .ext_call_source_receiver
                 .get(&id)
                 .and_then(|t| t.obj_internal())
-                .is_some_and(|fq| under.get(&fq).is_some_and(|u| u.is_reference()));
+                .is_some_and(|fq| {
+                    under
+                        .get(&fq)
+                        .is_some_and(|underlying| erase(underlying, &under).is_reference())
+                });
             if recv_is_ref_vc {
                 if let IrExpr::Call { args, .. } = &ir.exprs[id as usize] {
                     if let Some(&a0) = args.first() {
@@ -3048,6 +3278,22 @@ pub fn lower_value_classes(
                     }
                 }
                 for (k, a) in args.clone().into_iter().enumerate() {
+                    // The selected provider declaration is authoritative when it retained a source
+                    // parameter for this slot. This resolves the descriptor's irreducible `Object`
+                    // ambiguity without a value-class/name special case: a direct `Result<T>`
+                    // parameter wants the carrier, while a declaration type parameter wants a box.
+                    if let Some(parameter) = ir
+                        .call_declared_params
+                        .get(&id)
+                        .and_then(|parameters| parameters.get(k))
+                        .copied()
+                    {
+                        let (value, _) = repr_ctx.through_erased_generic_coercion(a);
+                        record_value_boundary(
+                            &mut ops, &ir.exprs, &repr_ctx, value, parameter, &under,
+                        );
+                        continue;
+                    }
                     // The RECEIVER (`args[0]`) of a value-class extension facade call takes the value class's
                     // OWN underlying (`getOrThrow-impl(Object)` for `Result`), so it passes UNBOXED — the
                     // dedicated `ext_call_source_receiver` handling above owns it. Never box it here, even
@@ -3117,15 +3363,15 @@ pub fn lower_value_classes(
                         .map(|(a, p)| (*a, p.clone()))
                         .collect()
                 }
-                IrExpr::Call {
-                    callee: Callee::Local(cfid) | Callee::ClassStatic { function: cfid, .. },
-                    args,
-                    ..
-                } => args
-                    .iter()
-                    .zip(orig_params[*cfid as usize].iter())
-                    .map(|(a, p)| (*a, p.clone()))
-                    .collect(),
+                IrExpr::Call { callee, args, .. } if callee.source_function().is_some() => {
+                    let function = callee
+                        .source_function()
+                        .expect("guarded same-file function call");
+                    args.iter()
+                        .zip(orig_params[function as usize].iter())
+                        .map(|(argument, parameter)| (*argument, *parameter))
+                        .collect()
+                }
                 // `Array<T>.set(index, value)` stores into the receiver array's semantic element
                 // slot. Reference arrays of value classes keep boxed elements, so the value-class
                 // boundary belongs here alongside call parameters and fields. The receiver is often
@@ -3245,13 +3491,17 @@ pub fn lower_value_classes(
     // constructor. Apply the same semantic boundary operation using the checker-selected parameter types
     // retained beside those arguments.
     for (class_index, class) in ir.classes.iter().enumerate() {
-        for (&argument, &parameter) in class.super_args.iter().zip(&class.super_ctor_params) {
-            let slots = body_slot_map(&ir.exprs, argument, &orig_ctor_args[class_index]);
+        for ((&argument, &parameter), slots) in class
+            .super_args
+            .iter()
+            .zip(&class.super_ctor_params)
+            .zip(&orig_super_argument_slots[class_index])
+        {
             let repr_ctx = ReprCtx {
                 exprs: &ir.exprs,
                 rets: &orig_rets,
                 fields: &orig_fields,
-                slots: &slots,
+                slots,
                 under: &under,
                 types: CallTypes::of(ir),
                 physical: &ir.physical_types,
@@ -3269,9 +3519,8 @@ pub fn lower_value_classes(
             value: Some(operand),
         };
     }
-    // A cast that was STRIPPED (its operand is already the underlying) is now a `Block` — the retarget's
-    // `TypeOp` match simply skips it, so a node in both lists is harmless; retarget only rewrites casts
-    // that survived.
+    // A cast that was STRIPPED (its operand is already the underlying) is now a `Block` — the
+    // retarget's `TypeOp` match simply skips it, so a node in both lists is harmless.
     for (id, underlying) in retarget {
         if let IrExpr::TypeOp { type_operand, .. } = &mut ir.exprs[id as usize] {
             *type_operand = underlying;
@@ -3414,22 +3663,49 @@ pub fn lower_value_classes(
             // erased return is the underlying.
             let x = *fq_name;
             if under.contains_key(&x) && suspend_fids.contains(&(fid as u32)) {
-                // …EXCEPT a `suspend fun`: the coroutine pass erases its return to `Object`, so the value
-                // leaves BOXED (kotlinc: `box-impl` before the CPS `areturn`). Box the tail exactly like a
-                // lambda's erased `Object` result and record the class, so the resume side can undo it.
+                // …EXCEPT a `suspend fun`: its CPS return is `Object`. The declaration-level suspension
+                // representation decides whether the carrier crosses directly or is wrapped in the value
+                // class. Besides scalar carriers, a null-capable carrier must be wrapped too: otherwise
+                // the raw `null` for `X(null)` is indistinguishable from a null result at the caller.
                 if let Some(body) = ir.functions[fid].body {
-                    ir.functions[fid].ret = boxed_value_ty(x);
-                    box_ref_tail(
-                        ir,
-                        body,
-                        x,
+                    match suspend_result_representation(
+                        &orig_rets[fid],
                         &under,
-                        &orig_rets,
-                        &orig_fields,
-                        &slot_types[fid],
-                        &field_getters,
-                    );
-                    ir.suspend_boxed_value_class_returns.insert(fid as u32, x);
+                        force_boxed_suspend_returns.contains(&(fid as u32)),
+                    ) {
+                        Some(crate::ir::IrValueClassSuspendResult::Boxed { .. }) => {
+                            ir.functions[fid].ret = boxed_value_ty(x);
+                            box_ref_tail(
+                                ir,
+                                body,
+                                x,
+                                &under,
+                                &orig_rets,
+                                &orig_fields,
+                                &slot_types[fid],
+                                &field_getters,
+                            );
+                        }
+                        Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier)) => {
+                            ir.functions[fid].ret = carrier;
+                            // A safe coroutine primitive produces `T` through the generic
+                            // `SafeContinuation<T>` slot, so a value-class `T` is boxed even when this
+                            // suspend declaration's selected CPS boundary is its raw reference carrier.
+                            // Convert that exact boxed tail once; ordinary carrier-producing tails are
+                            // already unboxed and remain unchanged.
+                            unbox_tail(
+                                ir,
+                                body,
+                                x,
+                                &under,
+                                &orig_rets,
+                                &orig_fields,
+                                &slot_types[fid],
+                                &field_getters,
+                            );
+                        }
+                        None => unreachable!("the return was already identified as a value class"),
+                    }
                 }
             } else if under.contains_key(&x) {
                 if let Some(body) = ir.functions[fid].body {
@@ -3758,10 +4034,12 @@ fn unboxed_vc_class(
         } if name == "constructor-impl" || name == "unbox-impl" => value_class_name(*owner, under),
         // A local call returning an unboxed value class — only considered when `calls` is set (the
         // `Any`-return case); the lambda case must NOT box these (they already satisfy `Object`).
-        IrExpr::Call {
-            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
-            ..
-        } if calls => match rets.get(*fid as usize) {
+        IrExpr::Call { callee, .. } if calls && callee.source_function().is_some() => match rets
+            .get(
+                callee
+                    .source_function()
+                    .expect("guarded same-file function call") as usize,
+            ) {
             Some(Ty::Obj(fq_name, _)) if under.contains_key(fq_name) => Some(*fq_name),
             _ => None,
         },
@@ -3779,25 +4057,6 @@ enum BoxOp {
     Unbox(TypeName),
     UnboxNull(TypeName),
     Narrow(TypeName),
-}
-
-fn value_tails(exprs: &[IrExpr], id: ExprId, out: &mut Vec<ExprId>) {
-    match &exprs[id as usize] {
-        IrExpr::When { branches } => {
-            for &(_, result) in branches {
-                value_tails(exprs, result, out);
-            }
-        }
-        IrExpr::Block {
-            value: Some(value), ..
-        } => value_tails(exprs, *value, out),
-        IrExpr::Block { value: None, stmts } => {
-            if let Some(&last) = stmts.last() {
-                value_tails(exprs, last, out);
-            }
-        }
-        _ => out.push(id),
-    }
 }
 
 /// The representation a value-class value currently has.
@@ -3844,6 +4103,10 @@ impl ReprCtx<'_> {
 
     fn operand_nonnull(&self, id: ExprId) -> bool {
         operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
+    }
+
+    fn operand_null_only(&self, id: ExprId) -> bool {
+        operand_null_only(self.exprs, self.rets, self.slots, id)
     }
 
     fn box_op(&self, id: ExprId, value_class: TypeName) -> BoxOp {
@@ -4087,12 +4350,34 @@ fn operand_nonnull(
             callee: Callee::Static { name, .. },
             ..
         } if name == "constructor-impl" || name == "box-impl" => true,
-        IrExpr::Call {
-            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
-            ..
-        } => rets.get(*fid as usize).is_some_and(non_null_ty),
+        IrExpr::Call { callee, .. } if callee.source_function().is_some() => rets
+            .get(
+                callee
+                    .source_function()
+                    .expect("guarded same-file function call") as usize,
+            )
+            .is_some_and(non_null_ty),
         IrExpr::GetValue(i) => slots.get(i).is_some_and(non_null_ty),
         IrExpr::Block { value: Some(v), .. } => operand_nonnull(exprs, rets, fields, slots, *v),
+        _ => false,
+    }
+}
+
+/// Whether a checked value has Kotlin's null-only bottom type. This is representation evidence,
+/// not data-flow inference: it follows only common-IR-transparent wrappers and declared slot/call
+/// result types already fixed by the frontend.
+fn operand_null_only(exprs: &[IrExpr], rets: &[Ty], slots: &HashMap<u32, Ty>, id: ExprId) -> bool {
+    let null_only_ty = |ty: &Ty| *ty == Ty::Null || ty.non_null() == Ty::Nothing;
+    match &exprs[id as usize] {
+        IrExpr::Const(crate::ir::IrConst::Null) => true,
+        IrExpr::GetValue(slot) => slots.get(slot).is_some_and(null_only_ty),
+        IrExpr::Call { callee, .. } if callee.source_function().is_some() => rets
+            .get(callee.source_function().expect("guarded source function") as usize)
+            .is_some_and(null_only_ty),
+        IrExpr::TypeOp { arg, .. } => operand_null_only(exprs, rets, slots, *arg),
+        IrExpr::Block {
+            value: Some(value), ..
+        } => operand_null_only(exprs, rets, slots, *value),
         _ => false,
     }
 }
@@ -4202,6 +4487,16 @@ fn repr(
     field_getters: &FieldGetters,
     id: ExprId,
 ) -> Repr {
+    // A backend pass may have selected the value-class box as this exact expression's physical type
+    // (notably at a suspend `Object` boundary). That representation fact is later than the declaration's
+    // semantic return type and therefore wins before structural call analysis.
+    if let Some(classifier) = physical
+        .get(&id)
+        .and_then(|ty| (*ty).obj_internal())
+        .filter(|classifier| under.contains_key(classifier))
+    {
+        return Repr::Boxed(classifier);
+    }
     match &exprs[id as usize] {
         // A field read whose declared (pre-erasure) type is a value class is the unboxed underlying
         // (a data class stores a value-class property as its erased `U`). Boxing at any reference
@@ -4248,11 +4543,22 @@ fn repr(
         } if name == "unbox-impl" => {
             value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
         }
-        IrExpr::Call {
-            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
-            ..
-        } => rets
-            .get(*fid as usize)
+        // Any already-selected call whose declaration returns a value class yields that declaration's
+        // physical representation. This includes index-resolved `MethodCall`s (interface/class members),
+        // not only `Call::source_function`; omitting them made `source.get()!!` look non-value-class and
+        // preserved a `checkcast X` around the raw carrier. `declared_value_class` deliberately excludes
+        // a generic `T` merely instantiated with `X`, whose erased boundary yields a BOX instead.
+        IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+            if types.declared_value_class(id, under).is_some() =>
+        {
+            repr_of_ty(&types.declared[&id], under)
+        }
+        IrExpr::Call { callee, .. } if callee.source_function().is_some() => rets
+            .get(
+                callee
+                    .source_function()
+                    .expect("guarded same-file function call") as usize,
+            )
             .map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
         IrExpr::GetValue(i) => slots.get(i).map_or(Repr::NotVc, |t| repr_of_ty(t, under)),
         // `e as X` yields a boxed `X` object (checkcast of an `Any`/supertype value) — EXCEPT a redundant
@@ -4439,6 +4745,18 @@ fn clone_expr_with_type_facts(ir: &mut IrFile, id: ExprId) -> ExprId {
     }
     if let Some(ty) = ir.property_declaration_types.get(&id).copied() {
         ir.property_declaration_types.insert(new_id, ty);
+    }
+    // The representation wrapper is not itself the selected suspension. Move that identity to the
+    // cloned original so CPS appends the continuation to the call, then realizes the wrapper around
+    // the call's synchronous/resumed result.
+    if let Some(result) = ir.suspend_calls.remove(&id) {
+        ir.suspend_calls.insert(new_id, result);
+    }
+    if let Some(result) = ir.value_class_suspend_calls.remove(&id) {
+        ir.value_class_suspend_calls.insert(new_id, result);
+    }
+    if let Some(result) = ir.intrinsic_suspension_points.remove(&id) {
+        ir.intrinsic_suspension_points.insert(new_id, result);
     }
     new_id
 }
@@ -4630,6 +4948,9 @@ fn is_boxed_vc(
 ) -> bool {
     let x_rendered = x.render();
     let is_x = |t: &Ty| t.non_null().obj_internal().is_some_and(|n| n == x);
+    if physical.get(&id).is_some_and(is_x) {
+        return true;
+    }
     if types.get(&id).is_some_and(is_x)
         && physical.get(&id).is_some_and(|ty| ty.is_erased_top())
         && types.declared_value_class(id, under) != Some(x)
@@ -4654,10 +4975,13 @@ fn is_boxed_vc(
             callee: Callee::Static { owner, name, .. },
             ..
         } if *owner == x && name == "box-impl" => true,
-        IrExpr::Call {
-            callee: Callee::Local(fid) | Callee::ClassStatic { function: fid, .. },
-            ..
-        } => funcs.get(*fid as usize).is_some_and(|f| is_x(&f.ret)),
+        IrExpr::Call { callee, .. } if callee.source_function().is_some() => funcs
+            .get(
+                callee
+                    .source_function()
+                    .expect("guarded same-file function call") as usize,
+            )
+            .is_some_and(|function| is_x(&function.ret)),
         // A cross-file call returning the value class `x` (or `x?`) hands back a BOXED `x` — the sibling
         // facade/owner exposes the boxed wrapper across the file boundary (like a classpath member). So a
         // nullable-VC-return tail that is such a call is already boxed and must NOT be re-boxed.
@@ -4754,20 +5078,30 @@ fn is_boxed_vc(
         IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
-            ..
-        } => is_boxed_vc(
-            exprs,
-            funcs,
-            fields,
-            rets,
-            slots,
-            under,
-            types,
-            physical,
-            field_getters,
-            *arg,
-            x,
-        ),
+            type_operand,
+        } => {
+            // The coercion itself is the checked representation boundary. A non-null `X` target
+            // promises the unboxed carrier after step 5, even when its operand is an erased generic
+            // read such as `List<X>.get`. Treating the pre-rewrite operand as the coercion's result
+            // makes a following sole-property access insert a second `unbox-impl`.
+            if matches!(target(type_operand, under), Target::UnboxedX(target) if target == x) {
+                false
+            } else {
+                is_boxed_vc(
+                    exprs,
+                    funcs,
+                    fields,
+                    rets,
+                    slots,
+                    under,
+                    types,
+                    physical,
+                    field_getters,
+                    *arg,
+                    x,
+                )
+            }
+        }
         IrExpr::Block { value: Some(v), .. } => is_boxed_vc(
             exprs,
             funcs,
@@ -4825,6 +5159,14 @@ fn unbox_tail(
     slots: &HashMap<u32, Ty>,
     field_getters: &FieldGetters,
 ) {
+    if ir.physical_types.get(&id).is_some_and(|ty| {
+        ty.non_null()
+            .obj_internal()
+            .is_some_and(|classifier| classifier == x)
+    }) {
+        unbox_wrap(ir, id, x, under);
+        return;
+    }
     match &ir.exprs[id as usize] {
         IrExpr::Return(Some(v)) | IrExpr::Block { value: Some(v), .. } => {
             let v = *v;
@@ -4901,6 +5243,17 @@ fn box_ref_tail(
     slots: &HashMap<u32, Ty>,
     field_getters: &FieldGetters,
 ) {
+    // A structural intrinsic point may contain an inlined user block whose own tail has a different
+    // type (`suspendCoroutine<T> { ... }` contains a `Unit` block). Its exact physical result belongs
+    // to the point as a whole; never recurse through that semantic boundary and reinterpret the block
+    // tail as the enclosing function's value-class result.
+    if ir.physical_types.get(&id).is_some_and(|ty| {
+        ty.non_null()
+            .obj_internal()
+            .is_some_and(|classifier| classifier == x)
+    }) {
+        return;
+    }
     match &ir.exprs[id as usize] {
         IrExpr::When { branches } => {
             let rs: Vec<ExprId> = branches.iter().map(|(_, r)| *r).collect();
@@ -5071,9 +5424,7 @@ fn box_nullable_vc_tail(
 
 /// Replace the expr at `id` with `box-impl(<original expr at id>)`.
 fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let orig = ir.exprs[id as usize].clone();
-    let new_id = ir.exprs.len() as ExprId;
-    ir.exprs.push(orig);
+    let new_id = clone_expr_with_type_facts(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let d = desc(&u);
     let owner_rendered = x.render();
@@ -5092,9 +5443,7 @@ fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
 /// Null-safe box: replace the expr at `id` with `{ tmp = <orig>; if (tmp == null) null else box-impl(tmp) }`
 /// — boxing a nullable (reference-underlying) value class without hitting the ctor null-check on `null`.
 fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let orig = ir.exprs[id as usize].clone();
-    let orig_id = ir.exprs.len() as ExprId;
-    ir.exprs.push(orig);
+    let orig_id = clone_expr_with_type_facts(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
@@ -5208,12 +5557,45 @@ fn erase(t: &Ty, under: &Under) -> Ty {
     *t
 }
 
+/// Select the physical result carried through a suspend function's erased `Object` boundary.
+///
+/// The declared type remains the semantic identity used for overloads and metadata. This target pass
+/// records only how that already-selected value crosses CPS. Scalar and null-capable carriers require a
+/// box; a non-null reference carrier crosses directly unless an exact override edge requires the concrete
+/// value-class identity at the supertype boundary. Nullable value classes keep their ordinary erasure.
+fn suspend_result_representation(
+    declared: &Ty,
+    under: &Under,
+    force_boxed: bool,
+) -> Option<crate::ir::IrValueClassSuspendResult> {
+    let classifier = declared
+        .non_null()
+        .obj_internal()
+        .filter(|classifier| under.contains_key(classifier))?;
+    let carrier = erase(declared, under);
+    if !declared.is_nullable() && (force_boxed || nullable_is_boxed(classifier, under)) {
+        Some(crate::ir::IrValueClassSuspendResult::Boxed {
+            classifier,
+            carrier,
+        })
+    } else {
+        Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
+    }
+}
+
 /// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class
 /// (`kotlin/Int`, `kotlin/Boolean`, …) emits as a JVM primitive (`I`, `Z`, …), so it is NOT a
 /// reference; its NULLABLE form is the boxed wrapper (`Integer`), which is. Everything else that is a
 /// `Class` is a reference.
 fn is_ref(t: &Ty) -> bool {
     if t.is_nullable() {
+        return true;
+    }
+    // A Kotlin type parameter always occupies an erased JVM reference slot, even when its upper
+    // bound names a primitive-like Kotlin class. Treating `T` as non-reference loses the boxing
+    // boundary in `Holder<T>(value: T)` and stores an unboxed value-class carrier as `Integer`
+    // instead of the value class's boxed wrapper.
+    if matches!(t.non_null(), Ty::TyParam(..)) {
         return true;
     }
     // A JVM scalar (`Int`/`Long`/… AND the unsigned `UInt`/`ULong`, which are unboxed primitives) is NOT a
@@ -5522,6 +5904,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             args: vec![arg],
             ctor_params: Some(vec![u_ir]),
             ctor_desc: None,
+            external_target: None,
         });
         let body = ret_block(ir, new);
         let fid = add_static(ir, "box-impl", vec![u_ir], x_ir, body);
@@ -5768,25 +6151,59 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
         }
     }
 
-    // A secondary constructor becomes a static `constructor-impl` overload.
+    // A secondary constructor becomes a static `constructor-impl` overload. Preserve its semantic
+    // declaration shape before consuming the instance-constructor IR: downstream Kotlin compilation
+    // selects the source constructor from metadata, then follows the exact static realization handle.
+    let secondary_metadata = ir.classes[class_id as usize]
+        .secondary_ctors
+        .iter()
+        .filter(|constructor| !constructor.synthetic)
+        .map(|constructor| crate::ir::IrJvmValueClassSecondaryCtor {
+            params: constructor.named_params.clone(),
+            param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
+            vararg_index: constructor.vararg_index,
+            annotations: constructor.annotations.clone(),
+            descriptor: method_descriptor(
+                &jvm_tys(
+                    &constructor
+                        .params
+                        .iter()
+                        .map(|parameter| erase(parameter, under))
+                        .collect::<Vec<_>>(),
+                ),
+                ir_ty_to_jvm(&eu),
+            ),
+        })
+        .collect::<Vec<_>>();
+    if !secondary_metadata.is_empty() {
+        ir.jvm_value_class_secondary_ctors
+            .insert(internal_name, secondary_metadata);
+    }
     let secs = std::mem::take(&mut ir.classes[class_id as usize].secondary_ctors);
     if !secs.is_empty() {
-        let udesc = type_descriptor(ir_ty_to_jvm(&u_ir));
         for sc in secs {
+            if !sc.prefix_params.is_empty() {
+                return false;
+            }
             let crate::ir::CtorDelegateTarget::This {
                 target_params,
-                to_primary: true,
+                to_primary: _,
                 default_masks,
             } = &sc.delegate
             else {
                 return false;
             };
-            if target_params.as_slice() != [u_ir]
-                || !default_masks.is_empty()
-                || sc.delegate_args.len() != 1
+            if !default_masks.is_empty()
+                || !sc.default_parameters.is_empty()
+                || sc.delegate_args.len() != target_params.len()
             {
                 return false;
             }
+            let target_params = target_params
+                .iter()
+                .map(|parameter| erase(parameter, under))
+                .collect::<Vec<_>>();
+            let target_descriptor = method_descriptor(&jvm_tys(&target_params), ir_ty_to_jvm(&eu));
 
             let mut roots = sc.delegate_prelude.clone();
             roots.extend(sc.delegate_args.iter().copied());
@@ -5810,7 +6227,7 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
                 callee: Callee::Static {
                     owner: internal_name,
                     name: "constructor-impl".to_string(),
-                    descriptor: format!("({udesc}){udesc}"),
+                    descriptor: target_descriptor,
                     inline: InlineKind::None,
                 },
                 dispatch_receiver: None,
@@ -6094,7 +6511,14 @@ fn erase_descriptor(descriptor: &str, under: &Under) -> String {
                 j += 1;
             }
             let fq = &descriptor[start..j];
-            if let Some(u) = existing_type_name(fq).and_then(|name| under.get(&name)) {
+            // A value class in a JVM reference-array component is necessarily BOXED. Erase a
+            // declaration slot `LValue;` to its carrier, but never rewrite the component of
+            // `[LValue;`: doing so silently changes `Array<UInt>` into `IntArray` and likewise turns
+            // `Array<Data>` into the array-valued carrier of `Data`.
+            let underlying = (bytes.get(i.wrapping_sub(1)) != Some(&b'['))
+                .then(|| existing_type_name(fq).and_then(|name| under.get(&name)))
+                .flatten();
+            if let Some(u) = underlying {
                 out.push_str(&desc(&erase(u, under)));
             } else {
                 out.push_str(&descriptor[i..=j]);
@@ -6106,13 +6530,6 @@ fn erase_descriptor(descriptor: &str, under: &Under) -> String {
         }
     }
     out
-}
-
-fn is_property_getter_bridge_name(name: &str) -> bool {
-    name.starts_with("get")
-        || name
-            .strip_prefix("is")
-            .is_some_and(|s| s.chars().next().is_some_and(char::is_uppercase))
 }
 
 fn desc(t: &Ty) -> String {

@@ -279,6 +279,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
         IrExpr::UnitInstance => "undefined".to_string(),
         IrExpr::GetValue(i) => val_name(*i, inst),
         IrExpr::GetStatic(i) => ir.statics[*i as usize].name.clone(),
+        IrExpr::EnclosingInstance { receiver, .. } => {
+            format!("{}.this$0", emit_expr(ir, *receiver, inst))
+        }
         IrExpr::GetField {
             receiver,
             class,
@@ -293,7 +296,10 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             name,
             ..
         } => {
-            let receiver = emit_expr(ir, *receiver, inst);
+            let receiver = receiver.map_or_else(
+                || class_simple(&owner.render()).to_string(),
+                |receiver| emit_expr(ir, receiver, inst),
+            );
             // Plain JavaScript has no Kotlin accessor ABI, but a source-written Kotlin accessor is still
             // executable user code: common lowering retains that body as an IrFunction. Calling it here
             // is the JS realization of the same semantic property operation; using `receiver.name`
@@ -361,6 +367,16 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     emit_args(ir, args, inst)
                 )
             }
+            Callee::ClassStaticDefault { owner, function } => {
+                let name = format!("{}$default", ir.functions[*function as usize].name);
+                let owner = owner.render();
+                format!(
+                    "{}.{}({})",
+                    class_simple(&owner),
+                    name,
+                    emit_args(ir, args, inst)
+                )
+            }
             Callee::LocalDefault(fid) => {
                 let name = format!("{}$default", ir.functions[*fid as usize].name);
                 format!("{}({})", name, emit_args(ir, args, inst))
@@ -373,6 +389,21 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             Callee::CrossFile { name, .. } => {
                 format!("{}({})", name, emit_args(ir, args, inst))
             }
+            Callee::Module {
+                name, default_call, ..
+            } => {
+                let name = if *default_call {
+                    format!("{name}$default")
+                } else {
+                    name.clone()
+                };
+                format!("{}({})", name, emit_args(ir, args, inst))
+            }
+            Callee::External { target, .. } => format!(
+                "__krusty_external_{}({})",
+                target.raw(),
+                emit_args(ir, args, inst)
+            ),
             // A resolved JVM instance call → `receiver.name(args)`.
             Callee::Virtual { name, .. } => {
                 let recv = dispatch_receiver
@@ -380,7 +411,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     .unwrap_or_default();
                 format!("{}.{}({})", recv, name, emit_args(ir, args, inst))
             }
-            Callee::Special { owner, name, .. } => {
+            // Realized into `Callee::Special` by the JVM pass; JS has no super-dispatch
+            // realization yet, so it renders the same direct call shape.
+            Callee::Super { owner, name, .. } | Callee::Special { owner, name, .. } => {
                 let receiver = dispatch_receiver
                     .map(|receiver| emit_expr(ir, receiver, inst))
                     .unwrap_or_else(|| "this".to_string());
@@ -434,6 +467,41 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     "String({})",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst)
                 ),
+                crate::ir::IrIntrinsic::PrimitiveCompare { .. } => {
+                    let left = emit_expr(ir, dispatch_receiver.unwrap(), inst);
+                    let right = emit_expr(ir, args[0], inst);
+                    format!(
+                        "((a,b)=>Number.isNaN(a)?(Number.isNaN(b)?0:1):Number.isNaN(b)?-1:\
+                         Object.is(a,b)?0:Object.is(a,-0)?-1:Object.is(b,-0)?1:a<b?-1:1)\
+                         ({left},{right})"
+                    )
+                }
+                // Coroutine CPS realization is target-specific and is not yet part of the JS
+                // backend. Keep the semantic operation explicit instead of invoking the stdlib's
+                // private throwing accessor.
+                crate::ir::IrIntrinsic::CoroutineContext => "undefined".to_string(),
+                crate::ir::IrIntrinsic::UnsignedToString { source } => {
+                    let value = emit_expr(ir, dispatch_receiver.unwrap(), inst);
+                    match *source {
+                        Ty::UByte => format!("String(({value}) & 255)"),
+                        Ty::UShort => format!("String(({value}) & 65535)"),
+                        Ty::UInt => format!("String(({value}) >>> 0)"),
+                        Ty::ULong => format!("String(BigInt.asUintN(64, BigInt({value})))"),
+                        _ => format!("String({value})"),
+                    }
+                }
+                crate::ir::IrIntrinsic::DataClassFieldEquals { .. } => format!(
+                    "Object.is({}, {})",
+                    emit_expr(ir, args[0], inst),
+                    emit_expr(ir, args[1], inst)
+                ),
+                crate::ir::IrIntrinsic::DataClassFieldHash { .. } => format!(
+                    "(String({}).split('').reduce((h,c)=>((h*31+c.charCodeAt(0))|0),0))",
+                    emit_expr(ir, args[0], inst)
+                ),
+                crate::ir::IrIntrinsic::DataClassArrayToString { .. } => {
+                    format!("String([{}])", emit_expr(ir, args[0], inst))
+                }
             },
         },
         IrExpr::TypeOp {
@@ -503,7 +571,10 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             value,
             ..
         } => {
-            let receiver = emit_expr(ir, *receiver, inst);
+            let receiver = receiver.map_or_else(
+                || class_simple(&owner.render()).to_string(),
+                |receiver| emit_expr(ir, receiver, inst),
+            );
             let value = emit_expr(ir, *value, inst);
             // As for reads, a source-written setter body is a real method in the common IR and must run.
             // A plain/default property has no such method and maps naturally to a JS field assignment.
@@ -647,6 +718,7 @@ mod tests {
             field_annotations: Vec::new(),
             property_annotations: Vec::new(),
             ctor_param_count: 0,
+            constructor_prefix_count: 0,
             ctor_args: Vec::new(),
             ctor_param_annotations: Vec::new(),
             init_body: None,

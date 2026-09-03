@@ -166,6 +166,31 @@ fn a_cross_file_jvm_field_property_is_read_as_a_field() {
     );
 }
 
+/// Top-level and named-object properties remain semantic property operations across the file
+/// boundary. The JVM alone chooses their static field containers (the file facade and object class).
+#[test]
+fn cross_file_top_level_and_object_jvm_fields_use_backend_storage() {
+    const LIB: &str = r#"
+package lib
+@JvmField var top: Int = 1
+object Values {
+    @JvmField var member: Int = 2
+}
+"#;
+    const USE: &str = r#"
+package lib
+fun box(): String {
+    top = 3
+    Values.member = 4
+    return if (top == 3 && Values.member == 4) "OK" else "fail"
+}
+"#;
+    common::expect_box_ok_files_with_stdlib(
+        &[("JvmFieldDeclarations.kt", LIB), ("JvmFieldUses.kt", USE)],
+        "cross-file top-level/object @JvmField storage",
+    );
+}
+
 /// The originally reported shape, `@JvmField val ys: Array<String>`, asserted on the two facts the
 /// annotation owns: the field is `public final` and NO accessor is emitted beside it.
 ///

@@ -14,7 +14,7 @@
 //! The flow frame is concrete: narrowings are a property of lexical scopes, so they live here.
 
 use crate::diag::Span;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -70,21 +70,42 @@ impl NarrowPath {
 /// even to the SAME type — is a different object. That is expressed by WHERE the narrowing lives:
 /// it sits in the frame of the scope that proved it, and `lookup_path_narrowing` stops walking
 /// outward at the rung that established the receiver.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct PathNarrowing {
     pub(crate) ty: Ty,
+}
+
+/// A value or classifier a stable access path cannot denote on the current control-flow edge.
+/// These are body-local semantic facts: exhaustiveness consumes them while checking a `when`, and
+/// no complement/intersection pseudo-type can escape into checked FIR.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum FlowExclusion {
+    Boolean(bool),
+    EnumEntry { classifier: TypeName, name: String },
+    Singleton(TypeName),
+    Classifier(TypeName),
+    Null,
 }
 
 /// Flow facts proven within one scope. Both kinds live HERE rather than on the binding they talk
 /// about, which is what makes them die with the scope that proved them — in both directions, with
 /// no reset step. A fact about a binding declared further out is still the inner scope's fact.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Flow {
     /// Property paths (`a.b`) proven non-null or `is T` by an enclosing condition.
     paths: HashMap<NarrowPath, PathNarrowing>,
+    /// All incomparable types proved for one stable access path. A Kotlin smart cast may produce
+    /// an intersection (`x is A && x is B`) even though the compact, globally shared [`Ty`] model
+    /// deliberately has no body-flow-only intersection variant. These facts stay in the lexical
+    /// flow frame and are discarded with the active body; a use site selects an ordinary bound and
+    /// publishes only that checked receiver type to FIR.
+    intersections: HashMap<NarrowPath, Vec<Ty>>,
+    /// Values and classifier regions excluded by preceding conditions on stable paths.
+    exclusions: HashMap<NarrowPath, Vec<FlowExclusion>>,
     /// Straight-line READ types for a `var` assigned a non-null value (`var x: Int?; x = 10`
-    /// reads as `Int`). Sound only along one statement sequence in one scope, so lookups read the
-    /// CURRENT scope's frame and never walk outward.
+    /// reads as `Int`). A nested lexical scope starts on the same execution edge and therefore sees
+    /// an enclosing fact until it shadows or writes that binding; branch-local facts still die with
+    /// the frame that established them.
     locals: HashMap<String, Ty>,
     /// Smart casts a condition ATTEMPTED but the stability gate declined because the root is a
     /// local `var` a capturing closure mutates: the variable's name and the target type the
@@ -92,6 +113,13 @@ pub(crate) struct Flow {
     /// later nullable-receiver use reports kotlinc's SMARTCAST_IMPOSSIBLE instead of the plain
     /// unsafe-call error.
     declined: Vec<(String, Ty)>,
+}
+
+/// A short-lived copy of the flow frames on one lexical scope chain. Control-flow constructs use
+/// this while checking sibling execution paths; it never survives body checking or crosses FIR.
+#[derive(Clone)]
+pub(crate) struct FlowSnapshot {
+    frames: Vec<Flow>,
 }
 
 /// Kotlin's namespaces are distinct: `fun Foo()` and `val Foo` may coexist in one scope, and a
@@ -133,6 +161,7 @@ struct ScopedReceiver {
     ty: Ty,
     identity: (usize, usize),
     extension_declaration: Option<Span>,
+    class_receiver: bool,
     context_name: Option<String>,
     context_shadow_depth: usize,
 }
@@ -143,6 +172,7 @@ impl ScopedReceiver {
             ty,
             identity,
             extension_declaration: None,
+            class_receiver: true,
             context_name: None,
             context_shadow_depth: 0,
         }
@@ -162,7 +192,7 @@ pub(crate) struct Scope<'p, B> {
     /// extension/current receiver stays in [`ScopeKind::Function`]; keeping the remaining
     /// receivers on the same rung lets every scope consumer (member lookup and context-argument
     /// selection alike) observe the exact lambda shape.
-    context_receivers: Vec<(Ty, String)>,
+    context_receivers: RefCell<Vec<(Ty, String)>>,
     /// Runtime binding of the function rung's current receiver. Ordinary extension receivers are
     /// addressed as `this`; when the last context parameter occupies this slot, lowering binds it
     /// under its declared name instead.
@@ -195,7 +225,7 @@ impl<'p, B> Scope<'p, B> {
         Scope {
             parent,
             kind,
-            context_receivers: Vec::new(),
+            context_receivers: RefCell::new(Vec::new()),
             current_receiver_name: None,
             extension_receiver_declaration: None,
             bindings: RefCell::new(Vec::new()),
@@ -211,6 +241,60 @@ impl<'p, B> Scope<'p, B> {
         Scope::with_parent(Some(self), kind)
     }
 
+    /// Capture the flow state of this scope chain before checking a sibling execution path.
+    pub(crate) fn flow_snapshot(&self) -> FlowSnapshot {
+        FlowSnapshot {
+            frames: self
+                .ancestors()
+                .map(|scope| scope.flow.borrow().clone())
+                .collect(),
+        }
+    }
+
+    /// Restore a previously captured state for the same live scope chain.
+    pub(crate) fn restore_flow(&self, snapshot: &FlowSnapshot) {
+        let scopes = self.ancestors().collect::<Vec<_>>();
+        assert_eq!(
+            scopes.len(),
+            snapshot.frames.len(),
+            "flow snapshot must belong to the same lexical scope chain"
+        );
+        for (scope, flow) in scopes.into_iter().zip(&snapshot.frames) {
+            *scope.flow.borrow_mut() = flow.clone();
+        }
+    }
+
+    /// Keep only facts that hold on every supplied normal-exit edge, then install that joined state.
+    pub(crate) fn restore_common_flow(&self, snapshots: &[FlowSnapshot]) {
+        let Some(first) = snapshots.first() else {
+            return;
+        };
+        let mut common = first.clone();
+        for snapshot in &snapshots[1..] {
+            assert_eq!(
+                common.frames.len(),
+                snapshot.frames.len(),
+                "joined flow snapshots must share one lexical scope chain"
+            );
+            for (frame, other) in common.frames.iter_mut().zip(&snapshot.frames) {
+                frame
+                    .paths
+                    .retain(|path, fact| other.paths.get(path) == Some(fact));
+                frame
+                    .intersections
+                    .retain(|path, facts| other.intersections.get(path) == Some(facts));
+                frame
+                    .exclusions
+                    .retain(|path, facts| other.exclusions.get(path) == Some(facts));
+                frame
+                    .locals
+                    .retain(|name, ty| other.locals.get(name) == Some(ty));
+                frame.declined.retain(|fact| other.declined.contains(fact));
+            }
+        }
+        self.restore_flow(&common);
+    }
+
     pub(crate) fn function_child(
         &'p self,
         receiver: Option<Ty>,
@@ -219,7 +303,10 @@ impl<'p, B> Scope<'p, B> {
     ) -> Scope<'p, B> {
         let mut child = Scope::with_parent(Some(self), ScopeKind::Function { receiver });
         child.current_receiver_name = receiver_name;
-        child.context_receivers.extend_from_slice(context_receivers);
+        child
+            .context_receivers
+            .get_mut()
+            .extend_from_slice(context_receivers);
         child
     }
 
@@ -228,10 +315,31 @@ impl<'p, B> Scope<'p, B> {
         receiver: Option<Ty>,
         extension_declaration: Option<Span>,
     ) -> Scope<'p, B> {
+        self.declaration_function_child_with_context(receiver, extension_declaration, &[])
+    }
+
+    pub(crate) fn declaration_function_child_with_context(
+        &'p self,
+        receiver: Option<Ty>,
+        extension_declaration: Option<Span>,
+        context_receivers: &[(Ty, String)],
+    ) -> Scope<'p, B> {
         debug_assert_eq!(receiver.is_some(), extension_declaration.is_some());
         let mut child = Scope::with_parent(Some(self), ScopeKind::Function { receiver });
         child.extension_receiver_declaration = extension_declaration;
         child
+            .context_receivers
+            .get_mut()
+            .extend_from_slice(context_receivers);
+        child
+    }
+
+    /// Attach classifier-owned context receivers after its type parameters have entered the class
+    /// rung and their types can be resolved. This mutates only the current lexical scope frame.
+    pub(crate) fn declare_context_receivers(&self, receivers: &[(Ty, String)]) {
+        self.context_receivers
+            .borrow_mut()
+            .extend_from_slice(receivers);
     }
 
     pub(crate) fn kind(&self) -> ScopeKind {
@@ -333,6 +441,13 @@ impl<'p, B> Scope<'p, B> {
         B: Clone,
     {
         for rung in self.ancestors() {
+            let cuts_outer = matches!(
+                rung.kind,
+                ScopeKind::Class {
+                    carries_outer: false,
+                    ..
+                }
+            );
             if let Some(binding) = rung.own_value_root(name) {
                 return Some(RootValue::Binding(binding));
             }
@@ -342,24 +457,22 @@ impl<'p, B> Scope<'p, B> {
                 } if receiver_has_value(receiver) => {
                     return Some(RootValue::Receiver);
                 }
-                ScopeKind::Class {
-                    ty, carries_outer, ..
-                } => {
+                ScopeKind::Class { ty, .. } => {
                     if receiver_has_value(ty) {
                         return Some(RootValue::Receiver);
-                    }
-                    if !carries_outer {
-                        break;
                     }
                 }
                 _ => {}
             }
-            if matches!(rung.kind, ScopeKind::Function { .. }) {
-                for (receiver, _) in rung.context_receivers.iter().rev() {
+            if !rung.context_receivers.borrow().is_empty() {
+                for (receiver, _) in rung.context_receivers.borrow().iter().rev() {
                     if receiver_has_value(*receiver) {
                         return Some(RootValue::Receiver);
                     }
                 }
+            }
+            if cuts_outer {
+                break;
             }
         }
         external_has_value().then_some(RootValue::External)
@@ -446,6 +559,46 @@ impl<'p, B> Scope<'p, B> {
             .insert(path, PathNarrowing { ty });
     }
 
+    /// Add one constituent of a flow intersection proved for `path` in this scope.
+    pub(crate) fn narrow_intersection(&self, path: NarrowPath, ty: Ty) {
+        let mut flow = self.flow.borrow_mut();
+        let types = flow.intersections.entry(path).or_default();
+        if !types.contains(&ty) {
+            types.push(ty);
+        }
+    }
+
+    /// Intersection constituents proved in THIS scope. The checker owns the ancestry walk because
+    /// it must stop at the binding/receiver boundary for the path, like ordinary path narrowing.
+    pub(crate) fn intersection_narrowing(&self, path: &NarrowPath) -> Vec<Ty> {
+        self.flow
+            .borrow()
+            .intersections
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Add one negative flow fact for `path` in this lexical frame.
+    pub(crate) fn exclude(&self, path: NarrowPath, exclusion: FlowExclusion) {
+        let mut flow = self.flow.borrow_mut();
+        let exclusions = flow.exclusions.entry(path).or_default();
+        if !exclusions.contains(&exclusion) {
+            exclusions.push(exclusion);
+        }
+    }
+
+    /// Negative facts proved in THIS scope. The checker owns the ancestry walk so it can stop at
+    /// the binding or receiver boundary that gives the path its identity.
+    pub(crate) fn exclusions(&self, path: &NarrowPath) -> Vec<FlowExclusion> {
+        self.flow
+            .borrow()
+            .exclusions
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The proof THIS scope holds for `path`, if any. Callers walk `ancestors` themselves because
     /// the walk must stop at the rung owning the path's root.
     pub(crate) fn path_narrowing(&self, path: &NarrowPath) -> Option<Ty> {
@@ -459,10 +612,10 @@ impl<'p, B> Scope<'p, B> {
     /// Drop every path proof rooted at `root`. A NEW binding under that name invalidates them —
     /// the proof was about the old value.
     pub(crate) fn invalidate_paths_rooted_at(&self, root: &str) {
-        self.flow
-            .borrow_mut()
-            .paths
-            .retain(|path, _| path.root != root);
+        let mut flow = self.flow.borrow_mut();
+        flow.paths.retain(|path, _| path.root != root);
+        flow.intersections.retain(|path, _| path.root != root);
+        flow.exclusions.retain(|path, _| path.root != root);
     }
 
     /// Record the straight-line read type of `name` for the rest of THIS scope, or with `None`
@@ -472,6 +625,22 @@ impl<'p, B> Scope<'p, B> {
     /// disproves a narrowing an enclosing scope established (`var x: Int? = 10; if (c) { x = null }`
     /// — the outer proof is dead once the branch can run), so `None` clears the whole chain.
     pub(crate) fn narrow_local(&self, name: &str, ty: Option<Ty>) {
+        // An assignment replaces every type fact about this runtime value, including an `A & B`
+        // proof established by an enclosing condition. Stop at the declaring rung so a same-named
+        // outer binding keeps its unrelated facts.
+        for rung in self.ancestors() {
+            rung.flow
+                .borrow_mut()
+                .intersections
+                .retain(|path, _| path.root != name);
+            rung.flow
+                .borrow_mut()
+                .exclusions
+                .retain(|path, _| path.root != name);
+            if rung.declared_here(name, Ns::Value) {
+                break;
+            }
+        }
         match ty {
             Some(ty) => {
                 self.flow.borrow_mut().locals.insert(name.to_string(), ty);
@@ -499,10 +668,18 @@ impl<'p, B> Scope<'p, B> {
         }
     }
 
-    /// The straight-line read type proven for `name` in THIS scope. Deliberately does not walk
-    /// outward: a narrowing proven before a branch does not hold inside it.
+    /// The nearest visible straight-line read type proven for `name`. A nested block inherits facts
+    /// from its entry edge, but a same-named declaration cuts the walk exactly like value lookup.
     pub(crate) fn local_narrowing(&self, name: &str) -> Option<Ty> {
-        self.flow.borrow().locals.get(name).copied()
+        for rung in self.ancestors() {
+            if let Some(ty) = rung.flow.borrow().locals.get(name).copied() {
+                return Some(ty);
+            }
+            if rung.declared_here(name, Ns::Value) {
+                return None;
+            }
+        }
+        None
     }
 
     /// Record that a condition guarding THIS scope tried to smart-cast `name` to `ty` but the
@@ -568,9 +745,23 @@ impl<'p, B> Scope<'p, B> {
         None
     }
 
-    /// Every straight-line narrowing THIS scope holds, by name.
+    /// Every visible straight-line narrowing, innermost fact first and cut by shadowing bindings.
     pub(crate) fn local_narrowings(&self) -> HashMap<String, Ty> {
-        self.flow.borrow().locals.clone()
+        let mut visible = HashMap::new();
+        let mut shadowed = std::collections::HashSet::new();
+        for rung in self.ancestors() {
+            for (name, &ty) in rung.flow.borrow().locals.iter() {
+                if !shadowed.contains(name.as_str()) {
+                    visible.entry(name.clone()).or_insert(ty);
+                }
+            }
+            for binding in rung.bindings.borrow().iter().rev() {
+                if binding.ns == Ns::Value {
+                    shadowed.insert(binding.name.clone());
+                }
+            }
+        }
+        visible
     }
 
     /// Implicit receivers, innermost first: extension receivers and `this@Class` rungs. Stops at
@@ -586,7 +777,7 @@ impl<'p, B> Scope<'p, B> {
     /// runtime value. Ordering is identical to [`Self::implicit_receivers`].
     pub(crate) fn implicit_receivers_with_declarations(
         &self,
-    ) -> Vec<(Ty, Option<Span>, (usize, usize))> {
+    ) -> Vec<(Ty, Option<Span>, (usize, usize), bool)> {
         self.implicit_receiver_values()
             .into_iter()
             .map(|receiver| {
@@ -594,9 +785,20 @@ impl<'p, B> Scope<'p, B> {
                     receiver.ty,
                     receiver.extension_declaration,
                     receiver.identity,
+                    receiver.class_receiver,
                 )
             })
             .collect()
+    }
+
+    pub(crate) fn implicit_receiver_context_name(
+        &self,
+        identity: (usize, usize),
+    ) -> Option<String> {
+        self.implicit_receiver_values()
+            .into_iter()
+            .find(|receiver| receiver.identity == identity)
+            .and_then(|receiver| receiver.context_name)
     }
 
     /// Identity of the innermost class receiver rung, if this lexical chain has one.
@@ -631,18 +833,47 @@ impl<'p, B> Scope<'p, B> {
                 ty,
                 identity,
                 extension_declaration,
+                class_receiver: false,
                 context_name,
                 context_shadow_depth,
             });
         };
         for scope in self.ancestors() {
             let scope_identity = scope as *const Self as usize;
-            if !matches!(scope.kind, ScopeKind::Function { .. }) {
-                for binding in scope.bindings.borrow().iter().rev() {
-                    if binding.ns == Ns::Value {
-                        *same_name_depths.entry(binding.name.clone()).or_default() += 1;
-                    }
+            let cuts_outer = matches!(
+                scope.kind,
+                ScopeKind::Class {
+                    carries_outer: false,
+                    ..
                 }
+            );
+            let mut receiver_binding_counts = HashMap::<String, usize>::new();
+            if let Some(name) = scope.current_receiver_name.as_ref() {
+                *receiver_binding_counts.entry(name.clone()).or_default() += 1;
+            }
+            for (_, name) in scope.context_receivers.borrow().iter() {
+                if name != "_" {
+                    *receiver_binding_counts.entry(name.clone()).or_default() += 1;
+                }
+            }
+            for binding in scope.bindings.borrow().iter().rev() {
+                if binding.ns != Ns::Value {
+                    continue;
+                }
+                if receiver_binding_counts
+                    .get_mut(&binding.name)
+                    .is_some_and(|remaining| {
+                        if *remaining == 0 {
+                            false
+                        } else {
+                            *remaining -= 1;
+                            true
+                        }
+                    })
+                {
+                    continue;
+                }
+                *same_name_depths.entry(binding.name.clone()).or_default() += 1;
             }
             match scope.kind {
                 ScopeKind::Function {
@@ -657,51 +888,27 @@ impl<'p, B> Scope<'p, B> {
                         scope.extension_receiver_declaration,
                     );
                 }
-                ScopeKind::Class {
-                    ty, carries_outer, ..
-                } => {
+                ScopeKind::Class { ty, .. } => {
                     out.push(ScopedReceiver::plain(ty, (scope_identity, 0)));
-                    if !carries_outer {
-                        break;
-                    }
                 }
                 _ => {}
             }
-            if matches!(scope.kind, ScopeKind::Function { .. }) {
-                let mut receiver_binding_counts = HashMap::<String, usize>::new();
-                if let Some(name) = scope.current_receiver_name.as_ref() {
-                    *receiver_binding_counts.entry(name.clone()).or_default() += 1;
-                }
-                for (index, (ty, name)) in scope.context_receivers.iter().rev().enumerate() {
+            if !scope.context_receivers.borrow().is_empty() {
+                for (index, (ty, name)) in scope.context_receivers.borrow().iter().rev().enumerate()
+                {
+                    let context_name = (name != "_").then(|| name.clone());
                     push(
                         &mut out,
                         &mut same_name_depths,
                         *ty,
                         (scope_identity, index + 1),
-                        Some(name.clone()),
+                        context_name,
                         None,
                     );
-                    *receiver_binding_counts.entry(name.clone()).or_default() += 1;
                 }
-                for binding in scope.bindings.borrow().iter().rev() {
-                    if binding.ns != Ns::Value {
-                        continue;
-                    }
-                    if receiver_binding_counts
-                        .get_mut(&binding.name)
-                        .is_some_and(|remaining| {
-                            if *remaining == 0 {
-                                false
-                            } else {
-                                *remaining -= 1;
-                                true
-                            }
-                        })
-                    {
-                        continue;
-                    }
-                    *same_name_depths.entry(binding.name.clone()).or_default() += 1;
-                }
+            }
+            if cuts_outer {
+                break;
             }
         }
         out
@@ -721,6 +928,13 @@ impl<'p, B> Scope<'p, B> {
         let mut out = Vec::new();
         for scope in self.ancestors() {
             let scope_identity = scope as *const Self as usize;
+            let cuts_outer = matches!(
+                scope.kind,
+                ScopeKind::Class {
+                    carries_outer: false,
+                    ..
+                }
+            );
             if scope.declared_here(name, ns) {
                 break;
             }
@@ -731,26 +945,25 @@ impl<'p, B> Scope<'p, B> {
                     let _ = receiver;
                     out.push((scope_identity, 0));
                 }
-                ScopeKind::Class {
-                    ty, carries_outer, ..
-                } => {
+                ScopeKind::Class { ty, .. } => {
                     let _ = ty;
                     out.push((scope_identity, 0));
-                    if !carries_outer {
-                        break;
-                    }
                 }
                 _ => {}
             }
-            if matches!(scope.kind, ScopeKind::Function { .. }) {
+            if !scope.context_receivers.borrow().is_empty() {
                 out.extend(
                     scope
                         .context_receivers
+                        .borrow()
                         .iter()
                         .rev()
                         .enumerate()
                         .map(|(index, _)| (scope_identity, index + 1)),
                 );
+            }
+            if cuts_outer {
+                break;
             }
         }
         out
@@ -1028,16 +1241,17 @@ mod tests {
     }
 
     #[test]
-    fn a_flow_fact_belongs_to_the_scope_that_proved_it() {
+    fn an_enclosing_flow_fact_holds_on_nested_scope_entry_and_a_write_invalidates_it() {
         let root: Scope<'_, u32> = Scope::root();
         let function = root.child(ScopeKind::Function { receiver: None });
+        function.rebind("x", Ns::Value, 1);
         function.narrow_local("x", Some(Ty::Int));
 
         let branch = function.child(ScopeKind::Block);
         assert_eq!(
             branch.local_narrowing("x"),
-            None,
-            "a straight-line narrowing does not hold inside a nested scope"
+            Some(Ty::Int),
+            "a nested scope starts with the enclosing execution-edge fact"
         );
         branch.narrow_local("x", Some(Ty::Long));
         drop(branch);

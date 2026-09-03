@@ -21,6 +21,8 @@ pub mod contracts;
 pub mod diag;
 pub mod dump;
 pub mod features;
+pub mod fir;
+pub mod fir_lower;
 pub mod frontend;
 pub mod ir;
 pub mod ir_lower;

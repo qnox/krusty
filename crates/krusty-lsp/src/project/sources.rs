@@ -233,9 +233,16 @@ impl ProjectSources {
                 .module_index_for_source(path)
                 .is_some_and(|index| covered_modules.contains(&index))
         });
-        let (kotlin_paths, java_paths): (Vec<_>, Vec<_>) = paths
-            .into_iter()
-            .partition(|path| krusty::source::is_supported_path(path));
+        // Both Kotlin and Java are supported project inputs, but they have different retention
+        // policies here: Kotlin files form the checked source prefix, while Java files are loaded
+        // through the import-closure budget below and contribute source headers. Do not reuse the
+        // broader "supported path" predicate as a language partition.
+        let (kotlin_paths, java_paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| {
+            matches!(
+                krusty::source::kind(path),
+                Some(krusty::source::SourceKind::Kotlin | krusty::source::SourceKind::KotlinScript)
+            )
+        });
         let java_paths = java_paths
             .into_iter()
             .map(|path| {

@@ -36,9 +36,11 @@ fn compile(src: &str) -> (Vec<String>, bool) {
         let runtime = krusty::libraries::EmptySymbolSource;
         if let Some(mut ir) = lower_file(&files[0], &info, &syms, &runtime) {
             let facade = file_class_name("Deep", None);
-            krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms)
-                .expect("backend passes should accept the deep chain");
             let cp = Classpath::new(vec![]);
+            krusty::jvm::backend::run_backend_passes(
+                &mut ir, &files[0], &facade, "main", &syms, &cp,
+            )
+            .expect("backend passes should accept the deep chain");
             emitted = emit_all(&ir, &facade, &cp, None, &syms).is_some();
         }
     }

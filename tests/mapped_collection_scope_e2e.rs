@@ -223,6 +223,20 @@ fn remove_at_override_satisfies_the_java_util_abstract() {
 }
 
 #[test]
+fn java_collection_returns_expose_the_mutable_flexible_lower_bound() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let source = r#"
+        class MutableStrings : MutableIterator<String> by ArrayList<String>().iterator()
+
+        fun mutableIterator(): MutableIterator<String> = ArrayList<String>().iterator()
+    "#;
+    let diagnostics =
+        common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
 fn java_only_members_are_not_in_the_kotlin_scope() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();

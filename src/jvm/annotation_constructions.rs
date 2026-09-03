@@ -110,11 +110,13 @@ fn annotation_implementation(
         primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
         property_annotations: Vec::new(),
         ctor_param_count: members.len() as u32,
+        constructor_prefix_count: 0,
         ctor_args: members
             .iter()
             .map(|(name, ty)| IrCtorArg {
                 name: Some(name.clone()),
                 ty: *ty,
+                declared_ty: None,
                 is_field: true,
                 has_default: false,
                 is_vararg: false,

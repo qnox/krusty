@@ -6,8 +6,10 @@
 //! and untested; this pins the round-trip before it is wired into emit.
 
 use krusty::jvm::classreader::ClassInfo;
-use krusty::jvm::metadata::{class_functions, decode_metadata, package_functions};
-use krusty::metadata::class_builder::{build_class, ClassTail, FnMeta};
+use krusty::jvm::metadata::{
+    class_constructors, class_functions, decode_metadata, package_functions,
+};
+use krusty::metadata::class_builder::{build_class, ClassTail, CtorMeta, FnMeta};
 use krusty::types::{type_name, Ty, TypeVariance};
 
 /// Wrap built `(d1_bytes, d2)` into a `ClassInfo` the reader consumes. `d1` is the protobuf payload with
@@ -76,6 +78,97 @@ fn class_member_value_params_round_trip() {
 }
 
 #[test]
+fn value_class_constructor_realization_name_round_trips() {
+    let (d1, d2) = build_class(
+        "sample/Name",
+        &[("value".to_string(), Ty::String)],
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        &[],
+        &[],
+        &[],
+        &ClassTail {
+            inline_underlying: Some(("value", Ty::String)),
+            ctor_sig_name: Some("constructor-impl"),
+            ..Default::default()
+        },
+    );
+    let ci = class_info_kind("sample/Name", d1, d2, Some(1));
+    let constructors = class_constructors(&ci);
+
+    assert_eq!(constructors.len(), 1);
+    assert_eq!(constructors[0].params.names, ["value"]);
+    assert_eq!(constructors[0].params.types, [Ty::String]);
+    assert_eq!(constructors[0].jvm_name, "constructor-impl");
+    assert_eq!(
+        constructors[0].jvm_desc,
+        Some("(Ljava/lang/String;)Ljava/lang/String;")
+    );
+}
+
+#[test]
+fn secondary_constructor_default_flags_round_trip() {
+    let parameters = vec![
+        ("required".to_string(), Ty::String),
+        ("fallback".to_string(), Ty::String),
+    ];
+    let defaults = [false, true];
+    let secondary = [CtorMeta {
+        params: &parameters,
+        param_defaults: &defaults,
+        desc: "(Ljava/lang/String;Ljava/lang/String;)V",
+        sig_name: None,
+        vararg_index: None,
+        flags: krusty::metadata::class_builder::SECONDARY_CTOR_FLAGS,
+        annotations: &[],
+    }];
+    let (d1, d2) = build_class(
+        "sample/Secondary",
+        &[],
+        "()V",
+        &[],
+        &[],
+        &[],
+        &ClassTail {
+            emit_primary_ctor: false,
+            secondary_ctors: &secondary,
+            ..Default::default()
+        },
+    );
+    let constructors = class_constructors(&class_info("sample/Secondary", d1, d2)).to_vec();
+
+    assert_eq!(constructors.len(), 1);
+    assert_eq!(constructors[0].params.names, ["required", "fallback"]);
+    assert_eq!(constructors[0].params.defaults, defaults);
+}
+
+#[test]
+fn class_member_equality_bound_round_trips() {
+    let owner = Ty::obj("sample/Base");
+    let mut equals = FnMeta::plain(
+        "equals".to_string(),
+        vec![("other".to_string(), Ty::nullable(Ty::obj("kotlin/Any")))],
+        Ty::Boolean,
+    );
+    equals.equality_bound = Some(owner);
+    let (d1, d2) = build_class(
+        "sample/Base",
+        &[],
+        "()V",
+        &[],
+        &[equals],
+        &[],
+        &ClassTail::default(),
+    );
+    let ci = class_info("sample/Base", d1, d2);
+    let equals = class_functions(&ci)
+        .iter()
+        .find(|function| function.jvm_name == "equals")
+        .expect("equals metadata");
+
+    assert_eq!(equals.equality_bound, Some(owner));
+}
+
+#[test]
 fn class_type_parameter_bound_and_variance_round_trip() {
     let parameter = krusty::ir::IrTypeParameter {
         name: "T".to_string(),
@@ -122,6 +215,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         context_count: 0,
         spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "pair".to_string(),
+        equality_bound: None,
         params: vec![
             (
                 "outer".to_string(),
@@ -151,6 +245,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         jvm_sig_name: None,
         annotations: Vec::new(),
         param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
     }];
     let own_names = vec!["U".to_string()];
     let captured = vec![outer];
@@ -199,6 +294,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         context_count: 0,
         spellings: krusty::spelling::DeclaredSpellings::default(),
         name: "triple".to_string(),
+        equality_bound: None,
         params: vec![parameter(&outer), parameter(&middle), parameter(&own)],
         ret: Ty::Unit,
         type_params: Vec::new(),
@@ -213,6 +309,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         jvm_sig_name: None,
         annotations: Vec::new(),
         param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
     }];
     let own_names = vec!["V".to_string()];
     let captured = vec![outer, middle];
@@ -259,6 +356,7 @@ fn package_value_param_defaults_round_trip() {
         decl_order: 0,
         jvm_name: None,
         name: "host".to_string(),
+        equality_bound: None,
         params: vec![("a".to_string(), Ty::String), ("b".to_string(), Ty::Int)],
         ret: Ty::String,
         receiver: None,
@@ -276,6 +374,7 @@ fn package_value_param_defaults_round_trip() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/HostKt", d1, d2);
@@ -306,6 +405,7 @@ fn package_function_type_parameter_bound_round_trips() {
         decl_order: 0,
         jvm_name: None,
         name: "identity".to_string(),
+        equality_bound: None,
         params: vec![("value".to_string(), t)],
         ret: t,
         receiver: None,
@@ -323,6 +423,7 @@ fn package_function_type_parameter_bound_round_trips() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/HostKt", d1, d2);
@@ -355,6 +456,7 @@ fn package_extension_receiver_round_trips() {
         decl_order: 0,
         jvm_name: None,
         name: "composable".to_string(),
+        equality_bound: None,
         params: vec![("route".to_string(), Ty::String)],
         ret: Ty::Unit,
         receiver: Some(Ty::obj("androidx/navigation/NavGraphBuilder")),
@@ -372,6 +474,7 @@ fn package_extension_receiver_round_trips() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
@@ -413,6 +516,7 @@ fn package_receiver_function_type_param_round_trips() {
         decl_order: 0,
         jvm_name: None,
         name: "NavHost".to_string(),
+        equality_bound: None,
         params: vec![(
             "builder".to_string(),
             Ty::fun_with_shape(
@@ -439,6 +543,7 @@ fn package_receiver_function_type_param_round_trips() {
         vararg_index: None,
         visibility: krusty::types::Visibility::Public,
         param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
     }];
     let (d1, d2) = build_package(&funcs, &[], &[], None);
     let ci = class_info("com/example/NavHostKt", d1, d2);

@@ -122,10 +122,10 @@ fun box(): String = if (C2().k == "K") "OK" else "FAIL"
 "#);
 }
 
-/// Parameter defaults live on the `expect` (kotlinc forbids them on the actual) — dropping the
-/// expect grafts its defaults onto the actual so omitted-argument calls still resolve.
+/// Parameter defaults live on the `expect` (kotlinc forbids them on the actual). Stable
+/// actualization retains that declaration as the Pass-2 expression provider for the actual ABI.
 #[test]
-fn expect_defaults_graft_onto_actual() {
+fn expect_defaults_are_realized_by_actual() {
     run(r#"// LANGUAGE: +MultiPlatformProjects
 expect fun foo(a: String, b: String = "K"): String
 
@@ -135,7 +135,7 @@ fun box(): String = foo("O")
 "#);
 }
 
-/// A grafted default may reference a PRIOR parameter — kotlinc guarantees the actual's parameter
+/// An expect-owned default may reference a PRIOR parameter — kotlinc guarantees the actual's parameter
 /// names match the expect's, so the name binds to the same position.
 #[test]
 fn expect_default_referencing_prior_parameter() {
@@ -145,6 +145,23 @@ expect fun rep(s: String, t: String = s): String
 actual fun rep(s: String, t: String): String = s + t
 
 fun box(): String = if (rep("X") == "XX") "OK" else "FAIL"
+"#);
+}
+
+/// Constructor defaults keep their expect declaration as the Pass-2 expression provider while
+/// the checked FIR and emitted default ABI belong to the actual constructor.
+#[test]
+fn expect_constructor_default_is_realized_by_actual_constructor() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect class C(value: String = "OK") {
+    fun get(): String
+}
+
+actual class C actual constructor(private val value: String) {
+    actual fun get(): String = value
+}
+
+fun box(): String = C().get()
 "#);
 }
 
@@ -182,10 +199,10 @@ fun box(): String = v
     );
 }
 
-/// Defaults on an `expect class` MEMBER graft onto the actual class's matching member, and an
+/// Defaults on an `expect class` member are checked for the matching actual member, and an
 /// overriding subclass inherits them at call sites.
 #[test]
-fn expect_class_member_defaults_graft() {
+fn expect_class_member_defaults_are_realized_by_actual() {
     run(r#"// LANGUAGE: +MultiPlatformProjects
 expect open class C() {
     open fun f(p: Int = 2): String
@@ -246,4 +263,26 @@ fn typealias_only_file_in_set_compiles() {
         panic!("expected the box to compile and run");
     };
     assert_eq!(out, "OK");
+}
+
+/// The same `expect class` / `actual typealias` pair split across TWO files. Pass 1 actualizes the
+/// expect declaration away, but Pass 2 reparses raw source, so the removal has to be replayed there
+/// — otherwise the checker walks a declaration whose signature was deliberately never collected and
+/// the compiler aborts instead of compiling.
+#[test]
+fn expect_class_actualized_by_typealias_across_files() {
+    let Some(got) = common::compile_and_run_files_with_stdlib(&[
+        (
+            "Common",
+            "// LANGUAGE: +MultiPlatformProjects\nexpect class S\nexpect fun f0(s: S): S\n",
+        ),
+        (
+            "Main",
+            "// LANGUAGE: +MultiPlatformProjects\nactual typealias S = String\n\
+             actual fun f0(s: S): S = s\nfun box(): String = f0(\"OK\")\n",
+        ),
+    ]) else {
+        panic!("expected the multi-file expect/actual box to compile and run");
+    };
+    assert_eq!(got, "OK");
 }

@@ -1403,8 +1403,12 @@ impl<'a> SemanticClassifier<'a> {
             }
             Stmt::Destructure { entries, .. } => {
                 let mut after = span.lo;
-                for (entry_index, (name, is_var)) in entries.iter().enumerate() {
-                    let value_modifiers = variable_modifier(*is_var);
+                for (entry_index, entry) in entries.iter().enumerate() {
+                    if entry.ignored {
+                        continue;
+                    }
+                    let name = &entry.name;
+                    let value_modifiers = variable_modifier(entry.mutable);
                     let mut definition = None;
                     if let Some(index) = self.find_named(span, name, Some(after), None, false) {
                         after = self.tokens[index].span.hi;
@@ -1442,7 +1446,7 @@ impl<'a> SemanticClassifier<'a> {
                             .unwrap_or(name);
                         self.set_last_binding_hover(format!(
                             "{} {name}: {}",
-                            if *is_var { "var" } else { "val" },
+                            if entry.mutable { "var" } else { "val" },
                             render_ty(ty)
                         ));
                     }
@@ -2943,7 +2947,7 @@ impl<'a> SemanticClassifier<'a> {
             self.push_type_definition_for_type_ref(source_span, ty);
         } else if let Some(internal) = self
             .type_info
-            .and_then(|types| types.resolved_type_ref(ty))
+            .and_then(|types| types.resolved_classifier_occurrence(ty))
             .filter(|internal| self.symbols.libraries.classifier(*internal).is_some())
         {
             self.push_library_definition(

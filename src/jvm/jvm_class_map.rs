@@ -289,7 +289,7 @@ pub fn to_jvm_internal(internal: &str) -> &str {
         return j;
     }
     if crate::types::existing_type_name(internal)
-        .is_some_and(super::jvm_libraries::is_fictitious_kfunction)
+        .is_some_and(super::function_classifiers::is_reflective_function_classifier)
     {
         return crate::types::KFUNCTION_INTERNAL;
     }

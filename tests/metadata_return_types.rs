@@ -292,7 +292,7 @@ abstract class Ro : List<String> {
         bridge_of(
             r#"
 abstract class Ro : MutableList<String> {
-    fun removeAt(index: Int): String = "x"
+    override fun removeAt(index: Int): String = "x"
 }
 "#
         ),

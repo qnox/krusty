@@ -38,6 +38,66 @@ fn copies_referenced_classpath_inner_class_metadata() {
     assert!(emitted.inner_classes.contains(&expected));
 }
 
+#[test]
+fn inherited_inner_constructor_metadata_excludes_its_enclosing_instance() {
+    let Some(lib) = common::compile_lib(
+        "inherited_inner_constructor",
+        "open class Foo(val z: Int) {\n\
+         \x20 open inner class FooInner { fun foo(): Int = z }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    let stdlib = common::stdlib_jar();
+    let source = "class Bar : Foo(42) {\n\
+        \x20 inner class BarInner(val x: Int) : FooInner()\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 val value = Bar().BarInner(117)\n\
+        \x20 return if (value.x == 117 && value.foo() == 42) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        common::front_end_diagnostics(
+            source,
+            &[lib, stdlib],
+            Some(common::jdk_modules().as_path()),
+        ),
+        Vec::<String>::new(),
+    );
+}
+
+#[test]
+fn classpath_inner_constructor_is_visible_and_bound_through_an_extension_receiver() {
+    let Some(lib) = common::compile_lib(
+        "extension_receiver_inner_constructor",
+        "package dep\n\
+         class Outer(val prefix: String) {\n\
+         \x20 inner class Inner(private val suffix: String) {\n\
+         \x20   fun text(): String = prefix + suffix\n\
+         \x20 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    let stdlib = common::stdlib_jar();
+    let source = "package app\n\
+                  import dep.Outer\n\
+                  fun Outer.make(): String = Inner(\"K\").text()\n\
+                  fun box(): String = Outer(\"O\").make()\n";
+    let Some(classes) = common::compile_in_process(
+        source,
+        "Use",
+        &[lib.clone(), stdlib.clone()],
+        Some(common::jdk_modules().as_path()),
+    ) else {
+        panic!("compile");
+    };
+    match common::run_box(&classes, "app.UseKt", &[lib, stdlib]) {
+        Some(output) => assert_eq!(output.trim(), "OK", "box() = {output:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}
+
 /// A companion declared in ANOTHER FILE of the same module is a class constant in the referencing
 /// class (`Owner.make()` loads `Owner$Companion`), so kotlinc gives it an `InnerClasses` entry
 /// (`public static final Companion=class app/Owner$Companion of class app/Owner`). The classpath
@@ -223,4 +283,37 @@ fn classpath_annotation_only_reference_gets_inner_classes_entry() {
         emitted.inner_classes,
         expected,
     );
+}
+
+#[test]
+fn generic_nested_dependency_constructor_keeps_its_erased_physical_descriptor() {
+    let library = r#"
+        package dep
+
+        abstract class Root<Nested : Root.Base<*>> {
+            open class Base<V>(val value: V)
+        }
+    "#;
+    let main = r#"
+        package app
+
+        import dep.Root
+
+        class Payload(val text: String)
+
+        class Derived : Root<Derived.Nested>() {
+            class Nested : Base<Payload>(Payload("O")) {
+                fun result(): String = Base(value).value.text + "K"
+            }
+        }
+
+        fun box(): String = Derived.Nested().result()
+    "#;
+
+    let Some(output) =
+        common::expect_box_run_against("generic_nested_ctor_descriptor", library, main)
+    else {
+        return;
+    };
+    assert_eq!(output, "OK");
 }

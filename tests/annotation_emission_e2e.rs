@@ -444,6 +444,22 @@ fn field_targeted_property_annotation_lands_on_the_backing_field() {
     );
 }
 
+#[test]
+fn streaming_named_target_array_reaches_property_metadata() {
+    require_same_metadata(
+        "streaming_named_target_array_metadata",
+        "A.kt",
+        "p/C",
+        "package p\n\n\
+         @Target(allowedTargets = [AnnotationTarget.FIELD, AnnotationTarget.VALUE_PARAMETER])\n\
+         annotation class Mark\n\n\
+         class C {\n\
+         \x20   @Mark\n\
+         \x20   val v: Int = 1\n\
+         }\n",
+    );
+}
+
 /// A primary-constructor `val` is a property too, but its annotations default to the PARAMETER — so
 /// only an annotation that cannot target a value parameter reaches the property (or the field). Both
 /// non-parameter routes are exercised here; the plain `@Mark` case stays a parameter annotation.

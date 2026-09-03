@@ -739,3 +739,52 @@ fn cross_file_adapted_ref_reports_uninferred_reified_type_argument() {
         "expected the type-inference diagnostic, got: {diags:?}"
     );
 }
+
+#[test]
+fn cross_file_inline_anonymous_class_carries_its_nested_checked_bodies() {
+    const LIB: &str = r#"
+interface Action { fun run() }
+
+inline fun action(crossinline body: () -> Unit): Action = object : Action {
+    override fun run() = body()
+}
+"#;
+    const MAIN: &str = r#"
+fun box(): String {
+    var result = "FAIL"
+    val action = action { result = "OK" }
+    action.run()
+    return result
+}
+"#;
+    common::expect_box_ok_files_with_stdlib(
+        &[("Library.kt", LIB), ("Consumer.kt", MAIN)],
+        "cross_file_inline_anonymous_class_payload",
+    );
+}
+
+#[test]
+fn cross_file_inline_member_detaches_nested_lambda_from_library_class() {
+    const LIB: &str = r#"
+class Host {
+    inline fun inner(crossinline body: (Int) -> Unit) {
+        object { fun run() = body(1) }.run()
+    }
+
+    inline fun outer(crossinline body: (Int) -> Unit) {
+        inner { body(it) }
+    }
+}
+"#;
+    const MAIN: &str = r#"
+fun box(): String {
+    var result = "FAIL"
+    Host().outer { result = "OK" }
+    return result
+}
+"#;
+    common::expect_box_ok_files_with_stdlib(
+        &[("Library.kt", LIB), ("Consumer.kt", MAIN)],
+        "cross_file_inline_member_nested_lambda",
+    );
+}

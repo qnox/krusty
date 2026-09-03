@@ -143,6 +143,15 @@ class Sub : p.Base() {
         ++count
     }
     fun readAll(): String = pub + prot + publicCount + count
+    fun expressionUpdates(): String {
+        publicCount = 1
+        count = 1
+        val oldPublic = publicCount++
+        val newPublic = ++publicCount
+        val oldProtected = count++
+        val newProtected = ++count
+        return "$oldPublic$newPublic$oldProtected$newProtected"
+    }
 }
 fun box(): String {
     val sub = Sub()
@@ -151,7 +160,8 @@ fun box(): String {
     sub.publicCount++
     sub.accessed = "z"
     val read = sub.readAll() + sub.accessed
-    return if (read == "aq32z") "OK" else "FAIL:$read"
+    val expressions = Sub().expressionUpdates()
+    return if (read == "aq32z" && expressions == "1313") "OK" else "FAIL:$read:$expressions"
 }
 "#,
     );
@@ -187,15 +197,14 @@ fn package_private_java_members_are_accessible_within_the_same_package() {
 
 #[test]
 fn package_private_java_field_does_not_hide_public_method_property() {
-    let result = common::compile_and_run_with_stdlib(
-        "fun box(): String {\n\
+    let source = "fun box(): String {\n\
              val values = java.util.HashMap<String, String>()\n\
              values[\"key\"] = \"value\"\n\
              return if (values.size == 1) \"OK\" else values.size.toString()\n\
-         }\n",
-        "Main",
-    )
-    .expect("HashMap.size must select the public method property");
+         }\n";
+    assert_eq!(common::checker_diags_with_stdlib(source), Some(Vec::new()));
+    let result = common::compile_and_run_with_stdlib(source, "Main")
+        .expect("HashMap.size must select the public method property");
     assert_eq!(result, "OK");
 }
 
@@ -230,12 +239,11 @@ fn package_private_java_static_field_read_within_same_package() {
     );
 }
 
-/// The CIRCULAR direction (slice 2, Kotlin-first): Java extends a Kotlin class, Kotlin calls the
-/// Java class. Pipeline: signature stubs from the Java source (`krusty::jvm::java_stub`, no
-/// javac) → krusty compiles Kotlin against the stub dir → real javac compiles the Java against
-/// krusty's output → both class sets run together. The stubs never reach the runtime.
+/// The circular direction: Java extends a Kotlin class while Kotlin calls the Java class. Both
+/// sources enter the production frontend together; its JVM provider publishes Java declaration
+/// headers during Pass 1, Kotlin is emitted, and only then does javac compile the real Java body.
 #[test]
-fn java_extends_kotlin_via_stub_pipeline() {
+fn java_extends_kotlin_via_production_source_headers() {
     let kotlin = r#"
 open class A {
     open fun name(): String = "FAIL:A"
@@ -246,43 +254,53 @@ fun box(): String = J().name()
     let java = "public class J extends A { @Override public String name() { return \"OK\"; } }";
     let jdk = common::jdk_modules();
     let jars = common::classpath_jars_for(kotlin);
-
-    // 1. Stubs: resolve `A` as a known Kotlin class, everything else via a real Classpath.
     let mut cp_paths = jars.clone();
     cp_paths.push(jdk.clone());
-    let classpath = krusty::jvm::classpath::Classpath::new(cp_paths);
-    let resolve = |cand: &str| cand == "A" || classpath.find(cand).is_some();
-    let stubs = krusty::jvm::java_stub::stub_classes(
-        &[("J.java".to_string(), java.to_string())],
-        krusty::jvm::java_stub::StubMode::Strict,
-        &resolve,
-    )
-    .expect("stub generation");
+    let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
+    let inputs = [
+        krusty::source::SourceInput::kotlin(kotlin).with_file_stem("Main"),
+        krusty::source::SourceInput::java(java).with_file_stem("J"),
+    ];
+    let stems = vec!["Main".to_string(), "J".to_string()];
+    let mut diagnostics = krusty::diag::DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
+            classpath.clone(),
+        )),
+        &krusty::features::LangFeatures::new(),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diagnostics,
+    );
+    let outputs = krusty::compiler::emit_analyzed(
+        analysis,
+        &stems,
+        &krusty::jvm::JvmBackend::new(classpath),
+        "main",
+        &mut diagnostics,
+    );
+    assert!(
+        !diagnostics.has_errors(),
+        "mixed-source production frontend rejected the legal cycle: {:?}",
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>()
+    );
+    let kotlin_classes = outputs
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            path.strip_suffix(".class")
+                .map(|name| (name.to_string(), bytes))
+        })
+        .collect::<Vec<_>>();
 
     let root = std::env::temp_dir().join(format!("krusty_stub_e2e_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let stubdir = root.join("stubs");
     let kotlindir = root.join("kotlin");
-    for (name, bytes) in &stubs {
-        let p = stubdir.join(format!("{name}.class"));
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, bytes).unwrap();
-    }
 
-    // 2. Kotlin against the stubs.
-    let mut cp = jars.clone();
-    cp.push(stubdir);
-    let kotlin_classes =
-        match common::compile_in_process(kotlin, "MainKt", &cp, Some(jdk.as_path())) {
-            Some(c) => c,
-            None => {
-                let d = common::front_end_diagnostics(kotlin, &cp, Some(jdk.as_path()));
-                let _ = std::fs::remove_dir_all(&root);
-                panic!("krusty should compile Kotlin against the stub dir; diags: {d:?}");
-            }
-        };
-
-    // 3. Real javac against krusty's output; the stub dir is NOT on javac's classpath.
+    // Real javac sees krusty's output; provider-owned Java headers never reach the runtime.
     for (name, bytes) in &kotlin_classes {
         let p = kotlindir.join(format!("{name}.class"));
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -299,12 +317,40 @@ fun box(): String = J().name()
     cleanup(&javadir);
     let _ = std::fs::remove_dir_all(&root);
 
-    // 4. Run with the REAL classes only.
+    // Run with the real classes only.
     let mut classes = kotlin_classes;
     classes.extend(java_classes);
     let box_class = common::find_box_class(&classes).expect("box() class");
     let got = common::run_box(&classes, &box_class, &jars).expect("box run");
     assert_eq!(got, "OK");
+}
+
+#[test]
+fn kotlin_covariant_supertype_is_invariant_in_a_java_class_header() {
+    let kotlin = r#"
+        open class A<T> : Collection<T> {
+            override val size: Int get() = 0
+            override fun contains(element: T): Boolean = false
+            override fun containsAll(elements: Collection<T>): Boolean = false
+            override fun isEmpty(): Boolean = true
+            override fun iterator(): Iterator<T> = emptyList<T>().iterator()
+        }
+
+        interface L<E> : List<E>
+    "#;
+    let Some(kotlin_classes) = common::compile_lib("java_invariant_supertype", kotlin) else {
+        return;
+    };
+    let java = r#"
+        public abstract class B<E> extends A<E> implements L<E> {
+            public void insert(E value) { add(0, value); }
+        }
+    "#;
+    let result = common::javac_compile(
+        &[("B.java".to_string(), java.to_string())],
+        &[kotlin_classes, common::stdlib_jar()],
+    );
+    assert!(result.is_some(), "javac must see L<E> as java.util.List<E>");
 }
 
 /// The `// MODULE:` chaining shape with a Java file in the DEPENDENCY module: `lib` is a Java
@@ -519,6 +565,29 @@ fn mixed_diagnostics(java: &[(&str, &str)], kotlin: &str) -> Option<Vec<String>>
         let _ = std::fs::remove_dir_all(root);
     }
     Some(diagnostics)
+}
+
+#[test]
+fn inherited_java_sam_target_wins_static_overload_specificity() {
+    run_mixed(
+        &[(
+            "Test.java",
+            r#"
+public class Test {
+    public interface MyRunnable extends Runnable {}
+    public static void foo(MyRunnable value) {}
+    public static void foo(Runnable value) { throw new AssertionError("less specific"); }
+}
+"#,
+        )],
+        r#"
+// LANGUAGE: +EliminateAmbiguitiesOnInheritedSamInterfaces
+fun box(): String {
+    Test.foo {}
+    return "OK"
+}
+"#,
+    );
 }
 
 /// Compile the Java sources with javac, then the Kotlin source with krusty against the javac output

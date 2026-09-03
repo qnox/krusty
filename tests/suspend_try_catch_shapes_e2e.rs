@@ -318,3 +318,53 @@ fn constructor_arguments_keep_order_around_suspensions() {
         "abc:abc"
     );
 }
+
+#[test]
+fn captured_write_receives_complete_suspending_try_value() {
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        class Hit : RuntimeException()\n\
+        suspend fun step(fail: Boolean): Int = if (fail) throw Hit() else 42\n\
+        suspend fun recover(): Int = 7\n\
+        fun box(): String {\n\
+        \x20 var captured = 0\n\
+        \x20 runBlocking { captured = try { step(false) } catch (e: Hit) { recover() } }\n\
+        \x20 val first = captured\n\
+        \x20 runBlocking { captured = try { step(true) } catch (e: Hit) { recover() } }\n\
+        \x20 return first.toString() + \"/\" + captured\n\
+        }\n";
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    assert_eq!(
+        common::expect_box_run(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()),),
+        "42/7"
+    );
+}
+
+#[test]
+fn sibling_suspending_catches_own_distinct_exception_spills() {
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        class A(msg: String) : RuntimeException(msg)\n\
+        class B(msg: String) : RuntimeException(msg)\n\
+        suspend fun step(which: Int): String = when (which) {\n\
+        \x20 0 -> \"ok\"\n\
+        \x20 1 -> throw A(\"a\")\n\
+        \x20 else -> throw B(\"b\")\n\
+        }\n\
+        suspend fun recover(mark: String): String = mark\n\
+        suspend fun select(which: Int): String = try {\n\
+        \x20 step(which)\n\
+        } catch (e: A) {\n\
+        \x20 recover(\"A:\" + e.message)\n\
+        } catch (e: B) {\n\
+        \x20 recover(\"B:\" + e.message)\n\
+        }\n\
+        fun box(): String = runBlocking { select(0) + \"/\" + select(1) + \"/\" + select(2) }\n";
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    assert_eq!(
+        common::expect_box_run(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()),),
+        "ok/A:a/B:b"
+    );
+}

@@ -39,3 +39,50 @@ fn suspend_compound_assign_in_loops_runs() {
         "suspend compound-assign in while/do-while/for loops"
     );
 }
+
+#[test]
+fn suspend_compound_assign_inside_a_conditional_loop_branch_runs() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        class Holder(var result: String = \"\")\n\
+        suspend fun next(): String = \"O\"\n\
+        suspend fun fill(holder: Holder) {\n\
+            for (selected in listOf(true, false)) {\n\
+                if (selected) holder.result += next() else holder.result += \"K\"\n\
+            }\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+            val holder = Holder(); fill(holder); holder.result\n\
+        }\n";
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
+    assert_eq!(out.as_deref(), Some("OK"));
+}
+
+#[test]
+fn suspending_while_and_do_while_conditions_run_at_the_loop_header() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        suspend fun below(value: Int, limit: Int): Boolean = value < limit\n\
+        suspend fun preTest(): String {\n\
+            var i = 0; var result = \"\"\n\
+            while (below(i++, 3)) { if (i == 2) continue; result += i }\n\
+            return \"$result:$i\"\n\
+        }\n\
+        suspend fun postTest(): String {\n\
+            var i = 0; var result = \"\"\n\
+            do { i++; if (i == 2) continue; result += i } while (below(i, 3))\n\
+            return \"$result:$i\"\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+            val pre = preTest(); val post = postTest()\n\
+            if (pre == \"13:4\" && post == \"13:3\") \"OK\" else \"F pre=$pre post=$post\"\n\
+        }\n";
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
+    assert_eq!(out.as_deref(), Some("OK"));
+}

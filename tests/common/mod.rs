@@ -289,10 +289,10 @@ pub(super) fn cached_classpath(
     })
 }
 
-/// Compile Kotlin `src` to `(internal_name, class_bytes)` pairs entirely in-process — the same pipeline
-/// (`lex → parse → check → ir_lower → ir_emit`) the conformance harness uses, sharing the process-global
-/// classpath caches (type/ext/jimage indexes) across every call. This is dramatically faster than
-/// spawning the `krusty` binary once per snippet (each subprocess rebuilds those indexes from scratch).
+/// Compile Kotlin `src` to `(internal_name, class_bytes)` pairs entirely in-process through the
+/// production two-pass FIR pipeline, sharing process-global classpath caches across every call. This
+/// is dramatically faster than spawning the `krusty` binary once per snippet (each subprocess
+/// rebuilds those indexes from scratch).
 /// `cp_jars` are the `-classpath` jars; `jdk_modules` is the JDK `lib/modules` jimage (the bootclasspath).
 /// Returns `None` on any compile error (an unsupported feature), like the CLI's non-zero exit.
 pub fn compile_in_process(
@@ -302,51 +302,37 @@ pub fn compile_in_process(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
-    use krusty::jvm::names::file_class_name;
+    use krusty::source::SourceInput;
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let files = parse_source_set_named(&[(stem, src)], &mut diags)?;
     let cp = cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    if diags.has_errors() {
-        return None;
-    }
-    let file = &files[0];
-    let info = check_file(file, &mut syms, &mut diags);
-    if diags.has_errors() {
-        return None;
-    }
-    let facade = file_class_name(stem, file.package.as_deref());
-    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-    let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
-    // The real backend's shared post-lowering pass pipeline (plugins → value-classes → suspend →
-    // must-inline marks → lambda reparenting) — one definition, so `compile_in_process` can't drift
-    // from what ships. An unlowerable shape → skip, don't miscompile.
-    krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
-    // The facade `@Metadata` the CLI backend writes (top-level fn/extension records) — without it a
-    // SEPARATE compilation reading this output from the classpath cannot resolve extensions.
-    let metadata =
-        krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir, "main");
-    // The SHIPPING emit config (per-class `@Metadata`, `SourceFile`, …) — the same definition the CLI
-    // backend uses, so this helper can't drift from what `krusty -d …` writes.
-    let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
-    let outputs = krusty::jvm::ir_emit::emit_all_with_opts(
-        &ir,
-        &facade,
-        &*cp,
-        metadata.as_ref(),
-        &opts,
-        &krusty::jvm::ir_emit::EmitRun::default(),
-        &syms,
-    )?;
-    if outputs.is_empty() {
-        None
-    } else {
-        Some(outputs)
-    }
+    let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
+    let stems = [stem.to_string()];
+    let features = krusty::features::LangFeatures::from_source(src);
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &features,
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let outputs = krusty::compiler::emit_analyzed(
+        analysis,
+        &stems,
+        &krusty::jvm::JvmBackend::new(cp),
+        "main",
+        &mut diags,
+    );
+    let classes = outputs
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            path.strip_suffix(".class")
+                .map(|internal| (internal.to_string(), bytes))
+        })
+        .collect::<Vec<_>>();
+    (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
 /// Compile a source set through the module-wide compiler driver.
@@ -357,29 +343,35 @@ pub fn compile_in_process_files(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
-    use krusty::frontend::collect_signatures_with_cp;
+    use krusty::source::SourceInput;
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let named = sources
-        .iter()
-        .map(|(name, source)| (name.trim_end_matches(".kt"), *source))
-        .collect::<Vec<_>>();
-    let files = parse_source_set_named(&named, &mut diags)?;
-    let cp = cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let mut symbols = collect_signatures_with_cp(&files, platform, &mut diags);
-    if diags.has_errors() {
-        return None;
-    }
     let stems = sources
         .iter()
-        .map(|(stem, _)| (*stem).to_string())
+        .map(|(name, _)| name.trim_end_matches(".kt").to_string())
         .collect::<Vec<_>>();
-    krusty::jvm::prepare_module_symbols(&files, &stems, &mut symbols);
-    let backend = krusty::jvm::JvmBackend::new(cp);
-    let outputs =
-        krusty::compiler::compile(&files, &stems, &mut symbols, &backend, "main", &mut diags);
+    let inputs = sources
+        .iter()
+        .zip(&stems)
+        .map(|((_, source), stem)| SourceInput::kotlin(source).with_file_stem(stem))
+        .collect::<Vec<_>>();
+    let cp = cached_classpath(cp_jars, jdk_modules);
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &krusty::features::LangFeatures::default(),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let outputs = krusty::compiler::emit_analyzed(
+        analysis,
+        &stems,
+        &krusty::jvm::JvmBackend::new(cp),
+        "main",
+        &mut diags,
+    );
     let classes = outputs
         .into_iter()
         .map(|(path, bytes)| {
@@ -423,69 +415,37 @@ pub fn compile_in_process_metadata_cp_module(
     module_name: &str,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
-    use krusty::jvm::ir_emit::EmitRun;
-    use krusty::jvm::names::file_class_name;
+    use krusty::source::SourceInput;
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(src);
-    let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        src, &toks, &mut diags, &features,
-    )];
-    if diags.has_errors() {
-        return None;
-    }
     let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    if diags.has_errors() {
-        return None;
-    }
-    let file = &files[0];
-    let info = check_file(file, &mut syms, &mut diags);
-    if diags.has_errors() {
-        return None;
-    }
-    let facade = file_class_name(stem, file.package.as_deref());
-    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-    let mut ir = krusty::ir_lower::lower_file(file, &info, &syms, &runtime)?;
-    let mut continuation_metadata = krusty::jvm::suspend::ContinuationMetadataMap::default();
-    krusty::jvm::backend::run_backend_passes_with_metadata(
-        &mut ir,
-        file,
-        &facade,
+    let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
+    let stems = [stem.to_string()];
+    let features = krusty::features::LangFeatures::from_source(src);
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &features,
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let outputs = krusty::compiler::emit_analyzed(
+        analysis,
+        &stems,
+        &krusty::jvm::JvmBackend::new(cp),
         module_name,
-        &syms,
-        &mut continuation_metadata,
-    )
-    .ok()?;
-    let mut opts = krusty::jvm::backend::shipping_emit_options(stem, module_name, None, cp.clone());
-    // This differential helper tests the metadata writer itself, so keep that feature enabled even
-    // when `KRUSTY_NO_CLASS_METADATA` asks shipping callers to omit it for a diagnostic bisect. All
-    // other fields still come from the shared shipping constructor and therefore cannot drift.
-    opts.emit_class_metadata = true;
-    let run = EmitRun::default();
-    // Facade `@Metadata` (k = 2, top-level fn/extension records), exactly as the CLI backend and
-    // `compile_in_process` pass it — `None` for a class-only source, so today's byte-identity
-    // fixtures are unaffected, and a future fixture mixing a class with top-level functions gets
-    // the same facade record a real build would.
-    let metadata =
-        krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir, module_name);
-    let outputs = krusty::jvm::ir_emit::emit_all_with_opts_and_metadata(
-        &ir,
-        &facade,
-        &*cp,
-        krusty::jvm::ir_emit::EmitMetadata {
-            facade: metadata.as_ref(),
-            continuations: &continuation_metadata,
-        },
-        &opts,
-        &run,
-        &syms,
-    )?;
-    (!outputs.is_empty()).then_some(outputs)
+        &mut diags,
+    );
+    let classes = outputs
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            path.strip_suffix(".class")
+                .map(|internal| (internal.to_string(), bytes))
+        })
+        .collect::<Vec<_>>();
+    (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
 /// Compile Kotlin `src` in-process and write the emitted `.class` files under `out_dir`, preserving
@@ -619,7 +579,7 @@ pub fn backend_outcome_in_process(
         return Some(BackendOutcome::LowerBail(bail.borrow().clone()));
     };
     if let Err(reason) =
-        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms)
+        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms, &cp)
     {
         return Some(BackendOutcome::BackendPassBail(reason));
     }
@@ -738,6 +698,25 @@ pub fn front_end_diagnostics(
     front_end_diagnostics_files(&[src], cp_jars, jdk_modules)
 }
 
+/// Front-end diagnostics with selected classpath entries treated as Kotlin friend modules.
+#[allow(dead_code)]
+pub fn front_end_diagnostics_with_friend_paths(
+    src: &str,
+    cp_jars: &[PathBuf],
+    friend_paths: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut paths = cp_jars.to_vec();
+    if let Some(path) = jdk_modules {
+        paths.push(path.to_path_buf());
+    }
+    let cp = std::rc::Rc::new(Classpath::new_with_friend_paths(
+        paths,
+        friend_paths.to_vec(),
+    ));
+    front_end_diagnostics_files_with_classpath(&[src], cp, |_, _| {})
+}
+
 /// Multi-file form of [`front_end_diagnostics`]. All signatures are collected before every file is
 /// checked, matching the module pipeline and keeping cross-file tests on the shared harness.
 pub fn front_end_diagnostics_files(
@@ -763,19 +742,31 @@ where
     F: FnOnce(&[krusty::ast::File], &mut krusty::frontend::FrontendSymbols),
 {
     let cp = cached_classpath(cp_jars, jdk_modules);
+    front_end_diagnostics_files_with_classpath(sources, cp, prepare)
+}
+
+fn front_end_diagnostics_files_with_classpath<F>(
+    sources: &[&str],
+    cp: std::rc::Rc<Classpath>,
+    prepare: F,
+) -> Vec<String>
+where
+    F: FnOnce(&[krusty::ast::File], &mut krusty::frontend::FrontendSymbols),
+{
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
     let inputs = sources
         .iter()
         .map(|source| krusty::frontend::SourceInput::kotlin(source))
         .collect::<Vec<_>>();
     let mut diags = krusty::diag::DiagSink::new();
-    let _ = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,
         &krusty::features::LangFeatures::new(),
         prepare,
         &mut diags,
     );
+    let _ = krusty::compiler::check_frontend_only(analysis, &mut diags);
     diags.diags.iter().map(|d| d.msg.clone()).collect()
 }
 
@@ -1971,33 +1962,40 @@ pub fn compile_libs_build(tag: &str, sources: &[(&str, &str)]) -> Option<Arc<Lib
 #[allow(dead_code)]
 fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     use krusty::diag::DiagSink;
-    use krusty::frontend::collect_signatures_with_cp;
+    use krusty::source::SourceInput;
 
     let _pg = ProfGuard::new("krusty_lib");
     let mut diags = DiagSink::new();
-    let texts: Vec<&str> = sources.iter().map(|(_, s)| *s).collect();
     let render = |diags: &krusty::diag::DiagSink| {
         let named: Vec<(&str, &str)> = sources.iter().map(|(n, s)| (*n, *s)).collect();
         diags.render_all(&named)
     };
-    let Some(files) = parse_source_set(&texts, &mut diags) else {
-        return Err(render(&diags));
-    };
-    let jdk = krusty::toolchain::jdk_modules();
-    let cp = cached_classpath(&[stdlib_jar()], jdk.as_deref());
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let mut symbols = collect_signatures_with_cp(&files, platform, &mut diags);
-    if diags.has_errors() {
-        return Err(render(&diags));
-    }
     let stems: Vec<String> = sources
         .iter()
         .map(|(name, _)| name.trim_end_matches(".kt").to_string())
         .collect();
-    krusty::jvm::prepare_module_symbols(&files, &stems, &mut symbols);
-    let backend = krusty::jvm::JvmBackend::new(cp);
-    let outputs =
-        krusty::compiler::compile(&files, &stems, &mut symbols, &backend, "main", &mut diags);
+    let inputs = sources
+        .iter()
+        .zip(&stems)
+        .map(|((_, source), stem)| SourceInput::kotlin(source).with_file_stem(stem))
+        .collect::<Vec<_>>();
+    let jdk = krusty::toolchain::jdk_modules();
+    let cp = cached_classpath(&[stdlib_jar()], jdk.as_deref());
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &krusty::features::LangFeatures::default(),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let outputs = krusty::compiler::emit_analyzed(
+        analysis,
+        &stems,
+        &krusty::jvm::JvmBackend::new(cp),
+        "main",
+        &mut diags,
+    );
     if diags.has_errors() {
         return Err(render(&diags));
     }

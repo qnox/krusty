@@ -336,14 +336,14 @@ fn a_local_class_reading_a_grandparent_receiver_is_rejected() {
     assert_rejected(SRC);
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted, prints `hi3`.
 ///
 /// Inside a member EXTENSION function the nearest `this` is the extension receiver, while lowering
-/// supplies a captured enclosing instance from the DISPATCH receiver. The two are different objects,
-/// so the enclosing instance contributes no capture names at all and the read is rejected rather
-/// than emitted as a field typed after one receiver holding the other.
+/// supplies a captured enclosing instance from the DISPATCH receiver. The two are different objects;
+/// the local class must capture the dispatch instance selected for `greet()`, not reinterpret the
+/// extension receiver as that instance.
 #[test]
-fn a_local_class_capturing_through_a_member_extension_receiver_is_rejected() {
+fn a_local_class_captures_dispatch_through_a_member_extension_receiver() {
     const SRC: &str = "class Outer(val n: Int) {\n\
         \x20   fun greet(): String = \"hi\" + n\n\
         \x20   fun String.ext(): String {\n\
@@ -353,7 +353,7 @@ fn a_local_class_capturing_through_a_member_extension_receiver_is_rejected() {
         \x20   fun run(): String = \"x\".ext()\n\
         }\n\
         fun box(): String = Outer(3).run()\n";
-    assert_rejected(SRC);
+    assert_eq!(run(SRC).expect("dispatch receiver capture resolves"), "hi3");
 }
 
 /// kotlinc: accepted, prints `OK`.

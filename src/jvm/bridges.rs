@@ -7,154 +7,46 @@
 //! names and `@JvmName` mangling are all JVM realizations of a declaration, so the derivation belongs
 //! here rather than in `ir_lower`, which only records what the source declares.
 //!
-//! The pass reads the OWN side from the IR (`IrClass::methods`/`properties`) and the SUPERTYPE side from
-//! the checker's symbols, and runs before the value-class pass so an existing bridge's target is
-//! retargeted/renamed with the mangled name once mangling is known.
+//! The pass consumes exact override edges selected while Pass 1's declaration providers were live. It
+//! runs before the value-class pass so an existing bridge's target is retargeted/renamed with the
+//! mangled name once mangling is known.
 
-use crate::frontend::FrontendSymbols;
-use crate::ir::{Bridge, IrFile};
+use crate::ir::{Bridge, BridgeKind, IrFile};
 use crate::jvm::backend::SkipReason;
-use crate::jvm::names::type_descriptor;
+use crate::jvm::names::{method_descriptor, type_descriptor};
 use crate::names::{property_getter_name, property_setter_name};
-use crate::types::{stored_value_ty, Ty, TypeName};
+use crate::types::{stored_value_ty, Ty};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
-pub fn derive_bridges(ir: &mut IrFile, syms: &FrontendSymbols) -> Result<(), SkipReason> {
+pub fn derive_bridges(
+    ir: &mut IrFile,
+    classpath: &crate::jvm::classpath::Classpath,
+) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
-        if ir.classes[cid].is_interface {
-            continue;
-        }
         // Source-declared classes only. A synthetic class (a lambda, a callable-reference subclass) has no
         // source declaration to override anything, and its supertypes are the emitter's own choice.
-        if syms.class_by_type_name(ir.classes[cid].fq_name).is_none() {
+        if !ir.classes[cid].is_source_declared {
             continue;
         }
-        superclass_method_bridges(ir, cid, syms)?;
-        property_bridges(ir, cid, syms);
-        mapped_interface_bridges(ir, cid, syms);
-        interface_bridges(ir, cid, syms)?;
+        superclass_method_bridges(ir, cid, classpath)?;
+        property_bridges(ir, cid, classpath);
     }
     Ok(())
 }
 
-#[derive(Clone)]
-struct MethodShape {
-    params: Vec<Ty>,
-    ret: Ty,
-}
-
-struct InterfaceObligation {
-    name: String,
-    /// Descriptor shape declared by the interface.
-    erased_params: Vec<Ty>,
-    erased_ret: Ty,
-    /// Semantic shape after applying the implementing class's interface arguments. This selects the
-    /// override among same-named overloads; it is never used as the bridge descriptor.
-    applied_params: Vec<Ty>,
-    applied_ret: Ty,
-    default: Option<bool>,
-}
-
-/// Symbol providers may expose the same physical declaration through several semantic aliases (most
-/// visibly Kotlin/Java builtin twins on `Any`). Those are one override candidate, not an overload
-/// ambiguity. Collapse only identical erased signatures; genuinely distinct overloads remain distinct
-/// and are still rejected when the override relation cannot select one uniquely.
-fn dedup_method_shapes(shapes: impl IntoIterator<Item = MethodShape>) -> Vec<MethodShape> {
-    let mut seen = std::collections::HashSet::new();
-    shapes
-        .into_iter()
-        .filter(|shape| seen.insert((shape.params.clone(), shape.ret)))
-        .collect()
-}
-
-/// Methods DECLARED on one semantic owner, normalized to the same erased shape regardless of where the
-/// owner came from. IR declarations are authoritative when present because later lowering may have
-/// refined their physical shape; module symbols cover a sibling source owner without IR in this file;
-/// library symbols cover the first external boundary. Keeping that provider distinction inside this
-/// adapter prevents bridge policy from growing separate same-file/module/classpath branches.
-fn declared_method_shapes(
-    ir: &IrFile,
-    syms: &FrontendSymbols,
-    owner: TypeName,
-    name: &str,
-) -> Vec<MethodShape> {
-    if let Some(class) = class_of(ir, owner) {
-        return dedup_method_shapes(
-            class
-                .methods
-                .iter()
-                .copied()
-                .filter_map(|fid| {
-                    let function = &ir.functions[fid as usize];
-                    (function.name == name).then(|| MethodShape {
-                        params: function
-                            .params
-                            .iter()
-                            .copied()
-                            .map(bridge_erasure)
-                            .collect(),
-                        ret: bridge_erasure(function.ret),
-                    })
-                })
-                .collect::<Vec<_>>(),
-        );
-    }
-    if let Some(class) = syms.class_by_type_name(owner) {
-        return dedup_method_shapes(
-            class
-                .methods
-                .get(name)
-                .into_iter()
-                .flatten()
-                .map(|signature| MethodShape {
-                    params: signature
-                        .params
-                        .iter()
-                        .copied()
-                        .map(bridge_erasure)
-                        .collect(),
-                    ret: bridge_erasure(signature.ret),
-                })
-                .collect::<Vec<_>>(),
-        );
-    }
-    dedup_method_shapes(
-        syms.libraries
-            .classifier(owner)
-            .into_iter()
-            .flat_map(|class| {
-                class
-                    .members
-                    .iter()
-                    .filter(move |member| member.name == name)
-                    .map(|member| MethodShape {
-                        params: member.params.iter().copied().map(bridge_erasure).collect(),
-                        ret: bridge_erasure(member.ret),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>(),
+fn external_method_name(
+    classpath: &crate::jvm::classpath::Classpath,
+    target: crate::fir::ExternalCallableId,
+    fallback: &str,
+) -> String {
+    classpath.external_callable(target).map_or_else(
+        || fallback.to_owned(),
+        |realization| {
+            let callable = realization.callable;
+            crate::jvm::names::mapped_builtin_virtual_name(&callable.owner.render(), &callable.name)
+                .to_owned()
+        },
     )
-}
-
-/// The direct semantic superclass. Source and library symbol providers expose different storage
-/// records, but the bridge walk only needs the language fact "the one parent that is not an interface".
-/// Centralizing that normalization also avoids inferring ownership from rendered JVM class names.
-fn direct_superclass(syms: &FrontendSymbols, owner: TypeName) -> Option<TypeName> {
-    if let Some(class) = syms.class_by_type_name(owner) {
-        return class.super_internal;
-    }
-    syms.libraries.classifier(owner).and_then(|class| {
-        class.supertypes.iter_ids().find(|&candidate| {
-            !syms
-                .libraries
-                .classifier(candidate)
-                .is_some_and(|ty| ty.is_interface())
-                && !syms
-                    .class_by_type_name(candidate)
-                    .is_some_and(|ty| ty.is_interface())
-        })
-    })
 }
 
 /// A method overriding a superclass method with a different erased signature (a generic or covariant
@@ -163,94 +55,126 @@ fn direct_superclass(syms: &FrontendSymbols, owner: TypeName) -> Option<TypeName
 fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
-    syms: &FrontendSymbols,
+    classpath: &crate::jvm::classpath::Classpath,
 ) -> Result<(), SkipReason> {
-    for own_fid in ir.classes[cid].methods.clone() {
-        // The explicit source modifier is the semantic discriminator. A same-named fresh declaration is
-        // an overload, not evidence that a superclass descriptor should delegate to it; backend/plugin
-        // synthesized methods are deliberately absent and may satisfy inherited obligations.
-        if ir.fresh_method_decls.contains(&own_fid) {
+    let internal_name = ir.classes[cid].fq_name;
+    let edges = ir
+        .function_overrides
+        .get(&internal_name)
+        .cloned()
+        .unwrap_or_default();
+    for edge in edges {
+        let own_fid = edge
+            .implementation_function
+            .or_else(|| match edge.implementation {
+                crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) => {
+                    ir.checked_callable_functions.get(&declaration).copied()
+                }
+                crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
+            });
+        if edge.implementation_owner == internal_name
+            && own_fid.is_none_or(|function| !ir.classes[cid].methods.contains(&function))
+        {
             continue;
         }
-        let name = ir.functions[own_fid as usize].name.clone();
-        let own = &ir.functions[own_fid as usize];
-        let own_shape = MethodShape {
-            params: own.params.iter().copied().map(bridge_erasure).collect(),
-            ret: bridge_erasure(own.ret),
-        };
-        let mut owner = Some(ir.classes[cid].superclass);
-        let mut seen = std::collections::HashSet::new();
-        let base_shape = loop {
-            let Some(base_owner) = owner.filter(|owner| seen.insert(*owner)) else {
-                break None;
-            };
-            let mut compatible = declared_method_shapes(ir, syms, base_owner, &name)
-                .into_iter()
-                .filter(|base| {
-                    base.params.len() == own_shape.params.len()
-                        && base
-                            .params
-                            .iter()
-                            .zip(&own_shape.params)
-                            .all(|(&erased, &concrete)| param_narrows(syms, erased, concrete))
-                        && return_admits(syms, base.ret, own_shape.ret, false)
-                })
-                .collect::<Vec<_>>();
-            // An exact parameter descriptor identifies the overridden overload before a merely
-            // compatible generic one. If neither choice is unique, declining the file is safer than
-            // emitting a bridge to an arbitrary overload.
-            let exact = compatible
-                .iter()
-                .filter(|shape| shape.params == own_shape.params)
-                .count();
-            if exact == 1 {
-                break compatible
-                    .into_iter()
-                    .find(|shape| shape.params == own_shape.params);
+        let base_params = edge
+            .declared_parameters
+            .iter()
+            .copied()
+            .map(bridge_erasure)
+            .collect::<Vec<_>>();
+        let base_ret = bridge_erasure(edge.declared_result);
+        let concrete_params = own_fid
+            .map(|function| ir.functions[function as usize].params.clone())
+            .unwrap_or_else(|| edge.implementation_parameters.clone());
+        let concrete_ret = own_fid
+            .map(|function| ir.functions[function as usize].ret)
+            .unwrap_or(edge.implementation_result);
+        let own_params = concrete_params
+            .iter()
+            .copied()
+            .map(bridge_erasure)
+            .collect::<Vec<_>>();
+        let own_ret = bridge_erasure(concrete_ret);
+        let bridge_name = match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
+            crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
+                external_method_name(classpath, target, &edge.name)
             }
-            if exact > 1 || compatible.len() > 1 {
-                return Err(SkipReason::Bridges);
-            }
-            if let Some(shape) = compatible.pop() {
-                break Some(shape);
-            }
-            // A nearer class may declare only sibling overloads. Keep walking: the method explicitly
-            // marked `override` can still implement a declaration farther up the superclass chain.
-            owner = direct_superclass(syms, base_owner);
         };
-        let Some(base) = base_shape else {
-            continue;
+        let target_name = if edge.implementation_function.is_some() {
+            edge.name.clone()
+        } else {
+            match edge.implementation {
+                crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
+                crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
+                    external_method_name(classpath, target, &edge.name)
+                }
+            }
         };
-        if base.params == own_shape.params && base.ret == own_shape.ret {
+        crate::trace_compiler!(
+            "bridges",
+            "stable override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={} target={} declared={base_params:?}->{base_ret:?} concrete={own_params:?}->{own_ret:?}",
+            edge.implementation,
+            edge.implementation_owner,
+            edge.overridden,
+            edge.overridden_owner,
+            edge.name,
+            bridge_name,
+            target_name,
+        );
+        // Bridge necessity is a JVM-descriptor question. Semantic types may still differ only in
+        // arguments owned by different declarations (`Iterator<T-super>` vs `Iterator<T-class>`),
+        // while erasure gives both methods the exact same descriptor. Comparing `Ty` structurally
+        // in that case manufactured a same-name/same-descriptor bridge which could only call itself.
+        let value_class_return_difference = base_ret != own_ret
+            && [base_ret, own_ret].into_iter().any(|result| {
+                result
+                    .non_null()
+                    .obj_internal()
+                    .is_some_and(|name| ir.is_value_class_name(name))
+            });
+        if method_descriptor(&base_params, base_ret) == method_descriptor(&own_params, own_ret)
+            && bridge_name == target_name
+            && !value_class_return_difference
+        {
             continue;
         }
         // A suspend override: the CPS rewrite gives BOTH the base declaration and the override the
         // same trailing `Continuation` parameter and an `Object` return, so a RETURN-only erasure
         // difference vanishes — no bridge exists to build (probed: kotlinc emits a single
-        // `byId(int, Continuation)` for `Repo<T>.byId(Int): T?`). A VALUE-parameter difference
-        // still needs one, which the coroutine pass can't fix up — skip the file for that shape.
-        if ir.suspend_funs.contains(&own_fid) {
-            // …EXCEPT a VALUE-CLASS return: it MANGLES the concrete method's name
-            // (`bar-JEFnHOQ(Continuation)`), so kotlinc emits a delegating bridge under the plain
-            // name — a shape the coroutine pass can't fix up here yet.
-            let vc_ret = own_shape
-                .ret
+        // `byId(int, Continuation)` for `Repo<T>.byId(Int): T?`). A VALUE-parameter difference or a
+        // value-class-mangled target still needs a bridge. Record it in declared form here so the
+        // value-class pass can apply its one canonical mangle/box/unbox realization; the suspend pass
+        // later converts both bridge sides to the CPS descriptor.
+        if edge.suspend || own_fid.is_some_and(|function| ir.suspend_funs.contains(&function)) {
+            let vc_ret = own_ret
                 .non_null()
                 .obj_internal()
                 .is_some_and(|n| ir.is_value_class_name(n));
-            if base.params == own_shape.params && !vc_ret {
+            if base_params == own_params && !vc_ret {
                 continue;
             }
-            return Err(SkipReason::Bridges);
         }
+        if ir.classes[cid].bridges.iter().any(|bridge| {
+            bridge.name == bridge_name
+                && bridge.erased_params == base_params
+                && bridge.erased_ret == base_ret
+        }) {
+            continue;
+        }
+        let target_name = (bridge_name != target_name).then_some(target_name);
         ir.classes[cid].bridges.push(Bridge {
-            name,
-            erased_params: base.params,
-            erased_ret: base.ret,
-            concrete_params: own.params.clone(),
-            concrete_ret: own.ret,
+            kind: BridgeKind::Function,
+            target_function: own_fid,
+            name: bridge_name,
+            erased_params: base_params,
+            erased_ret: base_ret,
+            concrete_params,
+            concrete_ret,
+            target_ret: None,
             type_safe_barrier: false,
-            target_name: None,
+            target_name,
             box_ret: None,
             unbox_params: Vec::new(),
         });
@@ -258,110 +182,60 @@ fn superclass_method_bridges(
     Ok(())
 }
 
-/// The accessor's return type for a property this class (or a same-file supertype) declares: the
-/// source-written accessor's own return when there is one, else the declared property type.
-fn accessor_ret(ir: &IrFile, owner: TypeName, name: &str, declared: Ty) -> Ty {
-    ir.classes
-        .iter()
-        .find(|c| c.fq_name == owner)
-        .and_then(|c| c.properties.iter().find(|p| p.name == name))
-        .and_then(|p| p.getter)
-        .map(|fid| ir.functions[fid as usize].ret)
-        .unwrap_or(declared)
-}
-
-#[derive(Clone, Copy)]
-struct PropertyShape {
-    ty: Ty,
-    accessor_ret: Ty,
-    is_var: bool,
-}
-
-/// One property DECLARED by a semantic owner, normalized across IR/module/library providers. The
-/// provider lookup is intentionally confined here; callers reason only about property type, accessor
-/// realization, and mutability, so source and classpath properties cannot drift into twin algorithms.
-fn declared_property_shape(
-    ir: &IrFile,
-    syms: &FrontendSymbols,
-    owner: TypeName,
-    name: &str,
-) -> Option<PropertyShape> {
-    if let Some(class) = syms.class_by_type_name(owner) {
-        let (ty, is_var) = class.prop(name)?;
-        return Some(PropertyShape {
-            ty,
-            accessor_ret: accessor_ret(ir, owner, name, ty),
-            is_var,
-        });
-    }
-    crate::symbol_resolver::declared_member_callables(
-        syms.libraries.as_ref(),
-        Ty::obj_name(owner),
-        name,
-    )
-    .into_parts()
-    .1
-    .overloads
-    .into_iter()
-    .find(|property| {
-        matches!(property.kind, crate::libraries::PropKind::Member) && property.owner == owner
-    })
-    .map(|property| PropertyShape {
-        ty: property.ty,
-        accessor_ret: property.ty,
-        is_var: property.setter.is_some(),
-    })
-}
-
 /// A property overriding a supertype property with a different erased type (a covariant override
 /// `from: Sub` over `from: Super`, or a generic `val x: T` erased to `Object` overridden with a concrete
 /// type) needs a synthetic `getX()` returning the supertype's erased type that delegates to the concrete
 /// getter — else a call through a supertype reference resolves to a getter that does not exist. A `var`
 /// override needs the matching `setX(erased)`, else a write through the supertype silently no-ops.
-fn property_bridges(ir: &mut IrFile, cid: usize, syms: &FrontendSymbols) {
+fn property_bridges(ir: &mut IrFile, cid: usize, classpath: &crate::jvm::classpath::Classpath) {
     let internal_name = ir.classes[cid].fq_name;
-    let own_properties: Vec<(String, PropertyShape)> = ir.classes[cid]
-        .properties
-        .iter()
-        .filter_map(|property| {
-            let (ty, is_var) = syms.prop_of_name(internal_name, &property.name)?;
-            Some((
-                property.name.clone(),
-                PropertyShape {
-                    ty,
-                    accessor_ret: accessor_ret(ir, internal_name, &property.name, ty),
-                    is_var,
-                },
-            ))
-        })
-        .collect();
-    let mut supertypes = syms
-        .applied_hierarchy(Ty::obj_name(internal_name))
-        .into_iter()
-        .filter(|(owner, _, _)| *owner != internal_name)
-        .collect::<Vec<_>>();
-    // `applied_hierarchy` is a graph walk whose sibling order is an implementation detail. Bridge
-    // deduplication intentionally lets the nearest declaration win, so make that semantic ordering
-    // explicit before examining superclass and interface providers.
-    supertypes.sort_by_key(|(_, _, depth)| *depth);
-    for (super_owner, _, _) in supertypes {
-        for (name, own) in &own_properties {
-            let Some(base) = declared_property_shape(ir, syms, super_owner, name) else {
-                continue;
-            };
-            if type_descriptor(base.ty) == type_descriptor(own.ty) {
-                continue;
+    let edges = ir
+        .property_overrides
+        .get(&internal_name)
+        .cloned()
+        .unwrap_or_default();
+    for edge in edges {
+        let implementation_property = match edge.implementation {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(declaration) => {
+                ir.checked_properties.get(&declaration)
             }
-            push_property_bridge(
-                ir,
-                cid,
-                name,
-                base.accessor_ret,
-                own.accessor_ret,
-                (base.ty, own.ty),
-                base.is_var && own.is_var,
-            );
+            crate::fir::ResolvedPropertyOverrideTarget::External(_) => None,
+        };
+        if edge.implementation_owner == internal_name
+            && implementation_property.is_none_or(|property| property.class != Some(cid as u32))
+        {
+            continue;
         }
+        let source_getter = property_getter_name(&edge.name);
+        let bridge_getter = match edge.overridden {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
+            crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
+                external_method_name(classpath, target, &source_getter)
+            }
+        };
+        let target_getter = match edge.implementation {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
+            crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
+                external_method_name(classpath, target, &source_getter)
+            }
+        };
+        if type_descriptor(edge.declared_type) == type_descriptor(edge.implementation_type)
+            && bridge_getter == target_getter
+        {
+            continue;
+        }
+        let name = edge.name.clone();
+        push_property_bridge(
+            ir,
+            cid,
+            &name,
+            edge.declared_type,
+            edge.implementation_type,
+            (edge.declared_type, edge.implementation_type),
+            edge.overridden_mutable && edge.implementation_mutable,
+            bridge_getter,
+            target_getter,
+        );
     }
 }
 
@@ -375,21 +249,26 @@ fn push_property_bridge(
     own_ret: Ty,
     (super_ty, own_ty): (Ty, Ty),
     needs_setter: bool,
+    getter_name: String,
+    getter_target: String,
 ) {
-    let gname = property_getter_name(pname);
     let has_getter = ir.classes[cid]
         .bridges
         .iter()
-        .any(|b| b.name == gname && b.erased_params.is_empty());
+        .any(|b| b.name == getter_name && b.erased_params.is_empty());
     if !has_getter {
+        let target_name = (getter_name != getter_target).then_some(getter_target);
         ir.classes[cid].bridges.push(Bridge {
-            name: gname,
+            kind: BridgeKind::PropertyGetter,
+            target_function: None,
+            name: getter_name,
             erased_params: vec![],
             erased_ret: super_ret,
             concrete_params: vec![],
             concrete_ret: own_ret,
+            target_ret: None,
             type_safe_barrier: false,
-            target_name: None,
+            target_name,
             box_ret: None,
             unbox_params: Vec::new(),
         });
@@ -404,11 +283,14 @@ fn push_property_bridge(
         .any(|b| b.name == sname && b.erased_params.len() == 1);
     if !has_setter {
         ir.classes[cid].bridges.push(Bridge {
+            kind: BridgeKind::PropertySetter,
+            target_function: None,
             name: sname,
             erased_params: vec![super_ty],
             erased_ret: Ty::Unit,
             concrete_params: vec![own_ty],
             concrete_ret: Ty::Unit,
+            target_ret: None,
             type_safe_barrier: false,
             target_name: None,
             box_ret: None,
@@ -417,80 +299,15 @@ fn push_property_bridge(
     }
 }
 
-/// A mapped Kotlin interface may expose a different PHYSICAL JVM member name than the source name the
-/// override is written under (the Kotlin name is the platform's, the class file's is Java's). Forward
-/// the physical name to the source override.
-fn mapped_interface_bridges(ir: &mut IrFile, cid: usize, syms: &FrontendSymbols) {
-    let internal_name = ir.classes[cid].fq_name;
-    let mapped_members = syms
-        .applied_hierarchy(Ty::obj_name(internal_name))
-        .into_iter()
-        .skip(1)
-        .flat_map(|(_, supertype, _)| syms.libraries.mapped_interface_members(supertype))
-        .collect::<Vec<_>>();
-    for mapped in mapped_members {
-        if mapped.is_property {
-            let Some((concrete_ret, _)) = syms.prop_of_name(internal_name, &mapped.source_name)
-            else {
-                continue;
-            };
-            let already = ir.classes[cid].bridges.iter().any(|bridge| {
-                bridge.name == mapped.physical_name && bridge.erased_params.is_empty()
-            });
-            if already {
-                continue;
-            }
-            ir.classes[cid].bridges.push(Bridge {
-                name: mapped.physical_name,
-                erased_params: vec![],
-                erased_ret: mapped.ret,
-                concrete_params: vec![],
-                concrete_ret,
-                type_safe_barrier: false,
-                target_name: Some(property_getter_name(&mapped.source_name)),
-                box_ret: None,
-                unbox_params: Vec::new(),
-            });
-        } else {
-            let Some((_, implementation)) = syms.method_matching_with_owner_name(
-                internal_name,
-                &mapped.source_name,
-                &mapped.params,
-            ) else {
-                continue;
-            };
-            let erased_params: Vec<Ty> =
-                mapped.params.iter().copied().map(stored_value_ty).collect();
-            let already = ir.classes[cid].bridges.iter().any(|bridge| {
-                bridge.name == mapped.physical_name && bridge.erased_params == erased_params
-            });
-            if already {
-                continue;
-            }
-            ir.classes[cid].bridges.push(Bridge {
-                name: mapped.physical_name,
-                erased_params,
-                erased_ret: mapped.ret,
-                concrete_params: implementation
-                    .params
-                    .iter()
-                    .copied()
-                    .map(stored_value_ty)
-                    .collect(),
-                concrete_ret: implementation.ret,
-                type_safe_barrier: false,
-                target_name: Some(mapped.source_name),
-                box_ret: None,
-                unbox_params: Vec::new(),
-            });
-        }
-    }
-}
-
 /// Bridge-signature erasure: a type parameter becomes its bound's storage type, a nullable keeps its
 /// wrapper. This is the shape a descriptor is written from, so it defines when two signatures COLLIDE.
 fn bridge_erasure(ty: Ty) -> Ty {
     match ty {
+        // JVM method descriptors erase a type parameter whose first bound is another type
+        // parameter to Object. The generic Signature still records `T : S`; recursively erasing
+        // through `S` here would invent `Entity` for `<T : S, S : Entity<...>>`, disagreeing with
+        // the descriptor the emitter (and kotlinc) actually publishes.
+        Ty::TyParam(_, bound) if matches!(*bound, Ty::TyParam(..)) => Ty::obj("kotlin/Any"),
         Ty::TyParam(_, bound) => stored_value_ty(bridge_erasure(*bound)),
         Ty::Nullable(inner) => Ty::nullable(bridge_erasure(*inner)),
         Ty::Obj(internal, _) if internal.render().is_empty() => Ty::obj("kotlin/Any"),
@@ -498,521 +315,17 @@ fn bridge_erasure(ty: Ty) -> Ty {
     }
 }
 
-fn unique_match<T>(items: &[T], mut predicate: impl FnMut(&T) -> bool) -> Option<&T> {
-    let mut matches = items.iter().filter(|item| predicate(item));
-    match (matches.next(), matches.next()) {
-        (Some(item), None) => Some(item),
-        _ => None,
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::bridge_erasure;
+    use crate::types::Ty;
 
-fn class_of(ir: &IrFile, name: TypeName) -> Option<&crate::ir::IrClass> {
-    ir.classes.iter().find(|c| c.fq_name == name)
-}
+    #[test]
+    fn dependent_type_parameter_erases_to_object_for_bridge_descriptors() {
+        let owner = Ty::ty_param("S", Ty::obj("sample/Entity"));
+        let method = Ty::ty_param("T", owner);
 
-/// Methods of a class in this file, by name.
-fn methods_named<'a>(ir: &'a IrFile, owner: TypeName, name: &'a str) -> Vec<u32> {
-    class_of(ir, owner)
-        .map(|c| {
-            c.methods
-                .iter()
-                .copied()
-                .filter(|fid| ir.functions[*fid as usize].name == name)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The nearest property declaration whose GENERATED accessor has `accessor`, together with whether the
-/// match is its setter. Matching the forward naming functions is deliberate: reversing `getURL` or
-/// `setOpen` loses information (`URL` vs `uRL`, `isOpen` vs `open`) and can point an interface obligation
-/// at the wrong property. This walk consumes declarations, never rendered owner/class names.
-fn declared_property_accessor(
-    ir: &IrFile,
-    internal: TypeName,
-    accessor: &str,
-) -> Option<(TypeName, Ty, bool)> {
-    let mut cur = internal;
-    loop {
-        let c = class_of(ir, cur)?;
-        if let Some(property) = c.properties.iter().find(|property| {
-            property_getter_name(&property.name) == accessor
-                || (property.is_var && property_setter_name(&property.name) == accessor)
-        }) {
-            let setter = property.is_var && property_setter_name(&property.name) == accessor;
-            return Some((cur, property.ty, setter));
-        }
-        cur = c.superclass;
+        assert_eq!(bridge_erasure(method), Ty::obj("kotlin/Any"));
+        assert_eq!(bridge_erasure(owner), Ty::obj("sample/Entity"));
     }
-}
-
-/// Every method of an interface in this file, including its super-interfaces'.
-fn iface_methods(ir: &IrFile, itf: TypeName) -> Vec<(TypeName, String, u32)> {
-    let mut out = Vec::new();
-    let mut stack = vec![itf];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(i) = stack.pop() {
-        if !seen.insert(i) {
-            continue;
-        }
-        if let Some(c) = class_of(ir, i) {
-            for fid in c.methods.iter().copied() {
-                out.push((i, ir.functions[fid as usize].name.clone(), fid));
-            }
-            stack.extend(c.interfaces.iter_ids());
-        }
-    }
-    out
-}
-
-/// Two erased types that write the SAME descriptor (a platform type and its Kotlin twin do).
-fn types_match(left: Ty, right: Ty) -> bool {
-    if left == right {
-        return true;
-    }
-    if left.is_reference() != right.is_reference() {
-        return false;
-    }
-    let (Some(left_name), Some(right_name)) = (
-        left.non_null().kotlin_class_internal(),
-        right.non_null().kotlin_class_internal(),
-    ) else {
-        return false;
-    };
-    crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(left_name, right_name)
-}
-
-fn param_narrows(syms: &FrontendSymbols, erased: Ty, concrete: Ty) -> bool {
-    types_match(erased, concrete)
-        || erased.is_erased_top()
-        || syms.is_source_subtype(concrete, erased)
-}
-
-fn return_admits(syms: &FrontendSymbols, erased: Ty, concrete: Ty, allow_fake: bool) -> bool {
-    param_narrows(syms, erased, concrete)
-        || (allow_fake
-            && erased.is_reference()
-            && concrete.is_reference()
-            && concrete.is_erased_top())
-}
-
-/// A value class's parameter erases to its underlying type — the shape the concrete method really takes
-/// once the value-class pass has run.
-fn post_value_erasure(syms: &FrontendSymbols, ty: Ty) -> Ty {
-    if ty.is_nullable() {
-        return bridge_erasure(ty);
-    }
-    syms.libraries
-        .value_underlying(ty)
-        .map(bridge_erasure)
-        .unwrap_or_else(|| bridge_erasure(ty))
-}
-
-/// The method a supertype's erased descriptor must land on: searched up the superclass chain first, then
-/// across default methods of the interfaces. `None` when nothing implements the obligation here.
-fn resolve_bridge_target(
-    ir: &IrFile,
-    syms: &FrontendSymbols,
-    internal: TypeName,
-    obligation: &InterfaceObligation,
-) -> Option<u32> {
-    let name = obligation.name.as_str();
-    let erased_params = obligation.erased_params.as_slice();
-    let erased_ret = obligation.erased_ret;
-    let applied_params = obligation.applied_params.as_slice();
-    let applied_ret = obligation.applied_ret;
-    let allow_fake_override = obligation.default == Some(false);
-    let mut current = Some(internal);
-    let mut seen = std::collections::HashSet::new();
-    while let Some(owner) = current {
-        if !seen.insert(owner) {
-            return None;
-        }
-        let Some(class) = class_of(ir, owner) else {
-            break;
-        };
-        let overloads = methods_named(ir, owner, name);
-        if overloads.is_empty() {
-            current = Some(class.superclass);
-            continue;
-        }
-        let mut candidates = overloads
-            .into_iter()
-            .filter_map(|fid| {
-                let function = &ir.functions[fid as usize];
-                (function.params.len() == erased_params.len()).then(|| {
-                    let params = function
-                        .params
-                        .iter()
-                        .copied()
-                        .map(bridge_erasure)
-                        .collect::<Vec<_>>();
-                    (fid, params, bridge_erasure(function.ret))
-                })
-            })
-            .collect::<Vec<_>>();
-        if let Some((fid, _, _)) = unique_match(&candidates, |(_, params, ret)| {
-            params == erased_params && *ret == erased_ret
-        }) {
-            return Some(*fid);
-        }
-        candidates.retain(|(fid, params, ret)| {
-            let generic_override = params.len() == applied_params.len()
-                && params
-                    .iter()
-                    .zip(applied_params)
-                    .all(|(&concrete, &applied)| param_narrows(syms, applied, concrete));
-            let fake_override = allow_fake_override
-                && params
-                    .iter()
-                    .zip(erased_params)
-                    .all(|(&concrete, &erased)| {
-                        types_match(concrete, erased) || concrete.is_erased_top()
-                    });
-            let changes_signature = params != erased_params || *ret != erased_ret;
-            let return_admitted = return_admits(syms, applied_ret, *ret, allow_fake_override);
-            (generic_override || fake_override)
-                && return_admitted
-                && changes_signature
-                // A FRESH declaration in the class itself is not an override, so a supertype's descriptor
-                // must not be pointed at it.
-                && (owner != internal || !ir.fresh_method_decls.contains(fid))
-        });
-        if let Some((fid, _, _)) =
-            unique_match(&candidates, |(_, params, _)| params == erased_params)
-        {
-            return Some(*fid);
-        }
-        if candidates.len() == 1 {
-            return Some(candidates[0].0);
-        }
-        if !candidates.is_empty() {
-            return None;
-        }
-        current = Some(class.superclass);
-    }
-    resolve_default_bridge_target(ir, syms, internal, name, erased_params, erased_ret)
-}
-
-/// The obligation may be satisfied by an inherited interface DEFAULT method rather than by anything the
-/// class hierarchy declares.
-fn resolve_default_bridge_target(
-    ir: &IrFile,
-    syms: &FrontendSymbols,
-    internal: TypeName,
-    name: &str,
-    erased_params: &[Ty],
-    erased_ret: Ty,
-) -> Option<u32> {
-    let mut queue = std::collections::VecDeque::new();
-    let mut current = Some(internal);
-    while let Some(owner) = current {
-        let Some(class) = class_of(ir, owner) else {
-            break;
-        };
-        queue.extend(class.interfaces.iter_ids());
-        current = Some(class.superclass);
-    }
-    let mut seen = std::collections::HashSet::new();
-    while let Some(owner) = queue.pop_front() {
-        if !seen.insert(owner) {
-            continue;
-        }
-        let Some(class) = class_of(ir, owner) else {
-            continue;
-        };
-        let overloads = methods_named(ir, owner, name);
-        if !overloads.is_empty() {
-            let candidates = overloads
-                .into_iter()
-                .filter_map(|fid| {
-                    let function = &ir.functions[fid as usize];
-                    // A DEFAULT method (one with a body) can be the target; an abstract one cannot.
-                    if function.body.is_none() || function.params.len() != erased_params.len() {
-                        return None;
-                    }
-                    let params = function
-                        .params
-                        .iter()
-                        .copied()
-                        .map(bridge_erasure)
-                        .collect::<Vec<_>>();
-                    let ret = bridge_erasure(function.ret);
-                    let compatible = params
-                        .iter()
-                        .zip(erased_params)
-                        .all(|(&concrete, &erased)| param_narrows(syms, erased, concrete))
-                        && return_admits(syms, erased_ret, ret, false);
-                    compatible.then_some((fid, params, ret))
-                })
-                .collect::<Vec<_>>();
-            if let Some((fid, _, _)) = unique_match(&candidates, |(_, params, ret)| {
-                params == erased_params && *ret == erased_ret
-            }) {
-                return Some(*fid);
-            }
-            if candidates.len() == 1 {
-                return Some(candidates[0].0);
-            }
-            if !candidates.is_empty() {
-                return None;
-            }
-        }
-        queue.extend(class.interfaces.iter_ids());
-    }
-    None
-}
-
-/// For each method an implemented interface obliges the class to provide, when the class's actual
-/// implementation (declared, inherited, or a property accessor the backend synthesizes) has a different
-/// erased signature than the interface's, add a bridge carrying the interface's descriptor.
-fn interface_bridges(
-    ir: &mut IrFile,
-    cid: usize,
-    syms: &FrontendSymbols,
-) -> Result<(), SkipReason> {
-    let internal_name = ir.classes[cid].fq_name;
-    let mut ifaces = ir.classes[cid].interfaces.clone();
-    for sup in syms.supertype_internal_names_from(internal_name) {
-        let is_iface = syms
-            .class_by_type_name(sup)
-            .is_some_and(|c| c.is_interface())
-            || syms
-                .libraries
-                .classifier(sup)
-                .is_some_and(|t| t.is_interface());
-        if is_iface && !ifaces.contains_name(sup) {
-            ifaces.push_name(sup);
-        }
-    }
-    let mut seen: std::collections::HashSet<(String, Vec<Ty>, Ty)> = ir.classes[cid]
-        .bridges
-        .iter()
-        .map(|bridge| {
-            (
-                bridge.name.clone(),
-                bridge
-                    .erased_params
-                    .iter()
-                    .copied()
-                    .map(bridge_erasure)
-                    .collect(),
-                bridge_erasure(bridge.erased_ret),
-            )
-        })
-        .collect();
-    for itf in ifaces.iter_ids() {
-        let classpath_interface = syms.libraries.classifier(itf).is_some();
-        let applied_interface_args = syms
-            .applied_hierarchy(Ty::obj_name(internal_name))
-            .into_iter()
-            .find_map(|(owner, applied, _)| (owner == itf).then(|| applied.type_args().to_vec()))
-            .unwrap_or_default();
-        let interface_formals = syms
-            .class_by_type_name(itf)
-            .map(|class| class.type_params().clone())
-            .or_else(|| {
-                syms.libraries
-                    .classifier(itf)
-                    .map(|class| class.type_params().clone())
-            })
-            .unwrap_or_default();
-        let interface_bindings = interface_formals
-            .into_iter()
-            .zip(applied_interface_args.iter().copied())
-            .collect::<std::collections::HashMap<_, _>>();
-        let apply = |ty| crate::symbol_resolver::ty_subst_keep_unbound(ty, &interface_bindings);
-        let obligations: Vec<InterfaceObligation> = if class_of(ir, itf).is_some() {
-            iface_methods(ir, itf)
-                .into_iter()
-                .map(|(_, name, fid)| {
-                    let function = &ir.functions[fid as usize];
-                    InterfaceObligation {
-                        name,
-                        erased_params: function
-                            .params
-                            .iter()
-                            .copied()
-                            .map(bridge_erasure)
-                            .collect(),
-                        erased_ret: bridge_erasure(function.ret),
-                        applied_params: function.params.iter().copied().map(apply).collect(),
-                        applied_ret: apply(function.ret),
-                        default: Some(function.body.is_some()),
-                    }
-                })
-                .collect()
-        } else if let Some(interface) = syms.libraries.classifier(itf) {
-            interface
-                .members
-                .iter()
-                .map(|member| {
-                    let declared_params = member
-                        .generic_sig
-                        .as_ref()
-                        .map_or(member.params.as_slice(), |signature| {
-                            signature.params.as_slice()
-                        });
-                    let declared_ret = member
-                        .generic_sig
-                        .as_ref()
-                        .map_or(member.ret, |signature| signature.ret);
-                    InterfaceObligation {
-                        name: member.name.clone(),
-                        erased_params: member.params.iter().copied().map(bridge_erasure).collect(),
-                        erased_ret: bridge_erasure(member.ret),
-                        applied_params: declared_params.iter().copied().map(apply).collect(),
-                        applied_ret: apply(declared_ret),
-                        default: None,
-                    }
-                })
-                .collect()
-        } else if let Some(interface) = syms.class_by_type_name(itf) {
-            interface
-                .methods
-                .iter()
-                .flat_map(|(name, signatures)| {
-                    signatures.iter().map(move |signature| InterfaceObligation {
-                        name: name.clone(),
-                        erased_params: signature
-                            .params
-                            .iter()
-                            .copied()
-                            .map(bridge_erasure)
-                            .collect(),
-                        erased_ret: bridge_erasure(signature.ret),
-                        applied_params: signature.params.iter().copied().map(apply).collect(),
-                        applied_ret: apply(signature.ret),
-                        default: None,
-                    })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for obligation in obligations {
-            let impl_fid = resolve_bridge_target(ir, syms, internal_name, &obligation);
-            let InterfaceObligation {
-                name,
-                erased_params,
-                erased_ret,
-                applied_params,
-                applied_ret,
-                default: _,
-            } = obligation;
-            crate::trace_compiler!(
-                "bridges",
-                "interface obligation class={internal_name} interface={itf} name={name} erased_params={erased_params:?} erased_ret={erased_ret:?} applied_params={applied_params:?} applied_ret={applied_ret:?} applied_args={applied_interface_args:?}"
-            );
-            // A property accessor is not an IR method — this backend synthesizes it — so the DECLARATION
-            // is the implementation the obligation is satisfied by.
-            let impl_sig = match impl_fid {
-                Some(fid) => {
-                    let f = &ir.functions[fid as usize];
-                    Some((f.params.clone(), f.ret, f.dispatch_receiver))
-                }
-                None => declared_property_accessor(ir, internal_name, &name).map(
-                    |(declaring, ty, setter)| {
-                        if setter {
-                            (vec![ty], Ty::Unit, Some(declaring))
-                        } else {
-                            (Vec::new(), ty, Some(declaring))
-                        }
-                    },
-                ),
-            };
-            let Some((concrete_params, concrete_ret, impl_owner)) = impl_sig else {
-                crate::trace_compiler!(
-                    "bridges",
-                    "interface obligation class={internal_name} name={name} has no implementation target"
-                );
-                continue;
-            };
-            crate::trace_compiler!(
-                "bridges",
-                "interface obligation class={internal_name} name={name} target={impl_fid:?} concrete_params={concrete_params:?} concrete_ret={concrete_ret:?} owner={impl_owner:?}"
-            );
-            let concrete_erased_params = concrete_params
-                .iter()
-                .copied()
-                .map(bridge_erasure)
-                .collect::<Vec<_>>();
-            if erased_params == concrete_erased_params && erased_ret == bridge_erasure(concrete_ret)
-            {
-                continue;
-            }
-            // An INHERITED implementation whose signature already matches needs no bridge here: the
-            // supertype that declares it carries its own.
-            let inherited_signature_matches = impl_owner != Some(internal_name)
-                && erased_params.len() == concrete_params.len()
-                && erased_params
-                    .iter()
-                    .zip(&concrete_params)
-                    .all(|(&erased, &concrete)| types_match(erased, bridge_erasure(concrete)))
-                && types_match(erased_ret, bridge_erasure(concrete_ret));
-            if inherited_signature_matches {
-                continue;
-            }
-            let post_value_params = concrete_params
-                .iter()
-                .copied()
-                .map(|ty| post_value_erasure(syms, ty))
-                .collect::<Vec<_>>();
-            let logical_match = applied_params.len() == concrete_params.len()
-                && applied_params
-                    .iter()
-                    .zip(&concrete_params)
-                    .all(|(&declared, &concrete)| types_match(declared, concrete));
-            let specializes_value_parameter = concrete_params.iter().copied().any(|concrete| {
-                syms.libraries.value_underlying(concrete).is_some()
-                    && applied_interface_args
-                        .iter()
-                        .copied()
-                        .any(|argument| types_match(concrete, argument))
-            });
-            if (logical_match || (classpath_interface && !specializes_value_parameter))
-                && erased_params.len() == post_value_params.len()
-                && erased_params
-                    .iter()
-                    .zip(&post_value_params)
-                    .all(|(&erased, &concrete)| types_match(erased, concrete))
-                && erased_ret == bridge_erasure(concrete_ret)
-            {
-                continue;
-            }
-            if impl_fid.is_some_and(|fid| ir.suspend_funs.contains(&fid)) {
-                // The CPS rewrite makes BOTH sides `(…, Continuation) -> Object`, so a RETURN-only
-                // erasure difference vanishes; only value-parameter differences — or a VALUE-CLASS
-                // return, which MANGLES the concrete method's name and forces a delegating bridge —
-                // still need the (unmodeled) bridge.
-                let concrete_erased = concrete_params
-                    .iter()
-                    .copied()
-                    .map(bridge_erasure)
-                    .collect::<Vec<_>>();
-                let vc_ret = concrete_ret
-                    .non_null()
-                    .obj_internal()
-                    .is_some_and(|n| ir.is_value_class_name(n));
-                if erased_params == concrete_erased && !vc_ret {
-                    continue;
-                }
-                return Err(SkipReason::Bridges);
-            }
-            if seen.insert((name.clone(), erased_params.clone(), erased_ret)) {
-                ir.classes[cid].bridges.push(Bridge {
-                    name,
-                    erased_params,
-                    erased_ret,
-                    concrete_params,
-                    concrete_ret,
-                    type_safe_barrier: false,
-                    target_name: None,
-                    box_ret: None,
-                    unbox_params: Vec::new(),
-                });
-            }
-        }
-    }
-    Ok(())
 }

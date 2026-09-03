@@ -14,7 +14,9 @@ use crate::libraries::{
     PropertyInfo, PropertySet,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{stored_value_ty, type_name, Ty, TypeName, Visibility};
+#[cfg(test)]
+use crate::types::Visibility;
+use crate::types::{stored_value_ty, type_name, Ty, TypeName};
 use std::collections::HashMap;
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
@@ -36,6 +38,44 @@ impl<'a> ModuleSymbols<'a> {
             syms,
             source_file: Some(source_file),
         }
+    }
+
+    pub(crate) fn type_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
+        self.syms.source_alias_expansions.get(&identity).cloned()
+    }
+
+    pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
+        self.syms
+            .classes
+            .values()
+            .find_map(|class| {
+                let index = class
+                    .type_params()
+                    .iter()
+                    .position(|parameter| parameter == identity)?;
+                class.type_parameter_extra_bounds.get(index).cloned()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn annotation_retention(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::AnnotationRetention> {
+        self.syms.annotation_retention(classifier)
+    }
+
+    pub(crate) fn annotation_targets(
+        &self,
+        classifier: TypeName,
+    ) -> crate::types::AnnotationTargets {
+        self.syms.annotation_targets(classifier)
+    }
+
+    /// Temporary Pass-1 graph access for inference-only checker operations. The streamed module
+    /// provider has no corresponding operation and therefore cannot retain this graph.
+    pub(crate) fn pass_one_symbols(&self) -> &'a FrontendSymbols {
+        self.syms
     }
 
     /// The declaring facade of a top-level `name`, if the multi-file driver recorded one. `None` means
@@ -131,7 +171,46 @@ impl<'a> ModuleSymbols<'a> {
         let companion = Vec::new();
         // The primary constructor (+ secondaries) as `<init>` members returning Unit.
         let mut constructors = Vec::new();
-        if c.has_primary_ctor {
+        let constructor_generic_signature = |params: Vec<Ty>| {
+            (!c.type_params.is_empty()).then(|| GenericSig {
+                formals: c.type_params.clone(),
+                formal_bounds: c
+                    .type_param_bounds
+                    .iter()
+                    .map(|bound| {
+                        if *bound == Ty::Error {
+                            Vec::new()
+                        } else {
+                            vec![*bound]
+                        }
+                    })
+                    .collect(),
+                receiver: None,
+                params,
+                ret: Ty::obj_args_name(
+                    c.internal_name(),
+                    &c.type_params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| {
+                            Ty::ty_param(
+                                name,
+                                c.type_param_bounds
+                                    .get(index)
+                                    .copied()
+                                    .filter(|bound| *bound != Ty::Error)
+                                    .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                return_policy: GenericReturnPolicy::Exact,
+            })
+        };
+        let exposes_constructors = !c.is_interface()
+            && !c.is_object()
+            && self.syms.enum_entries_of(c.internal_name()).is_none();
+        if exposes_constructors && c.has_primary_ctor {
             let mut constructor = LibraryMember::new(
                 "<init>".to_string(),
                 c.ctor_params.clone(),
@@ -179,55 +258,36 @@ impl<'a> ModuleSymbols<'a> {
                 required,
                 c.ctor_vararg,
             );
-            if !c.type_params.is_empty() {
-                constructor.generic_sig = Some(GenericSig {
-                    formals: c.type_params.clone(),
-                    formal_bounds: c
-                        .type_param_bounds
-                        .iter()
-                        .map(|bound| {
-                            if *bound == Ty::Error {
-                                Vec::new()
-                            } else {
-                                vec![*bound]
-                            }
-                        })
-                        .collect(),
-                    receiver: None,
-                    params: c
-                        .ctor_param_shapes
-                        .iter()
-                        .map(|(parameter, _)| *parameter)
-                        .collect(),
-                    ret: Ty::obj_args_name(
-                        c.internal_name(),
-                        &c.type_params
-                            .iter()
-                            .enumerate()
-                            .map(|(index, name)| {
-                                Ty::ty_param(
-                                    name,
-                                    c.type_param_bounds
-                                        .get(index)
-                                        .copied()
-                                        .filter(|bound| *bound != Ty::Error)
-                                        .unwrap_or_else(|| Ty::obj("kotlin/Any")),
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    ),
-                    return_policy: GenericReturnPolicy::Exact,
-                });
-            }
+            constructor.generic_sig = constructor_generic_signature(
+                c.ctor_param_shapes
+                    .iter()
+                    .map(|(parameter, _)| *parameter)
+                    .collect(),
+            );
             constructors.push(constructor);
         }
-        for params in &c.secondary_ctors {
-            constructors.push(LibraryMember::new(
+        for (index, params) in c
+            .secondary_ctors
+            .iter()
+            .enumerate()
+            .filter(|_| exposes_constructors)
+        {
+            let mut constructor = LibraryMember::new(
                 "<init>".to_string(),
                 params.clone(),
                 Ty::Unit,
                 String::new(),
-            ));
+            );
+            if let Some(call_sig) = c.secondary_ctor_call_sigs.get(index) {
+                constructor.call_sig = call_sig.clone();
+            }
+            constructor.generic_sig = constructor_generic_signature(
+                c.secondary_ctor_shapes
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| params.clone()),
+            );
+            constructors.push(constructor);
         }
         let mut supertypes: Vec<TypeName> = c.interfaces.iter_ids().collect();
         let mut supertype_templates = c
@@ -333,6 +393,7 @@ impl<'a> ModuleSymbols<'a> {
             is_kotlin: true,
             access: c.visibility.into(),
             source_file: Some(c.source_file),
+            stable_declaration: c.stable_declaration,
             is_nested: c.internal_name().contains("$"),
             outer_instance: c.inner_of,
             kind,
@@ -344,13 +405,19 @@ impl<'a> ModuleSymbols<'a> {
             supertypes: supertypes.into(),
             supertype_templates,
             constructors,
-            fields: Vec::new(),
+            hidden_member_properties: Default::default(),
             declared_callables: HashMap::new(),
+            declared_callable_order: Vec::new(),
             members,
             companion,
-            constants: HashMap::new(),
+            // A completed source classifier is also the provider record consumed by later
+            // modules. Preserve the Pass-1 constant payload here: annotation folding in a
+            // dependent module must read the selected semantic constant from the provider rather
+            // than reopen the dependency's source initializer.
+            constants: c.constants.clone(),
             sam_eligible: c.is_fun_interface(),
             callable_signature: c.callable_signature,
+            callable_signatures: c.callable_signatures.clone(),
             // Publish the source companion through the same classifier record as a dependency
             // companion. Core can then treat `Type(args)` → companion `operator fun invoke` as one
             // callable-tower case instead of retaining a source-only retry path.
@@ -375,10 +442,19 @@ impl<'a> ModuleSymbols<'a> {
                     .collect(),
                 c.type_param_bounds
                     .iter()
-                    .map(|bound| {
-                        (*bound != Ty::Error)
+                    .enumerate()
+                    .map(|(index, bound)| {
+                        let mut bounds = (*bound != Ty::Error)
                             .then_some(vec![*bound])
-                            .unwrap_or_default()
+                            .unwrap_or_default();
+                        bounds.extend(
+                            c.type_parameter_extra_bounds
+                                .get(index)
+                                .into_iter()
+                                .flatten()
+                                .copied(),
+                        );
+                        bounds
                     })
                     .chain(
                         c.captured_type_parameters
@@ -393,6 +469,7 @@ impl<'a> ModuleSymbols<'a> {
                     .copied()
                     .collect(),
             ),
+            own_type_parameter_count: c.type_params.len(),
             sealed_subclasses,
             enum_entries,
             enum_entries_accessor,
@@ -400,24 +477,25 @@ impl<'a> ModuleSymbols<'a> {
             retention: None,
             annotation_targets: None,
         };
-        let mut names = c
-            .methods
-            .keys()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        names.extend(c.member_ext_funs.keys().cloned());
-        names.extend(c.member_ext_props.keys().cloned());
-        for (name, property) in &c.declared_props {
-            names.insert(name.clone());
-            names.insert(property.getter_name.clone());
-            if let Some(setter) = &property.setter_name {
-                names.insert(setter.clone());
-            }
-        }
-        for name in names {
-            let declarations = self.declared_callables_for(c, &name);
+        debug_assert!(
+            c.methods
+                .keys()
+                .chain(c.member_ext_funs.keys())
+                .chain(c.member_ext_props.keys())
+                .chain(
+                    c.declared_props
+                        .iter()
+                        .filter(|(_, property)| property.source_visible)
+                        .map(|(name, _)| name),
+                )
+                .chain(c.contextual_props.keys())
+                .all(|name| c.declared_callable_order.contains(name)),
+            "the source provider must publish every direct callable in lexical order",
+        );
+        for name in &c.declared_callable_order {
+            let declarations = self.declared_callables_for(c, name);
             if !matches!(declarations, crate::libraries::Callables::None) {
-                shape.declared_callables.insert(name, declarations);
+                shape.insert_declared_callables(name.clone(), declarations);
             }
         }
         shape
@@ -441,6 +519,25 @@ impl<'a> ModuleSymbols<'a> {
         if let Some(i) = rt.non_null().obj_internal() {
             self.collect_member_libs(i, name, &mut out, &mut seen);
         }
+        // An OVERRIDE hides what it overrides. The walk pushes a class's own members before its
+        // supertypes', so the first entry for a given value-parameter shape is the nearest
+        // declaration; keeping the overridden one too lets a caller read the BASE declaration's
+        // return type, which is wrong whenever the override is covariant
+        // (`override fun bar(): String` over `open fun bar(): Any` — `bar().length` then failed to
+        // resolve). Overloads differ in their parameter shape and are all retained.
+        let mut shapes = Vec::new();
+        out.retain(|member| {
+            let shape = member
+                .params
+                .iter()
+                .map(|parameter| parameter.non_null().erased_recv())
+                .collect::<Vec<_>>();
+            if shapes.contains(&shape) {
+                return false;
+            }
+            shapes.push(shape);
+            true
+        });
         out
     }
 
@@ -590,43 +687,26 @@ impl<'a> ModuleSymbols<'a> {
                 function
             })
             .collect::<Vec<_>>();
-        for property in class.declared_props.values() {
-            let accessor = if property.getter_name == name {
-                Some(source_accessor(
-                    CallableOwner {
-                        internal,
-                        is_interface: class.is_interface(),
-                    },
-                    name,
-                    property.context_params.clone(),
-                    property.ty,
-                    property.visibility,
-                    0,
-                    property.context_params.len(),
-                ))
-            } else if property.setter_name.as_deref() == Some(name) {
-                let mut params = property.context_params.clone();
-                params.push(property.ty);
-                Some(source_accessor(
-                    CallableOwner {
-                        internal,
-                        is_interface: class.is_interface(),
-                    },
-                    name,
-                    params,
-                    Ty::Unit,
-                    property.visibility,
-                    0,
-                    property.context_params.len(),
-                ))
-            } else {
-                None
-            };
-            functions.extend(accessor);
-        }
-        let properties = class
+        functions.extend(class.member_ext_funs(name).iter().map(|declaration| {
+            let mut function = fn_info(
+                FnKind::Extension,
+                declaration.signature(),
+                Some(declaration.receiver_ty()),
+                CallableOwner {
+                    internal,
+                    is_interface: class.is_interface(),
+                },
+                name,
+                0,
+                Origin::Module { facade: internal },
+            );
+            function.source_key = None;
+            function
+        }));
+        let mut properties = class
             .declared_props
             .get(name)
+            .filter(|property| property.source_visible)
             .map(|property| {
                 let mut declaration = source_property(
                     internal,
@@ -683,6 +763,67 @@ impl<'a> ModuleSymbols<'a> {
             })
             .into_iter()
             .collect::<Vec<_>>();
+        properties.extend(class.contextual_props(name).iter().map(|property| {
+            source_property(
+                internal,
+                name,
+                property,
+                class.is_interface() || class.is_annotation(),
+                0,
+            )
+        }));
+        properties.extend(class.member_ext_props(name).iter().map(|declaration| {
+            let mut getter_params = vec![declaration.receiver_ty()];
+            getter_params.extend_from_slice(declaration.context_params());
+            let mut getter = source_property_getter(
+                internal,
+                crate::names::property_getter_name(name),
+                getter_params.clone(),
+                declaration.ret(),
+                class.is_interface(),
+            );
+            getter.source_receiver = Some(declaration.receiver_ty());
+            getter.context_count = declaration.context_params().len();
+            let setter = declaration.is_var().then(|| {
+                let mut params = getter_params;
+                params.push(stored_value_ty(declaration.ret()));
+                let mut setter = source_callable(
+                    internal,
+                    crate::names::property_setter_name(name),
+                    params,
+                    Ty::Unit,
+                    class.is_interface(),
+                );
+                setter.source_receiver = Some(declaration.receiver_ty());
+                setter.context_count = declaration.context_params().len();
+                setter
+            });
+            PropertyInfo {
+                name: name.to_string(),
+                kind: PropKind::MemberExtension,
+                receiver: Some(declaration.receiver_ty()),
+                formals: declaration.type_params().to_vec(),
+                ty: declaration.ret(),
+                context_count: declaration.context_params().len(),
+                context_param_names: Vec::new(),
+                getter,
+                setter,
+                setter_visibility: declaration
+                    .setter_visibility()
+                    .unwrap_or_else(|| declaration.visibility()),
+                is_const: false,
+                compile_time_constant: None,
+                visibility: declaration.visibility(),
+                owner: internal,
+                receiver_rank: 0,
+                source_key: None,
+                stable_declaration: declaration.stable_declaration(),
+                getter_declaration: None,
+                setter_declaration: None,
+                source_member: declaration.source_member(),
+                accessor_derived: false,
+            }
+        }));
         crate::libraries::Callables::from_parts(
             FunctionSet {
                 overloads: functions,
@@ -712,14 +853,17 @@ pub(crate) fn member_from_signature(
     m.generic_sig = sig.generic_sig.clone();
     m.set_is_interface(is_interface);
     m.set_is_abstract(sig.is_abstract());
+    m.set_is_final(sig.is_final());
     m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
     m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), sig.requires_splice());
     m.reified = sig.has_reified_type_params();
     m.call_sig = sig.call_sig();
     m.context_count = sig.context_count;
+    m.equality_bound = sig.equality_bound;
     m.default_values = sig.param_default_values.clone();
     m.plugin_expression = sig.plugin_expression;
+    m.stable_declaration = sig.stable_declaration;
     m.source_member = sig.source_member;
     m
 }
@@ -754,14 +898,22 @@ fn fn_info(
     if let Some(r) = receiver {
         params.insert(sig.context_count.min(params.len()), r);
     }
+    let declared_params = Some(params.clone().into_boxed_slice());
     let callable = LibraryCallable {
+        external_identity: None,
+        external_property_identity: None,
         owner,
         name: name.to_string(),
+        reflection_name: Some(name.to_string()),
         compiler_intrinsic: None,
         inline_body_plan: None,
         plugin_expression: sig.plugin_expression,
         descriptor: String::new(),
-        physical_params: params.clone(),
+        physical_params: if sig.is_companion_extension() {
+            sig.params.clone()
+        } else {
+            params.clone()
+        },
         params,
         ret: sig.ret,
         physical_ret: sig.ret,
@@ -781,17 +933,21 @@ fn fn_info(
         origin,
         // Representation lowering needs the declaration receiver before erasure.
         source_receiver,
+        declared_params,
         context_count: sig.context_count,
         contract: sig.contract.clone(),
+        equality_bound: sig.equality_bound,
         generic_sig: sig.generic_sig.clone().map(Box::new),
         singleton_dispatch: None,
         default_realization: None,
+        constructor_realization: None,
         // A SOURCE callable's `ret` is already the declared type and its `physical_ret` is not yet
         // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
         // sees the declaration itself. The fact exists for callables read back from a class file.
         declared_ret: None,
     };
     FunctionInfo {
+        companion_extension: sig.is_companion_extension(),
         receiver_rank: rank,
         generic_sig: sig.generic_sig.clone(),
         projected_return_hazard: sig.projected_return_hazard,
@@ -802,6 +958,7 @@ fn fn_info(
             .source_file
             .zip(sig.source_decl)
             .map(|(file, decl)| (file, decl.0)),
+        stable_declaration: sig.stable_declaration,
         source_member: sig.source_member,
         flags: FnFlags {
             inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
@@ -812,11 +969,41 @@ fn fn_info(
             operator: sig.is_operator(),
             infix: sig.is_infix(),
             is_abstract: sig.is_abstract(),
+            is_final: sig.is_final(),
         },
         visibility: sig.visibility,
         annotations: sig.annotations.clone(),
         ..FunctionInfo::plain(kind, receiver, callable)
     }
+}
+
+/// Normalize a transient source member declaration into the same candidate shape exposed by the
+/// module symbol provider. Body-local classifiers use this while their inferred member results are
+/// being checked in the active Pass-2 unit; the candidate and its parser coordinate are discarded
+/// with that unit, while checked FIR retains only `stable_declaration`.
+pub(crate) fn source_member_function(
+    name: &str,
+    signature: &Signature,
+    receiver: Option<Ty>,
+    owner: TypeName,
+    owner_is_interface: bool,
+) -> FunctionInfo {
+    fn_info(
+        if receiver.is_some() {
+            FnKind::Extension
+        } else {
+            FnKind::Member
+        },
+        signature,
+        receiver,
+        CallableOwner {
+            internal: owner,
+            is_interface: owner_is_interface,
+        },
+        name,
+        0,
+        Origin::Module { facade: owner },
+    )
 }
 
 fn source_callable(
@@ -826,8 +1013,12 @@ fn source_callable(
     ret: Ty,
     owner_is_interface: bool,
 ) -> LibraryCallable {
+    let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
+        external_identity: None,
+        external_property_identity: None,
         owner,
+        reflection_name: Some(name.clone()),
         name,
         compiler_intrinsic: None,
         inline_body_plan: None,
@@ -848,11 +1039,14 @@ fn source_callable(
         signature: None,
         origin: Origin::Module { facade: owner },
         source_receiver: None,
+        declared_params,
         context_count: 0,
         contract: None,
+        equality_bound: None,
         generic_sig: None,
         singleton_dispatch: None,
         default_realization: None,
+        constructor_realization: None,
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
     }
@@ -868,31 +1062,6 @@ fn source_property_getter(
     let mut callable = source_callable(owner, name, params, ty, owner_is_interface);
     callable.physical_ret = stored_value_ty(ty);
     callable
-}
-
-fn source_accessor(
-    owner: CallableOwner,
-    name: &str,
-    params: Vec<Ty>,
-    ret: Ty,
-    visibility: Visibility,
-    receiver_rank: u32,
-    context_count: usize,
-) -> FunctionInfo {
-    let CallableOwner {
-        internal: owner,
-        is_interface: owner_is_interface,
-    } = owner;
-    FunctionInfo {
-        visibility,
-        receiver_rank,
-        context_count,
-        ..FunctionInfo::plain(
-            FnKind::Member,
-            Some(Ty::obj_name(owner)),
-            source_callable(owner, name.to_string(), params, ret, owner_is_interface),
-        )
-    }
 }
 
 fn source_property(
@@ -930,10 +1099,14 @@ fn source_property(
         setter,
         setter_visibility: property.setter_visibility.unwrap_or(property.visibility),
         is_const: property.is_const,
+        compile_time_constant: None,
         visibility: property.visibility,
         owner,
         receiver_rank,
         source_key: None,
+        stable_declaration: property.stable_declaration,
+        getter_declaration: None,
+        setter_declaration: None,
         source_member: property.source_member,
         accessor_derived: false,
     }
@@ -976,6 +1149,10 @@ impl SymbolSource for ModuleSymbols<'_> {
                 .unwrap_or_else(|| classifier_name.expect("classifier identity"))
         });
         let name = name.to_string();
+        let associated_owner = match namespace {
+            SymbolNamespace::Classifier(owner) => Some(owner),
+            SymbolNamespace::Package(_) => None,
+        };
         let package = match namespace {
             SymbolNamespace::Package(package) => Some(package),
             SymbolNamespace::Classifier(_) => None,
@@ -1020,6 +1197,9 @@ impl SymbolSource for ModuleSymbols<'_> {
                 )
             });
             for (recv, sig) in declared {
+                let imported_associated = associated_owner.is_some_and(|owner| {
+                    sig.is_companion_extension() && recv.non_null().obj_internal() == Some(owner)
+                });
                 let rank = if recv.non_null().is_ty_param() || recv.non_null() == any {
                     1
                 } else {
@@ -1027,13 +1207,19 @@ impl SymbolSource for ModuleSymbols<'_> {
                 };
                 // Surface EVERY overload registered for this (receiver, name) so the resolver's
                 // overload picker can choose by arity/argument types (`fun R.f()` vs `fun R.f(x)`).
-                if !package.is_some_and(|package| package.matches(&sig.package)) {
+                if !package.is_some_and(|package| package.matches(&sig.package))
+                    && !imported_associated
+                {
                     continue;
                 }
                 overloads.push(fn_info(
-                    FnKind::Extension,
+                    if imported_associated {
+                        FnKind::TopLevel
+                    } else {
+                        FnKind::Extension
+                    },
                     sig,
-                    Some(*recv),
+                    (!imported_associated).then_some(*recv),
                     CallableOwner {
                         internal: crate::types::type_name(""),
                         is_interface: false,
@@ -1053,23 +1239,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         // and ordinary overload selection remains origin-neutral.
         if let SymbolNamespace::Classifier(owner) = namespace {
             if let Some(classifier) = self.classifier_record(owner).filter(|ty| ty.is_object()) {
-                let companion_storage = owner.nested_owner().and_then(|outer| {
-                    self.classifier_record(outer)
-                        .and_then(|outer_type| outer_type.companion_object.clone())
-                        .filter(|(_, companion)| *companion == owner)
-                        .map(|(field, _)| (outer, field))
-                });
-                let (field_owner, field_name) =
-                    companion_storage.unwrap_or_else(|| (owner, "INSTANCE".to_string()));
-                let singleton = crate::libraries::StaticFieldRef {
-                    owner: field_owner,
-                    name: field_name,
-                    descriptor: Some(format!("L{};", owner.render())),
-                    ty: Ty::obj_name(owner),
-                    constant: None,
-                    visibility: crate::types::Visibility::Public,
-                    is_final: true,
-                };
+                let singleton = crate::libraries::SingletonDispatch { classifier: owner };
                 let imported = classifier
                     .declared_callables
                     .get(&name)
@@ -1077,93 +1247,28 @@ impl SymbolSource for ModuleSymbols<'_> {
                     .unwrap_or_default();
                 let (imported_functions, imported_properties) = imported.into_parts();
                 for mut function in imported_functions.overloads {
-                    function.kind = FnKind::TopLevel;
-                    function.receiver = None;
+                    if function.kind == FnKind::Member {
+                        function.kind = FnKind::TopLevel;
+                        function.receiver = None;
+                    }
                     function.source_key = None;
                     function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
                     overloads.push(function);
                 }
                 for mut property in imported_properties.overloads {
-                    property.kind = PropKind::TopLevel;
-                    property.receiver = None;
+                    match property.kind {
+                        PropKind::Member => {
+                            property.kind = PropKind::TopLevel;
+                            property.receiver = None;
+                        }
+                        PropKind::MemberExtension => property.kind = PropKind::Extension,
+                        PropKind::Extension | PropKind::TopLevel => {}
+                    }
                     property.getter.singleton_dispatch = Some(Box::new(singleton.clone()));
                     if let Some(setter) = &mut property.setter {
                         setter.singleton_dispatch = Some(Box::new(singleton.clone()));
                     }
                     properties.push(property);
-                }
-                if let Some(class) = self.class_by_type_name(owner) {
-                    for declaration in class.member_ext_funs(&name) {
-                        let mut function = fn_info(
-                            FnKind::Extension,
-                            declaration.signature(),
-                            Some(declaration.receiver_ty()),
-                            CallableOwner {
-                                internal: owner,
-                                is_interface: class.is_interface(),
-                            },
-                            &name,
-                            0,
-                            Origin::Module { facade: owner },
-                        );
-                        // This is a member callable imported into the receiver-less callable scope,
-                        // not a top-level declaration. Its complete emit handle is the singleton
-                        // dispatch below; a source declaration key would misroute it through the
-                        // cross-file static-extension path.
-                        function.source_key = None;
-                        function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
-                        overloads.push(function);
-                    }
-                    for declaration in class.member_ext_props(&name) {
-                        let mut getter_params = vec![declaration.receiver_ty()];
-                        getter_params.extend_from_slice(declaration.context_params());
-                        let mut getter = source_property_getter(
-                            owner,
-                            crate::names::property_getter_name(&name),
-                            getter_params.clone(),
-                            declaration.ret(),
-                            class.is_interface(),
-                        );
-                        getter.singleton_dispatch = Some(Box::new(singleton.clone()));
-                        getter.source_receiver = Some(declaration.receiver_ty());
-                        getter.context_count = declaration.context_params().len();
-                        let setter = declaration.is_var().then(|| {
-                            let mut params = getter_params;
-                            params.push(stored_value_ty(declaration.ret()));
-                            let mut setter = source_callable(
-                                owner,
-                                crate::names::property_setter_name(&name),
-                                params,
-                                Ty::Unit,
-                                class.is_interface(),
-                            );
-                            setter.singleton_dispatch = Some(Box::new(singleton.clone()));
-                            setter.source_receiver = Some(declaration.receiver_ty());
-                            setter.context_count = declaration.context_params().len();
-                            setter
-                        });
-                        properties.push(PropertyInfo {
-                            name: name.clone(),
-                            kind: PropKind::Extension,
-                            receiver: Some(declaration.receiver_ty()),
-                            formals: declaration.type_params().to_vec(),
-                            ty: declaration.ret(),
-                            context_count: declaration.context_params().len(),
-                            context_param_names: Vec::new(),
-                            getter,
-                            setter,
-                            setter_visibility: declaration
-                                .setter_visibility()
-                                .unwrap_or_else(|| declaration.visibility()),
-                            is_const: false,
-                            visibility: declaration.visibility(),
-                            owner,
-                            receiver_rank: 0,
-                            source_key: None,
-                            source_member: None,
-                            accessor_derived: false,
-                        });
-                    }
                 }
             }
         }
@@ -1198,22 +1303,35 @@ impl SymbolSource for ModuleSymbols<'_> {
                     false,
                 )
             });
+            // An explicit backing field is a stable source-level smart-cast only while this
+            // compilation can see the final property's declaration. The accessor ABI and metadata
+            // remain nominal (`property.ty`); only the selected read expression gets the narrower
+            // field type.
+            let read_ty = (self.source_file == Some(source.0))
+                .then_some(property.storage_ty)
+                .flatten()
+                .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
+                .unwrap_or(property.ty);
             properties.push(PropertyInfo {
                 name: name.clone(),
                 kind: PropKind::TopLevel,
                 receiver: None,
-                formals: Vec::new(),
-                ty: property.ty,
+                formals: property.formals.clone(),
+                ty: read_ty,
                 context_count: property.context_params.len(),
                 context_param_names: property.context_param_names.clone(),
                 getter,
                 setter,
                 setter_visibility: property.setter_visibility,
                 is_const: property.is_const,
+                compile_time_constant: property.compile_time_constant.clone(),
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
                 source_key: Some(source),
+                stable_declaration: property.stable_declaration,
+                getter_declaration: None,
+                setter_declaration: None,
                 source_member: None,
                 accessor_derived: false,
             });
@@ -1223,7 +1341,12 @@ impl SymbolSource for ModuleSymbols<'_> {
                 continue;
             }
             for property in signatures {
-                if !package.is_some_and(|package| package.matches(&property.package))
+                let imported_associated = associated_owner.is_some_and(|owner| {
+                    property.is_companion_extension
+                        && property.receiver.non_null().obj_internal() == Some(owner)
+                });
+                if (!package.is_some_and(|package| package.matches(&property.package))
+                    && !imported_associated)
                     || (property.visibility.is_private()
                         && self.source_file != Some(property.source.0))
                 {
@@ -1249,10 +1372,45 @@ impl SymbolSource for ModuleSymbols<'_> {
                     params.push(stored_value_ty(property.ty));
                     source_callable(owner, setter_name.clone(), params, Ty::Unit, false)
                 });
+                let mut getter = getter;
+                let mut setter = setter;
+                if let Some(generic) = property.generic_signature() {
+                    getter.generic_sig = Some(Box::new(generic.clone()));
+                    if let Some(setter) = &mut setter {
+                        let mut setter_generic = generic;
+                        setter_generic.params.push(property.ty);
+                        setter_generic.ret = Ty::Unit;
+                        setter.generic_sig = Some(Box::new(setter_generic));
+                    }
+                }
+                if property.is_companion_extension {
+                    if !getter.physical_params.is_empty() {
+                        getter.physical_params.remove(0);
+                    }
+                    if let Some(setter) = &mut setter {
+                        if !setter.physical_params.is_empty() {
+                            setter.physical_params.remove(0);
+                        }
+                    }
+                }
+                if imported_associated {
+                    if !getter.params.is_empty() {
+                        getter.params.remove(0);
+                    }
+                    if let Some(setter) = &mut setter {
+                        if !setter.params.is_empty() {
+                            setter.params.remove(0);
+                        }
+                    }
+                }
                 properties.push(PropertyInfo {
                     name: property_name.clone(),
-                    kind: PropKind::Extension,
-                    receiver: Some(property.receiver),
+                    kind: if imported_associated {
+                        PropKind::TopLevel
+                    } else {
+                        PropKind::Extension
+                    },
+                    receiver: (!imported_associated).then_some(property.receiver),
                     formals: property.formals.clone(),
                     ty: property.ty,
                     context_count: property.context_params.len(),
@@ -1261,10 +1419,14 @@ impl SymbolSource for ModuleSymbols<'_> {
                     setter,
                     setter_visibility: property.visibility,
                     is_const: false,
+                    compile_time_constant: None,
                     visibility: property.visibility,
                     owner,
                     receiver_rank: 0,
                     source_key: Some(property.source),
+                    stable_declaration: property.stable_declaration,
+                    getter_declaration: None,
+                    setter_declaration: None,
                     source_member: None,
                     accessor_derived: false,
                 });
@@ -1292,10 +1454,6 @@ impl SymbolSource for ModuleSymbols<'_> {
                 self.classifier_record(owner).is_some_and(|classifier| {
                     classifier.is_enum_entry(&name)
                         || classifier.constants.contains_key(&name)
-                        || classifier
-                            .fields
-                            .iter()
-                            .any(|field| field.is_static && field.name == name)
                         || classifier
                             .companion_object
                             .as_ref()
@@ -1341,10 +1499,12 @@ mod tests {
                 .with_is_final(false)
                 .with_is_suspend(false),
             annotations: Vec::new(),
+            equality_bound: None,
             vararg_index: None,
             required: 0,
             param_defaults: vec![],
             exact_params: vec![],
+            no_infer_params: vec![],
             implicit_integer_coercion: vec![],
             param_default_values: vec![],
             param_names: vec![],
@@ -1353,6 +1513,7 @@ mod tests {
             visibility: crate::types::Visibility::Public,
             context_count: 0,
             source_decl: None,
+            stable_declaration: None,
             source_file: None,
             source_member: None,
             source_receiver: None,
@@ -1365,34 +1526,48 @@ mod tests {
     fn class(internal: &str) -> FrontendClassSig {
         FrontendClassSig {
             internal: internal.into(),
+            stable_declaration: None,
             source_file: 0,
             source_decl: None,
             visibility: Visibility::Public,
+            annotations: vec![],
             props: vec![],
             declared_props: HashMap::new(),
+            contextual_props: HashMap::new(),
             constants: HashMap::new(),
             member_ext_props: HashMap::new(),
             member_ext_funs: HashMap::new(),
             has_primary_ctor: true,
+            primary_constructor_declaration: None,
+            primary_constructor_annotations: vec![],
             ctor_params: vec![],
             ctor_param_shapes: vec![],
             ctor_param_names: vec![],
+            ctor_implicit_integer_coercion: vec![],
             ctor_vararg: None,
             methods: HashMap::new(),
-            source_methods: HashMap::new(),
+            declared_callable_order: Vec::new(),
+            source_methods: Vec::new(),
             flags: FrontendClassFlags::default(),
             inner_of: None,
             companion_internal: None,
             lateinit_props: HashSet::new(),
             interfaces: crate::types::TypeNameList::new(),
             interface_type_args: Vec::new(),
+            delegated_interfaces: Vec::new(),
             callable_signature: None,
+            callable_signatures: Vec::new(),
             super_internal: None,
             super_type_args: Vec::new(),
             super_ctor_params: Vec::new(),
             ctor_defaults: vec![],
             secondary_ctors: vec![],
+            secondary_ctor_shapes: vec![],
+            secondary_ctor_call_sigs: vec![],
+            secondary_constructor_declarations: vec![],
+            secondary_constructor_annotations: vec![],
             type_parameters: crate::types::TypeParameters::default(),
+            type_parameter_extra_bounds: Vec::new(),
             captured_type_parameters: crate::types::TypeParameters::default(),
             metadata_captured_type_parameters: Vec::new(),
             generic_props: HashMap::new(),
@@ -1473,19 +1648,50 @@ mod tests {
     }
 
     #[test]
+    fn type_shapes_publish_source_constant_payloads_to_dependent_modules() {
+        let mut symbols = FrontendSymbols::default();
+        let mut object = class("sample/Class$Obj");
+        object.flags = object.flags.with_object(true);
+        object.constants.insert(
+            "Const".to_string(),
+            crate::libraries::LibraryConst {
+                ty: Ty::String,
+                value: crate::libraries::LibConst::Str("const".into()),
+            },
+        );
+        symbols.insert_class(object);
+
+        let source = ModuleSymbols::new(&symbols);
+        let shape = source
+            .classifier(type_name("sample/Class$Obj"))
+            .expect("nested object classifier");
+        assert_eq!(
+            shape.constants.get("Const"),
+            Some(&crate::libraries::LibraryConst {
+                ty: Ty::String,
+                value: crate::libraries::LibConst::Str("const".into()),
+            })
+        );
+    }
+
+    #[test]
     fn companion_properties_are_members_of_the_companion_classifier_record() {
         let mut symbols = FrontendSymbols::default();
         let mut sample = class("sample/Sample");
         sample.companion_internal = Some(type_name("sample/Sample$Companion"));
         let mut companion = class("sample/Sample$Companion");
+        companion
+            .declared_callable_order
+            .push("maxValue".to_string());
         companion.declared_props.insert(
             "maxValue".to_string(),
             crate::resolve::DeclaredPropertySig {
                 ty: Ty::Int,
                 storage_ty: None,
                 visibility: Visibility::Public,
+                source_visible: true,
                 is_const: false,
-                is_jvm_field: false,
+                annotations: Vec::new(),
                 getter_name: "getMaxValue".to_string(),
                 setter_name: None,
                 setter_visibility: None,
@@ -1494,7 +1700,7 @@ mod tests {
                 is_open: false,
                 context_params: Vec::new(),
                 source_member: None,
-                hoists_to_owner_field: false,
+                stable_declaration: None,
             },
         );
         companion
@@ -1716,10 +1922,12 @@ mod tests {
     fn classifier_record_returns_exact_declarations_without_inheritance() {
         let mut st = FrontendSymbols::default();
         let mut base = class("demo/Base");
+        base.declared_callable_order.push("greet".to_string());
         base.methods
             .insert("greet".into(), vec![sig(vec![], Ty::String)]);
         let mut sub = class("demo/Sub");
         sub.super_internal = Some(crate::types::type_name("demo/Base"));
+        sub.declared_callable_order.push("own".to_string());
         sub.methods.insert("own".into(), vec![sig(vec![], Ty::Int)]);
         st.insert_class(base);
         st.insert_class(sub);
@@ -1750,14 +1958,16 @@ mod tests {
     fn member_properties_preserve_declaration_metadata() {
         let mut symbols = FrontendSymbols::default();
         let mut base = class("demo/Base");
+        base.declared_callable_order.push("state".to_string());
         base.declared_props.insert(
             "state".into(),
             FrontendDeclaredPropertySig {
                 ty: Ty::String,
                 storage_ty: None,
                 visibility: Visibility::Protected,
+                source_visible: true,
                 is_const: false,
-                is_jvm_field: false,
+                annotations: Vec::new(),
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),
                 setter_visibility: Some(Visibility::Protected),
@@ -1766,7 +1976,7 @@ mod tests {
                 is_open: false,
                 context_params: Vec::new(),
                 source_member: None,
-                hoists_to_owner_field: false,
+                stable_declaration: None,
             },
         );
         let mut sub = class("demo/Sub");
@@ -1803,14 +2013,10 @@ mod tests {
         let getter = declared(&source, Ty::obj("demo/Base"), "getState")
             .into_parts()
             .0;
-        assert_eq!(getter.overloads.len(), 1);
-        assert_eq!(getter.overloads[0].receiver_rank, 0);
-        assert_eq!(getter.overloads[0].visibility, Visibility::Protected);
-        assert!(getter.overloads[0].callable.owner.matches("demo/Base"));
-        assert!(matches!(
-            getter.overloads[0].callable.origin,
-            Origin::Module { .. }
-        ));
+        assert!(getter.overloads.is_empty());
+        assert_eq!(property.getter.name, "getState");
+        assert!(property.getter.owner.matches("demo/Base"));
+        assert!(matches!(property.getter.origin, Origin::Module { .. }));
         assert!(!declared(&source, Ty::obj("demo/Base"), "state")
             .into_parts()
             .1
@@ -1824,6 +2030,7 @@ mod tests {
         let mut c = class("demo/Host");
         let mut method = sig(vec![Ty::Int], Ty::Int);
         method.set_is_inline(true);
+        c.declared_callable_order.push("apply".to_string());
         c.methods.insert("apply".into(), vec![method]);
         st.insert_class(c);
         let m = ModuleSymbols::new(&st);
@@ -1948,7 +2155,9 @@ mod tests {
             (receiver.erased_recv(), "label".into()),
             vec![
                 FrontendExtPropSig {
+                    formal_names: Vec::new(),
                     formals: Vec::new(),
+                    formal_bounds: Vec::new(),
                     receiver,
                     ty: Ty::String,
                     is_var: true,
@@ -1959,9 +2168,14 @@ mod tests {
                     source: (0, 3),
                     package: "one".into(),
                     visibility: Visibility::Private,
+                    annotations: Vec::new(),
+                    stable_declaration: None,
+                    is_companion_extension: false,
                 },
                 FrontendExtPropSig {
+                    formal_names: Vec::new(),
                     formals: Vec::new(),
+                    formal_bounds: Vec::new(),
                     receiver,
                     ty: Ty::Int,
                     is_var: false,
@@ -1972,6 +2186,9 @@ mod tests {
                     source: (1, 4),
                     package: "two".into(),
                     visibility: Visibility::Public,
+                    annotations: Vec::new(),
+                    stable_declaration: None,
+                    is_companion_extension: false,
                 },
             ],
         );
@@ -2044,6 +2261,7 @@ mod tests {
         let mut st = FrontendSymbols::default();
         let mut c = class("demo/Point");
         c.ctor_params = vec![Ty::Int, Ty::Int];
+        c.declared_callable_order.push("sum".to_string());
         c.methods.insert("sum".into(), vec![sig(vec![], Ty::Int)]);
         c.interfaces = vec![crate::types::type_name("demo/Shape")].into();
         st.insert_class(c);
@@ -2100,6 +2318,7 @@ mod tests {
         let mut symbols = FrontendSymbols::default();
         let mut contract = class("demo/Contract");
         contract.flags = contract.flags.with_interface(true);
+        contract.declared_callable_order.push("run".to_string());
         contract
             .methods
             .insert("run".into(), vec![sig(vec![], Ty::Int)]);
@@ -2123,6 +2342,7 @@ mod tests {
 
         let mut defaulted = class("demo/Defaulted");
         defaulted.ctor_params = vec![Ty::Int];
+        defaulted.ctor_param_names = vec![("value".to_string(), true)];
         defaulted.ctor_defaults = vec![Some(CtorDefaultValue::Int(1))];
         st.insert_class(defaulted);
 
