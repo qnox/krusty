@@ -222,6 +222,11 @@ pub(crate) struct Scope<'p, B> {
     /// Source-declared receiver type label (`String` in `fun String.f`). This cannot be recovered
     /// from the semantic type when the source used a type alias.
     extension_receiver_label: Option<String>,
+    /// Bindings on this rung that are the lexical names of receiver entries owned by its parent
+    /// function rung. Member parameters live on a child rung so they can shadow properties; named
+    /// context parameters therefore need an explicit alias marker instead of being counted as a
+    /// second value with the same name.
+    parent_receiver_aliases: HashMap<String, usize>,
     /// Bindings introduced by THIS scope, in declaration order. Declaration order is what makes
     /// `fun g(a: Int, b: Int = a)` resolve and `fun g(a: Int = b, b: Int)` not.
     ///
@@ -249,6 +254,7 @@ impl<'p, B> Scope<'p, B> {
             current_receiver_name: None,
             extension_receiver_declaration: None,
             extension_receiver_label: None,
+            parent_receiver_aliases: HashMap::new(),
             bindings: RefCell::new(Vec::new()),
             flow: RefCell::new(Flow::default()),
         }
@@ -260,6 +266,19 @@ impl<'p, B> Scope<'p, B> {
             "the file scope is the root of the chain"
         );
         Scope::with_parent(Some(self), kind)
+    }
+
+    pub(crate) fn parameter_child(&'p self, context_receivers: &[ContextReceiver]) -> Scope<'p, B> {
+        let mut child = Scope::with_parent(Some(self), ScopeKind::Block);
+        for receiver in context_receivers {
+            if receiver.name != "_" {
+                *child
+                    .parent_receiver_aliases
+                    .entry(receiver.name.clone())
+                    .or_default() += 1;
+            }
+        }
+        child
     }
 
     /// Capture the flow state of this scope chain before checking a sibling execution path.
@@ -916,7 +935,7 @@ impl<'p, B> Scope<'p, B> {
                     ..
                 }
             );
-            let mut receiver_binding_counts = HashMap::<String, usize>::new();
+            let mut receiver_binding_counts = scope.parent_receiver_aliases.clone();
             if let Some(name) = scope.current_receiver_name.as_ref() {
                 *receiver_binding_counts.entry(name.clone()).or_default() += 1;
             }
@@ -925,28 +944,6 @@ impl<'p, B> Scope<'p, B> {
                     *receiver_binding_counts
                         .entry(receiver.name.clone())
                         .or_default() += 1;
-                }
-            }
-            // Class-member checking keeps parameters on a block rung immediately inside the
-            // function receiver rung so they can shadow member properties. Named context
-            // parameters on that block are aliases of the parent's receiver entries, not nearer
-            // same-name shadows. Exclude those aliases exactly as we do when a function keeps its
-            // parameters on the receiver rung itself.
-            if matches!(scope.kind, ScopeKind::Block) {
-                if let Some(parent) = scope
-                    .parent
-                    .filter(|parent| matches!(parent.kind, ScopeKind::Function { .. }))
-                {
-                    if let Some(name) = parent.current_receiver_name.as_ref() {
-                        *receiver_binding_counts.entry(name.clone()).or_default() += 1;
-                    }
-                    for receiver in parent.context_receivers.borrow().iter() {
-                        if receiver.name != "_" {
-                            *receiver_binding_counts
-                                .entry(receiver.name.clone())
-                                .or_default() += 1;
-                        }
-                    }
                 }
             }
             for binding in scope.bindings.borrow().iter().rev() {
@@ -1109,6 +1106,26 @@ mod tests {
                 ty: Ty::String,
                 context_name: Some(name),
                 context_shadow_depth: 2,
+                ..
+            }) if name == "value"
+        ));
+    }
+
+    #[test]
+    fn named_context_parameter_binding_aliases_its_parent_receiver() {
+        let root: Scope<'_, u32> = Scope::root();
+        let receiver = ContextReceiver::new(Ty::String, "value", None);
+        let function = root.function_child(None, None, std::slice::from_ref(&receiver));
+        let parameters = function.parameter_child(std::slice::from_ref(&receiver));
+        parameters.rebind("value", Ns::Value, 1);
+
+        let selected = parameters.find_context_value(|ty| ty == Ty::String, |_| false);
+        assert!(matches!(
+            selected,
+            Some(ContextValue::ImplicitReceiver {
+                ty: Ty::String,
+                context_name: Some(name),
+                context_shadow_depth: 0,
                 ..
             }) if name == "value"
         ));

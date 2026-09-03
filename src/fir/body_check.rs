@@ -1056,9 +1056,7 @@ impl BodyFirChecker<'_> {
                 )
                 .expect("too many implicit receivers");
             structural_paths.insert(depth, path.clone().into_boxed_slice());
-            if let Some(dispatch_depth) = dispatch_depth {
-                capture_depths.insert(depth, dispatch_depth);
-            }
+            capture_depths.insert(depth, depth);
             classifier = Some(outer);
         }
         ReceiverFrame {
