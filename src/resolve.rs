@@ -32282,24 +32282,32 @@ impl<'a> Checker<'a> {
                             top_level_candidates.clone(),
                         )
                     });
+                let receiver_extension_rung_available = matches!(
+                    &top_level,
+                    None | Some(CallableCandidateSelection::MissingContext(_))
+                );
                 // An implicit-receiver member or extension is a closer tower rung than the selected
-                // receiver-less declaration. Commit the first applicable receiver rung; retain an
-                // argument-mapping failure only for the terminal diagnostic after later rungs decline.
+                // receiver-less declaration. Member extensions were already considered with their
+                // dispatch receiver above. Imported receiver extensions belong to a later import
+                // rung, so they participate here only when the receiver-less rung has no applicable
+                // or ambiguous candidate.
                 let mut retained_receiver_call_failure = None;
-                for implicit_receiver in self.implicit_receivers(scope) {
-                    if let Some(ret) = self.this_member_call_ret(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
-                        implicit_receiver,
-                        &fname,
-                        expected,
-                        &mut retained_receiver_call_failure,
-                    ) {
-                        return ret;
+                if receiver_extension_rung_available {
+                    for implicit_receiver in self.implicit_receivers(scope) {
+                        if let Some(ret) = self.this_member_call_ret(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            implicit_receiver,
+                            &fname,
+                            expected,
+                            &mut retained_receiver_call_failure,
+                        ) {
+                            return ret;
+                        }
                     }
                 }
                 if let Some((signature, origin)) = self.receiver_function_value(scope, &fname) {
@@ -85421,6 +85429,27 @@ impl<'a> Checker<'a> {
         let resolved_partial_explicit = partial_explicit_arguments
             .as_ref()
             .map(|_| self.resolved_explicit_type_args(scope, call));
+        // A concrete or lexically quantified invariant expected application is a fixed result
+        // constraint, not another lower bound to join with constructor arguments. The selected
+        // constructor has already checked those arguments against this context, including integer
+        // literal adaptation, so retain `Box<Named>` for `Box(ConcreteName)` and `IntBox<T>` for
+        // `IntBox(-1)` inside `fun <T : Int> ...`. Variables owned by an enclosing inference frame
+        // are not lexical here and continue through ordinary bidirectional inference below.
+        if let Some(expected) = expected.map(Ty::non_null).filter(|expected| {
+            expected.obj_internal() == Some(internal)
+                && self.resolved_type_name(internal).is_some_and(|classifier| {
+                    expected.type_args().len() == classifier.type_params().len()
+                })
+                && expected.type_args().iter().all(|argument| {
+                    !matches!(
+                        argument,
+                        Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)
+                    )
+                })
+                && Self::type_is_lexically_fixed(scope, *expected)
+        }) {
+            return expected;
+        }
         // Provider-shaped constructor selection has already specialized the selected declaration's
         // semantic parameters. Recover the classifier's result arguments from that exact pair for
         // every declaration origin. After Pass 1 parser bindings are gone, `C(Iterable<String>)`
@@ -85437,12 +85466,6 @@ impl<'a> Checker<'a> {
                     ResolvedConstructor::Source { .. } => None,
                 });
             if !class.type_params.is_empty() {
-                if let Some(result) = selected.map(|member| member.ret).filter(|result| {
-                    result.obj_internal() == Some(internal)
-                        && result.type_args().len() == class.type_params.len()
-                }) {
-                    return result;
-                }
                 if let Some((generic, specialized)) = selected
                     .and_then(|member| member.generic_sig.as_ref().map(|generic| (generic, member)))
                     .filter(|(generic, member)| generic.params.len() == member.params.len())
@@ -85972,6 +85995,9 @@ impl<'a> Checker<'a> {
     /// top-level site (no enclosing class) a non-public member is inaccessible.
     /// Java package-private declarations are accessible from their declaring package.
     fn member_accessible(&self, vis: Visibility, owner: TypeName) -> bool {
+        if self.visibility_access_suppressed() {
+            return true;
+        }
         match vis {
             Visibility::Public => true,
             Visibility::Internal => {
@@ -86064,6 +86090,9 @@ impl<'a> Checker<'a> {
         owner: TypeName,
         receiver: Ty,
     ) -> bool {
+        if self.visibility_access_suppressed() {
+            return true;
+        }
         if self.receiver_member_accessible(visibility, owner, receiver) {
             return true;
         }
@@ -86340,6 +86369,9 @@ impl<'a> Checker<'a> {
         property: Option<crate::fir::ExternalPropertyId>,
         span: Span,
     ) {
+        if self.visibility_access_suppressed() || self.invisible_reference_suppressed(span) {
+            return;
+        }
         let label = property.and_then(|property| {
             self.libraries
                 .external_property_diagnostic_label(property, name, ty)
@@ -86369,6 +86401,11 @@ impl<'a> Checker<'a> {
             .iter()
             .rev()
             .any(|suppressed| suppressed == name)
+    }
+
+    fn visibility_access_suppressed(&self) -> bool {
+        self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
     }
 
     /// Resolve one annotation classifier in the active lexical type scope without performing its
