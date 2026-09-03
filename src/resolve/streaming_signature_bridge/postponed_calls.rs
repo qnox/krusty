@@ -235,25 +235,76 @@ impl ProductionSignatureSemantics<'_> {
             let Some(mut signature) = candidate.generic_sig.clone() else {
                 continue;
             };
-            let value_parameters =
-                &signature.params[candidate.context_count.min(signature.params.len())..];
             let mut bindings = known.clone();
-            for (&parameter, argument) in value_parameters.iter().zip(&arguments) {
+            let declared_receiver = signature.receiver.or(candidate.receiver);
+            if let Some(declared_receiver) = declared_receiver {
+                // Receiver inference is the first tower constraint on an extension candidate.
+                // Apply it before argument inference so `Flow<Value>.collect(this::emit)` fixes
+                // `collect`'s own `T = Value`; merging the unrelated open `Sink<T>` argument first
+                // would otherwise approximate both variables to `Any`.
+                crate::symbol_resolver::unify_inferred_ty_with_source(
+                    &source,
+                    declared_receiver,
+                    receiver,
+                    &mut bindings,
+                );
+            }
+            let value_parameter_start = candidate.context_count.min(signature.params.len());
+            for (parameter, argument) in signature.params[value_parameter_start..]
+                .iter()
+                .copied()
+                .zip(&arguments)
+            {
                 if argument.is_omitted_default() || argument.is_lambda_literal() {
                     continue;
                 }
+                let parameter = crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings);
                 crate::symbol_resolver::unify_inferred_ty_with_source(
                     &source,
                     parameter,
                     argument.type_for(parameter),
                     &mut bindings,
                 );
+                // The argument can carry a variable owned by the enclosing postponed call. Once
+                // the candidate parameter is specialized by its receiver/earlier arguments, the
+                // same assignability relation constrains that variable from the actual side.
+                let constraints =
+                    crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                        &source,
+                        parameter,
+                        argument.type_for(parameter),
+                    );
+                for (formal, actual) in constraints.lower {
+                    if active.contains(formal.as_str()) {
+                        bindings
+                            .entry(formal)
+                            .and_modify(|known| {
+                                *known =
+                                    crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                            })
+                            .or_insert(actual);
+                    }
+                }
+                for (formal, upper) in constraints.upper {
+                    if !active.contains(formal.as_str()) {
+                        continue;
+                    }
+                    for actual in upper {
+                        bindings
+                            .entry(formal.clone())
+                            .and_modify(|known| {
+                                *known =
+                                    crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                            })
+                            .or_insert(actual);
+                    }
+                }
             }
             // Candidate formals can mediate a constraint on the enclosing postponed call. For
             // `MutableSet<E>.addAll(Set<String>)`, argument inference first binds the extension's
             // `T = String`; only then does receiver assignability expose the outer `E = String`.
             // Keep that relation here, before discarding bindings not owned by the active frame.
-            if let Some(declared_receiver) = signature.receiver.or(candidate.receiver) {
+            if let Some(declared_receiver) = declared_receiver {
                 let expected_receiver =
                     crate::symbol_resolver::ty_subst_keep_unbound(declared_receiver, &bindings);
                 let constraints =
@@ -288,10 +339,11 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
-            bindings.retain(|formal, _| active.contains(formal.as_str()));
-            if bindings.is_empty() {
-                continue;
-            }
+            let committed = bindings
+                .iter()
+                .filter(|(formal, _)| active.contains(formal.as_str()))
+                .map(|(formal, ty)| (formal.clone(), *ty))
+                .collect();
 
             signature.receiver = signature
                 .receiver
@@ -309,7 +361,7 @@ impl ProductionSignatureSemantics<'_> {
                 .receiver
                 .map(|receiver| crate::symbol_resolver::ty_subst_keep_unbound(receiver, &bindings));
             candidate.generic_sig = Some(signature);
-            recorded.push((candidate.clone(), bindings));
+            recorded.push((candidate.clone(), committed));
         }
         PostponedCallableFamily {
             callables: crate::libraries::Callables::from_parts(functions, properties),
