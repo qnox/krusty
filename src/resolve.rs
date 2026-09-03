@@ -70762,7 +70762,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let defaults_scope = scope.child(ScopeKind::Block);
+            let defaults_scope = scope.parameter_child(&context_receivers);
             self.check_parameter_defaults(
                 &defaults_scope,
                 f.params
@@ -70770,7 +70770,7 @@ impl<'a> Checker<'a> {
                     .map(|parameter| (parameter.name.as_str(), parameter.default)),
                 &parameter_types,
             );
-            let params_scope = scope.child(ScopeKind::Block);
+            let params_scope = scope.parameter_child(&context_receivers);
             let scope = &params_scope;
             let inherited_equality_bound = (f.name == "equals")
                 .then(|| {
