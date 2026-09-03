@@ -19235,8 +19235,17 @@ enum SourceConstructorSelection {
         candidate_index: usize,
         resolved: Box<ResolvedCtorDelegation>,
     },
-    NoMatch,
+    NoMatch {
+        mismatch: Option<ConstructorArgumentMismatch>,
+    },
     Ambiguous,
+}
+
+#[derive(Clone, Copy)]
+struct ConstructorArgumentMismatch {
+    source_argument: usize,
+    expected: Ty,
+    actual: Ty,
 }
 
 enum LibraryConstructorSelection {
@@ -19256,7 +19265,20 @@ enum LibraryConstructorFailure {
         source_argument: usize,
         expected: Ty,
         actual: Ty,
+        /// The invalid expression still has its explicit/specialized construction type. Retaining
+        /// it after reporting the argument error lets the enclosing expectation diagnose an
+        /// independent result-type contradiction; no constructor target is committed to FIR.
+        result: Option<Ty>,
     },
+}
+
+impl LibraryConstructorFailure {
+    fn result_type(&self) -> Option<Ty> {
+        match self {
+            Self::TypeMismatch { result, .. } => *result,
+            Self::Mapping { .. } => None,
+        }
+    }
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -32018,7 +32040,7 @@ impl<'a> Checker<'a> {
                                             resolved: selected,
                                             ..
                                         } => Some(*selected),
-                                        SourceConstructorSelection::NoMatch
+                                        SourceConstructorSelection::NoMatch { .. }
                                         | SourceConstructorSelection::Ambiguous => None,
                                     }
                                 })
@@ -32521,6 +32543,20 @@ impl<'a> Checker<'a> {
                 }) {
                     return result;
                 }
+                // A non-functional interface is still a resolved classifier. It has no ordinary
+                // constructor candidate, but that must not degrade into UNRESOLVED_REFERENCE after
+                // the constructor and SAM rungs decline. Report the Kotlin construction rule while
+                // the exact classifier identity is still available on this tower rung.
+                if let Some(internal) = bare_classifier.filter(|internal| {
+                    self.resolver()
+                        .classifier(*internal)
+                        .is_some_and(|classifier| {
+                            classifier.is_interface() && !classifier.is_annotation()
+                        })
+                }) {
+                    self.reject_abstract_construction(internal, self.span(call));
+                    return Ty::Error;
+                }
                 if self.script_host_may_declare_call(scope, &fname) {
                     return Ty::Error;
                 }
@@ -32580,8 +32616,9 @@ impl<'a> Checker<'a> {
                     return self.ctor_result_name(scope, call, internal, expected, None);
                 }
                 if let Some(error) = constructor_mapping_failure {
+                    let result = error.result_type();
                     self.report_library_constructor_failure(call, args, error);
-                    return Ty::Error;
+                    return result.unwrap_or(Ty::Error);
                 }
                 // Every later callable rung has now declined. If the nearest lexical rung contains
                 // one ordinary local declaration, its argument-mapping failure is the terminal
@@ -61192,6 +61229,7 @@ impl<'a> Checker<'a> {
                 source_argument,
                 expected,
                 actual,
+                ..
             } => {
                 let Some(&argument) = args.get(source_argument) else {
                     return;
@@ -61223,11 +61261,21 @@ impl<'a> Checker<'a> {
             .iter()
             .any(Option::is_some)
             .then_some(arguments.names.as_slice());
+        let mut rejected = Vec::new();
         let mut scored = candidates
             .iter()
             .enumerate()
             .filter_map(|(candidate_index, candidate)| {
-                let selected = self.match_ctor_delegation_candidate(scope, arguments, candidate)?;
+                let mut mismatch = None;
+                let Some(selected) = self.match_ctor_delegation_candidate(
+                    scope,
+                    arguments,
+                    candidate,
+                    &mut mismatch,
+                ) else {
+                    rejected.push((candidate_index, mismatch));
+                    return None;
+                };
                 let params = candidate.target.params();
                 let call_sig = CallSig::source(
                     candidate.param_names.clone(),
@@ -61283,7 +61331,10 @@ impl<'a> Checker<'a> {
             scored.retain(|candidate| !candidate.0);
         }
         let Some(best) = scored.iter().map(|candidate| candidate.1).max() else {
-            return SourceConstructorSelection::NoMatch;
+            let mismatch = (candidates.len() == 1)
+                .then(|| rejected.into_iter().find(|(index, _)| *index == 0)?.1)
+                .flatten();
+            return SourceConstructorSelection::NoMatch { mismatch };
         };
         scored.retain(|candidate| candidate.1 == best);
         let selected = if let [(_, _, candidate_index, selected, _)] = scored.as_slice() {
@@ -61485,6 +61536,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         arguments: &CtorDelegationCall,
         candidate: &CtorDelegationCandidate,
+        mismatch: &mut Option<ConstructorArgumentMismatch>,
     ) -> Option<ResolvedCtorDelegation> {
         let outer_receiver = match &candidate.target {
             ResolvedCtorDelegationTarget::Super {
@@ -61680,6 +61732,11 @@ impl<'a> Checker<'a> {
                         .unwrap_or(false),
                 );
                 if !implicit_integer_coercion {
+                    *mismatch = Some(ConstructorArgumentMismatch {
+                        source_argument: source,
+                        expected,
+                        actual,
+                    });
                     return None;
                 }
             }
@@ -61750,7 +61807,7 @@ impl<'a> Checker<'a> {
             SourceConstructorSelection::Selected {
                 resolved: selected, ..
             } => *selected,
-            SourceConstructorSelection::NoMatch => {
+            SourceConstructorSelection::NoMatch { .. } => {
                 self.diags.error(
                     span,
                     format!("krusty: {label}(...) has no matching target constructor"),
@@ -70430,7 +70487,7 @@ impl<'a> Checker<'a> {
                     &constructor_candidates,
                 ) {
                     SourceConstructorSelection::Selected { resolved, .. } => *resolved,
-                    SourceConstructorSelection::NoMatch => {
+                    SourceConstructorSelection::NoMatch { .. } => {
                         self.diags.error(
                             entry.span,
                             format!(
@@ -85037,6 +85094,7 @@ impl<'a> Checker<'a> {
                         source_argument,
                         expected: violation.expected,
                         actual: violation.actual,
+                        result: None,
                     });
                     continue;
                 }
@@ -85186,7 +85244,15 @@ impl<'a> Checker<'a> {
                     candidate_index,
                     resolved,
                 } => (candidate_index, *resolved),
-                SourceConstructorSelection::NoMatch | SourceConstructorSelection::Ambiguous => {
+                SourceConstructorSelection::NoMatch { mismatch } => {
+                    if let Some(mismatch) = mismatch {
+                        return Err(LibraryConstructorFailure::TypeMismatch {
+                            source_argument: mismatch.source_argument,
+                            expected: mismatch.expected,
+                            actual: mismatch.actual,
+                            result: members.first().map(|member| member.ret),
+                        });
+                    }
                     if candidates.is_empty() {
                         if mapping_failures.is_empty() {
                             if let Some(failure) =
@@ -85214,6 +85280,9 @@ impl<'a> Checker<'a> {
                             });
                         }
                     }
+                    return Ok(LibraryConstructorSelection::NoMatch);
+                }
+                SourceConstructorSelection::Ambiguous => {
                     return Ok(LibraryConstructorSelection::NoMatch);
                 }
             };
@@ -85466,6 +85535,21 @@ impl<'a> Checker<'a> {
                     ResolvedConstructor::Source { .. } => None,
                 });
             if !class.type_params.is_empty() {
+                // Provider selection has already combined argument, result-supertype, explicit,
+                // and bound constraints into the constructor's semantic result. Prefer that exact
+                // application once the direct invariant expectation above has had its stronger
+                // Kotlin contextual-typing rule. Reconstructing solely from parameter pairs loses
+                // classifier variables absent from the constructor parameters (`MapImpl<K, E, V>`
+                // where V is learned only through `MyMap<K, V>`) and empty constructors whose only
+                // representable solution is their declared bound.
+                if let Some(result) = selected.map(|member| member.ret).filter(|result| {
+                    result.obj_internal() == Some(internal)
+                        && result.type_args().len() == class.type_params.len()
+                        && !result.mentions_error()
+                        && !result.mentions_pending()
+                }) {
+                    return result;
+                }
                 if let Some((generic, specialized)) = selected
                     .and_then(|member| member.generic_sig.as_ref().map(|generic| (generic, member)))
                     .filter(|(generic, member)| generic.params.len() == member.params.len())
