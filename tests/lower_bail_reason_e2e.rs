@@ -68,3 +68,41 @@ fun box(): String = C().x
         "OK"
     );
 }
+
+#[test]
+fn sibling_inline_extension_provide_delegate_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "Library.kt",
+                r#"
+var log: String = ""
+
+inline fun <T> runLogged(entry: String, action: () -> T): T {
+    log += entry
+    return action()
+}
+
+inline operator fun String.provideDelegate(host: Any?, property: Any): String =
+    runLogged("tdf($this);") { this }
+"#,
+            ),
+            (
+                "Main.kt",
+                r#"
+operator fun String.getValue(receiver: Any?, property: Any): String =
+    runLogged("get($this);") { this }
+
+val testO by runLogged("O;") { "O" }
+val testK by runLogged("K;") { "K" }
+val testOK = runLogged("OK;") { testO + testK }
+
+fun box(): String =
+    if (log == "O;tdf(O);K;tdf(K);OK;get(O);get(K);" && testOK == "OK") "OK"
+    else "FAIL: $log / $testOK"
+"#,
+            ),
+        ],
+        "SiblingInlineProvideDelegate",
+    );
+}

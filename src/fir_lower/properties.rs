@@ -1332,21 +1332,47 @@ fn delegated_call(
                 }
             }
             let mut arguments = arguments;
+            let mut parameters = signature
+                .parameters
+                .iter()
+                .map(|ty| ty.get())
+                .collect::<Vec<_>>();
             if call.extension {
-                arguments.insert(callable.shape.context_parameter_count as usize, receiver);
+                let position = callable.shape.context_parameter_count as usize;
+                let extension_receiver = callable.shape.extension_receiver.ok_or(
+                    FirFileLoweringFailure::MissingCallable(callable.declaration),
+                )?;
+                if position > arguments.len() || position > parameters.len() {
+                    let expected = u32::try_from(parameters.len() + 1)
+                        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+                    let actual = u32::try_from(arguments.len() + 1)
+                        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+                    return Err(FirFileLoweringFailure::InvalidDelegatedCallShape {
+                        expected,
+                        actual,
+                    });
+                }
+                arguments.insert(position, receiver);
+                parameters.insert(position, extension_receiver.get());
             }
             let function = ir.checked_callable_functions.get(target).copied();
+            let callee = match function {
+                Some(function) => Callee::Local(function),
+                None => Callee::Module {
+                    target: *target,
+                    name: index
+                        .callable_name(*target)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(
+                            callable.declaration,
+                        ))?
+                        .to_owned(),
+                    params: parameters,
+                    ret: signature.result.get(),
+                    default_call: false,
+                },
+            };
             let expression = ir.add_expr(IrExpr::Call {
-                callee: function.map_or_else(
-                    || Callee::Module {
-                        target: *target,
-                        name: index.callable_name(*target).unwrap_or_default().to_owned(),
-                        params: signature.parameters.iter().map(|ty| ty.get()).collect(),
-                        ret: signature.result.get(),
-                        default_call: false,
-                    },
-                    Callee::Local,
-                ),
+                callee,
                 dispatch_receiver: None,
                 args: arguments,
             });

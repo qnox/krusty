@@ -208,6 +208,52 @@ fn generic_member_delegate_result_keeps_its_erased_call_boundary() {
 }
 
 #[test]
+fn sibling_extension_provide_delegate_keeps_receiver_in_module_call_shape() {
+    let ir = lower_source_from_set(
+        &[
+            (
+                "inline operator fun String.provideDelegate(owner: Any?, property: Any): String = this",
+                "Delegate",
+            ),
+            (
+                "operator fun String.getValue(owner: Any?, property: Any): String = this\n\
+                 val value by \"OK\"",
+                "Consumer",
+            ),
+        ],
+        1,
+    );
+
+    let (parameters, arguments) = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Call {
+                callee:
+                    Callee::Module {
+                        name,
+                        params,
+                        default_call: false,
+                        ..
+                    },
+                args,
+                ..
+            } if name == "provideDelegate" => Some((params, args)),
+            _ => None,
+        })
+        .expect("sibling provideDelegate call");
+    assert_eq!(
+        parameters,
+        &[
+            Ty::String,
+            Ty::nullable(Ty::obj("kotlin/Any")),
+            Ty::obj("kotlin/Any"),
+        ]
+    );
+    assert_eq!(arguments.len(), parameters.len());
+}
+
+#[test]
 fn lateinit_local_materializes_null_storage_before_checked_reads() {
     let ir = lower_single_source(
         "fun read(): String { lateinit var value: String; return value }\n",
