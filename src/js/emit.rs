@@ -110,9 +110,10 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
                 emit_stmt(ir, s, depth, inst, out);
             }
             if let Some(v) = value {
-                indent(depth, out);
-                out.push_str(&emit_expr(ir, *v, inst));
-                out.push_str(";\n");
+                // A block's tail remains in statement position when the block itself is emitted as
+                // a statement. This preserves structured `when`/loop/control-flow nodes instead of
+                // forcing them through JavaScript's expression renderer.
+                emit_stmt(ir, *v, depth, inst, out);
             }
         }
         IrExpr::Return(v) => {
@@ -314,6 +315,23 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             let name = class_simple(&fq);
             format!("new {}({})", name, emit_args(ir, args, inst))
         }
+        IrExpr::NewArray { array_type, size } => {
+            let size = emit_expr(ir, *size, inst);
+            match array_type.array_elem() {
+                Some(Ty::Int) => format!("new Int32Array({size})"),
+                Some(Ty::Double) => format!("new Float64Array({size})"),
+                Some(Ty::Float) => format!("new Float32Array({size})"),
+                Some(Ty::Byte) => format!("new Int8Array({size})"),
+                Some(Ty::Short) => format!("new Int16Array({size})"),
+                Some(Ty::Char) => format!("new Uint16Array({size})"),
+                Some(Ty::Boolean) => format!("new Array({size}).fill(false)"),
+                Some(_) if array_type.is_reference_array() => {
+                    format!("new Array({size}).fill(null)")
+                }
+                Some(_) => format!("new Array({size}).fill(0)"),
+                None => unsupported_expression("NewArray"),
+            }
+        }
         IrExpr::MethodCall {
             class,
             index,
@@ -431,6 +449,20 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 }
             }
             Callee::Intrinsic { operation, .. } => match operation {
+                crate::ir::IrIntrinsic::Assert { mode } => {
+                    if *mode == crate::types::AssertionMode::AlwaysDisabled {
+                        "undefined".to_string()
+                    } else {
+                        let condition = emit_expr(ir, args[0], inst);
+                        let message = args.get(1).map_or_else(
+                            || "\"Assertion failed\"".to_string(),
+                            |message| format!("String(({})())", emit_expr(ir, *message, inst)),
+                        );
+                        format!(
+                            "(()=>{{if(!({condition}))throw new Error({message});return undefined;}})()"
+                        )
+                    }
+                }
                 crate::ir::IrIntrinsic::StringPlus => {
                     let receiver = emit_expr(ir, dispatch_receiver.unwrap(), inst);
                     let argument = emit_expr(ir, args[0], inst);
@@ -467,6 +499,14 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     "String({})",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst)
                 ),
+                crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
+                    let classifier = classifier
+                        .non_null()
+                        .obj_internal()
+                        .map(|name| class_simple(&name.render()).to_string())
+                        .unwrap_or_else(|| "undefined".to_string());
+                    format!("{classifier}.valueOf({})", emit_expr(ir, args[0], inst))
+                }
                 crate::ir::IrIntrinsic::PrimitiveCompare { .. } => {
                     let left = emit_expr(ir, dispatch_receiver.unwrap(), inst);
                     let right = emit_expr(ir, args[0], inst);
@@ -539,6 +579,27 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 s.push(')');
             }
             s
+        }
+        // Kotlin block expressions may introduce checked temporaries before yielding their final
+        // value. JavaScript has no block-expression syntax, so realize the same evaluation order in
+        // an immediately invoked closure. This is a representation choice over already-lowered IR;
+        // no source construct or semantic lookup is recovered here.
+        IrExpr::Block { stmts, value } => {
+            let mut body = String::from("(() => {\n");
+            for &statement in stmts {
+                emit_stmt(ir, statement, 1, inst, &mut body);
+            }
+            indent(1, &mut body);
+            match value {
+                Some(value) => {
+                    body.push_str("return ");
+                    body.push_str(&emit_expr(ir, *value, inst));
+                    body.push_str(";\n");
+                }
+                None => body.push_str("return undefined;\n"),
+            }
+            body.push_str("})()");
+            body
         }
         // Assignments are valid JS *expressions* (`x = e`), not only statements. They appear in an
         // expression position most importantly as a `for`-loop update (`for (; cond; i = i + 1)`),
@@ -614,11 +675,12 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
         // value: `undefined` silently compiles a wrong program (a property read read back as `undefined`
         // instead of the value, with no error anywhere). JS has no compile step of its own, so the honest
         // realization is a throw at the point of use.
-        other => format!(
-            "(() => {{ throw new Error(\"krusty: JS backend cannot emit {}\"); }})()",
-            expr_kind(other)
-        ),
+        other => unsupported_expression(&expr_kind(other)),
     }
+}
+
+fn unsupported_expression(kind: &str) -> String {
+    format!("(() => {{ throw new Error(\"krusty: JS backend cannot emit {kind}\"); }})()")
 }
 
 /// The source-written accessor body for a property declared in this IR file. Default accessors are
@@ -734,6 +796,7 @@ mod tests {
             is_abstract: false,
             is_open: true,
             superclass: "Base".into(),
+            super_arg_prelude: Vec::new(),
             super_args: Vec::new(),
             super_ctor_params: Vec::new(),
             enum_entries: Vec::new(),
@@ -764,6 +827,7 @@ mod tests {
                 descriptor: "()I".to_string(),
                 interface: false,
                 source_member: None,
+                source: None,
             },
             dispatch_receiver: Some(receiver),
             args: Vec::new(),

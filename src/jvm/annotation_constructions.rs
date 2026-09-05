@@ -68,7 +68,12 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
             implementation
         });
 
-        let IrExpr::New { internal, .. } = &mut ir.exprs[expression as usize] else {
+        let IrExpr::New {
+            internal,
+            external_target,
+            ..
+        } = &mut ir.exprs[expression as usize]
+        else {
             panic!("annotation-construction fact must point at IrExpr::New");
         };
         assert_eq!(
@@ -76,6 +81,11 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
             "annotation-construction identity must match its New target"
         );
         *internal = implementation;
+        // The checked dependency constructor identified the annotation declaration, not a JVM
+        // allocation target. This pass has replaced it with a generated in-file implementation;
+        // leaving the provider identity attached would make external-call realization attempt to
+        // invoke the annotation interface's nonexistent constructor/default stub.
+        *external_target = None;
     }
     for class in generated {
         ir.add_class(class);
@@ -118,6 +128,7 @@ fn annotation_implementation(
                 ty: *ty,
                 declared_ty: None,
                 is_field: true,
+                field_index: None,
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -138,6 +149,7 @@ fn annotation_implementation(
         is_abstract: false,
         is_open: false,
         superclass: type_name("kotlin/Any"),
+        super_arg_prelude: Vec::new(),
         super_args: Vec::new(),
         super_ctor_params: Vec::new(),
         enum_entries: Vec::new(),
@@ -153,5 +165,52 @@ fn annotation_implementation(
         has_primary_ctor: true,
         applied_annotations: crate::ir::DeclarationAnnotations::default(),
         annotation_retention: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fir::ExternalCallableId;
+
+    #[test]
+    fn external_annotation_construction_becomes_an_internal_implementation_allocation() {
+        let interface = type_name("dependency/Marker");
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String("OK".into())));
+        let construction = ir.add_expr(IrExpr::New {
+            internal: interface,
+            args: vec![value],
+            ctor_params: Some(vec![Ty::String]),
+            ctor_desc: None,
+            external_target: Some(ExternalCallableId::from_raw(7)),
+        });
+        ir.annotation_constructions.insert(
+            construction,
+            crate::ir::IrAnnotationConstruction {
+                interface,
+                members: vec![("value".into(), Ty::String)],
+                defaults: vec![None],
+                enclosing_class: None,
+            },
+        );
+
+        lower_annotation_constructions(&mut ir, "sample/MainKt");
+
+        let IrExpr::New {
+            internal,
+            external_target,
+            ..
+        } = ir.expr(construction)
+        else {
+            panic!("annotation construction remains an allocation")
+        };
+        assert!(internal
+            .render()
+            .contains("$annotationImpl$dependency_Marker$0"));
+        assert_eq!(*external_target, None);
+        assert!(ir.classes.iter().any(|class| {
+            class.fq_name_id() == *internal && class.annotation_impl_of == Some(interface)
+        }));
     }
 }

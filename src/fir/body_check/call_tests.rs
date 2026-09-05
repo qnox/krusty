@@ -3,6 +3,7 @@ use super::test_support::{
     checked_function_body_with_platform, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
+use crate::fir::{FirInlineBodyPlan, FirInlineDefaultValue};
 
 #[test]
 fn legacy_context_receiver_supplies_an_unqualified_extension_call() {
@@ -113,6 +114,40 @@ fn boolean_not_member_is_a_checked_semantic_unary_operation() {
         Ty::Boolean,
     );
 }
+
+#[test]
+fn primitive_unary_member_publishes_selected_operation_in_fir() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\nfun promote(value: Byte): Int = value.unaryPlus()\n",
+        "promote",
+        jvm_stdlib_semantics(),
+    );
+    let FirExprKind::Unary {
+        operation: FirUnaryOperation::Identity,
+        operand,
+    } = body
+        .expr(root_expression(&body))
+        .expect("Byte.unaryPlus expression")
+        .kind
+    else {
+        panic!("Byte.unaryPlus must become a checked primitive identity operation")
+    };
+    assert_eq!(
+        body.expr(root_expression(&body))
+            .expect("selected unary result")
+            .ty
+            .get(),
+        Ty::Int,
+    );
+    assert_eq!(
+        body.expr(operand)
+            .expect("source Byte operand")
+            .ty
+            .get()
+            .canonical_semantic(),
+        Ty::Byte,
+    );
+}
 use crate::fir::DeclarationFlags;
 
 #[test]
@@ -204,6 +239,182 @@ fn generated_data_class_object_methods_have_stable_fir_targets() {
             "{expected} must bind to the generated data-class declaration",
         );
     }
+}
+
+#[test]
+fn data_class_inherits_final_object_method_instead_of_publishing_a_generated_override() {
+    let (body, index) = checked_function_body(
+        "abstract class Base { final override fun toString(): String = \"kept\" }\n\
+         data class Data(val value: String) : Base()\n\
+         fun use(value: Data): String = value.toString()\n",
+        "use",
+    );
+
+    let target = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("toString")).then_some(target)
+        })
+        .expect("inherited final toString call");
+    let declaration = index.callable(target).expect("stable callable").declaration;
+    let header = index
+        .declaration_header(declaration)
+        .expect("stable declaration header");
+    assert!(!header.flags.has(DeclarationFlags::COMPILER_GENERATED));
+    let owner = header.owner.expect("member owner");
+    assert_eq!(index.declaration_name(owner), Some("Base"));
+}
+
+#[test]
+fn subtype_owned_override_wins_when_its_supertype_is_also_a_direct_parent() {
+    let (body, index) = checked_function_body(
+        "interface Contract { fun run(value: String = \"OK\"): Unit }\n\
+         open class Implementation : Contract { override fun run(value: String) {} }\n\
+         class Combined : Implementation(), Contract\n\
+         fun use(): Unit = Combined().run()\n",
+        "use",
+    );
+
+    let target = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("run")).then_some(target)
+        })
+        .expect("the inherited override call must have one stable target");
+    let declaration = index.callable(target).expect("stable callable").declaration;
+    let owner = index
+        .declaration_header(declaration)
+        .and_then(|header| header.owner)
+        .expect("member owner");
+    assert_eq!(index.declaration_name(owner), Some("Implementation"));
+}
+
+#[test]
+fn unrelated_abstract_members_with_the_same_slot_form_one_fake_override() {
+    let (body, index) = checked_function_body(
+        "interface Left { fun run(): String }\n\
+         interface Right { fun run(): String }\n\
+         interface Combined : Left, Right\n\
+         fun use(value: Combined): String = value.run()\n",
+        "use",
+    );
+
+    let targets = (0..body.expression_count())
+        .filter_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("run")).then_some(target)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets.len(),
+        1,
+        "the inherited slot must have one stable target"
+    );
+}
+
+#[test]
+fn delegated_implementation_inherits_a_sibling_interfaces_default() {
+    let (body, index) = checked_function_body(
+        "interface Body { fun run(value: String): String = value }\n\
+         interface Contract { fun run(value: String = \"OK\"): String }\n\
+         class Combined(body: Body) : Body by body, Contract\n\
+         fun use(value: Combined): String = value.run()\n",
+        "use",
+    );
+
+    let target = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("run")).then_some(target)
+        })
+        .expect("the delegated fake override must remain callable with the inherited default");
+    assert!(index.callable(target).is_some());
+}
+
+#[test]
+fn nominally_narrower_generic_bound_wins_overload_specificity() {
+    let (body, index) = checked_function_body(
+        "interface Root\n\
+         class Leaf : Root\n\
+         open class Base {\n\
+             fun <T : Root> pick(value: T): String = \"root\"\n\
+             open fun <T : Leaf> pick(value: T): String = \"leaf\"\n\
+         }\n\
+         class Derived : Base() {\n\
+             override fun <T : Leaf> pick(value: T): String = \"selected\"\n\
+         }\n\
+         fun use(): String = Derived().pick(Leaf())\n",
+        "use",
+    );
+
+    let target = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("pick")).then_some(target)
+        })
+        .expect("the narrower generic overload must have one stable target");
+    assert!(index.callable(target).is_some());
+}
+
+#[test]
+fn structurally_functional_generic_overload_wins_for_untyped_lambda() {
+    let (body, index) = checked_function_body(
+        "fun <T : Any> choose(value: T): String = \"value\"\n\
+         fun <T : Any> choose(value: () -> T): String = value() as String\n\
+         fun use(): String = choose { \"OK\" }\n",
+        "use",
+    );
+
+    let target = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("choose")).then_some(target)
+        })
+        .expect("the function-shaped overload must have one stable target");
+    assert!(index.callable(target).is_some());
+}
+
+#[test]
+fn unqualified_interface_super_call_ignores_abstract_sibling_slot() {
+    let (body, index) = checked_function_body(
+        "interface Root { fun test(): String = \"OK\" }\n\
+         interface Concrete : Root { override fun test(): String = super.test() }\n\
+         interface AbstractSibling : Root { override fun test(): String }\n\
+         interface Diamond : Concrete, AbstractSibling {\n\
+             override fun test(): String = super.test()\n\
+         }\n\
+         fun use(value: Diamond): String = value.test()\n",
+        "use",
+    );
+
+    let target = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("test")).then_some(target)
+        })
+        .expect("the diamond call must retain one stable target");
+    assert!(index.callable(target).is_some());
 }
 
 #[test]
@@ -522,6 +733,27 @@ fn unsigned_relational_operator_keeps_the_selected_value_class_member_call() {
 }
 
 #[test]
+fn explicit_unsigned_equals_is_an_ordinary_selected_member_call() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun equal(left: UInt, right: UInt): Boolean = left.equals(right)\n",
+        "equal",
+        jvm_stdlib_semantics(),
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("checked equals call")
+        .kind
+    else {
+        panic!("value-class ABI must not leak into checked FIR")
+    };
+    assert!(matches!(call.target, FirCallTarget::External { .. }));
+    assert!(call.dispatch_receiver.is_some());
+    assert!(call.extension_receiver.is_none());
+    assert_eq!(call.arguments.len(), 1);
+}
+
+#[test]
 fn explicit_builtin_range_to_is_the_same_checked_range_operation_as_operator_syntax() {
     let (body, _) = checked_function_body_with_platform(
         "// WITH_STDLIB\n\
@@ -568,6 +800,22 @@ fn implicit_receiver_primitive_intrinsic_uses_the_same_checked_operation_as_expl
          fun Int.shift(count: Int): Int = shl(count)\n",
         "shift",
         jvm_stdlib_semantics(),
+    );
+    assert!(matches!(
+        body.expr(root_expression(&body))
+            .map(|expression| &expression.kind),
+        Some(FirExprKind::Binary {
+            operation: FirBinaryOperation::ShiftLeft,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn core_primitive_infix_member_is_a_checked_binary_operation() {
+    let (body, _) = checked_function_body(
+        "fun shift(value: Int, count: Int): Int = value shl count\n",
+        "shift",
     );
     assert!(matches!(
         body.expr(root_expression(&body))
@@ -650,6 +898,16 @@ fn builtin_scalar_compare_to_publishes_its_selected_common_operand() {
     assert_eq!(receiver.get(), Ty::Double);
     assert_eq!(parameters.as_ref(), [ResolvedTy::new(Ty::Double).unwrap()]);
     assert_eq!(result.get(), Ty::Int);
+    assert!(matches!(
+        call.dispatch_receiver,
+        Some(FirReceiver {
+            conversion: Some(FirConversion {
+                kind: FirConversionKind::NumericWidening { to },
+                ..
+            }),
+            ..
+        }) if to.get() == Ty::Double
+    ));
 }
 
 #[test]
@@ -712,6 +970,99 @@ fn safe_coroutine_primitive_is_a_distinct_checked_fir_intrinsic() {
 }
 
 #[test]
+fn kotlin_assert_is_a_checked_lazy_fir_intrinsic() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun verify(value: Boolean): Unit = assert(value)\n",
+        "verify",
+        jvm_stdlib_semantics(),
+    );
+    let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("assert call").kind
+    else {
+        panic!("the selected kotlin.assert declaration must remain an explicit checked call")
+    };
+    assert!(matches!(
+        call.target,
+        FirCallTarget::Intrinsic {
+            operation: FirIntrinsic::Assert {
+                mode: crate::types::AssertionMode::Runtime,
+            },
+            receiver: None,
+            result,
+            ..
+        } if result.get() == Ty::Unit
+    ));
+    assert!(matches!(
+        call.arguments.as_ref(),
+        [FirCallArgument::Expression { parameter: 0, .. }]
+    ));
+}
+
+#[test]
+fn nullable_string_plus_is_a_checked_fir_intrinsic() {
+    let (body, _) = checked_function_body(
+        "fun concat(left: String?, right: String?): String = left + right\n",
+        "concat",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("nullable String.plus call")
+        .kind
+    else {
+        panic!("nullable String.plus must remain an explicit checked call")
+    };
+    assert!(matches!(
+        call.target,
+        FirCallTarget::Intrinsic {
+            operation: FirIntrinsic::StringPlus,
+            receiver: Some(receiver),
+            result,
+            ..
+        } if receiver.get() == Ty::nullable(Ty::String) && result.get() == Ty::String
+    ));
+    assert!(call.dispatch_receiver.is_none());
+    assert!(call.extension_receiver.is_some());
+    assert!(matches!(
+        call.arguments.as_ref(),
+        [FirCallArgument::Expression { parameter: 0, .. }]
+    ));
+}
+
+#[test]
+fn selected_trim_indent_constant_is_folded_into_checked_fir_code_units() {
+    let (body, _) = checked_function_body(
+        "fun box(): String = \"\"\"${'\\uD800'}x\"\"\".trimIndent()\n",
+        "box",
+    );
+    let root = body
+        .expr(root_expression(&body))
+        .expect("checked trimIndent result");
+    let FirExprKind::Constant(FirConstant::String(value)) = &root.kind else {
+        panic!("the selected intrinsic on a constant receiver must be checked as a constant")
+    };
+    assert_eq!(value.units().collect::<Vec<_>>(), [0xd800, b'x' as u16]);
+}
+
+#[test]
+fn same_named_source_trim_indent_remains_a_checked_call() {
+    let (body, _) = checked_function_body(
+        "fun String.trimIndent(): String = \"source\"\n\
+         fun box(): String = \"literal\".trimIndent()\n",
+        "box",
+    );
+    let root = body
+        .expr(root_expression(&body))
+        .expect("checked source extension call");
+    assert!(matches!(
+        root.kind,
+        FirExprKind::Call(FirCall {
+            target: FirCallTarget::Module(_),
+            ..
+        })
+    ));
+}
+
+#[test]
 fn builtin_scalar_relational_operator_compares_the_intrinsic_result_to_zero() {
     let (body, _) = checked_function_body_with_platform(
         "// WITH_STDLIB\n\
@@ -739,6 +1090,64 @@ fn builtin_scalar_relational_operator_compares_the_intrinsic_result_to_zero() {
 }
 
 #[test]
+fn char_minus_int_keeps_its_char_result_inside_a_relational_operand() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun compare(value: Char): Boolean = (value - 1) <= value\n",
+        "compare",
+        jvm_stdlib_semantics(),
+    );
+    let FirExprKind::ComparisonCall { call, .. } = &body
+        .expr(root_expression(&body))
+        .expect("Char relational expression")
+        .kind
+    else {
+        panic!("Char relation must retain its selected compareTo call")
+    };
+    let receiver = call
+        .dispatch_receiver
+        .as_ref()
+        .expect("comparison receiver");
+    let subtraction = body.expr(receiver.value).expect("subtraction receiver");
+    assert_eq!(subtraction.ty.get(), Ty::Char);
+    assert!(matches!(
+        subtraction.kind,
+        FirExprKind::Binary {
+            operation: FirBinaryOperation::Subtract,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn local_char_minus_int_keeps_its_char_result_inside_a_relational_operand() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun compare(): Boolean {\n\
+             if ('z' - 'a' != 25) return false\n\
+             val value: Char = Char.MIN_VALUE\n\
+             return (value - 1) <= value\n\
+         }\n",
+        "compare",
+        jvm_stdlib_semantics(),
+    );
+    let subtraction_types = (0..body.expression_count())
+        .filter_map(|raw| {
+            let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+            matches!(
+                expression.kind,
+                FirExprKind::Binary {
+                    operation: FirBinaryOperation::Subtract,
+                    ..
+                }
+            )
+            .then_some(expression.ty.get())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(subtraction_types, vec![Ty::Int, Ty::Char]);
+}
+
+#[test]
 fn builtin_floating_relational_operator_keeps_ieee_ordering() {
     let (body, _) = checked_function_body_with_platform(
         "// WITH_STDLIB\n\
@@ -759,6 +1168,39 @@ fn builtin_floating_relational_operator_keeps_ieee_ordering() {
     };
     assert_eq!(body.expr(*lhs).expect("left operand").ty.get(), Ty::Double);
     assert_eq!(body.expr(*rhs).expect("right operand").ty.get(), Ty::Double);
+}
+
+#[test]
+fn smartcast_primitive_binary_receiver_keeps_its_unbox_boundary() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun increment(value: Int?): Int? = if (value == null) null else value + 1\n",
+        "increment",
+        jvm_stdlib_semantics(),
+    );
+    let lhs = (0..body.expression_count())
+        .find_map(|raw| {
+            let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+            match expression.kind {
+                FirExprKind::Binary {
+                    operation: FirBinaryOperation::Add,
+                    lhs,
+                    ..
+                } => Some(lhs),
+                _ => None,
+            }
+        })
+        .expect("checked primitive addition");
+    assert!(matches!(
+        body.expr(lhs).expect("converted left operand").kind,
+        FirExprKind::ImplicitConversion {
+            conversion: FirConversion {
+                kind: FirConversionKind::SmartCast { to },
+                ..
+            },
+            ..
+        } if to.get() == Ty::Int
+    ));
 }
 
 #[test]
@@ -1841,12 +2283,19 @@ fn java_static_classifier_call_keeps_external_identity_without_a_receiver() {
         "load",
         platform,
     );
-    let FirExprKind::Call(call) = &body
-        .expr(root_expression(&body))
-        .expect("Java static call")
-        .kind
-    else {
-        panic!("Java static classifier call must become checked call FIR")
+    let root = body.expr(root_expression(&body)).expect("Java static call");
+    let call = match &root.kind {
+        FirExprKind::Call(call) => call,
+        FirExprKind::ImplicitConversion { value, conversion }
+            if matches!(conversion.kind, FirConversionKind::PlatformNarrowing { .. }) =>
+        {
+            let FirExprKind::Call(call) = &body.expr(*value).expect("platform producer").kind
+            else {
+                panic!("platform narrowing must wrap the selected Java call")
+            };
+            call
+        }
+        _ => panic!("Java static classifier call must become checked call FIR"),
     };
     assert!(matches!(call.target, FirCallTarget::External { .. }));
     assert!(call.dispatch_receiver.is_none());
@@ -2058,6 +2507,22 @@ fn outer_generic_bound_completes_a_nested_mutable_collection_constructor_before_
     let (body, _) = checked_function_body_with_platform(
         "// WITH_STDLIB\n\
          fun box(): Set<String> = listOf(1).mapTo(HashSet()) { \"OK\" }\n",
+        "box",
+        jvm_stdlib_semantics(),
+    );
+
+    let expression = body
+        .expr(root_expression(&body))
+        .expect("mapTo call must become checked FIR");
+    assert_eq!(expression.ty.get().type_args(), &[Ty::String]);
+}
+
+#[test]
+fn generic_constructor_destination_preserves_receiver_lambda_input_before_fir() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun consume(value: Int): String = value.toString()\n\
+         fun box(): Set<String> = (0 until 1).mapTo(HashSet()) { consume(it) }\n",
         "box",
         jvm_stdlib_semantics(),
     );
@@ -2394,6 +2859,36 @@ fn applicable_top_level_rung_is_not_replaced_by_an_imported_receiver_extension()
 }
 
 #[test]
+fn smart_casted_implicit_receiver_call_retains_its_conversion() {
+    let (body, index) = checked_function_body(
+        "sealed interface Op\n\
+         data class Create(val path: String, val n: Int = 7) : Op\n\
+         fun Op.renamed(p: String): Op = when (this) {\n\
+             is Create -> copy(path = p)\n\
+             else -> this\n\
+         }\n",
+        "renamed",
+    );
+    let call = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("copy")).then_some(call)
+        })
+        .expect("smart-cast branch must retain the selected copy call");
+    let conversion = call
+        .dispatch_receiver
+        .and_then(|receiver| receiver.conversion)
+        .expect("narrowed implicit receiver must publish a conversion");
+    let FirConversionKind::SmartCast { to } = conversion.kind else {
+        panic!("narrowed implicit receiver must use a smart-cast conversion")
+    };
+    assert_eq!(to.get(), Ty::obj("Create"));
+}
+
+#[test]
 fn inapplicable_function_value_falls_through_to_implicit_receiver_extension() {
     let (body, index) = checked_function_body(
         "interface Flow<T>\n\
@@ -2506,6 +3001,7 @@ fn selected_super_call_retains_named_and_default_argument_mapping() {
         call.target,
         FirCallTarget::Super {
             source: Some(_),
+            realization: crate::libraries::MemberRealization::Dispatch,
             ..
         }
     ));
@@ -2689,12 +3185,19 @@ fn safe_numeric_conversion_guards_the_conversion_operand() {
     else {
         panic!("safe conversion must retain an explicit null guard")
     };
-    let FirExprKind::ImplicitConversion { value, .. } =
-        body.expr(selector).expect("conversion selector").kind
+    let FirExprKind::ImplicitConversion {
+        value,
+        conversion:
+            FirConversion {
+                kind: FirConversionKind::NumericConversion { to },
+                ..
+            },
+    } = body.expr(selector).expect("conversion selector").kind
     else {
         panic!("safe numeric conversion must remain a checked conversion")
     };
     assert_eq!(receiver.value, value);
+    assert_eq!(to.get(), Ty::Byte);
 }
 
 #[test]
@@ -3222,6 +3725,209 @@ fn foreach_with_callable_reference_keeps_the_selected_external_call_without_spli
         inline_plan.is_none(),
         "a callable-reference value has no lambda body to splice"
     );
+}
+
+#[test]
+fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\
+             emptyList<Map.Entry<K, V>>().iterator()\n\
+         suspend fun render(entry: Map.Entry<String, Int>): String = entry.key\n\
+         suspend fun collect(values: Map<String, Int>): List<String> =\n\
+             values.map { render(it) }\n",
+        "collect",
+        jvm_stdlib_semantics(),
+    );
+
+    let plan = (0..body.expression_count()).find_map(|raw| {
+        let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+            return None;
+        };
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
+            return None;
+        };
+        matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. })
+            .then_some(plan.as_ref())
+    });
+    let Some(FirInlineBodyPlan::CollectionTransform {
+        lambda_parameter,
+        flatten,
+        iterator,
+        factory,
+        append,
+        accumulator,
+        append_parameter,
+        ..
+    }) = plan
+    else {
+        panic!("selected map call must publish its complete checked structural plan")
+    };
+    assert_eq!(*lambda_parameter, 0);
+    assert!(!flatten);
+    assert!(matches!(iterator.target, FirCallTarget::External { .. }));
+    assert_ne!(factory, append);
+    assert_eq!(
+        accumulator.get(),
+        Ty::obj_args("kotlin/collections/MutableList", &[Ty::String])
+    );
+    assert_eq!(append_parameter.get(), Ty::nullable(Ty::obj("kotlin/Any")));
+}
+
+#[test]
+fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
+    let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
+    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
+    ));
+    let (body, _) = checked_function_body_with_platform(
+        "import kotlinx.coroutines.sync.Mutex\n\
+         import kotlinx.coroutines.sync.withLock\n\
+         suspend fun read(mutex: Mutex): String = mutex.withLock { \"OK\" }\n",
+        "read",
+        platform,
+    );
+    let plan = (0..body.expression_count()).find_map(|raw| {
+        let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+        let FirExprKind::Call(call) = &expression.kind else {
+            return None;
+        };
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
+            return None;
+        };
+        matches!(
+            plan.as_ref(),
+            FirInlineBodyPlan::SuspendBeforeLambdaFinally { .. }
+        )
+        .then_some(plan.as_ref())
+    });
+    let Some(FirInlineBodyPlan::SuspendBeforeLambdaFinally {
+        lambda_parameter,
+        state_parameter,
+        state_default,
+        enter,
+        cleanup,
+    }) = plan
+    else {
+        panic!("withLock must publish its selected structural plan in checked FIR")
+    };
+    assert_eq!((*lambda_parameter, *state_parameter), (1, 0));
+    assert_eq!(*state_default, FirInlineDefaultValue::Null);
+    assert_eq!(enter.parameters.len(), 1);
+    assert_eq!(cleanup.parameters.len(), 1);
+    assert!(enter.suspend);
+    assert!(!cleanup.suspend);
+    assert_ne!(enter.declaration, cleanup.declaration);
+}
+
+#[test]
+fn java_sam_platform_number_is_explicitly_narrowed_before_primitive_operator() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun test(sizes: java.util.HashMap<String, Int>) {\n\
+             var total = 0\n\
+             sizes.forEach { name, count -> total += count + name.length }\n\
+         }\n",
+        "test",
+        jvm_stdlib_semantics(),
+    );
+
+    let lambda = (0..body.expression_count())
+        .find_map(|raw| {
+            let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+            let FirExprKind::Lambda { body, .. } = &expression.kind else {
+                return None;
+            };
+            Some(body.as_ref())
+        })
+        .expect("Java BiConsumer argument must remain a checked FIR lambda");
+    let (source, target) = (0..lambda.expression_count())
+        .find_map(|raw| {
+            let expression = lambda.expr(FirExprId::from_raw(raw as u32))?;
+            let FirExprKind::Binary {
+                operation: FirBinaryOperation::Add,
+                lhs,
+                ..
+            } = expression.kind
+            else {
+                return None;
+            };
+            let converted = lambda.expr(lhs)?;
+            let FirExprKind::ImplicitConversion {
+                value,
+                conversion:
+                    FirConversion {
+                        kind: FirConversionKind::SmartCast { to },
+                        ..
+                    },
+            } = converted.kind
+            else {
+                return None;
+            };
+            Some((lambda.expr(value)?.ty.get(), to.get()))
+        })
+        .expect("the selected primitive plus must own its platform-value conversion");
+    assert_eq!(source, Ty::platform_nullable(Ty::Int));
+    assert_eq!(target, Ty::Int);
+}
+
+#[test]
+fn named_context_parameter_is_a_value_not_an_implicit_member_receiver() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: +ContextParameters\n\
+         class Scope { fun selected(): String = \"member\" }\n\
+         fun selected(): String = \"top-level\"\n\
+         context(scope: Scope) fun contextual(): String = scope.selected()\n\
+         context(scope: Scope) fun use(): String = selected() + contextual()\n",
+        "use",
+    );
+
+    let selected = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("selected")).then_some((call, target))
+        })
+        .expect("top-level selected call");
+    let declaration = index
+        .callable(selected.1)
+        .expect("stable selected callable")
+        .declaration;
+    assert!(
+        index
+            .declaration_header(declaration)
+            .expect("stable selected declaration")
+            .owner
+            .is_none(),
+        "a named context parameter must not expose member callables unqualified",
+    );
+    assert!(selected.0.dispatch_receiver.is_none());
+
+    let contextual = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("contextual")).then_some(call)
+        })
+        .expect("forwarded contextual call");
+    let [FirCallArgument::Expression { value, .. }] = contextual.arguments.as_ref() else {
+        panic!("contextual call must carry its selected context value")
+    };
+    assert!(matches!(
+        body.expr(*value).map(|expression| &expression.kind),
+        Some(FirExprKind::ValueRead(_))
+    ));
 }
 
 #[test]
@@ -3862,4 +4568,41 @@ fn generic_overloads_use_the_primary_class_bound_for_declaration_identity() {
         .expect("selected generic overload call");
     assert_eq!(root.ty.get(), Ty::String);
     assert!(matches!(root.kind, FirExprKind::Call(_)));
+}
+
+#[test]
+fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
+    let (body, index) = checked_function_body(
+        "class Recorder {\n\
+             suspend fun save(label: String, value: Int): Int = value\n\
+         }\n\
+         suspend fun work(recorder: Recorder): Int {\n\
+             val result = recorder.save(\n\
+                 value = 3,\n\
+                 label = \"entry\",\n\
+             )\n\
+             return result\n\
+         }\n",
+        "work",
+    );
+    let call = (0..body.expression_count())
+        .map(|raw| FirExprId::from_raw(raw as u32))
+        .find(|expression| {
+            let Some(FirExpr {
+                kind: FirExprKind::Call(call),
+                ..
+            }) = body.expr(*expression)
+            else {
+                return false;
+            };
+            call.target
+                .module()
+                .and_then(|target| index.callable_name(target))
+                == Some("save")
+        })
+        .expect("selected suspend member call");
+    assert_eq!(
+        body.expression_debug_lines(call),
+        FirExpressionDebugLines { source: 5, end: 8 }
+    );
 }

@@ -123,3 +123,39 @@ fn suspending_finally_preserves_or_overrides_pending_completion() {
         "OK"
     );
 }
+
+#[test]
+fn inline_value_try_with_suspending_branches_binds_after_selection() {
+    run_ok(
+        "SfInlineValueTry",
+        "suspend fun await(value: String): String = value\n\
+         inline fun choose(body: () -> String, recover: (RuntimeException) -> String): String =\n\
+         try { body() } catch (error: RuntimeException) { recover(error) }\n\
+         fun box(): String { var result = \"FAIL\"\n\
+         builder { result = choose({ await(\"OK\") }, { await(\"WRONG\") }) }\n\
+         return result }\n",
+    );
+}
+
+#[test]
+fn inline_non_local_completion_runs_finally_before_loop_exit() {
+    const LIB: &str = "class Controller { var result = \"\" }\n\
+        suspend fun lock(owner: Controller) { owner.result += \"L\" }\n\
+        fun unlock(owner: Controller) { owner.result += \"U\" }\n\
+        public suspend inline fun doInline(owner: Controller, action: () -> Unit): Unit {\n\
+        lock(owner); try { return action() } finally { unlock(owner) } }\n";
+    const MAIN: &str = "import kotlin.coroutines.*\n\
+        fun builder(block: suspend Controller.() -> Unit): String {\n\
+        val controller = Controller()\n\
+        block.startCoroutine(controller, Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+        return controller.result }\n\
+        fun box(): String { val value = builder { doInline(this) {} }\n\
+        return if (value == \"LU\") \"OK\" else \"FAIL:$value\" }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("SfInlineFinallyLib.kt", LIB),
+            ("SfInlineFinallyMain.kt", MAIN),
+        ],
+        "SfInlineFinallyLoopExit",
+    );
+}

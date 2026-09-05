@@ -23,9 +23,11 @@ pub fn derive_bridges(
     classpath: &crate::jvm::classpath::Classpath,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
-        // Source-declared classes only. A synthetic class (a lambda, a callable-reference subclass) has no
-        // source declaration to override anything, and its supertypes are the emitter's own choice.
-        if !ir.classes[cid].is_source_declared {
+        // Source-declared classes and declaration-owned enum-entry subclasses only. Lambdas and
+        // callable-reference classes have emitter-chosen supertypes and no Kotlin override edges;
+        // an enum-entry body, however, contains source override declarations whose stable edges are
+        // attached to its common-IR subclass before this JVM representation pass.
+        if !ir.classes[cid].is_source_declared && ir.classes[cid].enum_entry_of.is_none() {
             continue;
         }
         superclass_method_bridges(ir, cid, classpath)?;
@@ -77,13 +79,52 @@ fn superclass_method_bridges(
         {
             continue;
         }
-        let base_params = edge
-            .declared_parameters
-            .iter()
-            .copied()
-            .map(bridge_erasure)
-            .collect::<Vec<_>>();
-        let base_ret = bridge_erasure(edge.declared_result);
+        // Common IR records the selected declaration and its call-site semantic signature. For an
+        // external declaration, recover the provider's canonical UNAPPLIED source signature by the
+        // opaque identity: the edge may say `Echo<String>.echo: String`, while the declaration still
+        // says `Echo<T>.echo: T`. Only then apply JVM bridge erasure. Using the physical descriptor
+        // here is too early: it would manufacture a bridge for semantic value-class parameters such
+        // as `Continuation.resumeWith(Result<T>)` before the value-class pass realizes their carrier.
+        let (base_params, base_ret) = match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(_) => (
+                edge.declared_parameters
+                    .iter()
+                    .copied()
+                    .map(bridge_erasure)
+                    .collect::<Vec<_>>(),
+                bridge_erasure(edge.declared_result),
+            ),
+            crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
+                let realization = classpath
+                    .external_callable(target)
+                    .ok_or(SkipReason::Bridges)?;
+                if realization.kind != crate::jvm::classpath::ExternalCallableKind::Member {
+                    return Err(SkipReason::Bridges);
+                }
+                let callable = realization.callable;
+                let declared_parameters = callable
+                    .declared_params
+                    .or_else(|| {
+                        callable
+                            .generic_sig
+                            .as_ref()
+                            .map(|signature| signature.params.clone().into_boxed_slice())
+                    })
+                    .unwrap_or_else(|| callable.params.into_boxed_slice());
+                let declared_result = callable
+                    .declared_ret
+                    .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
+                    .unwrap_or(callable.ret);
+                (
+                    declared_parameters
+                        .iter()
+                        .copied()
+                        .map(bridge_erasure)
+                        .collect(),
+                    bridge_erasure(declared_result),
+                )
+            }
+        };
         let concrete_params = own_fid
             .map(|function| ir.functions[function as usize].params.clone())
             .unwrap_or_else(|| edge.implementation_parameters.clone());

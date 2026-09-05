@@ -5,7 +5,10 @@ use crate::fir::{
 use crate::ir::{FnParamInfo, IrFile, IrFunction};
 
 use super::{
-    constructors::{accept_constructor_body, finalize_constructors, predeclare_constructors},
+    constructors::{
+        accept_constructor_body, finalize_constructor_field_indices, finalize_constructors,
+        predeclare_constructors,
+    },
     data_classes::finalize_data_classes,
     finish_callable_body,
     generics::{attach_callable_generic_facts, attach_classifier_generic_facts},
@@ -28,6 +31,7 @@ pub enum FirFileLoweringFailure {
     MissingSourcePackage(crate::fir::SourceFileId),
     UnsupportedPropertyShape(DeclarationId),
     MissingClassifier(DeclarationId),
+    MissingAnnotationPolicy(DeclarationId),
     MissingModuleClassifier(crate::types::TypeName),
     UnsupportedCallableOwner(DeclarationId),
     UnsupportedInlinePayloadOwner {
@@ -184,6 +188,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_constructors(index, self.ir)?;
         finalize_enum_entries(self.ir)?;
         finalize_properties(index, self.ir)?;
+        finalize_constructor_field_indices(index, self.ir)?;
         finalize_interface_delegations(index, self.ir)?;
         finalize_data_classes(index, self.ir)?;
         super::module_declarations::publish_referenced(index, self.ir)?;
@@ -241,8 +246,15 @@ impl<'a> CommonIrBodySink<'a> {
         index: &ResolvedModuleIndex,
         bodies: &InlineBodyStore,
     ) -> Result<(), FirFileLoweringFailure> {
-        for (callable, body) in bodies.bodies_for_source(index, self.source) {
-            self.accept_inline_payload(index, callable, body)?;
+        let mut callables = bodies
+            .bodies_for_source(index, self.source)
+            .into_iter()
+            .map(|(callable, _)| callable)
+            .collect::<Vec<_>>();
+        callables.sort_unstable_by_key(|callable| callable.raw());
+        let mut visiting = std::collections::HashSet::new();
+        for callable in callables {
+            self.accept_inline_payload_tree(index, bodies, callable, &mut visiting)?;
         }
         Ok(())
     }
@@ -255,27 +267,33 @@ impl<'a> CommonIrBodySink<'a> {
     ) -> Result<(), FirFileLoweringFailure> {
         let mut pending = std::collections::HashSet::new();
         caller.collect_referenced_module_callables(&mut pending);
-        while let Some(callable) = pending.iter().next().copied() {
-            pending.remove(&callable);
-            if self.materialized_inline_callables.contains(&callable) {
-                continue;
-            }
-            let Some(body) = bodies.get(callable).cloned() else {
-                continue;
-            };
-            body.collect_referenced_module_callables(&mut pending);
-            self.accept_inline_payload(index, callable, body)?;
+        let mut pending = pending.into_iter().collect::<Vec<_>>();
+        pending.sort_unstable_by_key(|callable| callable.raw());
+        let mut visiting = std::collections::HashSet::new();
+        for callable in pending {
+            self.accept_inline_payload_tree(index, bodies, callable, &mut visiting)?;
         }
         Ok(())
     }
 
-    fn accept_inline_payload(
+    /// Materialize retained inline templates dependency-first. Their checked FIR is stored in a
+    /// hash map, so iteration order cannot define whether a nested inline call sees its callee's
+    /// common-IR template. A recursive inline cycle is left as a selected physical call at the
+    /// cycle edge; valid acyclic chains are fully expanded independent of map order.
+    fn accept_inline_payload_tree(
         &mut self,
         index: &ResolvedModuleIndex,
+        bodies: &InlineBodyStore,
         callable: CallableId,
-        body: FirBody,
+        visiting: &mut std::collections::HashSet<CallableId>,
     ) -> Result<(), FirFileLoweringFailure> {
-        if !self.materialized_inline_callables.insert(callable) {
+        if self.materialized_inline_callables.contains(&callable) {
+            return Ok(());
+        }
+        let Some(body) = bodies.get(callable).cloned() else {
+            return Ok(());
+        };
+        if !visiting.insert(callable) {
             return Ok(());
         }
         let declaration = DeclarationId::from_raw(body.owner().raw());
@@ -292,6 +310,15 @@ impl<'a> CommonIrBodySink<'a> {
             self.predeclare_foreign_inline_template(index, callable)?;
         }
         self.predeclare_inline_payload(index, declaration, &body)?;
+        let mut dependencies = std::collections::HashSet::new();
+        body.collect_referenced_module_callables(&mut dependencies);
+        let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
+        dependencies.sort_unstable_by_key(|dependency| dependency.raw());
+        for dependency in dependencies {
+            self.accept_inline_payload_tree(index, bodies, dependency, visiting)?;
+        }
+        visiting.remove(&callable);
+
         let nested = body.inline_nested_declaration_bodies().to_vec();
         if let Err(error) = self.accept_body(index, body.owner(), body) {
             crate::trace_compiler!(
@@ -310,6 +337,7 @@ impl<'a> CommonIrBodySink<'a> {
                 return Err(error);
             }
         }
+        self.materialized_inline_callables.insert(callable);
         Ok(())
     }
 
@@ -603,6 +631,25 @@ impl<'a> CommonIrBodySink<'a> {
             };
             let classifier_identity = header.classifier;
             let mut class = crate::ir::IrClass::source_skeleton(header, declaration_header.flags);
+            if declaration_header.visibility != crate::types::Visibility::Public {
+                assert!(
+                    self.ir
+                        .class_visibilities
+                        .insert(classifier_identity, declaration_header.visibility)
+                        .is_none(),
+                    "a stable classifier may publish one visibility into common IR"
+                );
+            }
+            if declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
+            {
+                class.annotation_retention = Some(
+                    index
+                        .annotation_retention(classifier_identity)
+                        .ok_or(FirFileLoweringFailure::MissingAnnotationPolicy(declaration))?,
+                );
+            }
             attach_classifier_generic_facts(index, declaration, header, &mut class, self.ir);
             let hierarchy = index
                 .classifier_hierarchy(declaration)
@@ -754,6 +801,20 @@ impl<'a> CommonIrBodySink<'a> {
                     let entry_class = self.ir.add_class(entry_class);
                     assert!(
                         self.ir
+                            .property_overrides
+                            .insert(subclass, lower_property_override_plans(index, entry))
+                            .is_none(),
+                        "an enum-entry subclass may publish property override edges once"
+                    );
+                    assert!(
+                        self.ir
+                            .function_overrides
+                            .insert(subclass, lower_function_override_plans(index, entry))
+                            .is_none(),
+                        "an enum-entry subclass may publish function override edges once"
+                    );
+                    assert!(
+                        self.ir
                             .checked_enum_entry_classes
                             .insert(entry, entry_class)
                             .is_none(),
@@ -804,6 +865,13 @@ impl<'a> CommonIrBodySink<'a> {
                 return Err(FirFileLoweringFailure::MissingClassifier(outer));
             };
             let class = &mut self.ir.classes[class as usize];
+            for argument in &mut class.ctor_args {
+                if let Some(field) = &mut argument.field_index {
+                    *field = field
+                        .checked_add(1)
+                        .expect("inner-class field index overflow");
+                }
+            }
             class.fields.insert(
                 0,
                 crate::ir::IrField::new("this$0".to_owned(), outer_ty).with_is_final(true),
@@ -818,6 +886,7 @@ impl<'a> CommonIrBodySink<'a> {
                     ty: outer_ty,
                     declared_ty: None,
                     is_field: true,
+                    field_index: Some(0),
                     has_default: false,
                     is_vararg: false,
                     type_param: None,
@@ -891,6 +960,9 @@ impl<'a> CommonIrBodySink<'a> {
                 // An actualized-away `expect` retains its stable anchor but has no published header.
                 continue;
             };
+            if index.is_suppressed_generated_callable(declaration) {
+                continue;
+            }
             let Some(callable) = index.callable_for_declaration(declaration) else {
                 if index.is_body_local_declaration(declaration) {
                     continue;
@@ -988,6 +1060,12 @@ impl<'a> CommonIrBodySink<'a> {
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
             });
+            self.ir.fn_source_order.insert(
+                function,
+                index
+                    .source_order(declaration)
+                    .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
+            );
             if let Some(bound) = index.callable_equality_bound(callable.id) {
                 self.ir.fn_equality_bounds.insert(function, bound.get());
             }
@@ -1034,6 +1112,9 @@ impl<'a> CommonIrBodySink<'a> {
                 }
                 if header.visibility.is_private() {
                     self.ir.private_methods.insert(function);
+                }
+                if header.visibility == crate::types::Visibility::Internal {
+                    self.ir.internal_methods.insert(function);
                 }
                 if callable.is_inline() {
                     if class.is_none() {
@@ -1163,7 +1244,6 @@ impl<'a> CommonIrBodySink<'a> {
         let body = if declaration_header
             .flags
             .has(crate::fir::DeclarationFlags::TAILREC)
-            && lowered.implicit_return
             && self.ir.functions[function as usize].is_static
             && callable.shape.extension_receiver.is_none()
             && callable.shape.context_parameter_count == 0

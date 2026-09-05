@@ -106,6 +106,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_external(
                     expression,
                     reference.target.external_identity,
+                    reference.target.compiler_intrinsic,
                     None,
                     false,
                     &reference.target.params,
@@ -216,6 +217,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_external(
                     expression,
                     target.external_identity,
+                    target.compiler_intrinsic,
                     None,
                     false,
                     &target.params,
@@ -460,6 +462,7 @@ impl BodyFirChecker<'_> {
                     declaration,
                     classifier: constructor_owner,
                     parameters: target_parameters.clone().into_boxed_slice(),
+                    annotation: None,
                 }
             } else {
                 crate::trace_compiler!(
@@ -612,6 +615,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         member.external_identity,
+                        None,
                         Some(receiver_ty),
                         false,
                         &member.params,
@@ -668,6 +672,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         callable.external_identity,
+                        callable.compiler_intrinsic,
                         receiver_ty,
                         extension_target,
                         parameters,
@@ -733,6 +738,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         member.external_identity,
+                        None,
                         None,
                         false,
                         &member.params,
@@ -981,6 +987,7 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         declaration: Option<ExternalCallableId>,
+        compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
         receiver: Option<Ty>,
         extension_receiver_target: bool,
         parameters: &[Ty],
@@ -1002,6 +1009,37 @@ impl BodyFirChecker<'_> {
             .copied()
             .map(resolved)
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(crate::libraries::CompilerIntrinsic::ArrayFactory(operation)) =
+            compiler_intrinsic
+        {
+            if receiver.is_some()
+                || extension_receiver_target
+                || binding != FirCallableReferenceBinding::Static
+                || dispatch_receiver.is_some()
+                || extension_receiver.is_some()
+            {
+                return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
+            }
+            let array_type = resolved(result)?;
+            let element_type = result
+                .array_elem()
+                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+            return Ok(FirExprKind::CallableReference {
+                target: FirCallableReferenceTarget::ArrayFactory {
+                    operation,
+                    array_type,
+                    element_type: resolved(element_type)?,
+                    parameters: parameters.into_boxed_slice(),
+                },
+                function_type: self.reference_function_type(expression)?,
+                reflective: self.reference_is_reflective(expression),
+                binding,
+                dispatch_receiver: None,
+                extension_receiver: None,
+                substitutions: Box::new([]),
+                adaptation: adaptation.map(Box::new),
+            });
+        }
         let substitutions = self
             .info
             .resolved_call_type_args

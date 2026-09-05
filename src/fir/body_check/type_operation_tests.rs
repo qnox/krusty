@@ -33,6 +33,31 @@ fn scalar_and_unit_type_tests_retain_checked_fir_operations() {
 }
 
 #[test]
+fn nullable_mixed_numeric_equality_publishes_exact_comparison_types() {
+    let (body, _) = checked_function_body(
+        "fun equal(left: Int?, right: Double?): Boolean = left == right\n",
+        "equal",
+    );
+    let FirExprKind::NullableNumericComparison {
+        operation,
+        lhs_primitive,
+        rhs_primitive,
+        comparison,
+        ..
+    } = body
+        .expr(root_expression(&body))
+        .expect("checked nullable numeric equality")
+        .kind
+    else {
+        panic!("mixed nullable numbers must use their checked equality operation")
+    };
+    assert_eq!(operation, FirBinaryOperation::Equal);
+    assert_eq!(lhs_primitive.get(), Ty::Int);
+    assert_eq!(rhs_primitive.get(), Ty::Double);
+    assert_eq!(comparison.get(), Ty::Double);
+}
+
+#[test]
 fn bare_generic_typealias_runtime_operands_are_checked_as_star_expansions() {
     let (body, _) = checked_function_body_with_platform(
         "// WITH_STDLIB\n\

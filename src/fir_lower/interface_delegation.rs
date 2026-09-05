@@ -187,6 +187,7 @@ fn materialize_delegation(
                                         .map(|bound| (bound.get(), false))
                                         .collect(),
                                     variance: crate::types::TypeVariance::Invariant,
+                                    reified: false,
                                 })
                                 .collect(),
                             params,
@@ -395,6 +396,7 @@ fn delegated_call(
                 ret: call.result.get(),
                 substitutions: Vec::new(),
                 defaults: Vec::new(),
+                extension_receiver_parameter: None,
             },
             (0..semantic_parameters.len())
                 .map(|ordinal| ir.add_expr(IrExpr::GetValue(ordinal as u32 + 1)))

@@ -1,6 +1,6 @@
 //! Context parameters (`context(a: A) fun f()`): the leading context receivers are supplied IMPLICITLY
-//! at the call site — from the enclosing `with`-block receiver, or an in-scope local / enclosing context
-//! parameter — rather than positionally. The checker resolves each context parameter to an in-scope
+//! at the call site — from the enclosing `with`-block receiver or an enclosing context parameter —
+//! rather than positionally. The checker resolves each context parameter to an in-scope
 //! source and the lowerer prepends the loaded values (matching kotlinc's leading-value-parameter ABI).
 //! Same-file, runnable.
 use super::common;
@@ -37,6 +37,24 @@ fn contextual_inline_extension_maps_defaults_after_contexts() {
             with(Marker()) { if (4.total() == 10) \"OK\" else \"fail\" }\n\
         }\n";
     common::expect_box_ok_files_with_stdlib(&[("lib.kt", LIB), ("main.kt", MAIN)], "Main");
+}
+
+#[test]
+fn contextual_member_extension_retains_default_type_after_unnamed_context() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        class Context\n\
+        class Extended\n\
+        class Containing {\n\
+        \x20 context(_: Context) fun Extended.foo(value: String = \"OK\") = value\n\
+        }\n\
+        fun box(): String = with(Containing()) {\n\
+        \x20 with(Context()) { Extended().foo() }\n\
+        }\n";
+
+    assert_eq!(
+        run(SRC).expect("default after unnamed context parameter"),
+        "OK"
+    );
 }
 
 #[test]
@@ -87,9 +105,9 @@ fn context_parameter_declarations_follow_the_language_feature_mode() {
 }
 
 #[test]
-fn context_from_local_value() {
-    // The context `a: A` is filled from an in-scope local of the matching type.
-    const SRC: &str = "class A(val x: String) { fun foo(): String = x }\n\
+fn ordinary_local_value_is_not_an_implicit_context_argument() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+        class A(val x: String) { fun foo(): String = x }\n\
         var result = \"\"\n\
         context(a: A)\n\
         fun test1() { result = a.foo() }\n\
@@ -98,7 +116,19 @@ fn context_from_local_value() {
         \x20 test1()\n\
         \x20 return result\n\
         }\n";
-    assert_eq!(run(SRC).expect("context from local"), "OK");
+    let (reference, _) = common::kotlinc_source_result("ContextFromOrdinaryLocal", SRC);
+    assert_ne!(
+        reference, 0,
+        "kotlinc accepted an ordinary local as context"
+    );
+    assert_eq!(
+        common::front_end_diagnostics(
+            SRC,
+            std::slice::from_ref(&common::stdlib_jar()),
+            Some(common::jdk_modules().as_path()),
+        ),
+        vec!["no context argument for 'a: A' found."]
+    );
 }
 
 #[test]
@@ -179,7 +209,8 @@ fn explicit_context_argument_selects_the_contextual_member_overload() {
         }
         fun box(): String {
             val service = Both()
-            return service.read() + service.read(token = Token())
+            val token = Token()
+            return service.read() + service.read(token = token)
         }
     "#;
     assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");

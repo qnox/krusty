@@ -462,7 +462,7 @@ pub(crate) fn publish_stable_declaration_metadata(
                 index.classifier_header(declaration)?;
                 Some((
                     declaration,
-                    table.applied_hierarchy(crate::types::Ty::obj_name(class.internal)),
+                    table.applied_hierarchy(index.classifier_self_type(declaration)?),
                 ))
             })
         })
@@ -478,6 +478,7 @@ pub(crate) fn publish_stable_declaration_metadata(
             declaration,
             suppressions.invisible_reference,
             suppressions.invisible_member,
+            suppressions.optional_declaration_usage,
         );
     }
     for property in table.source_props.values() {

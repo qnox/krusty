@@ -1081,6 +1081,42 @@ fn protected_java_member_receiver_diagnostics_match_kotlinc() {
 }
 
 #[test]
+fn protected_inherited_java_constructor_diagnostic_matches_kotlinc() {
+    let Some((java_dir, _)) = common::javac_compile(
+        &[(
+            "fixtures/Parent.java".to_string(),
+            "package fixtures; public class Parent { protected static class Category { protected Category() {} } }"
+                .to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "import fixtures.Parent\n\
+                  class Child : Parent() {\n\
+                      fun value(): Any = Category()\n\
+                  }";
+    let result = common::compiler_diagnostics(
+        &[("ProtectedNestedConstructor.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let expected = vec![ObservedError {
+        file: "ProtectedNestedConstructor.kt".to_string(),
+        line: 3,
+        column: 20,
+        message: "cannot access 'constructor(): Parent.Category': it is protected in 'fixtures.Parent.Category'."
+            .to_string(),
+    }];
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}
+
+#[test]
 fn protected_java_field_receiver_diagnostics_match_kotlinc() {
     let Some((java_dir, _)) = common::javac_compile(
         &[(

@@ -346,9 +346,24 @@ fun use(): String {
     });
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(field_reads, 2);
-    // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
-    // gap - upgrade to `expect_true_e2e` when the backend admits it.
+    // The local class's cross-class private field access needs a JVM synthetic accessor. This test
+    // owns the frontend lexical/capture contract; the executable lambda case is pinned below.
     assert!(common::front_end_diagnostics_with_stdlib(src).is_empty());
+}
+
+#[test]
+fn accessor_backing_field_receiver_is_captured_by_lambda() {
+    run_ok(
+        r#"
+fun <T> eval(block: () -> T): T = block()
+class Holder {
+    val value: String = "O"
+        get() = eval { field } + "K"
+}
+fun box(): String = Holder().value
+"#,
+        "BackingFieldLambdaReceiver",
+    );
 }
 
 #[test]

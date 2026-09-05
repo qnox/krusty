@@ -44,11 +44,19 @@ where
 
     fn lower_ir_file(
         &self,
-        file: crate::backend::CheckedIrFile<'_>,
+        mut file: crate::backend::CheckedIrFile<'_>,
         _state: &mut Self::State,
-        _diags: &mut DiagSink,
+        diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
+        if let Err(target) = crate::backend::local_properties::realize(&mut file.ir) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: cannot realize checked JS property access for {target:?}"),
+            );
+            return Vec::new();
+        }
+        super::control_flow::realize_updates(&mut file.ir);
         vec![(
             format!("{stem}.js"),
             super::emit_file(&file.ir).into_bytes(),
@@ -64,24 +72,32 @@ where
 mod tests {
     use crate::backend::Artifact;
     use crate::diag::DiagSink;
-    use crate::frontend::{collect_signatures_with_cp, parse_source_with_detected_features};
     use crate::libraries::EmptySymbolSource;
+    use crate::source::SourceInput;
 
     fn compile_js_sources(sources: &[(&str, &str)]) -> (Vec<Artifact>, DiagSink) {
         let mut diags = DiagSink::new();
-        let files = sources
+        let inputs = sources
             .iter()
-            .map(|(_, src)| parse_source_with_detected_features(src, &mut diags))
+            .map(|(stem, source)| SourceInput::kotlin(source).with_file_stem(stem))
             .collect::<Vec<_>>();
         let stems = sources
             .iter()
             .map(|(stem, _)| (*stem).to_string())
             .collect::<Vec<_>>();
-        let mut syms = collect_signatures_with_cp(&files, Box::new(EmptySymbolSource), &mut diags);
-        let outputs = crate::compiler::compile(
-            &files,
+        let mut features = crate::features::LangFeatures::new();
+        for (_, source) in sources {
+            features.apply_source_directives(source);
+        }
+        let analysis = crate::frontend::analyze_source_set_streaming_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &features,
+            &mut diags,
+        );
+        let outputs = crate::compiler::emit_analyzed(
+            analysis,
             &stems,
-            &mut syms,
             &super::JsBackend::new(EmptySymbolSource),
             "main",
             &mut diags,
@@ -148,25 +164,24 @@ mod tests {
             outputs,
             vec![(
                 "Main.js".to_string(),
-                b"function side() {\n  return 1;\n}\nfunction box() {\n  if (true) {\n    undefined;\n  }\n  else {\n    side();\n    undefined;\n  }\n}\n"
+                b"function side() {\n  return 1;\n}\nfunction box() {\n  if (true) {\n  }\n  else {\n    side();\n  }\n}\n"
                     .to_vec(),
             )]
         );
     }
 
     #[test]
-    fn js_backend_reports_unsupported_ir_lowering() {
-        // A `tailrec` member function is rejected by common lowering before backend emission.
+    fn js_backend_emits_checked_block_expression() {
         let (outputs, diags) = compile_js_sources(&[(
             "Main",
             "class C { tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n\
              fun box(): Int = C().f(3)",
         )]);
 
-        assert_eq!(outputs, Vec::<Artifact>::new());
-        assert_eq!(
-            diagnostic_messages(&diags),
-            vec!["krusty: this construct is not yet supported by the IR backend"]
-        );
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        assert_eq!(outputs.len(), 1);
+        let source = String::from_utf8(outputs[0].1.clone()).expect("JavaScript must be UTF-8");
+        assert!(source.contains("return v2.f(v3);"), "{source}");
+        assert!(!source.contains("cannot emit Block"), "{source}");
     }
 }

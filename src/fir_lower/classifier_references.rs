@@ -357,6 +357,7 @@ impl BodyLowering<'_> {
                 declaration,
                 classifier: selected_classifier,
                 parameters: selected_parameters,
+                annotation,
             } => {
                 if *selected_classifier != classifier || selected_parameters.as_ref() != parameters
                 {
@@ -370,6 +371,7 @@ impl BodyLowering<'_> {
                     parameters,
                     outer_receiver,
                     arguments,
+                    annotation.as_deref(),
                 )
                 .ok_or(FirLoweringFailure::UnsupportedExternalConstructor(
                     *declaration,

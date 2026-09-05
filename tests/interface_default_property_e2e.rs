@@ -6,10 +6,9 @@
 //! a real JVM default method. The gate now admits a non-`var`, non-extension, non-private computed
 //! property (`is_computed_prop`).
 //!
-//! Deliberately still gated (never miscompile): `var` with custom accessors, extension properties
-//! in interfaces, getters that read `field` (a backing field an interface can't have), and PRIVATE
-//! computed properties — pass 1 registers their accessor `public`, so a same-named member on an
-//! implementor would hijack the virtual dispatch (accessor privacy isn't modeled on this path).
+//! Extension, mutable, abstract-extension, and private computed properties use the same semantic
+//! accessor model. A getter that reads `field` is rejected by the frontend because Kotlin
+//! interfaces cannot own backing fields.
 
 use super::common;
 
@@ -262,17 +261,10 @@ fun box(): String {
     );
 }
 
-/// REJECTION GUARDS: shapes that must never EMIT (they'd miscompile as public defaults). Asserts
-/// on the backend outcome, not a run result — a skip and an emitted-but-crashing class both make a
-/// run-based check pass, but only the former is acceptable.
 #[test]
-fn unsupported_interface_property_shapes_still_rejected() {
-    let jdk = common::jdk_modules();
-    let cases: &[(&str, &str)] = &[
-        // An extension property in an interface.
-        (
-            "IfaceExtProp",
-            r#"
+fn interface_extension_default_getter_runs() {
+    run_box(
+        r#"
 interface I {
     val String.x: String
         get() = "OK"
@@ -280,25 +272,14 @@ interface I {
 class C : I
 fun box(): String = C().run { "x".x }
 "#,
-        ),
-        // A getter reading `field` (an interface has no backing field).
-        (
-            "IfaceFieldRead",
-            r#"
-interface I {
-    val x: String
-        get() = field
+        "IfaceExtProp",
+    );
 }
-class C : I
-fun box(): String = C().x
-"#,
-        ),
-        // A PRIVATE computed property: its accessor would be registered `public`, letting a
-        // same-named member on an implementor hijack the virtual dispatch (kotlinc emits the
-        // getter private; accessor privacy isn't modeled on this path).
-        (
-            "IfacePrivateComputed",
-            r#"
+
+#[test]
+fn private_interface_computed_property_runs() {
+    run_box(
+        r#"
 interface I {
     fun test(): String = x
     private val x: String
@@ -307,12 +288,14 @@ interface I {
 class C : I
 fun box(): String = C().test()
 "#,
-        ),
-        // An ABSTRACT extension property: its accessor takes the receiver as a parameter, a
-        // descriptor this path doesn't emit.
-        (
-            "IfaceAbstractExtProp",
-            r#"
+        "IfacePrivateComputed",
+    );
+}
+
+#[test]
+fn abstract_interface_extension_property_override_runs() {
+    run_box(
+        r#"
 interface I {
     val String.x: String
 }
@@ -321,17 +304,24 @@ class C : I {
 }
 fun box(): String = with(C()) { "a".x }
 "#,
-        ),
-    ];
-    for (stem, src) in cases {
-        let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));
-        assert_ne!(
-            outcome,
-            Some(common::BackendOutcome::Emitted),
-            "{stem}: unsupported interface property shape must not emit (skip, never miscompile)"
-        );
-    }
+        "IfaceAbstractExtProp",
+    );
+}
+
+#[test]
+fn interface_backing_field_is_a_frontend_error() {
+    let source = r#"
+interface I {
+    val x: String
+        get() = field
+}
+class C : I
+fun box(): String = C().x
+"#;
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&[source]),
+        ["property in interface cannot have a backing field."]
+    );
 }
 
 /// The exact corpus cases, including the object/class/interface double diamond. That case used to

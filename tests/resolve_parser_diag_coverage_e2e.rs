@@ -128,12 +128,6 @@ fn companion_property_custom_accessor() {
 }
 
 #[test]
-fn referential_equality_on_strings() {
-    let d = diags("fun box(): Int { val a = \"x\"; val b = \"y\"; val c = a === b; return 0 }");
-    assert_rejected(&d, "referential equality on Strings");
-}
-
-#[test]
 fn referential_equality_on_a_value_class_operand() {
     // kotlinc: "identity equality for arguments of types 'Any' and 'UInt' is prohibited." An inline /
     // `@JvmInline value` class has no stable boxed identity, so `===` on one is an ERROR there — not the

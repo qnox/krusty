@@ -168,6 +168,97 @@ fn compound_member_property_binds_the_shared_receiver_once() {
 }
 
 #[test]
+fn access_increment_publishes_one_checked_runtime_receiver_value() {
+    let (body, index) = checked_function_body(
+        "class Box(var value: Int)\n\
+         val stored = Box(1)\n\
+         fun nextBox(): Box = stored\n\
+         fun update() { nextBox().value++ }\n",
+        "update",
+    );
+    let receiver_calls = (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .filter(|expression| match &expression.kind {
+            FirExprKind::Call(call) => {
+                call.target
+                    .module()
+                    .and_then(|target| index.callable_name(target))
+                    == Some("nextBox")
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(receiver_calls, 1);
+
+    let receivers = (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::PropertyRead {
+                dispatch_receiver: Some(receiver),
+                ..
+            }
+            | FirExprKind::PropertyWrite {
+                dispatch_receiver: Some(receiver),
+                ..
+            } => Some(receiver.value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receivers.len(), 2);
+    assert_eq!(receivers[0], receivers[1]);
+    assert!(matches!(
+        body.expr(receivers[0]).expect("bound receiver value").kind,
+        FirExprKind::ValueRead(_)
+    ));
+}
+
+#[test]
+fn smart_cast_increment_publishes_read_and_write_representation_boundaries() {
+    let (body, _) = checked_function_body(
+        "fun update() { var number: Int?; number = 4; number++ }\n",
+        "update",
+    );
+    let (updated, write_conversion) = (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .find_map(|expression| match expression.kind {
+            FirExprKind::ValueWrite {
+                value, conversion, ..
+            } if conversion.is_some()
+                && matches!(
+                    body.expr(value).map(|expression| &expression.kind),
+                    Some(FirExprKind::Unary { .. })
+                ) =>
+            {
+                Some((value, conversion.unwrap()))
+            }
+            _ => None,
+        })
+        .expect("the increment write must retain its storage conversion");
+    assert!(matches!(
+        write_conversion.kind,
+        FirConversionKind::NullabilityWidening { to } if to.get() == Ty::nullable(Ty::Int)
+    ));
+    let FirExprKind::Unary { operand, .. } =
+        body.expr(updated).expect("checked increment result").kind
+    else {
+        panic!("builtin increment must remain an explicit FIR unary operation")
+    };
+    let FirExprKind::ImplicitConversion { value, conversion } =
+        body.expr(operand).expect("checked smart-cast operand").kind
+    else {
+        panic!("the storage read must retain its selected smart cast")
+    };
+    assert!(matches!(
+        conversion.kind,
+        FirConversionKind::SmartCast { to } if to.get() == Ty::Int
+    ));
+    assert_eq!(
+        body.expr(value).expect("raw storage read").ty.get(),
+        Ty::nullable(Ty::Int)
+    );
+}
+
+#[test]
 fn implicit_context_member_property_updates_keep_context_operands() {
     let (body, _) = checked_function_body(
         "// LANGUAGE: +ContextReceivers\n\

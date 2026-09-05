@@ -39,17 +39,13 @@ fn suspend_lambda_in_collection_hof_runs() {
             if (f == listOf(1, 2, 3) && m == listOf(2, 1) && a == listOf(1, 2, 3) && p == listOf(11, 21)) \"OK\"\n\
             else \"F f=$f m=$m a=$a p=$p\"\n\
         }\n";
-    let out = common::compile_and_run_box(
+    let out = common::expect_box_run(
         MAIN,
         "Main",
         &[lo, sl, coro, jdk.clone()],
         Some(jdk.as_path()),
     );
-    assert_eq!(
-        out.as_deref(),
-        Some("OK"),
-        "suspend lambda in collection HOF"
-    );
+    assert_eq!(out, "OK", "suspend lambda in collection HOF");
 }
 
 #[test]
@@ -66,11 +62,11 @@ fn suspend_map_hof_uses_declaration_iterator_scope() {
         fun box(): String = runBlocking {\n\
             collect(mapOf(\"O\" to 1, \"K\" to 2)).joinToString(\"\")\n\
         }\n";
-    let output = common::compile_and_run_box(
+    let output = common::expect_box_run(
         SOURCE,
         "Main",
         &[stdlib, coroutines, jdk.clone()],
         Some(jdk.as_path()),
     );
-    assert_eq!(output.as_deref(), Some("OK"));
+    assert_eq!(output, "OK");
 }

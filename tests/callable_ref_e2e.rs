@@ -18,6 +18,63 @@ return \"OK\"\n\
 }
 
 #[test]
+fn array_factory_references_use_the_selected_compiler_declaration() {
+    const SRC: &str = r#"
+fun collect(factory: (Int, Int) -> Array<Int>): String {
+    val values = factory('O'.toInt(), 'K'.toInt())
+    return "${values[0].toChar()}${values[1].toChar()}"
+}
+
+fun pass(factory: (Array<String>) -> Array<String>): Array<String> =
+    factory(arrayOf("OK"))
+
+fun box(): String {
+    if (collect(::arrayOf) != "OK") return "adapted"
+    val original = arrayOf("OK")
+    val identity: (Array<String>) -> Array<String> = ::arrayOf
+    if (identity(original) !== original) return "vararg identity"
+    if (pass(::arrayOf)[0] != "OK") return "array parameter"
+    val nullable: (Int) -> Array<String?> = ::arrayOfNulls
+    val nulls = nullable(2)
+    if (nulls.size != 2 || nulls[0] != null || nulls[1] != null) return "null factory"
+    return "OK"
+}
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "ArrayFactoryCallableRef");
+}
+
+#[test]
+fn reflective_string_plus_reference_invokes_provider_selected_intrinsic_adapter() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+fun box(): String {
+    if ((String::plus)("O", "K") != "OK") return "plus"
+    return "OK"
+}
+"#,
+        "ReflectiveStringPlusIntrinsicReference",
+    );
+}
+
+#[test]
+fn inline_extension_plan_names_its_receiver_semantically() {
+    const SRC: &str = r#"
+interface T {
+    fun foo() = "OK"
+}
+
+class B : T {
+    inner class C {
+        fun bar() = (T::foo).let { it(this@B) }
+    }
+}
+
+fun box(): String = B().C().bar()
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "InlineExtensionReceiverPlan");
+}
+
+#[test]
 fn callable_reference_above_numbered_jvm_arity_uses_function_n() {
     const SRC: &str = r#"
 var result = "FAIL"

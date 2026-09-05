@@ -53,6 +53,26 @@ fun box(): String {\n\
 }
 
 #[test]
+fn suspend_value_lambda_body_writes_are_not_operand_construction_effects() {
+    const SRC: &str = "import kotlin.coroutines.*\n\
+inline suspend fun <T> call(noinline block: suspend Host.() -> T): T = block(Host())\n\
+class Host { suspend fun await(value: String): String = value }\n\
+inline suspend fun Iterable<String>.joined(): String = call {\n\
+    var result = \"\"\n\
+    for (value in this@joined) result += await(value)\n\
+    result\n\
+}\n\
+fun box(): String {\n\
+    var result = \"FAIL\"\n\
+    suspend { result = listOf(\"O\", \"K\").joined() }\n\
+        .startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return result\n\
+}\n";
+    let out = run(SRC).expect("lambda-body writes must not force suspension operand rebinding");
+    assert_eq!(out, "OK");
+}
+
+#[test]
 fn suspend_lambda_with_value_class_params() {
     // Corpus coroutines/inlineClasses/direct/createMangling.kt: a suspend lambda whose parameters
     // are value classes — the erased invoke's boxed args must unbox into the underlying-typed param

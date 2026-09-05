@@ -87,7 +87,10 @@ impl BodyFirChecker<'_> {
         let storage = LocalBinding {
             value: self.allocate_local(),
             ty: storage_ty,
+            lateinit: false,
         };
+        self.body
+            .set_debug_value_name(storage.value, format!("{name}$delegate"));
         self.delegate_scopes
             .last_mut()
             .expect("a local delegate belongs to a lexical scope")
@@ -597,6 +600,7 @@ fn selected_delegate_call(
                     can_inline: callable.inline.can_inline(),
                     inline_plan: super::calls::fir_inline_body_plan(
                         callable.inline_body_plan.as_deref(),
+                        Some(0),
                     ),
                     extension_receiver_parameter: None,
                 },
@@ -655,7 +659,10 @@ fn selected_delegate_call(
                     declared_result: declared_ret.map(resolved).transpose()?,
                     suspend: *suspend,
                     can_inline: inline.can_inline(),
-                    inline_plan: super::calls::fir_inline_body_plan(inline_body_plan.as_deref()),
+                    inline_plan: super::calls::fir_inline_body_plan(
+                        inline_body_plan.as_deref(),
+                        None,
+                    ),
                     extension_receiver_parameter: Some(
                         u32::try_from(extension_parameter)
                             .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,

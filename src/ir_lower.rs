@@ -28,7 +28,7 @@ use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrAnnotationConstruction, IrBinOp, IrCatch, IrClass,
     IrConst, IrCtorArg, IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp, IrfFlags,
 };
-use crate::kt_string::KtString;
+use crate::kt_string::{trim_indent, trim_margin, KtString};
 use crate::libraries::{map_call_args, InlineKind, LibraryMember, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
 use crate::runtime::{
@@ -1126,6 +1126,7 @@ fn lower_file_at_reporting_impl(
                         ty: ty_to_ir(Ty::obj(o)),
                         declared_ty: None,
                         is_field: true,
+                        field_index: Some(0),
                         has_default: false,
                         is_vararg: false,
                         type_param: None,
@@ -1138,6 +1139,7 @@ fn lower_file_at_reporting_impl(
                             ty: ty_to_ir(stored_ty),
                             declared_ty: None,
                             is_field: true,
+                            field_index: None,
                             has_default: false,
                             is_vararg: false,
                             type_param: None,
@@ -1183,6 +1185,7 @@ fn lower_file_at_reporting_impl(
                                 .get(i)
                                 .map(|(shape, _)| *shape),
                             is_field: p.is_property,
+                            field_index: None,
                             has_default: p.default.is_some(),
                             is_vararg: p.is_vararg,
                             type_param: c
@@ -1215,6 +1218,7 @@ fn lower_file_at_reporting_impl(
                 is_abstract: c.is_abstract(),
                 is_open: c.is_open(),
                 superclass,
+                super_arg_prelude: Vec::new(),
                 super_args: Vec::new(),
                 super_ctor_params: Vec::new(),
                 // Entry names + subclass markers now; constructor-arg value-ids are lowered in pass 2.
@@ -3849,36 +3853,12 @@ fn lower_file_at_reporting_impl(
                     lo.ir.classes[class_id as usize].super_args = sargs;
                     lo.ir.classes[class_id as usize].super_ctor_params = super_field_tys;
                 }
-                // A `@JvmInline value class` with a DEFAULT on its single underlying property needs
-                // kotlinc's synthetic `constructor-impl$default`. Lower the default in the STATIC
-                // `constructor-impl` frame — the sole param is value-index 0, no `this` — and stash it by
-                // class internal; the value-class JVM pass registers it as `constructor-impl`'s param
-                // default so the backend emits the stub.
-                if c.is_value {
-                    if let Some((parameter, p)) =
-                        c.props.iter().enumerate().find(|(_, p)| p.is_property)
-                    {
-                        if let Some(d) = p.default {
-                            lo.scope.clear();
-                            lo.boxed_elem.clear();
-                            lo.next_value = 0;
-                            lo.cur_class = Some(type_name(&internal));
-                            let pty = class_sig.ctor_params[parameter];
-                            let v = lo.fresh_value(); // value-index 0 = the underlying param
-                            lo.scope.push((p.name.clone(), v, pty));
-                            if let Some(lowered) = lo.lower_arg(d, &ty_to_ir(pty)) {
-                                lo.ir.insert_value_ctor_default(&internal, lowered);
-                            }
-                        }
-                    }
-                }
-                // A REGULAR (non-value, non-inner) class with a DEFAULT on any primary-ctor parameter needs
-                // kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload. Lower
-                // each default in the INSTANCE `<init>` frame (`this` = value 0, then captured parameters,
-                // then source parameters) and stash one parallel entry per physical constructor parameter;
-                // the backend emits the overload (one int mask per 32 params).
-                if !c.is_value
-                    && c.inner_of.is_none()
+                // A non-inner class with a DEFAULT on any primary-constructor parameter retains the
+                // target-neutral constructor contract. Lower every default in the ordinary INSTANCE
+                // constructor frame (`this` = value 0, then captured parameters, then source parameters)
+                // and stash one entry per physical constructor parameter. The backend decides whether
+                // this becomes an `<init>` overload or another physical representation.
+                if c.inner_of.is_none()
                     && !c.is_interface()
                     && c.primary_ctor_annotations.is_some()
                     && c.props.iter().any(|p| p.default.is_some())
@@ -4638,6 +4618,7 @@ fn lower_file_at_reporting_impl(
                             is_abstract: false,
                             is_open: false,
                             superclass: type_name(&internal),
+                            super_arg_prelude: Vec::new(),
                             super_args: vec![],
                             super_ctor_params: vec![],
                             enum_entries: vec![],
@@ -6523,6 +6504,31 @@ impl<'a> Lower<'a> {
     /// Preserve the checker-selected singleton declaration. Physical storage is a backend decision:
     /// common lowering neither invents an `INSTANCE` field nor assumes how companions are represented.
     fn lower_singleton_value(&mut self, singleton: &SingletonValue) -> Option<u32> {
+        // The legacy per-file entry point does not have the streamed module index that
+        // `fir_lower::module_declarations` uses to publish referenced declarations. Preserve the
+        // equivalent compact classifier fact here when this singleton belongs to another source
+        // unit. The fact remains Kotlin-level (singleton + companion ownership); a backend alone
+        // chooses its storage.
+        if !self
+            .ir
+            .referenced_module_classifiers
+            .contains_key(&singleton.classifier)
+        {
+            if let Some(classifier) = self.syms.class_by_type_name(singleton.classifier) {
+                let companion_owner = singleton.classifier.nested_owner().filter(|owner| {
+                    self.syms
+                        .class_by_type_name(*owner)
+                        .is_some_and(|outer| outer.companion_internal == Some(singleton.classifier))
+                });
+                self.ir.referenced_module_classifiers.insert(
+                    singleton.classifier,
+                    crate::ir::IrModuleClassifier {
+                        singleton: classifier.is_object(),
+                        companion_owner,
+                    },
+                );
+            }
+        }
         Some(self.ir.add_expr(IrExpr::SingletonValue {
             classifier: singleton.classifier,
         }))
@@ -6917,6 +6923,8 @@ impl<'a> Lower<'a> {
                 name,
                 params,
                 ret,
+                module_target: None,
+                module_default_call: false,
             },
             None,
             args,
@@ -8211,10 +8219,11 @@ impl<'a> Lower<'a> {
     /// as an EMITTED reified method; `None` otherwise (the caller resolves the class normally).
     fn emitted_reified_marker(&mut self, ty: Ty) -> Option<u32> {
         let (name, erased) = self.emitted_reified_parameter(ty)?;
-        Some(
-            self.ir
-                .add_expr(IrExpr::ReifiedClassMarker { name, erased }),
-        )
+        Some(self.ir.add_expr(IrExpr::ReifiedClassMarker {
+            name,
+            erased,
+            kclass: false,
+        }))
     }
 
     /// A `ReifiedTypeOp` marker node for `is`/`as` on the emitted fn's own reified parameter.
@@ -9657,7 +9666,7 @@ impl<'a> Lower<'a> {
         if !omitted.is_empty() || !default_masks.is_empty() {
             let internal = self.ir.classes[class as usize].fq_name();
             let stub_missing = if value_class {
-                self.ir.value_ctor_default(&internal).is_none()
+                self.ir.class_ctor_defaults(&internal).is_none()
             } else {
                 params.iter().any(|parameter| {
                     parameter
@@ -10213,8 +10222,7 @@ impl<'a> Lower<'a> {
                 "destructure component{} receiver={it_ty:?} target={target:?}",
                 idx + 1
             );
-            let (call, log_ty) =
-                self.lower_destructure_component_target(recv, it_ty, idx, target)?;
+            let (call, log_ty) = self.lower_destructure_component_target(recv, it_ty, target)?;
             self.bind_destructure_component(name, call, log_ty, out)?;
         }
         Some(())
@@ -10224,36 +10232,15 @@ impl<'a> Lower<'a> {
         &mut self,
         recv: u32,
         recv_ty: Ty,
-        idx: usize,
         target: DestructureComponentTarget,
     ) -> Option<(u32, Ty)> {
-        match target {
-            DestructureComponentTarget::Call(target) => {
-                let name = match target.as_ref() {
-                    ResolvedCall::Member(member) => member.member.name.clone(),
-                    ResolvedCall::MemberExtension { name, .. } => name.clone(),
-                    ResolvedCall::Extension(extension) => extension.callable.name.clone(),
-                    _ => return None,
-                };
-                self.lower_selected_op_call(recv, recv_ty, &name, &[], *target, None, &[], None)
-            }
-            DestructureComponentTarget::IndexedGet(m) => {
-                let m = *m;
-                let internal = recv_ty.kotlin_class_internal()?;
-                let physical_ret = m.member.physical_ret;
-                let ret = m.ret;
-                let i = self.emit_const(IrConst::Int(idx as i32));
-                let c = self.emit_library_member_call(
-                    recv,
-                    internal,
-                    m.member,
-                    ret,
-                    m.suspend,
-                    vec![i],
-                )?;
-                Some((self.coerce_to_static(c, ret, physical_ret), ret))
-            }
-        }
+        let name = match target.as_ref() {
+            ResolvedCall::Member(member) => member.member.name.clone(),
+            ResolvedCall::MemberExtension { name, .. } => name.clone(),
+            ResolvedCall::Extension(extension) => extension.callable.name.clone(),
+            _ => return None,
+        };
+        self.lower_selected_op_call(recv, recv_ty, &name, &[], *target, None, &[], None)
     }
 
     /// Bind one destructured component `name` to its (already-lowered) initializer value `call` of
@@ -10800,11 +10787,21 @@ impl<'a> Lower<'a> {
                 .or_insert(0);
             let ordinal = *next;
             *next += 1;
+            let identity = self
+                .ir
+                .lambda_origins
+                .values()
+                .map(|origin| origin.identity)
+                .max()
+                .map_or(0, |identity| identity.saturating_add(1));
             let origin = crate::ir::IrLambdaOrigin {
-                source_expression: e.0,
+                identity,
+                lexical_owner: self.cur_class,
                 enclosing_name,
                 binding_name,
                 ordinal,
+                implementation_name: self.cur_fn.source_name.clone(),
+                implementation_ordinal: seq,
             };
             self.lambda_origin_by_source.insert(e.0, origin.clone());
             origin
@@ -11414,6 +11411,7 @@ impl<'a> Lower<'a> {
                 ty: ty_to_ir(*ty),
                 declared_ty: None,
                 is_field: false,
+                field_index: None,
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -11424,6 +11422,7 @@ impl<'a> Lower<'a> {
                 ty: cont_ir.clone(),
                 declared_ty: None,
                 is_field: false,
+                field_index: None,
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -11486,6 +11485,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name("kotlin/coroutines/jvm/internal/SuspendLambda"),
+            super_arg_prelude: Vec::new(),
             super_args: vec![arity_const, completion_get],
             super_ctor_params: vec![Ty::Int, Ty::obj("kotlin/coroutines/Continuation")],
             enum_entries: vec![],
@@ -12242,9 +12242,7 @@ impl<'a> Lower<'a> {
     fn field_hash(&mut self, class_id: ClassId, idx: u32, t: Ty) -> Option<u32> {
         let field = &self.ir.classes[class_id as usize].fields[idx as usize];
         let guarded = field.ty.is_nullable() || field.type_param.is_some();
-        // Keys for recording this field's chosen `hashCode` owner (read by the pool seeder).
         let class_name = self.ir.classes[class_id as usize].fq_name_id();
-        let class_internal = class_name.render();
         let field_name = field.name.clone();
         // The checker `Ty` of a nullable-primitive field is `Nullable(Int)` — test the classifier
         // under the `?`.
@@ -12275,7 +12273,6 @@ impl<'a> Lower<'a> {
                     let erased = s.vc_erase_ty(under);
                     let udesc = s.runtime.type_descriptor(erased)?;
                     let owner = internal.render();
-                    s.ir.set_data_hashcode_owner(&class_internal, &field_name, owner.clone());
                     return Some(s.emit_static_call(
                         owner,
                         "hashCode-impl".to_string(),
@@ -12307,9 +12304,6 @@ impl<'a> Lower<'a> {
             match t.non_null().kotlin_class_internal() {
                 Some(_) => {
                     let owner = s.info.data_class_hash_owner(class_name, &field_name)?;
-                    // Record the owner (backend maps `kotlin/Any` → `java/lang/Object`) so the pool seeder
-                    // interns the SAME `hashCode` methodref this body emits.
-                    s.ir.set_data_hashcode_owner(&class_internal, &field_name, owner.render());
                     Some(s.emit_virtual_call(
                         owner,
                         "hashCode".into(),
@@ -13755,6 +13749,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
@@ -13905,6 +13900,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
@@ -14155,6 +14151,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
@@ -14870,6 +14867,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass,
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
@@ -17454,6 +17452,7 @@ impl<'a> Lower<'a> {
                     descriptor,
                     interface: target.interface,
                     source_member: target.source_member,
+                    source: None,
                 },
                 Some(receiver),
                 arguments,
@@ -20002,7 +20001,7 @@ impl<'a> Lower<'a> {
                 // never guesses from the source spelling (which may instead be a local named `field`).
                 if matches!(
                     self.info.stmt_lowers.get(&s),
-                    Some(StmtLowering::BackingFieldWrite)
+                    Some(StmtLowering::BackingFieldWrite { .. })
                 ) {
                     let Some(ty) = self.selected_backing_field_ty() else {
                         return self.bail("captured backing field write is not lowered");
@@ -20191,7 +20190,7 @@ impl<'a> Lower<'a> {
                 };
                 if matches!(
                     self.info.stmt_lowers.get(&s),
-                    Some(StmtLowering::BackingFieldWrite)
+                    Some(StmtLowering::BackingFieldWrite { .. })
                 ) {
                     return self.lower_selected_backing_field_incdec(site, dec, prefix, false);
                 }
@@ -21086,6 +21085,9 @@ impl<'a> Lower<'a> {
                     Some(result),
                 ))
             }
+            // The production checked-FIR path consumes this provider plan. The legacy lowerer has
+            // its pre-existing suspend-only collection expansion earlier in expression lowering.
+            crate::libraries::InlineBodyPlan::CollectionTransform { .. } => None,
         }
     }
 
@@ -26260,7 +26262,8 @@ impl<'a> Lower<'a> {
                     crate::libraries::CompilerIntrinsic::EnumValues => {
                         return crate::synthetics::lower_enum_values(self, &call);
                     }
-                    crate::libraries::CompilerIntrinsic::ForEach
+                    crate::libraries::CompilerIntrinsic::ArrayFactory(_)
+                    | crate::libraries::CompilerIntrinsic::ForEach
                     | crate::libraries::CompilerIntrinsic::ForEachIndexed
                     | crate::libraries::CompilerIntrinsic::Assert
                     | crate::libraries::CompilerIntrinsic::AssertFailsWith
@@ -26284,6 +26287,7 @@ impl<'a> Lower<'a> {
                     | crate::libraries::CompilerIntrinsic::CharCode
                     | crate::libraries::CompilerIntrinsic::StringLength
                     | crate::libraries::CompilerIntrinsic::NumericConversion
+                    | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                     | crate::libraries::CompilerIntrinsic::PrimitiveCompare
                     | crate::libraries::CompilerIntrinsic::BooleanNot
                     | crate::libraries::CompilerIntrinsic::PrimitiveBitAnd
@@ -26763,7 +26767,7 @@ impl<'a> Lower<'a> {
                     let folded = match string_normalization {
                         Some(crate::libraries::CompilerIntrinsic::TrimIndent) => trim_indent(&s),
                         Some(crate::libraries::CompilerIntrinsic::TrimMargin) => {
-                            trim_margin(&s, "|")
+                            trim_margin(&s, &KtString::from("|"))
                         }
                         _ => unreachable!(),
                     };
@@ -27479,8 +27483,12 @@ impl<'a> Lower<'a> {
                 let call = self.coerce_to_static(call, ret, physical_ret);
                 self.wrap_arg_prelude(call, prelude)
             } else if let Some((internal, m)) = {
-                // A `@JvmStatic` member of a classpath `object` (`IdGen.of(x)`) → a static
-                // method on the object class (`invokestatic`), found in the type's static list.
+                // A callable selected through a classifier namespace has one of two semantic call
+                // shapes. A genuine associated/static declaration has no dispatch receiver. An
+                // ordinary member of an object or companion carries its exact singleton dispatch;
+                // materialize that Kotlin value in common IR and leave its physical storage to the
+                // backend. Do not collapse both shapes into a receiver-less call: a target pass can
+                // choose the invocation instruction, but it cannot recreate a missing operand.
                 rt.obj_internal()
                     .zip(self.info.resolved_companion(e).cloned())
             } {
@@ -27491,10 +27499,42 @@ impl<'a> Lower<'a> {
                     .len()
                     .saturating_sub(usize::from(m.call_sig.vararg));
                 let a = self.lower_call_args_vararg(&args, &params, m.call_sig.vararg, fixed)?;
-                let call = self.emit_static_call(owner, m.name, m.descriptor, m.inline, a);
+                let call = if let Some(singleton) = m.singleton_dispatch.as_deref() {
+                    let interface = m.is_interface();
+                    let receiver = self.ir.add_expr(IrExpr::SingletonValue {
+                        classifier: singleton.classifier,
+                    });
+                    let physical_params = if m.physical_params.len() == m.params.len() {
+                        m.physical_params
+                    } else {
+                        m.params
+                    };
+                    let params = m
+                        .descriptor
+                        .is_empty()
+                        .then_some((tys_to_ir(&physical_params), ty_to_ir(m.physical_ret)));
+                    self.emit_call(
+                        Callee::Virtual {
+                            owner,
+                            name: m.name,
+                            descriptor: m.descriptor,
+                            params,
+                            interface,
+                        },
+                        Some(receiver),
+                        a,
+                    )
+                } else {
+                    self.emit_static_call(owner, m.name, m.descriptor, m.inline, a)
+                };
                 self.coerce_to_static(call, m.ret, m.physical_ret)
             } else if let Some(c) = self.info.resolved_extension(e).cloned() {
-                if let Some(plan) = c.inline_body_plan.as_deref() {
+                if let Some(plan) = c.inline_body_plan.as_deref().filter(|plan| {
+                    !matches!(
+                        plan,
+                        crate::libraries::InlineBodyPlan::CollectionTransform { .. }
+                    )
+                }) {
                     return self
                         .lower_extension_inline_body_plan(e, receiver, &args, &c, plan, &name);
                 }
@@ -27791,96 +27831,6 @@ fn has_byte_or_short_param(params: &[Ty]) -> bool {
             || p.array_elem()
                 .is_some_and(|elem| matches!(elem, Ty::Byte | Ty::Short))
     })
-}
-
-/// Whether a UTF-16 code unit is `Char.isWhitespace()` — Kotlin's predicate, which on the JVM is
-/// `Character.isWhitespace(c) || Character.isSpaceChar(c)`.
-///
-/// That is NOT Rust's `char::is_whitespace` (the Unicode `White_Space` property). Compared against
-/// JBR 21 over the whole BMP, the two sets differ in exactly five code points: Kotlin also counts
-/// the separators `U+001C..U+001F`, and does not count `U+0085` (NEL — a `Cc` control that is
-/// neither `isWhitespace` nor `isSpaceChar`). The rest — including `U+00A0`, `U+2007` and `U+202F`,
-/// which `Character.isWhitespace` alone excludes — agree, because `isSpaceChar` re-admits every
-/// `Zs`/`Zl`/`Zp` character. This decides where an indent ends, so the difference is observable:
-/// `"\u{85}a".trimIndent()` keeps its leading NEL under kotlinc.
-///
-/// A surrogate half is not whitespace and has no scalar form, so it answers `false` without a lossy
-/// conversion.
-fn is_unit_whitespace(unit: u16) -> bool {
-    if (0x1c..=0x1f).contains(&unit) {
-        return true;
-    }
-    unit != 0x85 && char::from_u32(unit as u32).is_some_and(char::is_whitespace)
-}
-
-/// `String.isBlank()` over code units.
-fn is_unit_line_blank(line: &[u16]) -> bool {
-    line.iter().all(|&u| is_unit_whitespace(u))
-}
-
-const LF: u16 = b'\n' as u16;
-
-/// Join `lines` with `\n`, the shared tail of `trimIndent`/`trimMargin`.
-fn join_unit_lines(lines: Vec<Vec<u16>>) -> KtString {
-    let mut out: Vec<u16> = Vec::new();
-    for (i, line) in lines.into_iter().enumerate() {
-        if i > 0 {
-            out.push(LF);
-        }
-        out.extend_from_slice(&line);
-    }
-    KtString::from_units(out)
-}
-
-/// `String.trimIndent()`: split into lines, drop the common minimal indentation of the non-blank
-/// lines from every line, and omit a blank FIRST or LAST line — matching `kotlin.text.trimIndent`.
-///
-/// Works in UTF-16 code units, not `char`s: the receiver may contain an unpaired surrogate (folded
-/// in from a `${'\uD800'}` template part), and Kotlin measures the indent in code units anyway.
-fn trim_indent(s: &KtString) -> KtString {
-    let units: Vec<u16> = s.units().collect();
-    let lines: Vec<&[u16]> = units.split(|&u| u == LF).collect();
-    let min_indent = lines
-        .iter()
-        .filter(|l| !is_unit_line_blank(l))
-        .map(|l| l.iter().take_while(|&&u| is_unit_whitespace(u)).count())
-        .min()
-        .unwrap_or(0);
-    let last = lines.len().saturating_sub(1);
-    let mut out: Vec<Vec<u16>> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if (i == 0 || i == last) && is_unit_line_blank(line) {
-            continue;
-        }
-        // A blank line may be shorter than `min_indent`; only cut what is there.
-        let cut = min_indent.min(line.len());
-        out.push(line[cut..].to_vec());
-    }
-    join_unit_lines(out)
-}
-
-/// `String.trimMargin(prefix)`: for each line, remove leading whitespace up to and including the
-/// first `prefix`; a line without the prefix is left unchanged. A blank FIRST or LAST line is
-/// omitted — matching `kotlin.text.trimMargin`.
-fn trim_margin(s: &KtString, margin: &str) -> KtString {
-    let margin: Vec<u16> = margin.encode_utf16().collect();
-    let units: Vec<u16> = s.units().collect();
-    let lines: Vec<&[u16]> = units.split(|&u| u == LF).collect();
-    let last = lines.len().saturating_sub(1);
-    let mut out: Vec<Vec<u16>> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if (i == 0 || i == last) && is_unit_line_blank(line) {
-            continue;
-        }
-        let indent = line.iter().take_while(|&&u| is_unit_whitespace(u)).count();
-        let trimmed = &line[indent..];
-        if trimmed.starts_with(&margin) {
-            out.push(trimmed[margin.len()..].to_vec());
-        } else {
-            out.push(line.to_vec());
-        }
-    }
-    join_unit_lines(out)
 }
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
@@ -29130,14 +29080,13 @@ fn fn_generic_sig(
             .ok_or("internal:missing-checked-generic-declaration-type")?,
         None => Ty::Unit,
     };
+    let mut type_params =
+        type_param_bounds_ir(info, tps, &[], &f.type_param_bounds, f.signature_span.lo)?;
+    for parameter in &mut type_params {
+        parameter.reified = f.reified_type_params.contains(&parameter.name);
+    }
     Ok(Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(
-            info,
-            tps,
-            &[],
-            &f.type_param_bounds,
-            f.signature_span.lo,
-        )?,
+        type_params,
         params,
         ret: Some(ret),
         supers: Vec::new(),
@@ -29176,6 +29125,7 @@ fn type_param_bounds_ir(
             semantic_name: semantic_names[index].clone(),
             bounds: resolved_bounds,
             variance: variances.get(index).copied().unwrap_or_default(),
+            reified: false,
         });
     }
     Ok(out)
@@ -29693,38 +29643,6 @@ fn align_call_values_to_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `Char.isWhitespace()` is `Character.isWhitespace(c) || Character.isSpaceChar(c)`, which is not
-    /// Rust's `char::is_whitespace`. The two sets differ in exactly these five code points (checked
-    /// against JBR 21 over the whole BMP), and the predicate decides where a `trimIndent` indent ends.
-    #[test]
-    fn unit_whitespace_matches_kotlins_predicate_not_rusts() {
-        // Kotlin-only: the file/group/record/unit separators are `Character.isWhitespace`.
-        for unit in 0x1c..=0x1f {
-            assert!(
-                is_unit_whitespace(unit),
-                "U+{unit:04X} is Kotlin whitespace"
-            );
-        }
-        // Rust-only: NEL is a `Cc` control — neither `isWhitespace` nor `isSpaceChar`.
-        assert!(!is_unit_whitespace(0x85));
-        // Agreeing cases, including the `Zs` characters `Character.isWhitespace` alone excludes and
-        // `isSpaceChar` re-admits.
-        for unit in [b' ' as u16, b'\t' as u16, 0x00a0, 0x2007, 0x202f, 0x3000] {
-            assert!(is_unit_whitespace(unit), "U+{unit:04X} is whitespace");
-        }
-        for unit in [b'a' as u16, 0x00, 0xd800, 0xdfff] {
-            assert!(!is_unit_whitespace(unit), "U+{unit:04X} is not whitespace");
-        }
-    }
-
-    /// A blank line and the common indent are both measured with that predicate, so a leading NEL is
-    /// ordinary content: kotlinc leaves it in place rather than stripping it as indentation.
-    #[test]
-    fn trim_indent_does_not_treat_nel_as_indentation() {
-        let source = KtString::from("\u{85}a\n\u{85}b");
-        assert_eq!(trim_indent(&source), source);
-    }
 
     struct UnsignedBoxRuntime;
 

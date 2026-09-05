@@ -4,8 +4,8 @@ use super::*;
 use crate::ast::{ClassDecl, CtorDelegation, Decl, DeclId, SecondaryCtor};
 use crate::libraries::LibraryMember;
 use crate::resolve::{
-    ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegation,
-    ResolvedCtorDelegationTarget,
+    ResolvedAnnotationConstruction, ResolvedConstructor, ResolvedContextArgument,
+    ResolvedCtorDelegation, ResolvedCtorDelegationTarget,
 };
 
 impl BodyFirChecker<'_> {
@@ -58,6 +58,7 @@ impl BodyFirChecker<'_> {
                 owner,
                 outer,
                 member,
+                annotation,
                 context_args,
                 args,
             } => {
@@ -107,12 +108,14 @@ impl BodyFirChecker<'_> {
                     context_args,
                     argument_slots,
                     Vec::new(),
+                    annotation,
                 )
             }
             ResolvedConstructor::PlainSlots {
                 owner,
                 outer,
                 member,
+                annotation,
                 context_args,
                 slots,
             } => {
@@ -179,12 +182,14 @@ impl BodyFirChecker<'_> {
                     context_args,
                     argument_slots,
                     omitted,
+                    annotation,
                 )
             }
             ResolvedConstructor::Synthetic {
                 owner,
                 outer,
                 ctor,
+                annotation,
                 context_args,
                 args,
             } => {
@@ -229,6 +234,7 @@ impl BodyFirChecker<'_> {
                     context_args,
                     argument_slots,
                     omitted,
+                    annotation,
                 )
             }
         }
@@ -337,6 +343,7 @@ impl BodyFirChecker<'_> {
         context_args: Vec<ResolvedContextArgument>,
         argument_slots: Vec<usize>,
         omitted: Vec<usize>,
+        annotation: Option<ResolvedAnnotationConstruction>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         if argument_slots.len() != arguments.len() {
             return Err(self.failure(
@@ -392,6 +399,10 @@ impl BodyFirChecker<'_> {
                 declaration,
                 classifier: owner,
                 parameters: parameters.clone().into_boxed_slice(),
+                annotation: annotation
+                    .map(|annotation| self.checked_annotation_construction(span, annotation))
+                    .transpose()?
+                    .map(Box::new),
             },
             outer_parameter,
             outer_receiver,
@@ -399,6 +410,63 @@ impl BodyFirChecker<'_> {
             arguments: checked_arguments,
             substitutions: Box::new([]),
         }))
+    }
+
+    fn checked_annotation_construction(
+        &self,
+        span: Span,
+        annotation: ResolvedAnnotationConstruction,
+    ) -> Result<FirAnnotationConstruction, BodyCheckFailure> {
+        use crate::libraries::DefaultValue;
+
+        if annotation.members.len() != annotation.defaults.len() {
+            return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
+        }
+        let members = annotation
+            .members
+            .into_iter()
+            .map(|(name, ty)| {
+                self.resolved_type(span, crate::types::stored_value_ty(ty))
+                    .map(|ty| (name.into_boxed_str(), ty))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let defaults = annotation
+            .defaults
+            .into_iter()
+            .map(|default| {
+                default.map(|default| match default {
+                    DefaultValue::Int(value) => {
+                        FirAnnotationDefaultValue::Constant(FirConstant::Int(value))
+                    }
+                    DefaultValue::Long(value) => {
+                        FirAnnotationDefaultValue::Constant(FirConstant::Long(value))
+                    }
+                    DefaultValue::Double(value) => {
+                        FirAnnotationDefaultValue::Constant(FirConstant::Double(value))
+                    }
+                    DefaultValue::Float(value) => {
+                        FirAnnotationDefaultValue::Constant(FirConstant::Float(value))
+                    }
+                    DefaultValue::Bool(value) => {
+                        FirAnnotationDefaultValue::Constant(FirConstant::Boolean(value))
+                    }
+                    DefaultValue::Char(value) => {
+                        FirAnnotationDefaultValue::Constant(FirConstant::Char(value))
+                    }
+                    DefaultValue::Str(value) => {
+                        FirAnnotationDefaultValue::Constant(FirConstant::String(value))
+                    }
+                    DefaultValue::Null => FirAnnotationDefaultValue::Constant(FirConstant::Null),
+                    DefaultValue::Object(classifier) => {
+                        FirAnnotationDefaultValue::Singleton(crate::types::type_name(&classifier))
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(FirAnnotationConstruction {
+            members: members.into_boxed_slice(),
+            defaults: defaults.into_boxed_slice(),
+        })
     }
 
     fn checked_constructor_arguments(
@@ -505,7 +573,8 @@ impl BodyFirChecker<'_> {
                     return Ok(FirCallArgument::Expression {
                         parameter,
                         value,
-                        conversion: self.selected_value_conversion(*argument, target, cause)?,
+                        conversion: self
+                            .selected_value_conversion(*argument, value, target, cause)?,
                     });
                 }
                 saw_vararg = true;
@@ -518,20 +587,26 @@ impl BodyFirChecker<'_> {
                     return Ok(FirCallArgument::Expression {
                         parameter,
                         value,
-                        conversion: self.selected_value_conversion(*argument, target, cause)?,
+                        conversion: self
+                            .selected_value_conversion(*argument, value, target, cause)?,
                     });
                 }
-                let element_ty = parameter_ty.array_elem().ok_or_else(|| {
-                    self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
-                })?;
-                let target = self.resolved_type(span, element_ty)?;
+                let expected = if self.file.is_spread_arg(*argument) {
+                    parameter_ty
+                } else {
+                    parameter_ty.array_elem().ok_or_else(|| {
+                        self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+                    })?
+                };
+                let target = self.resolved_type(span, expected)?;
                 Ok(FirCallArgument::Vararg {
                     parameter,
                     origin: cause,
                     elements: vec![FirVarargElement {
                         value,
                         spread: self.file.is_spread_arg(*argument),
-                        conversion: self.selected_value_conversion(*argument, target, cause)?,
+                        conversion: self
+                            .selected_value_conversion(*argument, value, target, cause)?,
                     }]
                     .into_boxed_slice(),
                 })
@@ -730,6 +805,7 @@ fn checked_delegation_target(
                 })?,
                 classifier: *owner,
                 parameters: parameters.into_boxed_slice(),
+                annotation: None,
             })
         }
     }

@@ -1178,6 +1178,50 @@ fn pass_two_reparse_removes_the_complete_actualized_expect_class_subtree() {
 }
 
 #[test]
+fn source_optional_expectation_keeps_finalized_constructor_and_file_suppression() {
+    let source = "// WITH_STDLIB\n\
+                  // LANGUAGE: +MultiPlatformProjects\n\
+                  @file:Suppress(\"OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE\")\n\
+                  import kotlin.OptionalExpectation as MayDisappear\n\
+                  @MayDisappear\n\
+                  expect annotation class Optional()\n\
+                  @Optional fun answer(): String = \"OK\"\n";
+    let inputs = [SourceInput::kotlin(source).with_file_stem("Optional")];
+    let mut classpath = crate::toolchain::classpath_jars_for(source);
+    if let Some(jdk) = crate::toolchain::jdk_modules() {
+        classpath.push(jdk);
+    }
+    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
+    ));
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &LangFeatures::from_source(source),
+        |_, _| {},
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
+    let classifier = index
+        .classifier_declaration(crate::types::type_name("Optional"))
+        .expect("target-less optional expectation must remain a common semantic declaration");
+    let constructor = index
+        .owned_declaration(classifier, crate::fir::DeclarationKind::Constructor, 0)
+        .expect("optional annotation constructor declaration");
+    assert!(
+        index.signature(constructor).is_some(),
+        "Pass 2 must consume the finalized annotation constructor signature"
+    );
+
+    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    assert!(census.failures.is_empty(), "{:?}", census.failures);
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+}
+
+#[test]
 fn actualization_keeps_a_distinct_common_overload_after_body_compaction() {
     let inputs = [
         SourceInput::kotlin(
@@ -2627,6 +2671,37 @@ fn inline_accessor_binding_ignores_released_sibling_body_spans() {
 }
 
 #[test]
+fn signature_default_binding_ignores_released_ordinary_local_class_ownership() {
+    let inputs = [SourceInput::kotlin(
+        "fun select(value: Int = 1): Int {\n\
+             val ordinary = object {\n\
+                 fun nested(): Any = object {}\n\
+             }\n\
+             return value\n\
+         }\n\
+         class Holder(val value: Int = 2) {\n\
+             val next = value + 1\n\
+             init { next }\n\
+         }\n\
+         fun box(): String = if (select() + Holder().value == 3) \"OK\" else \"fail\"\n",
+    )
+    .with_file_stem("CompactedDefaultOwners")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_streaming_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
+    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    assert!(census.failures.is_empty(), "{:?}", census.failures);
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+}
+
+#[test]
 fn production_pass_one_publishes_stable_pending_free_signatures() {
     let source = "class Box(val value: Int) {\n\
                           constructor(text: String) : this(text.length)\n\
@@ -3523,6 +3598,37 @@ fn reparsed_constructor_combines_contravariant_argument_and_expected_supertype_c
          fun box(): String = \"OK\"\n",
     )
     .with_file_stem("ContravariantConstructorResult")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features_and_prepare(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        |_, _| {},
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
+    let analysis = finish_pass_one(analysis);
+    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    assert!(census.failures.is_empty(), "{:?}", census.failures);
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+}
+
+#[test]
+fn reparsed_expected_supertype_contextualizes_a_nested_constructor_lambda() {
+    let inputs = [SourceInput::kotlin(
+        "interface Cursor<T> { fun hasNext(): Boolean; fun next(): T }\n\
+         interface Values<T> { fun iterator(): Cursor<T> }\n\
+         class Yield<T>(val factory: () -> (() -> T?)) : Values<T> {\n\
+             override fun iterator(): Cursor<T> = null as Cursor<T>\n\
+         }\n\
+         fun <TItem> Values<TItem>.lazy(): Values<TItem> = Yield {\n\
+             val iterator = this.iterator();\n\
+             { if (iterator.hasNext()) iterator.next() else null }\n\
+         }\n",
+    )
+    .with_file_stem("ExpectedSupertypeNestedLambda")];
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,

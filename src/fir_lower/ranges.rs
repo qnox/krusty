@@ -107,8 +107,14 @@ impl BodyLowering<'_> {
                 init: Some(value),
                 named: false,
             });
-            let contained =
-                self.range_membership(operation, negated, start_slot, end_slot, scalar_slot);
+            let contained = self.range_membership(
+                operation,
+                comparison_ty,
+                negated,
+                start_slot,
+                end_slot,
+                scalar_slot,
+            );
             let matched = self.ir.add_expr(IrExpr::Block {
                 stmts: vec![scalar],
                 value: Some(contained),
@@ -130,7 +136,14 @@ impl BodyLowering<'_> {
             init: Some(value),
             named: false,
         }));
-        let result = self.range_membership(operation, negated, start_slot, end_slot, value_slot);
+        let result = self.range_membership(
+            operation,
+            comparison_ty,
+            negated,
+            start_slot,
+            end_slot,
+            value_slot,
+        );
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: declarations,
             value: Some(result),
@@ -140,11 +153,31 @@ impl BodyLowering<'_> {
     fn range_membership(
         &mut self,
         operation: FirRangeOperation,
+        comparison_ty: Ty,
         negated: bool,
         start_slot: u32,
         end_slot: u32,
         value_slot: u32,
     ) -> ExprId {
+        if negated && matches!(comparison_ty, Ty::Float | Ty::Double) {
+            // IEEE floating-point order is partial: `!(x <= NaN)` is true while `x > NaN` is
+            // false, so the integer De Morgan form is not equivalent. Build the checked positive
+            // membership predicate and negate that boolean result exactly.
+            let contained = self.range_membership(
+                operation,
+                comparison_ty,
+                false,
+                start_slot,
+                end_slot,
+                value_slot,
+            );
+            let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+            return self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Eq,
+                lhs: contained,
+                rhs: false_value,
+            });
+        }
         let (low, high, high_strict) = match operation {
             FirRangeOperation::Through => (start_slot, end_slot, false),
             FirRangeOperation::OpenEnd | FirRangeOperation::Until => (start_slot, end_slot, true),

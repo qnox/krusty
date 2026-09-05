@@ -39,6 +39,7 @@ impl BodyLowering<'_> {
             }
             let realization = LocalCallableRealization {
                 function,
+                suspend: *suspend,
                 owner,
                 source_name: body.debug_name().unwrap_or("<anonymous>").into(),
                 captures: body.captures().to_vec(),
@@ -97,7 +98,7 @@ impl BodyLowering<'_> {
             else {
                 unreachable!("local function declaration changed during FIR lowering")
             };
-            let lowered = self.lower_nested_function(body, function, false)?;
+            let lowered = self.lower_nested_function(body, function, false, false)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
         }
         Ok(())
@@ -327,6 +328,7 @@ impl BodyLowering<'_> {
         }
         let realization = LocalCallableRealization {
             function,
+            suspend,
             owner,
             source_name: body.debug_name().unwrap_or("<anonymous>").into(),
             captures: body.captures().to_vec(),
@@ -340,7 +342,16 @@ impl BodyLowering<'_> {
             .expect("a body always has a local callable scope")
             .insert(callable, realization.clone());
         assert!(previous.is_none(), "a FIR lambda callable is declared once");
-        let lowered = self.lower_nested_function(body, function, unit_as_value)?;
+        let lowered = self.lower_nested_function(body, function, unit_as_value, true)?;
+        if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
+            .iter()
+            .any(|(_, depth)| *depth > 0)
+        {
+            // A return through an enclosing callable is meaningful only after this lambda's inline
+            // template is spliced across that lexical boundary. Its standalone implementation has
+            // the lambda's own return descriptor and therefore cannot represent the checked target.
+            self.ir.inline_only_fns.insert(function);
+        }
         self.ir.functions[function as usize].body = Some(lowered.callable);
         let captures = self.bound_all_captures(0, &realization)?;
         let own_parameters_from = u32::try_from(realization.capture_count()).map_err(|_| {
@@ -390,7 +401,11 @@ impl BodyLowering<'_> {
             arity,
             captures,
             sam: None,
-            inline_body: Some(lowered.inline),
+            inline_body: Some(
+                lowered
+                    .inline
+                    .expect("source-lambda lowering retains an inline template"),
+            ),
         }))
     }
 
@@ -443,6 +458,8 @@ impl BodyLowering<'_> {
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
         reference: &crate::types::FnSig,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
+        let reference_suspend = realization.suspend
+            || adaptation.is_some_and(|adaptation| adaptation.suspend_conversion);
         let Some(arity) = u8::try_from(reference.params.len()).ok() else {
             return Ok(None);
         };
@@ -599,7 +616,7 @@ impl BodyLowering<'_> {
                 );
             }
         }
-        if adaptation.is_some_and(|adaptation| adaptation.suspend_conversion) {
+        if reference_suspend {
             self.ir.suspend_funs.push(wrapper);
         }
         self.ir.private_methods.insert(wrapper);
@@ -636,11 +653,29 @@ impl BodyLowering<'_> {
         );
         let mut class = IrClass::synthetic(internal);
         class.superclass = type_name("kotlin/jvm/internal/FunctionReferenceImpl");
+        let continuation = Ty::obj("kotlin/coroutines/Continuation");
+        let mut invoke_parameters = reference.params.clone();
+        let mut target_parameters = self.ir.functions[wrapper as usize].params.clone();
+        let mut invoke_result = reference.ret;
+        let mut target_result = self.ir.functions[wrapper as usize].ret;
+        if reference_suspend {
+            invoke_parameters.push(continuation);
+            target_parameters.push(continuation);
+            invoke_result = Ty::obj("kotlin/Any");
+            target_result = Ty::obj("kotlin/Any");
+        }
+        let declaration_suspend = realization.suspend;
+        let mut reflection_parameters = reference.params.clone();
+        let mut reflection_result = selected_result;
+        if declaration_suspend {
+            reflection_parameters.push(continuation);
+            reflection_result = Ty::obj("kotlin/Any");
+        }
         class.func_ref = Some(FuncRef {
             adapted: adaptation.is_some(),
             bound,
             arity,
-            is_suspend: reference.suspend,
+            is_suspend: reference_suspend,
             module_target: None,
             local_target: Some(wrapper),
             owner_class: realization.owner,
@@ -655,13 +690,13 @@ impl BodyLowering<'_> {
             call_name: self.ir.functions[wrapper as usize].name.clone(),
             reflection_name: None,
             reflection_receiver_parameter: false,
-            reflection_target_ret_ty: Some(selected_result),
-            reflection_target_param_tys: Some(reference.params.clone()),
+            reflection_target_ret_ty: Some(reflection_result),
+            reflection_target_param_tys: Some(reflection_parameters),
             call_interface: false,
-            param_tys: reference.params.clone(),
-            ret_ty: reference.ret,
-            target_param_tys: self.ir.functions[wrapper as usize].params.clone(),
-            target_ret_ty: self.ir.functions[wrapper as usize].ret,
+            param_tys: invoke_parameters,
+            ret_ty: invoke_result,
+            target_param_tys: target_parameters,
+            target_ret_ty: target_result,
             unbox_params: vec![None; arity as usize],
             unbox_param_nullable: vec![false; arity as usize],
             box_ret: None,
@@ -790,6 +825,17 @@ impl BodyLowering<'_> {
             })?
             .get();
         let params = local_function_parameters(body);
+        let mut param_checks = vec![None; params.len()];
+        if body.is_source_lambda()
+            && body.receiver_type().is_some_and(|receiver| {
+                receiver.get().is_reference() && !receiver.get().is_nullable()
+            })
+        {
+            let receiver = body.captures().len()
+                + body.implicit_receiver_captures().len()
+                + body.context_receiver_types().len();
+            param_checks[receiver] = Some("<this>".to_owned());
+        }
         let source_name = body.debug_name().unwrap_or("$fir_lambda");
         let name = format!(
             "{source_name}$fir_{}_{}_{}",
@@ -799,7 +845,7 @@ impl BodyLowering<'_> {
         );
         let function = self.ir.add_fun(IrFunction {
             name,
-            param_checks: vec![None; params.len()],
+            param_checks,
             params,
             ret: result,
             body: None,
@@ -853,6 +899,70 @@ impl BodyLowering<'_> {
                 );
             }
         }
+        let parameter_names = local_function_debug_parameter_names(self.body, body);
+        self.ir
+            .fn_params
+            .entry(function)
+            .or_insert_with(|| crate::ir::FnParamInfo::names(parameter_names));
+        if let Some(line) = local_function_debug_line(body) {
+            self.ir.fn_decl_lines.insert(function, line);
+        }
+        if body.is_source_lambda() {
+            // An empty enclosing segment is the semantic class-initialization context. Do not put
+            // the diagnostic placeholder `<anonymous>` into common IR: angle-bracket names are
+            // illegal JVM methods, and other targets own their own physical spelling.
+            let enclosing_name = body.debug_name().unwrap_or_default().to_owned();
+            let binding_name = body.debug_binding_name().map(str::to_owned);
+            // A local binding contributes to the lambda CLASS name, not to its implementation
+            // method. Inside `init { val x = { ... } }`, for example, the class is `C$x$1` while
+            // the method remains in the class-initializer sequence.
+            let implementation_name = body.debug_name().unwrap_or_default().to_owned();
+            let rendered_prefix = [Some(enclosing_name.as_str()), binding_name.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join("$");
+            let next = |select: &dyn Fn(&crate::ir::IrLambdaOrigin) -> Option<u32>| {
+                self.ir
+                    .lambda_origins
+                    .values()
+                    .filter_map(select)
+                    .max()
+                    .map_or(0, |ordinal| ordinal.saturating_add(1))
+            };
+            let identity = next(&|origin| Some(origin.identity));
+            let implementation_ordinal = next(&|origin| {
+                (origin.lexical_owner == owner && origin.implementation_name == implementation_name)
+                    .then_some(origin.implementation_ordinal)
+            });
+            let ordinal = next(&|origin| {
+                let origin_prefix = [
+                    Some(origin.enclosing_name.as_str()),
+                    origin.binding_name.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join("$");
+                (origin.lexical_owner == owner && origin_prefix == rendered_prefix)
+                    .then_some(origin.ordinal)
+            });
+            let previous = self.ir.lambda_origins.insert(
+                function,
+                crate::ir::IrLambdaOrigin {
+                    identity,
+                    lexical_owner: owner,
+                    enclosing_name,
+                    binding_name,
+                    ordinal,
+                    implementation_name,
+                    implementation_ordinal,
+                },
+            );
+            assert!(previous.is_none(), "one FIR lambda has one semantic origin");
+        }
         Ok((function, owner))
     }
 
@@ -861,6 +971,7 @@ impl BodyLowering<'_> {
         body: &FirBody,
         function: crate::ir::FunId,
         unit_as_value: bool,
+        retain_inline_template: bool,
     ) -> Result<NestedCallableBodies, FirLoweringFailure> {
         #[cfg(feature = "trace")]
         super::trace_checked_body(body, self.index);
@@ -931,7 +1042,25 @@ impl BodyLowering<'_> {
                 origin: body_origin(body),
             })?
             .get();
-        let inline = inline_callable_body(nested.ir, &roots, result, body.has_implicit_return());
+        let inline = if retain_inline_template {
+            let inline =
+                inline_callable_body(nested.ir, &roots, result, body.has_implicit_return());
+            let (inline, _) = crate::ir::clone_expression_dag(nested.ir, inline);
+            Some(
+                super::inline_returns::prepare_inline_template(
+                    nested.ir,
+                    inline,
+                    result,
+                    true,
+                    &mut nested.next_temporary,
+                )
+                .ok_or(FirLoweringFailure::MissingBodyResult {
+                    origin: body_origin(body),
+                })?,
+            )
+        } else {
+            None
+        };
         let callable = finish_callable_body(
             nested.ir,
             roots,
@@ -950,7 +1079,7 @@ impl BodyLowering<'_> {
 #[derive(Clone, Copy)]
 struct NestedCallableBodies {
     callable: ExprId,
-    inline: ExprId,
+    inline: Option<ExprId>,
 }
 
 /// Build the value-producing form consumed by declaration-defined inline expansion. Unlike a
@@ -1011,6 +1140,65 @@ fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
                 .map(|parameter| parameter.ty.get()),
         )
         .collect()
+}
+
+fn local_function_debug_parameter_names(enclosing: &FirBody, body: &FirBody) -> Vec<String> {
+    let mut names = body
+        .captures()
+        .iter()
+        .enumerate()
+        .map(|(ordinal, capture)| {
+            (capture.enclosing_depth == 0)
+                .then(|| enclosing.debug_value_name(capture.source))
+                .flatten()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("$capture{ordinal}"))
+        })
+        .collect::<Vec<_>>();
+    names.extend(
+        body.implicit_receiver_captures()
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| format!("$this${ordinal}")),
+    );
+    let context_value_count = body.context_value_count() as usize;
+    for ordinal in 0..body.context_receiver_types().len() {
+        let name = (ordinal < context_value_count)
+            .then(|| body.parameters().get(ordinal))
+            .flatten()
+            .and_then(|parameter| body.debug_value_name(parameter.value))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("$context_receiver_{ordinal}"));
+        names.push(name);
+    }
+    if body.receiver_type().is_some() {
+        names.push("<this>".to_owned());
+    }
+    names.extend(
+        body.parameters()
+            .iter()
+            .skip(context_value_count)
+            .enumerate()
+            .map(|(ordinal, parameter)| {
+                body.debug_value_name(parameter.value)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("p{ordinal}"))
+            }),
+    );
+    names
+}
+
+fn local_function_debug_line(body: &FirBody) -> Option<u32> {
+    let root = *body.roots().first()?;
+    let statement_line = body.statement_debug_line(root);
+    if statement_line != 0 {
+        return Some(statement_line);
+    }
+    let crate::fir::FirStatementKind::Expression(expression) = &body.statement(root)?.kind else {
+        return None;
+    };
+    let source_line = body.expression_debug_lines(*expression).source;
+    (source_line != 0).then_some(source_line)
 }
 
 fn body_origin(body: &FirBody) -> crate::fir::OriginId {

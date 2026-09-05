@@ -394,11 +394,28 @@ impl SignatureConstraintExtractor {
         self.graph.add_expr(SigExpr::Known(ty))
     }
 
+    fn integer_literal(&mut self, value: i64) -> SigExprId {
+        match i32::try_from(value) {
+            Ok(value) => self.graph.add_expr(SigExpr::IntegerLiteral(value)),
+            Err(_) => self.known(Ty::Int),
+        }
+    }
+
     fn lexical_receivers(&self) -> Vec<SigExprId> {
         self.lexical_values
             .iter()
             .rev()
-            .filter_map(|values| values.get("this").copied())
+            .filter_map(|values| {
+                let receiver = values.get("this").copied()?;
+                // A contextual lambda binds `this` to a deferred lookup because whether the
+                // expected function type contributes an extension receiver is not known until
+                // evaluation. That lookup is already evaluated while the contextual function's
+                // receiver rung is active. Capturing it again as an unconditional scoped receiver
+                // on every nested local declaration would make an ordinary `() -> T` lambda fail
+                // merely because no extension receiver exists, even when the nested body never
+                // uses `this`.
+                (!matches!(self.graph.expr(receiver), Some(SigExpr::Value(_)))).then_some(receiver)
+            })
             .collect()
     }
 
@@ -500,10 +517,18 @@ impl SignatureConstraintExtractor {
             } else {
                 None
             };
-            let dispatch_receiver = self.graph.add_expr(SigExpr::ClassifierType {
-                declaration: classifier_declaration,
-                scope,
-            });
+            let dispatch_receiver = if self.local_classifier_stack.last() == Some(&classifier) {
+                self.lexical_values
+                    .iter()
+                    .rev()
+                    .find_map(|values| values.get("this").copied())
+                    .expect("an active local classifier must bind its dispatch receiver")
+            } else {
+                self.graph.add_expr(SigExpr::ClassifierType {
+                    declaration: classifier_declaration,
+                    scope,
+                })
+            };
             bindings.entry("this".into()).or_insert(dispatch_receiver);
             self.lexical_values.push(bindings);
             self.lexical_types.push(HashMap::new());
@@ -1267,7 +1292,7 @@ impl SignatureConstraintExtractor {
             });
         }
         let node = match file.expr(expression) {
-            Expr::IntLit(_) => self.known(Ty::Int),
+            Expr::IntLit(value) => self.integer_literal(*value),
             Expr::LongLit(_) => self.known(Ty::Long),
             Expr::UIntLit(_) => self.known(Ty::UInt),
             Expr::ULongLit(_) => self.known(Ty::ULong),
@@ -1363,6 +1388,10 @@ impl SignatureConstraintExtractor {
             } => {
                 let selector_origin =
                     Self::member_name_origin(file, expression, name, origin, node_origin);
+                let receiver_argument_origin = origin(
+                    file.expr_span(*receiver)
+                        .expect("a signature receiver must retain its source span"),
+                );
                 let receiver = self.expression(file, *receiver, scope, origin)?;
                 let receiver = self.graph.add_expr(SigExpr::NonNullable(receiver));
                 let selected = match args {
@@ -1385,9 +1414,9 @@ impl SignatureConstraintExtractor {
                                 Vec::with_capacity(self.graph.call_arguments(explicit).len() + 1);
                             arguments.push(SigCallArgument {
                                 value: receiver,
+                                origin: receiver_argument_origin,
                                 name: None,
                                 spread: false,
-                                integer_literal: None,
                                 lambda: false,
                             });
                             arguments.extend(self.graph.call_arguments(explicit).iter().copied());
@@ -1626,6 +1655,10 @@ impl SignatureConstraintExtractor {
                             // function type's receiver parameter. Preserve that lexical binding in the
                             // compact graph instead of turning `value.block()` into a deferred member
                             // lookup that can never find the local parameter declaration.
+                            let receiver_argument_origin = origin(
+                                file.expr_span(*receiver)
+                                    .expect("a signature receiver must retain its source span"),
+                            );
                             let receiver = self.expression(file, *receiver, scope, origin)?;
                             let explicit =
                                 self.call_arguments(file, expression, args, scope, origin)?;
@@ -1633,9 +1666,9 @@ impl SignatureConstraintExtractor {
                                 Vec::with_capacity(self.graph.call_arguments(explicit).len() + 1);
                             arguments.push(SigCallArgument {
                                 value: receiver,
+                                origin: receiver_argument_origin,
                                 name: None,
                                 spread: false,
-                                integer_literal: None,
                                 lambda: false,
                             });
                             arguments.extend(self.graph.call_arguments(explicit).iter().copied());
@@ -2170,12 +2203,14 @@ impl SignatureConstraintExtractor {
                     return Ok(callable);
                 }
                 let spelling = self.graph.intern_name(name);
+                let target_origin =
+                    Self::member_name_origin(file, expression, name, origin, node_origin);
                 let target = self
                     .graph
                     .add_callable_selection(DeferredCallableSelection {
                         scope,
                         spelling,
-                        origin: node_origin,
+                        origin: target_origin,
                         expected: None,
                         type_arguments: super::OperandRange::default(),
                         trailing_lambda: false,
@@ -2216,12 +2251,14 @@ impl SignatureConstraintExtractor {
                     })
                     .unwrap_or((None, None));
                 let spelling = self.graph.intern_name(name);
+                let target_origin =
+                    Self::member_name_origin(file, expression, name, origin, node_origin);
                 let target = self
                     .graph
                     .add_callable_selection(DeferredCallableSelection {
                         scope,
                         spelling,
-                        origin: node_origin,
+                        origin: target_origin,
                         expected: None,
                         type_arguments: super::OperandRange::default(),
                         trailing_lambda: false,
@@ -2543,9 +2580,9 @@ impl SignatureConstraintExtractor {
             .graph
             .add_call_arguments(arguments.into_iter().map(|value| SigCallArgument {
                 value,
+                origin,
                 name: None,
                 spread: false,
-                integer_literal: None,
                 lambda: false,
             }));
         self.graph.add_expr(SigExpr::MemberCall {
@@ -2612,12 +2649,12 @@ impl SignatureConstraintExtractor {
                 .map(|name| self.graph.intern_name(name));
             compact.push(SigCallArgument {
                 value,
+                origin: origin(
+                    file.expr_span(argument)
+                        .expect("a signature argument must retain its source span"),
+                ),
                 name,
                 spread: file.is_spread_arg(argument),
-                integer_literal: match file.expr(argument) {
-                    Expr::IntLit(value) => i32::try_from(*value).ok(),
-                    _ => None,
-                },
                 lambda: matches!(file.expr(argument), Expr::Lambda { .. }),
             });
         }

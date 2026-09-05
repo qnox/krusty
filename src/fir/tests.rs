@@ -229,6 +229,14 @@ fn streamed_header_inventory_returns_no_whole_module_ast() {
     assert_eq!(module.sources.len(), 2);
     assert_eq!(module.stubs.len(), 2);
     assert_eq!(
+        module.source_declarations(SourceFileId::from_raw(0)).len(),
+        1
+    );
+    assert_eq!(
+        module.source_declarations(SourceFileId::from_raw(1)).len(),
+        1
+    );
+    assert_eq!(
         module.lookup_names.len(),
         3,
         "declaration spellings and explicit type lookup input are interned; bodies are not"
@@ -303,6 +311,69 @@ fn actualization_excludes_the_compact_expect_subtree_before_signatures() {
                 .and_then(|anchor| anchor.owner);
         }
         true
+    }));
+}
+
+#[test]
+fn actualization_preserves_later_source_declaration_positions() {
+    let sources = [
+        SourceInput::kotlin(
+            "// LANGUAGE: +MultiPlatformProjects\n\
+             expect class Api\n\
+             class Kept\n",
+        )
+        .with_file_stem("Common"),
+        SourceInput::kotlin(
+            "// LANGUAGE: +MultiPlatformProjects\n\
+             actual class Api\n",
+        )
+        .with_file_stem("Platform"),
+    ];
+    let mut diagnostics = DiagSink::new();
+    let mut module = stream_file_stub_inventory(
+        &sources,
+        &LangFeatures::new(),
+        &mut diagnostics,
+        |_, _, _| {},
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+
+    let common = SourceFileId::from_raw(0);
+    let before = module.source_declarations(common).to_vec();
+    assert_eq!(before.len(), 2);
+    let kept = before[1];
+    let matched = matched_expect_declarations(&module);
+    module.exclude_declaration_subtrees(&matched);
+
+    assert_eq!(module.source_declarations(common), before.as_slice());
+    assert!(module.stubs.iter().any(|stub| stub.id == kept));
+    assert!(module.stubs.iter().all(|stub| !matched.contains(&stub.id)));
+}
+
+#[test]
+fn streamed_header_order_accepts_unpublished_lexical_function_owners() {
+    let sources = [SourceInput::kotlin(
+        "inline fun expose(): String {\n\
+             return object {\n\
+                 fun value(): String {\n\
+                     class Local\n\
+                     return Local().toString()\n\
+                 }\n\
+             }.value()\n\
+         }\n",
+    )
+    .with_file_stem("InlineLocals")];
+    let mut diagnostics = DiagSink::new();
+    let module = stream_file_stub_inventory(
+        &sources,
+        &LangFeatures::new(),
+        &mut diagnostics,
+        |_, _, _| {},
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    assert!(module.stubs.iter().any(|stub| {
+        stub.kind == DeclarationKind::Classifier && stub.flags.has(DeclarationFlags::LOCAL_CLASS)
     }));
 }
 
@@ -2497,9 +2568,9 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     });
     let call_arguments = graph.add_call_arguments([SigCallArgument {
         value: int,
+        origin,
         name: None,
         spread: false,
-        integer_literal: None,
         lambda: false,
     }]);
     let call = graph.add_expr(SigExpr::Call {
@@ -2521,9 +2592,9 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     });
     let member_call_arguments = graph.add_call_arguments([SigCallArgument {
         value: string,
+        origin,
         name: None,
         spread: false,
-        integer_literal: None,
         lambda: false,
     }]);
     let member_call = graph.add_expr(SigExpr::MemberCall {
@@ -2534,9 +2605,9 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     });
     let invoke_arguments = graph.add_call_arguments([SigCallArgument {
         value: int,
+        origin,
         name: None,
         spread: false,
-        integer_literal: None,
         lambda: false,
     }]);
     let invoke = graph.add_expr(SigExpr::Invoke {

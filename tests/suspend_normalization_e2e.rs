@@ -93,6 +93,60 @@ fn ordered_binary_operands_can_both_suspend() {
 }
 
 #[test]
+fn ordered_function_invocation_arguments_can_both_suspend() {
+    let source = r#"
+        import kotlin.coroutines.Continuation
+        import kotlin.coroutines.EmptyCoroutineContext
+        import kotlin.coroutines.startCoroutine
+
+        suspend fun await(value: String): String = value
+        suspend fun zip(combine: (String, String) -> String): String =
+            combine(await("O"), await("K"))
+
+        fun box(): String {
+            var result = "FAIL"
+            suspend { result = zip { left, right -> left + right } }
+                .startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+            return result
+        }
+    "#;
+
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "SuspendInvokeOrderedArguments"),
+        "OK"
+    );
+}
+
+#[test]
+fn inline_loop_tail_capture_write_is_normalized_before_state_splitting() {
+    let source = r#"
+        import kotlin.coroutines.Continuation
+        import kotlin.coroutines.EmptyCoroutineContext
+        import kotlin.coroutines.startCoroutine
+
+        suspend fun await(value: String): String = value
+
+        fun box(): String {
+            var result = ""
+            suspend {
+                var index = 0
+                while (index < 3) {
+                    val value = if (index++ == 1) "$" else if (index == 1) "O" else "K"
+                    if (value == "$") continue
+                    run { result += await(value) }
+                }
+            }.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+            return result
+        }
+    "#;
+
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "SuspendInlineLoopTailCapture"),
+        "OK"
+    );
+}
+
+#[test]
 fn normalized_suspend_corpus_shapes_execute() {
     if !common::corpus_ready() {
         return;

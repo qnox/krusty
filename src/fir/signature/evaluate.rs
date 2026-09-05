@@ -24,6 +24,41 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         graph: &SignatureGraph,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedSignature, DiagnosticId> {
+        /// Recover integer-constant provenance from nodes whose types have already been resolved.
+        /// Binary folding is delegated to semantic policy after `select_binary` populated `memo`;
+        /// parser structure alone never declares an operator foldable.
+        fn evaluated_integer_literal<S: SignatureSemantics>(
+            semantics: &S,
+            expression: SigExprId,
+            graph: &SignatureGraph,
+            memo: &HashMap<SigExprId, ResolvedTy>,
+        ) -> Option<i32> {
+            match graph.expr(expression)? {
+                SigExpr::IntegerLiteral(value) => Some(value),
+                SigExpr::Binary {
+                    operator, lhs, rhs, ..
+                } => {
+                    let lhs_value = evaluated_integer_literal(semantics, lhs, graph, memo)?;
+                    let rhs_value = evaluated_integer_literal(semantics, rhs, graph, memo)?;
+                    semantics.fold_selected_integer_binary(
+                        operator,
+                        *memo.get(&lhs)?,
+                        lhs_value,
+                        *memo.get(&rhs)?,
+                        rhs_value,
+                        *memo.get(&expression)?,
+                    )
+                }
+                SigExpr::Sequence { result, .. }
+                | SigExpr::ScopedReceiver { result, .. }
+                | SigExpr::NonNullable(result)
+                | SigExpr::Substitute { base: result, .. } => {
+                    evaluated_integer_literal(semantics, result, graph, memo)
+                }
+                _ => None,
+            }
+        }
+
         fn argument_probe<'a, S: SignatureSemantics>(
             semantics: &S,
             argument: &'a SigCallArgument,
@@ -63,9 +98,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 evaluate_expression(semantics, argument.value, graph, demand, memo, computing)?;
             Ok(SigCallArgumentProbe::Typed(ResolvedSigCallArgument {
                 ty,
+                origin: argument.origin,
                 name,
                 spread: argument.spread,
-                integer_literal: argument.integer_literal,
+                integer_literal: evaluated_integer_literal(semantics, argument.value, graph, memo),
                 lambda: argument.lambda,
                 contextual_call: matches!(graph.expr(argument.value), Some(SigExpr::Call { .. })),
             }))
@@ -100,9 +136,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 )?;
                 return Ok(ResolvedSigCallArgument {
                     ty,
+                    origin: argument.origin,
                     name,
                     spread: argument.spread,
-                    integer_literal: argument.integer_literal,
+                    integer_literal: None,
                     lambda: argument.lambda,
                     contextual_call: false,
                 });
@@ -138,9 +175,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 };
                 return Ok(ResolvedSigCallArgument {
                     ty,
+                    origin: argument.origin,
                     name,
                     spread: argument.spread,
-                    integer_literal: argument.integer_literal,
+                    integer_literal: evaluated_integer_literal(
+                        semantics,
+                        argument.value,
+                        graph,
+                        memo,
+                    ),
                     lambda: argument.lambda,
                     contextual_call: false,
                 });
@@ -168,9 +211,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     )?;
                     return Ok(ResolvedSigCallArgument {
                         ty,
+                        origin: argument.origin,
                         name,
                         spread: argument.spread,
-                        integer_literal: argument.integer_literal,
+                        integer_literal: None,
                         lambda: argument.lambda,
                         contextual_call: false,
                     });
@@ -200,9 +244,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 )?;
                 return Ok(ResolvedSigCallArgument {
                     ty,
+                    origin: argument.origin,
                     name,
                     spread: argument.spread,
-                    integer_literal: argument.integer_literal,
+                    integer_literal: None,
                     lambda: argument.lambda,
                     contextual_call: false,
                 });
@@ -288,9 +333,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             )?;
             Ok(ResolvedSigCallArgument {
                 ty,
+                origin: argument.origin,
                 name,
                 spread: argument.spread,
-                integer_literal: argument.integer_literal,
+                integer_literal: None,
                 lambda: argument.lambda,
                 contextual_call: false,
             })
@@ -624,6 +670,8 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 .expect("a signature expression id must belong to its graph");
             let ty = match node {
                 SigExpr::Known(ty) => Ok(ty),
+                SigExpr::IntegerLiteral(_) => Ok(ResolvedTy::new(Ty::Int)
+                    .expect("the built-in Int literal type is always publishable")),
                 SigExpr::DeclarationType(declaration) => {
                     demand(declaration).map(|signature| signature.result)
                 }

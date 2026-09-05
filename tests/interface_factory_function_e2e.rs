@@ -276,25 +276,16 @@ fn value_class_factory_composes_with_indexed_container() {
 }
 
 /// An indexed getter is a user member, not a stored-property getter merely because both JVM names begin
-/// with `get`. User value-class members returning another value class still require a boxed-result model
-/// that this backend does not implement, so the architecture contract is to decline this whole file. This
-/// pins the safe, semantic classification: accepting and miscompiling it is worse than an explicit bail.
+/// with `get`. Its value-class result must use the static carrier member ABI and remain usable through the
+/// returned value class's property.
 #[test]
-fn indexed_getter_returning_value_class_is_rejected_safely() {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let source = "@JvmInline value class ElementToken(val raw: Int)\n\
+fn indexed_getter_returning_value_class_runs() {
+    run_ok(
+        "IndexedValueClassReturn",
+        "@JvmInline value class ElementToken(val raw: Int)\n\
                   @JvmInline value class TokenBuffer(val data: IntArray) {\n\
                   \x20   operator fun get(index: Int): ElementToken = ElementToken(data[index])\n\
                   }\n\
-                  fun box(): String = if (TokenBuffer(IntArray(1))[0].raw == 0) \"OK\" else \"F\"\n";
-    assert_eq!(
-        common::backend_rejects_in_process(
-            source,
-            "IndexedValueClassReturn",
-            &[stdlib],
-            Some(&jdk)
-        ),
-        Some(true),
+                  fun box(): String = if (TokenBuffer(IntArray(1))[0].raw == 0) \"OK\" else \"F\"\n",
     );
 }

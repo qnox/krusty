@@ -10,6 +10,27 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
+/// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
+/// the checked operation while preserving lazy condition/message evaluation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AssertionMode {
+    #[default]
+    Runtime,
+    AlwaysEnabled,
+    AlwaysDisabled,
+}
+
+/// Semantic shape of one compiler-provided Kotlin array factory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayFactoryKind {
+    PrimitiveVararg(Ty),
+    PrimitiveSize(Ty),
+    ReferenceVararg,
+    ReferenceSize,
+    EmptyReference,
+    NullableReference,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeName(NameId);
 

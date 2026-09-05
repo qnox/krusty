@@ -403,6 +403,18 @@ fun box(): String {
 }
 
 #[test]
+fn safecall_generic_nullable_number_bound_runs() {
+    run_box(
+        r#"
+fun <T : Number?> foo(t: T) = t?.toInt()
+
+fun box(): String = if (foo(1) == 1 && foo<Int?>(null) == null) "OK" else "fail"
+"#,
+        "SafeCallGenericNull",
+    );
+}
+
+#[test]
 fn safecall_function_any_methods_run() {
     run_box(
         r#"
@@ -419,35 +431,21 @@ fun box(): String {
     );
 }
 
-/// REJECTION GUARDS: shapes that must never EMIT. Asserts on the backend outcome, not a run
-/// result — a skip and an emitted-but-crashing class both make a run-based check pass, but only
-/// the former is acceptable.
+/// A local receiver-less function is not made into an extension by safe-call syntax. Assert on the
+/// backend outcome so an emitted-but-crashing class cannot masquerade as a safe rejection.
 #[test]
-fn unsupported_safecall_shapes_still_rejected() {
+fn receiverless_local_function_through_safecall_is_rejected() {
     let jdk = common::jdk_modules();
-    let cases: &[(&str, &str)] = &[
-        // A type-parameter receiver erased to `Any` (`t?.toInt()` on `T : Number?`) — needs
-        // bound-driven member resolution.
-        (
-            "SafeCallGenericNull",
-            r#"
-fun <T : Number?> foo(t: T) = t?.toInt()
-
-fun box(): String = if (foo(1) == 1) "OK" else "fail"
-"#,
-        ),
-        // A LOCAL function called through `?.` — the checker records nothing for local targets.
-        (
-            "SafeCallLocalFn",
-            r#"
+    let cases: &[(&str, &str)] = &[(
+        "SafeCallLocalFn",
+        r#"
 fun box(): String {
     fun local(x: Int) = x + 1
     val t: Int? = 2
     return if (t?.local(2) == 3) "OK" else "fail"
 }
 "#,
-        ),
-    ];
+    )];
     for (stem, src) in cases {
         let cp = krusty::toolchain::classpath_jars_for(src);
         let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));

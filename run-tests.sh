@@ -177,6 +177,7 @@ build_log="$logdir/build.log"
 cargo build --color never --profile gate -p krusty-cli
 target_root="${CARGO_TARGET_DIR:-$PWD/target}"
 [[ "$target_root" = /* ]] || target_root="$PWD/$target_root"
+failure_manifest="${KRUSTY_FAILURE_MANIFEST:-$target_root/gate/failed-tests.txt}"
 cli_name="krusty"
 [[ "${OS:-}" = "Windows_NT" ]] && cli_name="krusty.exe"
 export KRUSTY_BIN="$target_root/gate/$cli_name"
@@ -386,6 +387,37 @@ if [ "${#pool_bins[@]}" -gt 0 ]; then
 fi
 
 if [ -f "$logdir/FAILED" ]; then
+  manifest_tmp="$logdir/failed-tests.txt"
+  : >"$manifest_tmp"
+  echo "=== FAILED TEST MANIFEST ==="
+  while IFS=$'\t' read -r name _; do
+    log="$logdir/$name.log"
+    [ -f "$log" ] || continue
+    # Libtest writes two `failures:` sections: captured panic output first, then the final list.
+    # Reset at every marker and print only the names accumulated immediately before `test result:`;
+    # otherwise indented javap headings such as `Code:` are mistaken for test identities.
+    awk '
+      /^failures:$/ { delete failed; count = 0; collecting = 1; next }
+      /^test result:/ {
+        if (collecting) for (i = 1; i <= count; i++) print failed[i]
+        collecting = 0
+        next
+      }
+      collecting && /^    [[:alnum:]_][[:alnum:]_:]*$/ {
+        sub(/^    /, "")
+        failed[++count] = $0
+      }
+    ' "$log" >>"$manifest_tmp"
+  done <"$logdir/FAILED"
+  # Preserve first-seen suite order while removing duplicate identities emitted by an abnormal
+  # binary. This file survives the temporary per-run logs and is the bounded repair set for the
+  # next iteration; a later authoritative full run replaces it atomically.
+  awk '!seen[$0]++' "$manifest_tmp" >"$manifest_tmp.unique"
+  mkdir -p "$(dirname "$failure_manifest")"
+  cp "$manifest_tmp.unique" "$failure_manifest.tmp"
+  mv "$failure_manifest.tmp" "$failure_manifest"
+  sed -n '1,$p' "$failure_manifest"
+  echo "run-tests.sh: persisted failed test IDs to $failure_manifest" >&2
   echo "=== FAILED TEST BINARIES ==="
   while IFS=$'\t' read -r name desc; do
     echo "----- $desc -----"
@@ -417,4 +449,7 @@ fi
 # SIGPIPE, which under `set -o pipefail` fails this cosmetic diagnostic — and thus the whole (green)
 # run — with 141. Letting awk consume all of sort's output keeps the pipeline exit status 0.
 sort -rn "$logdir/TIMINGS" | awk 'NR <= 20 {printf "%7.2fs  %s\n", $1 / 1000, $2}'
+mkdir -p "$(dirname "$failure_manifest")"
+: >"$failure_manifest.tmp"
+mv "$failure_manifest.tmp" "$failure_manifest"
 echo "all test binaries passed"

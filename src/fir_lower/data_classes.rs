@@ -93,12 +93,17 @@ struct DataField {
     generic: bool,
 }
 
+enum GeneratedMethod {
+    Present(u32),
+    Suppressed,
+}
+
 fn generated_method(
     index: &ResolvedModuleIndex,
     owner: DeclarationId,
     name: &str,
     ir: &IrFile,
-) -> Option<u32> {
+) -> Option<GeneratedMethod> {
     (0..index.declaration_count()).find_map(|raw| {
         let declaration = DeclarationId::from_raw(raw as u32);
         let header = index.declaration_header(declaration)?;
@@ -106,14 +111,15 @@ fn generated_method(
         (anchor.owner == Some(owner)
             && header.kind == DeclarationKind::Function
             && header.flags.has(DeclarationFlags::COMPILER_GENERATED)
-            && index
-                .callable_for_declaration(declaration)
-                .and_then(|callable| index.callable_name(callable.id))
-                == Some(name))
+            && index.declaration_name(declaration) == Some(name))
         .then(|| {
+            if index.is_suppressed_generated_callable(declaration) {
+                return Some(GeneratedMethod::Suppressed);
+            }
             index
                 .callable_for_declaration(declaration)
                 .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
+                .map(GeneratedMethod::Present)
         })
         .flatten()
     })
@@ -128,8 +134,12 @@ fn synthesize_components_and_copy(
 ) -> Result<(), FirFileLoweringFailure> {
     for (ordinal, field) in fields.iter().enumerate() {
         let name = format!("component{}", ordinal + 1);
-        let function = generated_method(index, declaration, &name, ir)
-            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+        let function = match generated_method(index, declaration, &name, ir) {
+            Some(GeneratedMethod::Present(function)) => function,
+            Some(GeneratedMethod::Suppressed) | None => {
+                return Err(FirFileLoweringFailure::MissingCallable(declaration));
+            }
+        };
         let this = ir.add_expr(IrExpr::GetValue(0));
         let value = ir.add_expr(IrExpr::GetField {
             receiver: this,
@@ -143,9 +153,13 @@ fn synthesize_components_and_copy(
         }));
     }
 
-    let copy = generated_method(index, declaration, "copy", ir)
-        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
-    let capture_count = fields.first().map_or(0, |field| field.index);
+    let copy = match generated_method(index, declaration, "copy", ir) {
+        Some(GeneratedMethod::Present(function)) => function,
+        Some(GeneratedMethod::Suppressed) | None => {
+            return Err(FirFileLoweringFailure::MissingCallable(declaration));
+        }
+    };
+    let capture_count = ir.classes[class as usize].constructor_prefix_count;
     let mut args = Vec::with_capacity(capture_count as usize + fields.len());
     for field in 0..capture_count {
         let this = ir.add_expr(IrExpr::GetValue(0));
@@ -218,7 +232,8 @@ fn synthesize_to_string(
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     let function = match generated_method(index, declaration, "toString", ir) {
-        Some(function) => function,
+        Some(GeneratedMethod::Present(function)) => function,
+        Some(GeneratedMethod::Suppressed) => return Ok(()),
         None if has_method(ir, class, "toString", 0) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };
@@ -257,6 +272,10 @@ fn synthesize_to_string(
             class,
             index: field.index,
         });
+        // Backend representation may erase a value class to its carrier, but data-class rendering
+        // is defined by the declared Kotlin field type. Keep that checked type on the generated read
+        // so a target can choose the value class's semantic string conversion.
+        ir.logical_types.insert(value, field.ty);
         if field.ty.is_array() {
             value = intrinsic(
                 ir,
@@ -289,7 +308,8 @@ fn synthesize_hash_code(
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     let function = match generated_method(index, declaration, "hashCode", ir) {
-        Some(function) => function,
+        Some(GeneratedMethod::Present(function)) => function,
+        Some(GeneratedMethod::Suppressed) => return Ok(()),
         None if has_method(ir, class, "hashCode", 0) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };
@@ -382,7 +402,8 @@ fn synthesize_equals(
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     let function = match generated_method(index, declaration, "equals", ir) {
-        Some(function) => function,
+        Some(GeneratedMethod::Present(function)) => function,
+        Some(GeneratedMethod::Suppressed) => return Ok(()),
         None if has_method(ir, class, "equals", 1) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };

@@ -721,24 +721,19 @@ fn flexible_static_typevar_return_uses_the_same_policy() {
 }
 
 #[test]
-fn kotlin_non_null_return_still_rejects_null_check() {
-    // Negative pin: an exact source signature must still reject `!= null`; only declarations whose
-    // generic signature explicitly carries the flexible-reference policy may change representation.
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let classpath = vec![stdlib];
+fn kotlin_non_null_return_allows_constant_null_check() {
+    // Kotlin accepts structural equality with `null` for a statically non-null value and reports
+    // only an always-true warning. Keep the expression checked as Boolean; flexible Java return
+    // policy is irrelevant to whether the source expression itself is legal.
     let source = r#"
         fun nonNull(): Boolean = true
 
         fun bad(): Boolean = nonNull() != null
+        fun box(): String = if (bad()) "OK" else "fail"
     "#;
-    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message
-                .contains("operator '!=' cannot be applied to 'Boolean' and 'Null'.")),
-        "a Kotlin non-null Boolean return must keep rejecting `!= null`, got {diagnostics:?}"
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "NonNullNullComparison").as_deref(),
+        Some("OK")
     );
 }
 

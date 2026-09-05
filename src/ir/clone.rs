@@ -77,9 +77,20 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                     .iter_mut()
                     .for_each(|argument| remap_argument(argument, &mut map));
             }
-            IrCheckedOperation::BackingFieldRead { .. }
-            | IrCheckedOperation::LateinitFieldRead { .. } => {}
-            IrCheckedOperation::BackingFieldWrite { value, .. } => *value = map(*value),
+            IrCheckedOperation::BackingFieldRead {
+                dispatch_receiver, ..
+            }
+            | IrCheckedOperation::LateinitFieldRead {
+                dispatch_receiver, ..
+            } => map_option(dispatch_receiver, &mut map),
+            IrCheckedOperation::BackingFieldWrite {
+                dispatch_receiver,
+                value,
+                ..
+            } => {
+                map_option(dispatch_receiver, &mut map);
+                *value = map(*value);
+            }
             IrCheckedOperation::PropertyRead {
                 dispatch_receiver,
                 extension_receiver,
@@ -280,6 +291,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
         };
     }
     copy_map!(fir_origins);
+    copy_map!(checked_return_depths);
     copy_map!(annotation_constructions);
     copy_map!(constructor_default_arguments);
     copy_map!(expr_lines);
@@ -297,5 +309,11 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(intrinsic_suspension_points);
     if ir.property_initializer_stores.contains(&source) {
         ir.property_initializer_stores.insert(target);
+    }
+    if ir.inline_regions.contains(&source) {
+        ir.inline_regions.insert(target);
+    }
+    if ir.inline_call_sites.contains(&source) {
+        ir.inline_call_sites.insert(target);
     }
 }

@@ -69,7 +69,7 @@ fn top_level_lateinit_initialization_test_keeps_the_selected_property_identity()
     else {
         panic!("isInitialized must become a checked raw-field/null comparison")
     };
-    let FirExprKind::LateinitFieldRead { target } = body
+    let FirExprKind::LateinitFieldRead { target, .. } = body
         .expr(lhs)
         .expect("raw top-level lateinit field read")
         .kind
@@ -84,6 +84,54 @@ fn top_level_lateinit_initialization_test_keeps_the_selected_property_identity()
         .expect("lateinit declaration header")
         .flags
         .has(crate::fir::DeclarationFlags::LATEINIT));
+}
+
+#[test]
+fn inherited_lateinit_initialization_test_uses_the_current_subclass_receiver() {
+    let (body, index) = checked_function_body(
+        "open class Base { lateinit var state: String }\n\
+         class Derived : Base() { fun ready(): Boolean = this::state.isInitialized }\n",
+        "ready",
+    );
+    let FirExprKind::Binary {
+        operation: FirBinaryOperation::ReferentialNotEqual,
+        lhs,
+        rhs: _,
+    } = body
+        .expr(root_expression(&body))
+        .expect("lateinit initialization test")
+        .kind
+    else {
+        panic!("isInitialized must become a checked raw-field/null comparison")
+    };
+    let FirExprKind::LateinitFieldRead {
+        target,
+        dispatch_receiver: Some(dispatch_receiver),
+    } = body
+        .expr(lhs)
+        .expect("raw inherited lateinit field read")
+        .kind
+    else {
+        panic!("an inherited lateinit field must retain its current dispatch receiver")
+    };
+    assert!(matches!(
+        body.expr(dispatch_receiver.value)
+            .expect("current subclass receiver")
+            .kind,
+        FirExprKind::ImplicitReceiver {
+            current: true,
+            depth: 0
+        }
+    ));
+    let declaration = index
+        .property_declaration(target)
+        .expect("stable inherited property declaration");
+    assert_eq!(
+        index
+            .declaration_header(declaration)
+            .and_then(|header| header.owner),
+        index.classifier_declaration(crate::types::type_name("Base"))
+    );
 }
 
 #[test]
@@ -223,14 +271,26 @@ fn non_function_expected_type_does_not_suppress_natural_unbound_method_reference
         "reference",
         jvm_stdlib_semantics(),
     );
+    let root = root_expression(&body);
+    let reference = match &body.expr(root).expect("return boundary").kind {
+        FirExprKind::ImplicitConversion {
+            value,
+            conversion:
+                FirConversion {
+                    kind: FirConversionKind::NullabilityWidening { to },
+                    ..
+                },
+        } => {
+            assert_eq!(to.get(), Ty::nullable(Ty::obj("kotlin/Any")));
+            *value
+        }
+        _ => root,
+    };
     let FirExprKind::CallableReference {
         function_type,
         binding,
         ..
-    } = &body
-        .expr(root_expression(&body))
-        .expect("unbound method reference")
-        .kind
+    } = &body.expr(reference).expect("unbound method reference").kind
     else {
         panic!("the natural method reference must become checked callable-reference FIR")
     };
@@ -322,6 +382,7 @@ fn dependency_constructor_reference_keeps_its_external_declaration_identity() {
                         declaration: _,
                         classifier,
                         parameters: selected_parameters,
+                        ..
                     },
                 parameters,
                 result,
@@ -1468,4 +1529,33 @@ fn redundant_reflection_supertype_check_keeps_mutable_property_arity() {
             Some(FirExprKind::Call(_))
         )
     }));
+}
+
+#[test]
+fn private_setter_outside_its_class_publishes_a_read_only_property_reference() {
+    let (body, _) = checked_function_body_with_platform(
+        "class Box(value: String) {\n\
+             var text: String = value\n\
+                 private set\n\
+         }\n\
+         fun reference() = Box::text\n",
+        "reference",
+        jvm_semantics(),
+    );
+
+    let FirExprKind::PropertyReference {
+        target: FirPropertyReferenceTarget::SpecializedModule { .. },
+        mutable,
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("property reference")
+        .kind
+    else {
+        panic!("expected a checked module property reference")
+    };
+    assert!(
+        !mutable,
+        "an inaccessible setter cannot make the reference mutable"
+    );
 }

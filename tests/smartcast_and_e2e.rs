@@ -81,23 +81,19 @@ fun box(): String =\n\
 }
 
 #[test]
-fn unrelated_false_facts_do_not_pick_a_type_by_declaration_order() {
+fn fallthrough_combines_unrelated_interface_facts_as_an_intersection() {
     const SRC: &str = "interface Left { fun left(): Int }\n\
 interface Right { fun right(): Int }\n\
+class Both : Left, Right {\n\
+    override fun left(): Int = 1\n\
+    override fun right(): Int = 2\n\
+}\n\
 fun use(value: Any): Int {\n\
     if (value !is Left || value !is Right) return 0\n\
     return value.left() + value.right()\n\
-}\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("left"))
-            && diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("right")),
-        "{diagnostics:?}"
-    );
+}\n\
+fun box(): String = if (use(Both()) == 3 && use(Any()) == 0) \"OK\" else \"FAIL\"\n";
+    assert_eq!(run(SRC).as_deref(), Some("OK"));
 }
 
 #[test]

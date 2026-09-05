@@ -97,8 +97,12 @@ impl BodyFirChecker<'_> {
             })
             .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
         let argument = self.expression(argument_source)?;
-        let conversion =
-            self.selected_value_conversion(argument_source, selected.value_parameters[0], cause)?;
+        let conversion = self.selected_value_conversion(
+            argument_source,
+            argument,
+            selected.value_parameters[0],
+            cause,
+        )?;
         arguments.push(FirCallArgument::Expression {
             parameter: u32::try_from(selected.context_arguments.len())
                 .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,

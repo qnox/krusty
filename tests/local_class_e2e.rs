@@ -63,9 +63,10 @@ fn local_class_inheritance_with_modifiers() {
 }
 
 #[test]
-fn named_local_object() {
-    // A NAMED local object (`object Counter { … }`) is a singleton declaration — distinct from an
-    // anonymous-object expression (`object { … }` / `object : T { … }`), which stays on the expr path.
+fn named_local_object_is_rejected() {
+    // Kotlin permits local anonymous-object expressions, but a named singleton declaration cannot
+    // be local. Keep this at the frontend boundary: synthesizing JVM INSTANCE storage for it would
+    // accept a program kotlinc rejects.
     const SRC: &str = "fun box(): String {\n\
     object Registry {\n\
         val tag = \"reg\"\n\
@@ -76,6 +77,8 @@ fn named_local_object() {
     if (anon.n != 7) return \"fail anon\"\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("named local object should compile + run");
-    assert_eq!(out, "OK");
+    assert_eq!(
+        common::front_end_diagnostics(SRC, &[common::stdlib_jar()], None),
+        ["named object 'Registry' cannot be local. Try to use an anonymous object instead."]
+    );
 }

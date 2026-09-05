@@ -8,8 +8,8 @@
 //! owner/receiver at each read/write site (`ExprLowering::MemberExtensionPropertyRead`,
 //! `StmtLowering::MemberExtensionPropertyWrite`).
 //!
-//! Deliberately still gated (never miscompile): a value-class receiver/return (mangling/boxing)
-//! and open/override/abstract extension properties (cross-class extension dispatch isn't modeled).
+//! Value-class receiver/return mangling remains a JVM realization concern; open/override member
+//! extension properties use the same virtual accessor dispatch as ordinary overridden members.
 
 use super::common;
 
@@ -460,6 +460,38 @@ fun box(): String = Test().test()
 }
 
 #[test]
+fn generic_delegated_member_extension_uses_the_selected_dispatch_receiver() {
+    run_box(
+        r#"
+object Host {
+    interface Delegate<D, E, R>
+
+    fun <D, E, R> delegate(): Delegate<D, E, R> =
+        object : Delegate<D, E, R> {}
+
+    operator fun <D, E, R> Delegate<D, E, R>.provideDelegate(
+        host: D,
+        property: Any?,
+    ): Delegate<D, E, R> = this
+
+    operator fun <D, E, R> Delegate<D, E, R>.getValue(
+        receiver: E,
+        property: Any?,
+    ): R = "OK" as R
+
+    val Long.inferred: String by delegate()
+    val Long.explicit: String by delegate<Host, Long, String>()
+}
+
+fun box(): String = with(Host) {
+    if (1L.inferred + 2L.explicit == "OKOK") "OK" else "fail"
+}
+"#,
+        "GenericDelegatedMemberExtensionDispatch",
+    );
+}
+
+#[test]
 fn delegated_top_level_extension_property_passes_the_extension_receiver_to_get_value() {
     run_box(
         r#"
@@ -477,17 +509,10 @@ fun box(): String = "OK".echo
     );
 }
 
-/// REJECTION GUARDS: shapes that must never EMIT (the accessor/dispatch isn't modeled). Asserts
-/// on the backend outcome, not a run result — a skip and an emitted-but-crashing class both make a
-/// run-based check pass, but only the former is acceptable.
 #[test]
-fn unsupported_member_ext_prop_shapes_still_rejected() {
-    let jdk = common::jdk_modules();
-    let cases: &[(&str, &str)] = &[
-        // An OPEN member extension property: cross-class extension overrides register nothing.
-        (
-            "MemberExtPropOpen",
-            r#"
+fn open_member_extension_property_dispatches_to_the_override() {
+    run_box(
+        r#"
 open class Base {
     open val Int.foo: String
         get() = "Fail"
@@ -500,7 +525,17 @@ class Derived : Base() {
 
 fun box(): String = with(Derived()) { 1.foo }
 "#,
-        ),
+        "MemberExtPropOpen",
+    );
+}
+
+/// Kotlin/JVM rejects source declarations that map an extension-property accessor and an ordinary
+/// function to the same physical method signature. These are declaration conflicts, not unsupported
+/// semantic property shapes, and therefore must not produce duplicate methods.
+#[test]
+fn member_extension_accessor_signature_collisions_are_rejected() {
+    let jdk = common::jdk_modules();
+    let cases: &[(&str, &str)] = &[
         // A source method can spell the exact accessor JVM signature. Registering both would emit
         // duplicate `getToken(I)Ljava/lang/String;` methods; the class must be rejected instead of
         // relying on the JVM to fail while loading it.
@@ -555,7 +590,7 @@ fun box(): String = with(SyntheticOwner()) { 1.token }
         assert_ne!(
             outcome,
             Some(common::BackendOutcome::Emitted),
-            "{stem}: unsupported member extension property shape must not emit (skip, never miscompile)"
+            "{stem}: conflicting accessor declarations must not emit duplicate methods"
         );
     }
 }

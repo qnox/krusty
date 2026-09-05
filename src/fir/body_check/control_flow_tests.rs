@@ -404,6 +404,24 @@ fn nullable_primitive_and_scalar_identity_keep_semantic_operand_types() {
 }
 
 #[test]
+fn string_referential_equality_is_a_checked_fir_operation() {
+    let (body, _) = checked_function_body(
+        "fun same(left: String, right: String): Boolean = left === right\n",
+        "same",
+    );
+    let root = body
+        .expr(root_expression(&body))
+        .expect("checked String referential equality");
+    assert!(matches!(
+        root.kind,
+        FirExprKind::Binary {
+            operation: FirBinaryOperation::ReferentialEqual,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn string_referential_inequality_is_a_checked_fir_operation() {
     let (body, _) = checked_function_body(
         "fun different(left: String?, right: String?): Boolean = left !== right\n",

@@ -51,6 +51,10 @@ pub struct BackendClassifierFact {
     pub supertypes: Box<[TypeName]>,
     /// Functions and property accessors in semantic declaration order.
     pub surface: Box<[BackendMemberFact]>,
+    /// Number of leading semantic type parameters declared by this classifier itself. Remaining
+    /// parameters are lexical captures used by common checking, not parameters of its backend
+    /// declaration.
+    pub own_type_parameter_count: usize,
     pub type_param_variances: Box<[TypeVariance]>,
     pub value_underlying: Option<Ty>,
 }
@@ -130,6 +134,7 @@ impl BackendClassifierFact {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             surface: surface.into_boxed_slice(),
+            own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape
                 .type_param_variances()
                 .iter()
@@ -250,6 +255,7 @@ pub struct BackendModuleFacts {
     /// only the identity prevents an accidental lookup of a same-named dependency classifier.
     body_local_classifiers: HashSet<TypeName>,
     source_value_classes: HashMap<TypeName, Ty>,
+    metadata_readable_value_classes: HashSet<TypeName>,
 }
 
 impl BackendModuleFacts {
@@ -261,6 +267,7 @@ impl BackendModuleFacts {
         let mut classifiers = HashMap::new();
         let mut body_local_classifiers = HashSet::new();
         let mut source_value_classes = HashMap::new();
+        let mut metadata_readable_value_classes = HashSet::new();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
                 u32::try_from(raw).expect("too many stable declarations for a packed id"),
@@ -325,6 +332,11 @@ impl BackendModuleFacts {
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice();
+            let own_type_parameter_count = index
+                .classifier_own_type_parameter_count(declaration)
+                .ok_or(BackendFactError::IncompleteClassifier(
+                    classifier.classifier,
+                ))? as usize;
             let mut surface = Vec::new();
             let mut value_underlying = None;
             for child_raw in 0..index.declaration_count() {
@@ -342,6 +354,9 @@ impl BackendModuleFacts {
                 };
                 match anchor.kind {
                     crate::fir::DeclarationKind::Function => {
+                        if index.is_suppressed_generated_callable(child) {
+                            continue;
+                        }
                         let signature = index.signature(child).ok_or(
                             BackendFactError::IncompleteClassifier(classifier.classifier),
                         )?;
@@ -492,11 +507,23 @@ impl BackendModuleFacts {
                     .map(|(_, member)| member)
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
+                own_type_parameter_count,
                 type_param_variances,
                 value_underlying,
             };
             if let Some(underlying) = value_underlying {
                 source_value_classes.insert(classifier.classifier, underlying);
+                let has_secondary_constructor = (0..index.declaration_count()).any(|raw| {
+                    let child = crate::fir::DeclarationId::from_raw(raw as u32);
+                    index.declaration_anchor(child).is_some_and(|anchor| {
+                        anchor.owner == Some(declaration)
+                            && anchor.kind == crate::fir::DeclarationKind::Constructor
+                            && anchor.sibling > 0
+                    })
+                });
+                if !has_secondary_constructor {
+                    metadata_readable_value_classes.insert(classifier.classifier);
+                }
             }
             classifiers.insert(classifier.classifier, Arc::new(fact));
         }
@@ -504,6 +531,7 @@ impl BackendModuleFacts {
             classifiers,
             body_local_classifiers,
             source_value_classes,
+            metadata_readable_value_classes,
         })
     }
 
@@ -514,6 +542,7 @@ impl BackendModuleFacts {
     ) -> Result<Self, BackendFactError> {
         let mut classifiers = HashMap::new();
         let mut source_value_classes = HashMap::new();
+        let mut metadata_readable_value_classes = HashSet::new();
         for (classifier, shape) in source {
             if classifiers.contains_key(&classifier) {
                 continue;
@@ -521,6 +550,7 @@ impl BackendModuleFacts {
             validate_classifier(classifier, &shape)?;
             if let Some(underlying) = shape.value_underlying {
                 source_value_classes.insert(classifier, underlying);
+                metadata_readable_value_classes.insert(classifier);
             }
             classifiers.insert(
                 classifier,
@@ -531,6 +561,7 @@ impl BackendModuleFacts {
             classifiers,
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
+            metadata_readable_value_classes,
         })
     }
 
@@ -550,6 +581,10 @@ impl BackendModuleFacts {
 
     pub fn source_value_classes(&self) -> &HashMap<TypeName, Ty> {
         &self.source_value_classes
+    }
+
+    pub fn metadata_readable_value_classes(&self) -> &HashSet<TypeName> {
+        &self.metadata_readable_value_classes
     }
 }
 

@@ -3,6 +3,43 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
+    /// The classifier that owns a declaration whose syntax is physically duplicated from the
+    /// primary constructor header. Its nested declarations and type parameters are lexically
+    /// visible there even though no dispatch receiver exists yet. Nested classifiers inherited by
+    /// the owner form a distinct fallback rung after file/import lookup.
+    pub(super) fn classifier_header_scope_owner(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<crate::fir::DeclarationId> {
+        let anchor = self.headers.declarations.anchor(declaration)?;
+        let owner = anchor.owner?;
+        let owner_header = self.headers.syntax.declaration(owner)?;
+        let crate::fir::HeaderDeclarationKind::Classifier {
+            primary_parameters, ..
+        } = owner_header.kind
+        else {
+            return None;
+        };
+        match anchor.kind {
+            crate::fir::DeclarationKind::Constructor if anchor.sibling == 0 => Some(owner),
+            crate::fir::DeclarationKind::Property => self
+                .headers
+                .syntax
+                .parameters(primary_parameters)
+                .get(anchor.sibling as usize)
+                .filter(|parameter| parameter.flags.is_property() && parameter.span == anchor.range)
+                .map(|_| owner),
+            crate::fir::DeclarationKind::Function
+            | crate::fir::DeclarationKind::Classifier
+            | crate::fir::DeclarationKind::TypeAlias
+            | crate::fir::DeclarationKind::Accessor
+            | crate::fir::DeclarationKind::Initializer
+            | crate::fir::DeclarationKind::EnumEntry
+            | crate::fir::DeclarationKind::Script
+            | crate::fir::DeclarationKind::Constructor => None,
+        }
+    }
+
     /// A contextual lambda has the function type requested by its call site once its body result is
     /// accepted by the ordinary subtype relation. An unresolved expected type parameter remains an
     /// inference target, so its concrete body result continues through the compact constraint graph.
@@ -66,6 +103,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         lexical: &super::super::CheckerScope<'_>,
         reference: &'a TypeRef,
+        include_scope_owner_body: bool,
     ) -> &'a TypeRef {
         let nested = reference
             .fun_params
@@ -74,10 +112,15 @@ impl ProductionSignatureSemantics<'_> {
             .chain(reference.targs.iter());
         for component in nested {
             if self
-                .signature_type_ref_at(scope, lexical, component, true)
+                .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
                 .is_none()
             {
-                return self.unresolved_signature_type_ref(scope, lexical, component);
+                return self.unresolved_signature_type_ref(
+                    scope,
+                    lexical,
+                    component,
+                    include_scope_owner_body,
+                );
             }
         }
         reference
@@ -95,7 +138,7 @@ impl ProductionSignatureSemantics<'_> {
         self.signature_type_ref_at(scope, lexical, reference, false)
     }
 
-    fn signature_type_ref_at(
+    pub(super) fn signature_type_ref_at(
         &self,
         scope: crate::fir::SignatureScope,
         lexical: &super::super::CheckerScope<'_>,
@@ -135,7 +178,7 @@ impl ProductionSignatureSemantics<'_> {
                 .and_then(|receiver| self.headers.syntax.ty(receiver))
                 .is_some_and(|receiver| receiver.span == reference.span);
         if associated_receiver && reference.targs.is_empty() {
-            if let Some((_, expansion)) =
+            if let Some((_, _, expansion)) =
                 self.signature_source_alias_expansion(scope, &reference.name)
             {
                 if let Some(classifier) = expansion.non_null().obj_internal() {
@@ -162,9 +205,94 @@ impl ProductionSignatureSemantics<'_> {
         }
         // Classifier before leaf, matching `Checker::type_ref_ty`: a declared classifier outranks a
         // builtin spelling of the same name.
-        if let Some(internal) =
-            lexical_classifier.or_else(|| self.qualified_classifier(scope, &reference.name))
+        if let Some(internal) = lexical_classifier
+            .or_else(|| self.qualified_classifier(scope, &reference.name))
+            .or_else(|| {
+                self.classifier_header_scope_owner(scope.owner)
+                    .and_then(|owner| {
+                        self.classifier_header_inherited_classifier(scope, owner, &reference.name)
+                    })
+            })
         {
+            if !self.table.declaration_suppresses_visibility(scope.owner) {
+                let access = self
+                    .with_resolver(scope, |resolver| {
+                        resolver.inaccessible_classifier_access(internal)
+                    })
+                    .ok();
+                crate::trace_compiler!(
+                    "resolve",
+                    "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+                    scope.owner,
+                    scope.source,
+                    reference.name,
+                    internal,
+                );
+                if let Some(access) = access {
+                    self.record_classifier_access_diagnostic_at(
+                        scope.owner,
+                        scope.source,
+                        reference.span,
+                        internal,
+                        super::super::inaccessible_classifier_message(&reference.name, access),
+                    );
+                }
+            }
+            let type_param_variances = self
+                .with_resolver(scope, |resolver| {
+                    resolver
+                        .classifier(internal)
+                        .map(|classifier| classifier.type_param_variances.clone())
+                })
+                .ok()
+                .unwrap_or_default();
+            if let Some(argument) =
+                reference
+                    .targs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, argument)| {
+                        let variance = type_param_variances.get(index).copied().unwrap_or_default();
+                        matches!(
+                            (
+                                variance,
+                                argument.in_projection(),
+                                argument.out_projection()
+                            ),
+                            (crate::types::TypeVariance::Out, true, _)
+                                | (crate::types::TypeVariance::In, _, true)
+                        )
+                        .then_some(argument)
+                    })
+            {
+                let mut display = super::super::BoundedSourceDisplay::new(usize::MAX);
+                use std::fmt::Write as _;
+                display
+                    .write_str(internal.nested_segment_ref())
+                    .expect("unbounded type display");
+                display.write_str("<").expect("unbounded type display");
+                super::super::write_source_type_list_with(
+                    &mut display,
+                    &reference.targs,
+                    &mut super::super::write_source_type_leaf,
+                )
+                .expect("unbounded type display");
+                display.write_str(">").expect("unbounded type display");
+                let projection_prefix = if argument.in_projection() { 3 } else { 4 };
+                self.record_source_diagnostic_at(
+                    scope.owner,
+                    scope.source,
+                    Span::new(
+                        argument.span.lo.saturating_sub(projection_prefix),
+                        argument.span.hi,
+                    ),
+                    format!(
+                        "projection conflicts with variance of the corresponding type parameter of '{}'. Remove the projection or replace it with '*'.",
+                        display.finish(),
+                    ),
+                );
+                return Some(Ty::Error);
+            }
             let fallback_star_bound = Ty::nullable(Ty::obj("kotlin/Any"));
             let classifier = self.table.class_by_type_name(internal);
             let captured_count = classifier.map_or(0, |classifier| {
@@ -291,7 +419,32 @@ impl ProductionSignatureSemantics<'_> {
         reference: &TypeRef,
         include_scope_owner_body: bool,
     ) -> Option<Ty> {
-        let (formals, expansion) = self.signature_source_alias_expansion(scope, &reference.name)?;
+        let (identity, formals, expansion) =
+            self.signature_source_alias_expansion(scope, &reference.name)?;
+        let selected_classifier = self.qualified_classifier(scope, &reference.name);
+        // Compare with the declaration-owned alias target, not with the storage variant of its
+        // expansion. A structural function expansion is `Ty::Fun`, while dependency metadata
+        // correctly records its classifier target; deriving the head from `Ty::Obj` would reject
+        // that legitimate alias and deriving it from backend representation would leak platform
+        // policy into signature resolution.
+        let expansion_head = self
+            .table
+            .source_alias_fqns
+            .get(&identity)
+            .copied()
+            .or_else(|| {
+                self.table
+                    .libraries
+                    .type_alias_expansion(identity)
+                    .map(|alias| alias.target)
+            })
+            .or_else(|| expansion.non_null().obj_internal());
+        if selected_classifier.is_some() && selected_classifier != expansion_head {
+            // A nearer class declaration owns this spelling. The imported alias is not a fallback
+            // template for that unrelated class, including when the alias expands to a function
+            // type and therefore has no classifier head at all.
+            return None;
+        }
         crate::trace_compiler!(
             "signature",
             "compact typealias use spelling={} formals={formals:?} template={expansion:?}",
@@ -345,7 +498,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
-    ) -> Option<(Vec<String>, Ty)> {
+    ) -> Option<(crate::types::TypeName, Vec<String>, Ty)> {
         if spelling.contains('.') || spelling.contains('/') {
             return None;
         }
@@ -388,7 +541,7 @@ impl ProductionSignatureSemantics<'_> {
             }
             found?
         };
-        expansion(identity)
+        expansion(identity).map(|(formals, expansion)| (identity, formals, expansion))
     }
 
     pub(super) fn qualified_classifier(
@@ -407,8 +560,8 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> (Option<crate::types::TypeName>, Option<String>) {
-        let mut segments = spelling.split('.');
-        let Some(first) = segments.next() else {
+        let segments = spelling.split('.').collect::<Vec<_>>();
+        let Some(&first) = segments.first() else {
             return (None, Some(spelling.to_string()));
         };
         let mut lexical_owners = Vec::new();
@@ -428,13 +581,74 @@ impl ProductionSignatureSemantics<'_> {
             }
             owner = anchor.owner;
         }
+        let header_scope = self.classifier_header_scope_owner(scope.owner).is_some()
+            || self
+                .headers
+                .declarations
+                .anchor(scope.owner)
+                .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::Classifier);
         self.with_resolver(scope, |resolver| {
             let mut current = None;
-            for owner in lexical_owners {
-                match resolver.nested_classifier(Ty::obj_name(owner), first) {
+            let mut scope_failure = None;
+            // A declaration nested directly in the lexical owner is the nearest classifier rung.
+            // In an ordinary class body, inherited nested classifiers are the next rung. A class
+            // or primary-constructor header has not entered that inherited body scope yet, so its
+            // file/import rung precedes inherited fallback.
+            for &owner in &lexical_owners {
+                let candidate = owner
+                    .existing_nested_child(first)
+                    .unwrap_or_else(|| crate::types::type_name_nested_child(owner, first));
+                if resolver.classifier(candidate).is_some() {
+                    current = Some(candidate);
+                    break;
+                }
+            }
+            let inherited = || {
+                for &owner in &lexical_owners {
+                    match resolver.nested_classifier(Ty::obj_name(owner), first) {
+                        crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                            return crate::symbol_resolver::CandidateSelection::Selected(
+                                classifier,
+                            );
+                        }
+                        crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                            return crate::symbol_resolver::CandidateSelection::Ambiguous;
+                        }
+                        crate::symbol_resolver::CandidateSelection::None => {}
+                    }
+                }
+                crate::symbol_resolver::CandidateSelection::None
+            };
+            if current.is_none() && !header_scope {
+                match inherited() {
                     crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                         current = Some(classifier);
-                        break;
+                    }
+                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                        return Some((None, Some(first.to_string())));
+                    }
+                    crate::symbol_resolver::CandidateSelection::None => {}
+                }
+            }
+            if current.is_none() {
+                let (selection, failed_segment) =
+                    resolver.qualified_classifier_binding_in_scope(spelling);
+                match selection {
+                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                        return Some((Some(classifier), None));
+                    }
+                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                        return Some((None, failed_segment));
+                    }
+                    crate::symbol_resolver::CandidateSelection::None => {
+                        scope_failure = failed_segment;
+                    }
+                }
+            }
+            if current.is_none() && header_scope {
+                match inherited() {
+                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                        current = Some(classifier);
                     }
                     crate::symbol_resolver::CandidateSelection::Ambiguous => {
                         return Some((None, Some(first.to_string())));
@@ -445,20 +659,10 @@ impl ProductionSignatureSemantics<'_> {
             let mut current = match current {
                 Some(classifier) => classifier,
                 None => {
-                    let (selection, failed_segment) =
-                        resolver.qualified_classifier_binding_in_scope(spelling);
-                    return Some(match selection {
-                        crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                            (Some(classifier), None)
-                        }
-                        crate::symbol_resolver::CandidateSelection::None
-                        | crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                            (None, failed_segment)
-                        }
-                    });
+                    return Some((None, scope_failure.or_else(|| Some(first.to_string()))));
                 }
             };
-            for segment in segments {
+            for segment in &segments[1..] {
                 let candidate = current
                     .existing_nested_child(segment)
                     .unwrap_or_else(|| crate::types::type_name_nested_child(current, segment));
@@ -996,6 +1200,52 @@ impl ProductionSignatureSemantics<'_> {
                     .contains_key(&candidate)
                     .then_some(candidate)
             })
+    }
+
+    /// Inherited nested classifiers of the classifier whose own header is being resolved. This is
+    /// deliberately consulted only after lexical/package/import lookup: Kotlin accepts a package
+    /// `Category` in `class Child(x: Category) : Left, Right` even when both supertypes declare a
+    /// nested `Category`, while the inherited declaration remains visible when no nearer binding
+    /// exists.
+    fn classifier_header_inherited_classifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+        header_owner: crate::fir::DeclarationId,
+        spelling: &str,
+    ) -> Option<crate::types::TypeName> {
+        if spelling.contains('.') {
+            return None;
+        }
+        let owner = self.classifier_types.get(&header_owner).copied()?;
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let roots = crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
+            .into_iter()
+            .filter_map(Ty::obj_internal)
+            .collect::<Vec<_>>();
+        match crate::symbol_resolver::inherited_nested_classifier_name(
+            spelling,
+            roots,
+            |candidate| {
+                crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(candidate))
+                    .into_iter()
+                    .filter_map(Ty::obj_internal)
+                    .collect()
+            },
+            |candidate| {
+                crate::symbol_resolver::inherited_classifier_shape(&source, candidate, owner)
+                    .is_some()
+            },
+        ) {
+            crate::symbol_resolver::InheritedNestedClassifier::Found(classifier) => {
+                Some(classifier)
+            }
+            crate::symbol_resolver::InheritedNestedClassifier::NotFound
+            | crate::symbol_resolver::InheritedNestedClassifier::Ambiguous => None,
+        }
     }
 
     pub(super) fn member_extension_property_for(

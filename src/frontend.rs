@@ -389,6 +389,42 @@ fn actualize_headers_and_collect_inherited_defaults(
     (crate::fir::matched_expect_declarations(headers), work)
 }
 
+/// Reject every top-level expect subtree for which compact actualization found no platform root.
+/// This is a source-set semantic check, not a consequence of whether a particular expect spelling
+/// happens to have an executable body. Reporting it before exclusion also prevents body checking
+/// or a backend from accidentally treating a body-less expect function as an abstract declaration.
+fn report_unmatched_expect_roots(
+    headers: &crate::fir::StreamedHeaderModule,
+    matched: &std::collections::HashSet<crate::fir::DeclarationId>,
+    symbols: &FrontendSymbols,
+    rejected_sources: &mut [bool],
+    diags: &mut DiagSink,
+) {
+    for stub in headers.stubs.iter().filter(|stub| {
+        stub.flags.has(crate::fir::DeclarationFlags::EXPECT)
+            && headers
+                .declarations
+                .anchor(stub.id)
+                .is_some_and(|anchor| anchor.owner.is_none())
+            && !matched.contains(&stub.id)
+            && !symbols.is_source_optional_expectation(stub.id)
+    }) {
+        let source = stub.source.raw() as usize;
+        if let Some(rejected) = rejected_sources.get_mut(source) {
+            *rejected = true;
+        }
+        diags.set_file(stub.source.raw());
+        let name = stub
+            .lookup_name
+            .and_then(|name| headers.lookup_names.get(name))
+            .unwrap_or("<anonymous>");
+        diags.error(
+            stub.range,
+            format!("expected declaration '{name}' has no actual declaration in this module"),
+        );
+    }
+}
+
 fn signature_default_work(
     headers: &crate::fir::StreamedHeaderModule,
     inherited: &[crate::fir::DefaultArgumentProvider],
@@ -861,7 +897,7 @@ where
         diags.set_file(error.source as u32);
         diags.error(Span::new(0, 0), error.message);
     }
-    let mut signature_default_work_items = if multiplatform {
+    let (mut signature_default_work_items, matched_expect_declarations) = if multiplatform {
         let (matched, defaults) =
             actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
         pass1_headers.exclude_declaration_subtrees(&matched);
@@ -885,9 +921,12 @@ where
                 }
             }
         }
-        signature_default_work_items
+        (signature_default_work_items, matched)
     } else {
-        signature_default_work(&pass1_headers, &[])
+        (
+            signature_default_work(&pass1_headers, &[]),
+            std::collections::HashSet::new(),
+        )
     };
     let platform = if inferred_count < files.len() {
         let mut dependency_diags = DiagSink::new();
@@ -918,6 +957,15 @@ where
         platform,
         diags,
     );
+    if multiplatform {
+        report_unmatched_expect_roots(
+            &pass1_headers,
+            &matched_expect_declarations,
+            &symbols,
+            &mut parse_errors,
+            diags,
+        );
+    }
     prepare_symbols(&files, &mut symbols);
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
     let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
@@ -965,6 +1013,10 @@ where
     let mut recovery_streamed = None;
     let pending_streamed = if streamed_index.failures.is_empty() {
         let mut index = streamed_index.index;
+        // Finalized signatures and their stable declaration ancestry form one Pass-1 product.
+        // Publish the inventory before deriving declaration-owned metadata such as enum-entry
+        // override edges; those entries deliberately have no ordinary classifier header.
+        pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
         // A `const val` initializer is a stable declaration dependency. Check each such bounded
@@ -981,7 +1033,6 @@ where
             &index,
             &mut signature_default_work_items,
         );
-        pass1_headers.publish_declaration_inventory(&mut index);
         // Defaults are signature-owned executable fragments. Check and detach them before the
         // compact header environment is consumed; no provider root or source locator crosses
         // this boundary.

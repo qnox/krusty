@@ -37,9 +37,20 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                     }
                 });
             }
-            IrCheckedOperation::BackingFieldRead { .. }
-            | IrCheckedOperation::LateinitFieldRead { .. } => {}
-            IrCheckedOperation::BackingFieldWrite { value, .. } => f(*value),
+            IrCheckedOperation::BackingFieldRead {
+                dispatch_receiver, ..
+            }
+            | IrCheckedOperation::LateinitFieldRead {
+                dispatch_receiver, ..
+            } => dispatch_receiver.iter().for_each(|&receiver| f(receiver)),
+            IrCheckedOperation::BackingFieldWrite {
+                dispatch_receiver,
+                value,
+                ..
+            } => {
+                dispatch_receiver.iter().for_each(|&receiver| f(receiver));
+                f(*value);
+            }
             IrCheckedOperation::PropertyRead {
                 dispatch_receiver,
                 extension_receiver,
@@ -254,58 +265,12 @@ pub fn value_tails(exprs: &[IrExpr], expression: ExprId, out: &mut Vec<ExprId>) 
     }
 }
 
-/// Whether a top-level `foo$default` synthetic can be SAFELY emitted for `fid`. The function name must be
-/// unmangled — a value-class-parameter-mangled `foo-<hash>` needs box/unbox adaptation the plain facade
-/// stub doesn't model — and every registered default expression must be simple enough to re-emit inside
-/// the stub: no lambda, no `invoke`, no value-class-mangled call, and no reference to a value index beyond
-/// the parameters (a default that spilled a temp or captured a closure). A plain OBJECT/`new` construction
-/// (`filters: F = F()`) IS allowed — the stub re-emits it like any other value. Conservative — an unknown
-/// shape is rejected, so the caller falls back to the unchanged inline call-site fill (never a miscompile).
+/// Whether a top-level `foo$default` synthetic can be safely emitted for `fid`. Every registered
+/// default expression must be self-contained in the synthetic frame: no unresolved invocation and no
+/// reference to a value index beyond the parameters or locals declared by the default itself. Physical
+/// value-class adaptation is a backend responsibility and is therefore not guessed here.
 pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     let f = &ir.functions[fid as usize];
-    // This gate runs at TWO times: during lowering (call-site routing, before the value-class pass)
-    // and at emission (stub gating, after it). The value-class pass MANGLES a function whose
-    // parameters mention a value class (`foo` → `foo-<hash>`) and erases those parameter types; the
-    // stub follows along (`foo-<hash>$default(erased params…)`, kotlinc's shape), so a value-class
-    // signature is allowed — with carve-outs the erased stub can't model, checked by whichever
-    // evidence the current time has: pre-pass by the still-value-class-typed parameters, post-pass
-    // by the mangled name / the pass's own records. Both runs must agree for every carve-out the
-    // POST-pass can see, or a call is routed to a stub that is never emitted (NoSuchMethodError);
-    // a pre-pass-only rejection merely leaves an uncalled stub. (Only the PARAMETERS matter: a
-    // file-class function's value-class return does not mangle its name — see `vc_mangle`.)
-    let vc_of = |t: &Ty| {
-        t.non_null()
-            .obj_internal()
-            .filter(|&n| ir.is_value_class_name(n))
-    };
-    let vc_params: Vec<TypeName> = f.params.iter().filter_map(vc_of).collect();
-    if f.name.contains('-') || !vc_params.is_empty() {
-        // A `suspend` function's CPS rewrite appends a trailing `Continuation` — for the stub it is
-        // just another loaded parameter (kotlinc: `pick-<hash>$default(int, String, Continuation,
-        // int, Object)` delegating to the CPS method). The mask covers only the DECLARED defaulted
-        // parameters, and the stub-safe gate already restricts defaults to simple constants, which
-        // cannot suspend — so the shape is modeled.
-        // A NULLABLE-underlying value-class param stays BOXED in kotlinc's stub signature; the plain
-        // facade stub emits fully erased params — not modeled. Post-pass evidence: the value-class
-        // pass recorded the boxed stub params (`vc_underlying_nullable`, which also recurses through
-        // a nested-VC underlying). Pre-pass evidence: the underlying's DIRECT nullability — the
-        // recursive nested case is covered by the nested-VC reject below, so the two runs agree.
-        if ir
-            .default_stub_boxed_params
-            .get(&fid)
-            .is_some_and(|v| !v.is_empty())
-        {
-            return false;
-        }
-        for &n in &vc_params {
-            // A GENERIC value class (`X<T>(val s: T)`) or a NESTED value-class underlying erases
-            // through extra layers the placeholder/adaptation here doesn't cover — conservative
-            // pre-pass reject (post-pass still emits the stub; it just gets no routed calls).
-            if !vc_stub_shape_ok(ir, n) {
-                return false;
-            }
-        }
-    }
     // A user function literally named `<name>$default` (a back-ticked identifier) would collide with the
     // synthetic — don't emit the stub (kotlinc also treats that as a conflicting declaration).
     let stub_name = format!("{}$default", f.name);
@@ -328,122 +293,18 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
             return true;
         };
         let expression_safe = default_expr_stub_safe(ir, *default, n);
-        let slot_safe = default_root_slot_ok(ir, *default, f.params.get(parameter));
         crate::trace_compiler!(
             "lower",
-            "default stub safety function={} parameter={} expression={} expression_safe={} slot_safe={} slot={:?} erased_value={:?} logical={:?}",
+            "default stub safety function={} parameter={} expression={} expression_safe={} slot={:?} logical={:?}",
             f.name,
             parameter,
             default,
             expression_safe,
-            slot_safe,
             f.params.get(parameter),
-            ir.erased_value_constructions.get(default),
             ir.logical_types.get(default),
         );
-        expression_safe && slot_safe
+        expression_safe
     })
-}
-
-/// The erased representations must MATCH where a default value lands: a value-class construction
-/// default (`z: Z = Z(42)`) re-emits as the unboxed `constructor-impl` call, so it can only fill a
-/// slot whose erased type IS that underlying — i.e. a parameter of exactly the same NON-nullable
-/// value class. A `Z?` (boxed slot), `Any`, or interface parameter would need a `box-impl` the
-/// erased stub doesn't model — rejected (a pre-pass-only reject merely leaves an uncalled stub:
-/// post-pass the default is already a rewritten call and passes trivially).
-fn default_root_slot_ok(ir: &IrFile, e: ExprId, param: Option<&Ty>) -> bool {
-    let mut tails = Vec::new();
-    value_tails(&ir.exprs, e, &mut tails);
-    !tails.is_empty()
-        && tails
-            .into_iter()
-            .all(|tail| default_tail_slot_ok(ir, tail, param))
-}
-
-fn default_tail_slot_ok(ir: &IrFile, e: ExprId, param: Option<&Ty>) -> bool {
-    // Post-pass view: provenance recorded while rewriting the generic construction tells us the
-    // expression's erased result without inspecting a JVM helper name. The erased slot must be exactly
-    // that underlying type; a boxed or generic slot would require adaptation the facade does not model.
-    if let Some((_, underlying)) = ir.erased_value_constructions.get(&e) {
-        return param.is_some_and(|param| param == underlying);
-    }
-    match &ir.exprs[e as usize] {
-        // Pre-pass view: the default is a value-class `new` — the slot must be exactly the same
-        // NON-nullable value class (erased representations match).
-        IrExpr::New { internal, .. } if ir.is_value_class_name(*internal) => {
-            param.is_some_and(|p| !p.is_nullable() && p.obj_internal() == Some(*internal))
-        }
-        // A MANGLED classpath call returns the ERASED underlying (that is what the mangling
-        // means), so it can only fill a slot erased the same way — the same non-nullable value
-        // class pre-pass, or its erased underlying post-pass (the value-class pass has already
-        // rewritten the parameter). A boxed (`Duration?`) or widened slot would need a `box-impl`
-        // the erased stub doesn't model.
-        IrExpr::Call {
-            callee: Callee::Static { name, .. },
-            ..
-        } if name.contains('-') && !ir.erased_value_constructions.contains_key(&e) => {
-            let root_vc = ir
-                .logical_types
-                .get(&e)
-                .and_then(|t| t.non_null().obj_internal())
-                .filter(|&n| ir.is_value_class_name(n));
-            root_vc.is_some_and(|n| {
-                param.is_some_and(|p| {
-                    (!p.is_nullable() && p.obj_internal() == Some(n))
-                        || ir
-                            .value_class_underlying_name(n)
-                            .is_some_and(|underlying| *p == underlying)
-                })
-            })
-        }
-        root => {
-            // A param whose erased slot is PRIMITIVE (pre-pass: a non-nullable value-class param
-            // over a primitive underlying; post-pass: the already-erased param) can only be filled
-            // by a root carrying the erased representation — a const, a local slot, or a
-            // construction (handled above). Any OTHER value-class-typed root (a field/getter read,
-            // a coercion) carries the BOXED representation — stored raw in the stub, it fails
-            // class-load verification.
-            let primitive_slot = param.is_some_and(|p| {
-                !p.is_reference()
-                    || (!p.is_nullable()
-                        && p.obj_internal()
-                            .and_then(|name| ir.value_class_underlying_name(name))
-                            .is_some_and(|underlying| !underlying.is_reference()))
-            });
-            if !primitive_slot {
-                return true;
-            }
-            let root_is_vc = ir.logical_types.get(&e).is_some_and(|t| {
-                t.non_null()
-                    .obj_internal()
-                    .is_some_and(|name| ir.is_value_class_name(name))
-            });
-            !root_is_vc || matches!(root, IrExpr::Const(_) | IrExpr::GetValue(_))
-        }
-    }
-}
-
-/// Whether a value class is simple enough for the erased `$default` stub: non-generic, with a
-/// resolvable, non-nullable, non-nested-VC underlying — the carve-outs of
-/// [`toplevel_default_stub_safe`], shared by the parameter check and the default-expression
-/// construction check ([`default_expr_stub_safe`]).
-fn vc_stub_shape_ok(ir: &IrFile, n: TypeName) -> bool {
-    let vc_of = |t: &Ty| {
-        t.non_null()
-            .obj_internal()
-            .filter(|&name| ir.is_value_class_name(name))
-    };
-    let same_file = ir.classes.iter().find(|c| c.is_value && c.fq_name == n);
-    if same_file.is_some_and(|c| !c.type_params.is_empty()) {
-        return false;
-    }
-    let underlying = ir.value_class_underlying_name(n);
-    match underlying {
-        Some(u) if u.is_nullable() => false,
-        Some(u) if vc_of(&u).is_some() => false,
-        Some(_) => true,
-        None => false,
-    }
 }
 
 fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
@@ -491,16 +352,8 @@ fn default_expr_stub_safe_with_locals(
             return false;
         }
         // A plain `new`/object construction (`f: F = F()`) is fine — the stub re-emits it. A
-        // VALUE/inline-class construction erases to its unboxed underlying — but the value-class
-        // pass rewrites it to a plain `constructor-impl` static call in registered defaults exactly
-        // as in function bodies, so the erased stub CAN re-emit it — behind the same carve-outs as
-        // a value-class parameter (a generic / nullable-underlying / nested-VC shape keeps the
-        // conservative reject: the file falls back to the inline call-site fill / skip).
-        IrExpr::New { internal, .. }
-            if ir.is_value_class_name(*internal) && !vc_stub_shape_ok(ir, *internal) =>
-        {
-            return false;
-        }
+        // VALUE/inline-class construction is also re-emittable: the target representation pass
+        // rewrites and adapts it to the physical default-stub slot.
         // A default LAMBDA (`f: (Int) -> Int = { it + 1 }`) is re-emittable: the closure construction
         // only reads its captures, and those are checked as children (a capture of a spilled temp /
         // enclosing local — any value `>= n` — rejects above). Its `inline_body` is in the lambda's OWN
@@ -520,12 +373,12 @@ fn default_expr_stub_safe_with_locals(
             // bypass the conservative mangled-call gate.
             && !ir.erased_value_constructions.contains_key(&e) =>
         {
-            // EXCEPT a mangled call whose checked RESULT is a stub-modelable value class
+            // EXCEPT a mangled call whose checked RESULT is a value class
             // (`timeout: Duration = 60.seconds` — a classpath companion-extension getter): the
             // mangling means the physical return already IS the erased underlying, which is
-            // exactly the representation the erased stub passes along. Whether the SLOT agrees is
-            // [`default_root_slot_ok`]'s question. Both gate runs see the same evidence — a
-            // classpath callee carries its mangled JVM name before and after the value-class pass.
+            // a representation the target pass can adapt to the selected stub slot. Both gate runs
+            // see the same semantic result evidence — a classpath callee carries its mangled JVM
+            // name before and after the value-class pass.
             let vc_result = ir
                 .logical_types
                 .get(&e)
@@ -533,7 +386,7 @@ fn default_expr_stub_safe_with_locals(
                 .filter(|&n| ir.is_value_class_name(n));
             let exact_physical_result =
                 ir.logical_types.contains_key(&e) && ir.physical_types.contains_key(&e);
-            if !exact_physical_result && !vc_result.is_some_and(|n| vc_stub_shape_ok(ir, n)) {
+            if !exact_physical_result && vc_result.is_none() {
                 return false;
             }
         }

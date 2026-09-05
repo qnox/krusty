@@ -121,7 +121,7 @@ pub(super) fn attach_checked_declaration_metadata(
     if let Some(function) = active.function(file, selected_root) {
         attach_function_metadata(function, selected_root, info, index, ir);
     }
-    let Some((_declaration, class)) = active.class(file, selected_root) else {
+    let Some((source_class, class)) = active.class(file, selected_root) else {
         return;
     };
     let stable_class = selected_root;
@@ -167,26 +167,32 @@ pub(super) fn attach_checked_declaration_metadata(
             .insert(classifier, header.clone());
     }
 
-    for (property, source_property) in class
-        .props
-        .iter()
-        .map(|property| property.name.as_str())
-        .chain(
-            class
-                .body_props
-                .iter()
-                .map(|property| property.name.as_str()),
-        )
-        .enumerate()
-    {
-        let stable_property =
-            index.owned_declaration(stable_class, DeclarationKind::Property, property as u32);
-        if let Some(spelling) =
-            stable_property.and_then(|property| index.declaration_spellings(property))
+    let mut attach_property_spelling = |property: Option<DeclarationId>, name: &str| {
+        if let Some(spelling) = property.and_then(|property| index.declaration_spellings(property))
         {
             ir.prop_declared_spellings
-                .insert((classifier, source_property.to_owned()), spelling.clone());
+                .insert((classifier, name.to_owned()), spelling.clone());
         }
+    };
+    for (property_index, property) in class.props.iter().enumerate() {
+        if property.is_property {
+            attach_property_spelling(
+                active.constructor_property_declaration(
+                    source_class,
+                    u32::try_from(property_index).expect("too many constructor properties"),
+                ),
+                &property.name,
+            );
+        }
+    }
+    for (property_index, property) in class.body_props.iter().enumerate() {
+        attach_property_spelling(
+            active.class_body_property_declaration(
+                source_class,
+                u32::try_from(property_index).expect("too many class properties"),
+            ),
+            &property.name,
+        );
     }
 
     for (method, source_method) in class.methods.iter().enumerate() {

@@ -1,7 +1,7 @@
 use crate::fir::{DeclarationId, FirBody, ResolvedModuleIndex};
 use crate::ir::{
     IrCheckedArgument, IrCheckedConstructorBody, IrCheckedConstructorTarget, IrCheckedOperation,
-    IrCtorArg, IrExpr, IrFile, IrNodeOrigin,
+    IrConst, IrCtorArg, IrExpr, IrFile, IrNodeOrigin, IrTypeOp,
 };
 
 use super::checked_arguments::{
@@ -160,6 +160,13 @@ pub(super) fn finalize_constructors(
         let Some(delegation) = constructor.delegation else {
             continue;
         };
+        let (delegation, delegate_prelude) = match ir.expr(delegation) {
+            IrExpr::Block {
+                stmts,
+                value: Some(value),
+            } => (*value, stmts.clone()),
+            _ => (delegation, Vec::new()),
+        };
         let IrExpr::Checked(IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
@@ -231,6 +238,7 @@ pub(super) fn finalize_constructors(
                 ));
             }
             class.superclass = owner;
+            class.super_arg_prelude = delegate_prelude;
             class.super_args = arguments;
             class.super_ctor_params = parameters;
             if let Some(external_target) = external_target {
@@ -316,7 +324,7 @@ pub(super) fn finalize_constructors(
                     named_params,
                     vararg_index,
                     defaults,
-                    delegate_prelude: Vec::new(),
+                    delegate_prelude,
                     delegate_args: arguments,
                     default_parameters,
                     body: constructor.body,
@@ -382,6 +390,104 @@ fn constructor_arguments(
         .collect::<Option<Vec<_>>>()
         .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
     Ok((arguments, defaults))
+}
+
+/// Attach each source primary-constructor property parameter to the exact backing field selected by
+/// property lowering. Constructors arrive before property realization, so this runs immediately after
+/// `finalize_properties`; stable parameter/property ordinals and `PropertyId` layouts provide the edge
+/// without matching a source name or assuming fields are leading/contiguous.
+pub(super) fn finalize_constructor_field_indices(
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+) -> Result<(), FirFileLoweringFailure> {
+    let mut edges = Vec::new();
+    for (property_id, property) in &ir.checked_properties {
+        if !property
+            .flags
+            .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
+        {
+            continue;
+        }
+        let anchor = index.declaration_anchor(property.declaration).ok_or(
+            FirFileLoweringFailure::MissingProperty(property.declaration),
+        )?;
+        let Some(crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            backing_field: Some(field),
+            ..
+        }) = ir.local_property_layouts.get(property_id)
+        else {
+            return Err(FirFileLoweringFailure::MissingProperty(
+                property.declaration,
+            ));
+        };
+        let prefix = ir.classes[*class as usize].constructor_prefix_count;
+        let parameter = prefix
+            .checked_add(anchor.sibling)
+            .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
+        edges.push((*class, parameter, *field, property.declaration));
+    }
+    for (class, parameter, field, declaration) in edges {
+        let owner = ir.classes[class as usize].fq_name_id();
+        let default = ir
+            .class_ctor_defaults_name(owner)
+            .and_then(|defaults| defaults.get(parameter as usize))
+            .copied()
+            .flatten()
+            .and_then(|expression| {
+                checked_default_constant(
+                    ir,
+                    expression,
+                    ir.classes[class as usize].fields[field as usize].ty,
+                )
+            });
+        let argument = ir.classes[class as usize]
+            .ctor_args
+            .get_mut(parameter as usize)
+            .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
+        if !argument.is_field {
+            return Err(FirFileLoweringFailure::MissingProperty(declaration));
+        }
+        argument.field_index = Some(field);
+        ir.classes[class as usize].fields[field as usize].default = default;
+    }
+    Ok(())
+}
+
+/// Recover the constant value of a checked constructor default after its explicit FIR conversions
+/// have been lowered. This does not evaluate source syntax: only a constant and the already-selected
+/// representation coercions around it are admissible.
+fn checked_default_constant(
+    ir: &IrFile,
+    expression: u32,
+    target: crate::types::Ty,
+) -> Option<IrConst> {
+    let constant = match ir.expr(expression) {
+        IrExpr::Const(constant) => constant.clone(),
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } => checked_default_constant(ir, *arg, target)?,
+        _ => return None,
+    };
+    Some(match (target.non_null(), constant) {
+        (crate::types::Ty::Byte | crate::types::Ty::UByte, IrConst::Int(value)) => {
+            IrConst::Byte(value as i8)
+        }
+        (crate::types::Ty::Short | crate::types::Ty::UShort, IrConst::Int(value)) => {
+            IrConst::Short(value as i16)
+        }
+        (crate::types::Ty::Long | crate::types::Ty::ULong, IrConst::Int(value)) => {
+            IrConst::Long(value as i64)
+        }
+        (crate::types::Ty::Float, IrConst::Int(value)) => IrConst::Float(value as f32),
+        (crate::types::Ty::Float, IrConst::Long(value)) => IrConst::Float(value as f32),
+        (crate::types::Ty::Double, IrConst::Int(value)) => IrConst::Double(value as f64),
+        (crate::types::Ty::Double, IrConst::Long(value)) => IrConst::Double(value as f64),
+        (crate::types::Ty::Double, IrConst::Float(value)) => IrConst::Double(value as f64),
+        (_, constant) => constant,
+    })
 }
 
 pub(super) fn accept_constructor_body(
@@ -513,11 +619,15 @@ pub(super) fn accept_constructor_body(
     let delegation = roots
         .first()
         .copied()
-        .filter(|expression| {
-            matches!(
-                ir.expr(*expression),
+        .filter(|expression| match ir.expr(*expression) {
+            IrExpr::Checked(IrCheckedOperation::ConstructorDelegation { .. }) => true,
+            IrExpr::Block {
+                value: Some(value), ..
+            } => matches!(
+                ir.expr(*value),
                 IrExpr::Checked(IrCheckedOperation::ConstructorDelegation { .. })
-            )
+            ),
+            _ => false,
         })
         .map(|delegation| {
             roots.remove(0);
@@ -598,6 +708,7 @@ pub(super) fn accept_constructor_body(
                     ty: *ty,
                     declared_ty: Some(*semantic_ty),
                     is_field: flags.is_property(),
+                    field_index: None,
                     has_default: flags.has_default(),
                     is_vararg: flags.is_vararg(),
                     type_param: (!flags.is_vararg())

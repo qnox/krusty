@@ -32,25 +32,37 @@ pub enum SkipReason {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
-/// 2. `lower_companion_properties` — realize supported companion backing fields as JVM outer statics.
+///
+/// 2. `realize_top_level_jvm_fields` — select public field storage for eligible top-level
+///    `@JvmField` declarations through stable property/layout identities.
+///
+/// 3. `lower_companion_properties` — realize supported companion backing fields as JVM outer statics.
 ///    Common IR keeps the ordinary declaration and semantic initializer for other targets.
-/// 3. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
+///
+/// 4. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
 ///    initialization. Common IR retains them for targets without zero-initialized fields.
-/// 4. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+///
+/// 5. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
 ///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
 ///    declaration, so lowering records only the declarations and this pass derives the bridges.
-/// 5. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
-/// 6. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+///
+/// 6. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+///
+/// 7. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
-/// 7. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
-/// 8. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
-/// 9. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
-///    (`require`/`check`) message lambda; it is spliced at the call site.
-/// 10. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
-///    its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
-///    be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
-///    ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
-///    machines. Runs after all IR→IR transforms, before emit.
+///
+/// 8. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
+///
+/// 9. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+///
+/// 10. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+///     (`require`/`check`) message lambda; it is spliced at the call site.
+///
+/// 11. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+///     its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
+///     be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
+///     ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
+///     machines. Runs after all IR→IR transforms, before emit.
 ///
 /// Per-site concerns (timing counters, bail-reason strings, diagnostics) stay at the call sites.
 pub fn run_backend_passes(
@@ -93,10 +105,12 @@ pub fn run_backend_passes_with_metadata(
                 .map(|(_, ty)| (class.internal_name(), *ty))
         })
         .collect();
+    let module_readable_value_classes = module_value_classes.keys().copied().collect();
     run_backend_passes_after_plugins(
         ir,
         facade,
         &module_value_classes,
+        &module_readable_value_classes,
         classpath,
         continuation_metadata,
     )
@@ -109,6 +123,7 @@ pub fn run_backend_passes_with_checked_metadata(
     facade: &str,
     module_name: &str,
     module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
+    module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
@@ -117,6 +132,7 @@ pub fn run_backend_passes_with_checked_metadata(
         ir,
         facade,
         module_value_classes,
+        module_readable_value_classes,
         classpath,
         continuation_metadata,
     )
@@ -126,6 +142,7 @@ fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
     module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
+    module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
@@ -134,14 +151,22 @@ fn run_backend_passes_after_plugins(
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
     // together with its mangled getter.
     crate::jvm::property_annotations::synthesize_property_annotation_markers(ir);
+    // A package property remains a semantic declaration plus a checked common-IR layout. Join the
+    // stable identities here, where `@JvmField` becomes a JVM storage decision.
+    crate::jvm::property_storage::realize_top_level_jvm_fields(ir);
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::jvm::companion::lower_companion_properties(ir);
     // The JVM supplies default field values before any constructor runs. Elide only source
     // declaration stores recorded by exact ExprId; common IR and other targets keep them.
     crate::jvm::property_storage::elide_default_property_stores(ir);
+    // Kotlin parameter nullability is already fixed in common IR. Select the JVM's entry-guard
+    // realization before generic/value-class erasure changes the physical parameter types; those
+    // later representation passes may then remove a guard whose carrier becomes primitive.
+    crate::jvm::parameter_assertions::realize(ir);
     // Common IR retains source type-parameter identities and complete intersections. Select the JVM
     // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
+    crate::jvm::reified_operations::realize(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
@@ -153,13 +178,19 @@ fn run_backend_passes_after_plugins(
     // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
     // construction/member resolution for source value classes).
     crate::jvm::value_classes::apply_override_final_drop(ir);
-    if !crate::jvm::value_classes::lower_value_classes(ir, classpath, module_value_classes) {
+    if !crate::jvm::value_classes::lower_value_classes(
+        ir,
+        classpath,
+        module_value_classes,
+        module_readable_value_classes,
+    ) {
         return Err(SkipReason::ValueClasses);
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
     if !crate::jvm::suspend::lower_suspend(ir, facade, continuation_metadata) {
         return Err(SkipReason::Suspend);
     }
+    crate::jvm::ir_emit::realize_lambda_impl_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     Ok(())
@@ -709,7 +740,7 @@ impl JvmBackend {
             continuation_metadata,
             metadata,
             has_facade_members,
-            crate::jvm::module_calls::ModulePropertyRealizations::default(),
+            crate::jvm::property_realizations::PropertyRealizations::default(),
             state,
             diags,
         )
@@ -721,7 +752,7 @@ impl JvmBackend {
         classifiers: &CheckedBackendClassifiers<'_>,
         module_name: &str,
         stem: &str,
-        module_property_realizations: crate::jvm::module_calls::ModulePropertyRealizations,
+        property_realizations: crate::jvm::property_realizations::PropertyRealizations,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -733,10 +764,15 @@ impl JvmBackend {
             &facade_name,
             module_name,
             classifiers.module().source_value_classes(),
+            classifiers.module().metadata_readable_value_classes(),
             &self.cp,
             &mut continuation_metadata,
         ) {
             report_backend_pass_failure(reason, diags);
+            return Vec::new();
+        }
+        if let Err(message) = crate::jvm::declaration_collisions::validate(&ir) {
+            diags.error(crate::diag::Span::new(0, 0), message);
             return Vec::new();
         }
         let metadata = facade_package_metadata_from_ir(&ir, module_name);
@@ -754,7 +790,7 @@ impl JvmBackend {
             continuation_metadata,
             metadata,
             has_facade_members,
-            module_property_realizations,
+            property_realizations,
             state,
             diags,
         )
@@ -773,7 +809,7 @@ impl JvmBackend {
         continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
         metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
         has_facade_members: bool,
-        module_property_realizations: crate::jvm::module_calls::ModulePropertyRealizations,
+        property_realizations: crate::jvm::property_realizations::PropertyRealizations,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -804,8 +840,10 @@ impl JvmBackend {
                     emit_metadata,
                     &emit_opts,
                     &run,
-                    symbols,
-                    &module_property_realizations,
+                    crate::jvm::ir_emit::LegacyEmitContext {
+                        symbols,
+                        property_realizations: &property_realizations,
+                    },
                 )
             }
             BackendReadyClassifiers::Checked(classifiers) => {
@@ -817,7 +855,7 @@ impl JvmBackend {
                     &emit_opts,
                     &run,
                     classifiers,
-                    &module_property_realizations,
+                    &property_realizations,
                 )
             }
         };
@@ -941,6 +979,10 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
+        // A checked annotation constructor names the semantic annotation declaration. The JVM
+        // realizes it as a generated concrete implementation before ordinary dependency
+        // constructors are assigned physical descriptors/default stubs.
+        crate::jvm::annotation_constructions::lower_annotation_constructions(&mut file.ir, &facade);
         if let Err(target) = crate::jvm::external_calls::realize(&mut file.ir, &self.cp) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -948,30 +990,35 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) = crate::jvm::local_properties::realize(&mut file.ir) {
+        let mut property_realizations =
+            crate::jvm::property_realizations::PropertyRealizations::default();
+        if let Err(target) =
+            crate::jvm::local_properties::realize(&mut file.ir, &mut property_realizations)
+        {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!("internal error: cannot realize local JVM property access for {target:?}"),
             );
             return Vec::new();
         }
-        let module_property_realizations =
-            match crate::jvm::module_calls::realize(&mut file.ir, file.stems, &self.cp) {
-                Ok(realizations) => realizations,
-                Err(target) => {
-                    diags.error(
-                        crate::diag::Span::new(0, 0),
-                        format!("internal error: missing JVM module layout for {target:?}"),
-                    );
-                    return Vec::new();
-                }
-            };
+        if let Err(target) = crate::jvm::module_calls::realize(
+            &mut file.ir,
+            file.stems,
+            &self.cp,
+            &mut property_realizations,
+        ) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: missing JVM module layout for {target:?}"),
+            );
+            return Vec::new();
+        }
         self.emit_streamed_ir(
             file.ir,
             &file.classifiers,
             file.module_name,
             stem,
-            module_property_realizations,
+            property_realizations,
             state,
             diags,
         )
@@ -1832,6 +1879,10 @@ mod tests {
         // token that marks a CALL of the pass → files allowed to contain it (the defining module's
         // internal/recursive uses, and the shared pipeline in this file).
         let rules: &[(&str, &[&str])] = &[
+            (
+                "realize_top_level_jvm_fields(",
+                &["src/jvm/property_storage.rs", "src/jvm/backend.rs"],
+            ),
             (
                 "lower_companion_properties(",
                 &["src/jvm/companion.rs", "src/jvm/backend.rs"],

@@ -44,6 +44,7 @@ u32_id!(LocalValueId);
 u32_id!(LocalCallableId);
 u32_id!(ControlTargetId);
 u32_id!(FirSamConversionId);
+u32_id!(FirPlatformNarrowingId);
 u32_id!(CallableId);
 // Provider-owned identity of a callable outside the current source module. The provider and
 // backend share the corresponding realization table; FIR carries only this opaque identity.

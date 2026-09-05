@@ -6,6 +6,7 @@
 
 use crate::fir::{OriginId, SyntheticOriginKind};
 use crate::ir::{Callee, ExprId, FunId, IrConst, IrExpr, IrFile, IrNodeOrigin};
+use crate::types::Ty;
 
 use super::FirLoweringFailure;
 
@@ -18,10 +19,11 @@ pub(super) fn finish_tailrec_body(
     parameter_count: usize,
     origin: OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
+    let result = ir.functions[function as usize].ret;
     let tail = roots
         .pop()
         .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
-    let tail = tail_value(ir, tail, function, parameter_count, origin)?;
+    let tail = tail_value(ir, tail, function, parameter_count, result, origin)?;
     roots.push(tail);
     let loop_body = generated(
         ir,
@@ -58,6 +60,7 @@ fn tail_value(
     expression: ExprId,
     function: FunId,
     parameter_count: usize,
+    result: Ty,
     origin: OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     match ir.expr(expression).clone() {
@@ -94,22 +97,83 @@ fn tail_value(
                 origin,
             ))
         }
-        IrExpr::Block { mut stmts, value } => {
-            let value = value.ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
-            stmts.push(tail_value(ir, value, function, parameter_count, origin)?);
+        IrExpr::Block {
+            mut stmts,
+            value: Some(value),
+        } if result == Ty::Unit && matches!(ir.expr(value), IrExpr::UnitInstance) => {
+            // A checked `CoerceToUnit` boundary is represented as `{ effect; Unit }`. The singleton
+            // is not an effect after the recursive call, so the final statement remains the real
+            // tail position. This is the shape produced by a Unit-returning `if`/`when` whose
+            // recursive call occupies one arm.
+            if let Some(tail) = stmts.pop() {
+                stmts.push(tail_value(
+                    ir,
+                    tail,
+                    function,
+                    parameter_count,
+                    result,
+                    origin,
+                )?);
+            } else {
+                stmts.push(generated(ir, IrExpr::Return(None), origin));
+            }
             Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
         }
+        IrExpr::Block { mut stmts, value } => {
+            if let Some(value) = value {
+                stmts.push(tail_value(
+                    ir,
+                    value,
+                    function,
+                    parameter_count,
+                    result,
+                    origin,
+                )?);
+            } else if let Some(tail) = stmts.pop() {
+                // A block-bodied function carries its explicit `return` (or Unit tail statement)
+                // as the final statement rather than as the block value. It is still the sole tail
+                // position of this block.
+                stmts.push(tail_value(
+                    ir,
+                    tail,
+                    function,
+                    parameter_count,
+                    result,
+                    origin,
+                )?);
+            } else if result == Ty::Unit {
+                stmts.push(generated(ir, IrExpr::Return(None), origin));
+            } else {
+                return Err(FirLoweringFailure::MissingBodyResult { origin });
+            }
+            Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
+        }
+        IrExpr::Return(Some(value)) => {
+            tail_value(ir, value, function, parameter_count, result, origin)
+        }
+        IrExpr::Return(None) => Ok(expression),
         IrExpr::When { branches } => {
             let branches = branches
                 .into_iter()
                 .map(|(condition, branch)| {
                     Ok((
                         condition,
-                        tail_value(ir, branch, function, parameter_count, origin)?,
+                        tail_value(ir, branch, function, parameter_count, result, origin)?,
                     ))
                 })
                 .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
             Ok(generated(ir, IrExpr::When { branches }, origin))
+        }
+        _ if result == Ty::Unit => {
+            let returned = generated(ir, IrExpr::Return(None), origin);
+            Ok(generated(
+                ir,
+                IrExpr::Block {
+                    stmts: vec![expression, returned],
+                    value: None,
+                },
+                origin,
+            ))
         }
         _ => Ok(generated(ir, IrExpr::Return(Some(expression)), origin)),
     }

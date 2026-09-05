@@ -237,6 +237,23 @@ fn java_collection_returns_expose_the_mutable_flexible_lower_bound() {
 }
 
 #[test]
+fn delegated_mapped_iterator_applies_visible_java_member_owner_type_parameters() {
+    let output = common::expect_box_run_with_stdlib(
+        r#"
+        class Strings : MutableIterator<String> by arrayListOf("O", "K").iterator()
+
+        fun box(): String {
+            val out = StringBuilder()
+            Strings().forEachRemaining { out.append(it) }
+            return out.toString()
+        }
+        "#,
+        "Main",
+    );
+    assert_eq!(output, "OK");
+}
+
+#[test]
 fn java_only_members_are_not_in_the_kotlin_scope() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();

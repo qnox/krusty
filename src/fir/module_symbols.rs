@@ -119,6 +119,25 @@ impl<'a> StreamedModuleSymbols<'a> {
             .unwrap_or_default()
     }
 
+    fn property_context_parameter_names(
+        &self,
+        declaration: DeclarationId,
+        context_count: usize,
+    ) -> Vec<String> {
+        let property = self.index.property_for_declaration(declaration);
+        (0..context_count)
+            .map(|ordinal| {
+                property
+                    .and_then(|property| {
+                        self.index
+                            .property_context_parameter_name(property, ordinal as u32)
+                    })
+                    .unwrap_or("_")
+                    .to_owned()
+            })
+            .collect()
+    }
+
     pub(crate) fn annotation_retention(
         &self,
         classifier: TypeName,
@@ -234,6 +253,16 @@ impl<'a> StreamedModuleSymbols<'a> {
             }
             match header.kind {
                 DeclarationKind::Property => {
+                    if flags.has(DeclarationFlags::VALUE)
+                        && header.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
+                    {
+                        projected.value_underlying = self
+                            .index
+                            .signature(declaration)
+                            .map(|signature| signature.result.get());
+                        projected.value_underlying_property =
+                            self.index.declaration_name(declaration).map(str::to_owned);
+                    }
                     let Some((name, value)) = self
                         .index
                         .declaration_name(declaration)
@@ -539,7 +568,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             formals: Vec::new(),
             ty: Ty::Error,
             context_count,
-            context_param_names: vec!["_".to_owned(); context_count],
+            context_param_names: self.property_context_parameter_names(declaration, context_count),
             getter,
             setter,
             setter_visibility,
@@ -1034,7 +1063,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 // `field`/own-property access and is already published separately on PropertyHeader.
                 ty: public_ty,
                 context_count,
-                context_param_names: vec!["_".to_owned(); context_count],
+                context_param_names: self
+                    .property_context_parameter_names(declaration, context_count),
                 getter,
                 setter,
                 setter_visibility,
@@ -1143,9 +1173,6 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(anchor) = self.index.declaration_anchor(declaration) else {
                 continue;
             };
-            if header.visibility.is_private() && self.source_file != Some(anchor.source.raw()) {
-                continue;
-            }
             let declaration_package = self
                 .index
                 .source_package(anchor.source)
@@ -1433,7 +1460,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 formals,
                 ty: read_ty,
                 context_count,
-                context_param_names: vec!["_".to_owned(); context_count],
+                context_param_names: self
+                    .property_context_parameter_names(declaration, context_count),
                 getter,
                 setter,
                 setter_visibility,

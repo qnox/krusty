@@ -60,6 +60,22 @@ fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
     }
 }
 
+/// JVM primary erasure for each declaration-owned type parameter. Reified-operation realization
+/// consumes the same map before descriptors erase their occurrences, so marker placeholders and
+/// method signatures cannot disagree about an intersection's physical class bound.
+pub(super) fn parameter_erasures(parameters: &[IrTypeParameter]) -> HashMap<String, Ty> {
+    let mut erasures = HashMap::new();
+    for parameter in parameters {
+        resolve_primary_bound(
+            &parameter.semantic_name,
+            parameters,
+            &mut erasures,
+            &mut HashSet::new(),
+        );
+    }
+    erasures
+}
+
 pub(super) fn lower_function_type_parameters(ir: &mut IrFile) {
     let signatures = ir
         .signatures
@@ -70,15 +86,7 @@ pub(super) fn lower_function_type_parameters(ir: &mut IrFile) {
         if parameters.is_empty() {
             continue;
         }
-        let mut erasures = HashMap::new();
-        for parameter in &parameters {
-            resolve_primary_bound(
-                &parameter.semantic_name,
-                &parameters,
-                &mut erasures,
-                &mut HashSet::new(),
-            );
-        }
+        let erasures = parameter_erasures(&parameters);
         let Some(function) = ir.functions.get_mut(function as usize) else {
             continue;
         };

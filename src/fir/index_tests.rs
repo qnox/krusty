@@ -6,6 +6,100 @@ use crate::source::SourceInput;
 use super::*;
 
 #[test]
+fn member_source_order_interleaves_functions_and_properties() {
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "class C {\n    fun before() = 1\n    var value = \"x\"\n    fun after() = value.length\n}\n",
+        )
+        .with_file_stem("Members")],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let class = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .declaration_header(*declaration)
+                .is_some_and(|header| {
+                    header.kind == DeclarationKind::Classifier
+                        && index.declaration_name(*declaration) == Some("C")
+                })
+        })
+        .expect("class C");
+    let order = |name: &str| {
+        (0..index.declaration_count())
+            .map(|raw| DeclarationId::from_raw(raw as u32))
+            .find(|declaration| {
+                index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| {
+                        header.owner == Some(class)
+                            && index.declaration_name(*declaration) == Some(name)
+                    })
+            })
+            .and_then(|declaration| index.source_order(declaration))
+            .unwrap_or_else(|| panic!("member {name}"))
+    };
+
+    assert!(order("before") < order("value"));
+    assert!(order("value") < order("after"));
+}
+
+#[test]
+fn generated_data_members_follow_every_declared_member() {
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[
+            SourceInput::kotlin("data class D(val x: Int) {\n    fun declared(): Int = x\n}\n")
+                .with_file_stem("DataOrder"),
+        ],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let class = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("D"))
+        .expect("data class D");
+    let mut declared_max = 0;
+    let mut generated_min = u32::MAX;
+    for raw in 0..index.declaration_count() {
+        let declaration = DeclarationId::from_raw(raw as u32);
+        let Some(header) = index.declaration_header(declaration) else {
+            continue;
+        };
+        if header.owner != Some(class) {
+            continue;
+        }
+        let order = index
+            .source_order(declaration)
+            .expect("member source order");
+        if header.flags.has(DeclarationFlags::COMPILER_GENERATED) {
+            generated_min = generated_min.min(order);
+        } else {
+            declared_max = declared_max.max(order);
+        }
+    }
+    assert!(declared_max < generated_min);
+}
+
+#[test]
 fn resolved_index_owns_semantic_classifier_graph_without_header_syntax() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
@@ -344,6 +438,72 @@ fn interface_function_override_edge_precedes_backend_erasure() {
 }
 
 #[test]
+fn enum_entry_override_edge_is_owned_by_the_stable_entry() {
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "interface Action<T> { fun apply(value: T): String }\n\
+             enum class EntryEnum : Action<String> {\n\
+                 ONLY { override fun apply(value: String): String = value }\n\
+             }\n",
+        )
+        .with_file_stem("EnumEntryOverrides")],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let entry = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .declaration_header(*declaration)
+                .is_some_and(|header| header.kind == DeclarationKind::EnumEntry)
+                && index.declaration_name(*declaration) == Some("ONLY")
+        })
+        .expect("ONLY entry");
+    let [edge] = index.function_overrides(entry) else {
+        let declarations = (0..index.declaration_count())
+            .map(|raw| DeclarationId::from_raw(raw as u32))
+            .filter_map(|declaration| {
+                index.declaration_header(declaration).map(|header| {
+                    (
+                        declaration,
+                        header.kind,
+                        header.owner,
+                        header.flags,
+                        index.declaration_name(declaration),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        panic!(
+            "the enum-entry override must publish its exact interface edge; declarations={declarations:?} parent_hierarchy={:?}",
+            index
+                .declaration_header(entry)
+                .and_then(|header| header.owner)
+                .and_then(|parent| index.classifier_hierarchy(parent))
+        )
+    };
+    assert_eq!(edge.name.as_ref(), "apply");
+    assert!(edge.overridden_is_interface);
+    assert_eq!(edge.overridden_owner.segment_ref(), "Action");
+    assert!(edge.declared_parameters[0].get().mentions_ty_param());
+    assert_eq!(edge.applied_parameters[0].get(), crate::types::Ty::String);
+    assert_eq!(
+        edge.implementation_parameters[0].get(),
+        crate::types::Ty::String
+    );
+    assert!(edge.implementation_owner.matches("EntryEnum$ONLY"));
+}
+
+#[test]
 fn inherited_interface_implementation_is_published_before_backend_lowering() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
@@ -484,4 +644,57 @@ fn mapped_interface_override_publishes_external_declaration_identity() {
         .expect("external override target realization");
     assert_eq!(realization.callable.name, "removeAt");
     assert!(realization.callable.owner.matches("java/util/List"));
+}
+
+#[test]
+fn value_class_override_publishes_the_generic_interface_edge() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "@JvmInline\n\
+             value class InlinedComparable<T : Int>(val value: T) :\n\
+                 Comparable<InlinedComparable<T>> {\n\
+                 override fun compareTo(other: InlinedComparable<T>): Int = 0\n\
+             }\n",
+        )
+        .with_file_stem("ValueClassComparableOverride")],
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+            classpath.clone(),
+        )),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let implementation = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .classifier_header(*declaration)
+                .is_some_and(|header| header.classifier.segment_ref() == "InlinedComparable")
+        })
+        .expect("InlinedComparable classifier");
+    let edge = index
+        .function_overrides(implementation)
+        .iter()
+        .find(|edge| edge.name.as_ref() == "compareTo")
+        .expect("compareTo interface edge");
+    assert!(matches!(
+        edge.overridden,
+        ResolvedFunctionOverrideTarget::External(_)
+    ));
+    assert!(edge.overridden_is_interface);
+    assert_eq!(edge.overridden_owner.segment_ref(), "Comparable");
 }

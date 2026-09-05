@@ -67,6 +67,10 @@ impl BodyFirChecker<'_> {
         let owner = self.body.owner();
         let target_origin = self.origins.source(self.source, span);
         let mut body = FirBody::new_local(owner, callable);
+        if let Some(name) = self.body.debug_name() {
+            body.set_debug_name(name.to_owned());
+        }
+        body.mark_source_lambda(self.lambda_binding_name.clone());
         if let Some(owner) = self.body.lexical_class_owner() {
             body.set_lexical_class_owner(Some(owner));
         }
@@ -208,6 +212,7 @@ impl BodyFirChecker<'_> {
             },
             local_callable_scopes: vec![HashMap::new()],
             expression_substitutions: HashMap::new(),
+            lambda_binding_name: None,
             outer_callables: self
                 .outer_callables
                 .iter()
@@ -237,11 +242,12 @@ impl BodyFirChecker<'_> {
                 .nested_body_depth
                 .checked_add(1)
                 .expect("too many nested bodies"),
-            // Keep the checker's complete receiver-tower width. Named context parameters are
-            // materialized through `context_binding` as ordinary FIR values, but they still occupy
-            // tower coordinates and therefore shift every enclosing receiver depth.
-            owned_receiver_count: u32::try_from(context_count + receiver_count)
-                .expect("too many lambda receiver rungs"),
+            expression_depth: 0,
+            // Named context parameters are lexical values, not implicit-receiver tower rungs.
+            owned_receiver_count: u32::try_from(
+                context_count - named_context_count + receiver_count,
+            )
+            .expect("too many lambda receiver rungs"),
             outer_receiver_frames: std::iter::once(receiver_frame)
                 .chain(self.outer_receiver_frames.iter().cloned())
                 .collect(),

@@ -29,6 +29,21 @@ fn build_trivial_function_ir() {
 }
 
 #[test]
+fn expression_dag_clone_preserves_checked_return_depth() {
+    let mut file = IrFile::default();
+    let value = file.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let returned = file.add_expr(IrExpr::Return(Some(value)));
+    file.checked_return_depths.insert(returned, 2);
+
+    let (copy, identities) = clone_expression_dag(&mut file, returned);
+
+    assert_ne!(copy, returned);
+    assert_eq!(identities.get(&returned), Some(&copy));
+    assert_eq!(file.checked_return_depths.get(&returned), Some(&2));
+    assert_eq!(file.checked_return_depths.get(&copy), Some(&2));
+}
+
+#[test]
 fn expr_diverges_by_handles_branches_and_custom_leaves() {
     let mut f = IrFile::default();
     let condition = f.add_expr(IrExpr::Const(IrConst::Boolean(true)));
@@ -66,6 +81,10 @@ fn zero_for_value_type_tracks_primitive_carriers() {
         IrConst::Boolean(false)
     );
     assert_eq!(IrConst::zero_for_value_type(Ty::Int), IrConst::Int(0));
+    assert_eq!(
+        IrConst::zero_for_value_type(Ty::obj("kotlin/Int")),
+        IrConst::Int(0)
+    );
     assert_eq!(IrConst::zero_for_value_type(Ty::UInt), IrConst::Int(0));
     assert_eq!(IrConst::zero_for_value_type(Ty::ULong), IrConst::Long(0));
     assert_eq!(IrConst::zero_for_value_type(Ty::String), IrConst::Null);
@@ -226,6 +245,7 @@ fn blank_class(fq: &str) -> IrClass {
         is_abstract: false,
         is_open: false,
         superclass: "kotlin/Any".into(),
+        super_arg_prelude: Vec::new(),
         super_args: Vec::new(),
         super_ctor_params: Vec::new(),
         enum_entries: Vec::new(),
@@ -382,7 +402,7 @@ fn toplevel_default_stub_safe_accepts_locals_declared_inside_the_default() {
 fn toplevel_default_stub_safe_value_class_param_pre_mangling() {
     // The PRE-pass view of a VC-param function: plain name, value-class-typed param. A plain
     // non-nullable underlying routes through the (soon-mangled) stub; a NULLABLE underlying stays
-    // boxed in kotlinc's stub signature (not modeled) — rejected.
+    // boxed in kotlinc's stub signature and the JVM realization records that physical distinction.
     let mut f = IrFile::default();
     let mut c = blank_class("X");
     c.is_value = true;
@@ -401,7 +421,7 @@ fn toplevel_default_stub_safe_value_class_param_pre_mangling() {
     assert!(toplevel_default_stub_safe(&f, fid));
 
     f.classes[0].fields[0].ty = Ty::nullable(Ty::String);
-    assert!(!toplevel_default_stub_safe(&f, fid));
+    assert!(toplevel_default_stub_safe(&f, fid));
 }
 
 #[test]

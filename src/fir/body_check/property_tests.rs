@@ -101,6 +101,37 @@ fn imported_object_extension_property_keeps_its_selected_singleton_dispatch() {
 }
 
 #[test]
+fn aliased_nested_companion_property_keeps_its_selected_singleton_dispatch() {
+    let (body, index) = checked_function_body(
+        "import Outer.Holder.Companion.fragment as selected\n\
+         class Outer { class Holder { companion object { val fragment = \"OK\" } } }\n\
+         fun read(): String = selected\n",
+        "read",
+    );
+    let FirExprKind::PropertyRead {
+        target,
+        dispatch_receiver: Some(dispatch),
+        extension_receiver,
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("imported companion property")
+        .kind
+    else {
+        panic!("an imported companion property must keep its semantic singleton dispatch")
+    };
+    assert!(index
+        .property_declaration(target.module().expect("source companion property"))
+        .is_some());
+    assert!(extension_receiver.is_none());
+    assert!(matches!(
+        body.expr(dispatch.value).expect("companion singleton").kind,
+        FirExprKind::SingletonValue { classifier, .. }
+            if classifier.matches("Outer$Holder$Companion")
+    ));
+}
+
+#[test]
 fn jvm_field_annotation_does_not_change_checked_companion_property_access() {
     let (body, index) = checked_function_body_with_platform(
         "class C { companion object { @JvmField var value: String = \"OK\" } }\n\
@@ -235,16 +266,28 @@ fn dependency_static_field_read_keeps_only_its_provider_identity() {
         "output",
         platform,
     );
+    let root = root_expression(&body);
+    let property = match &body.expr(root).expect("return boundary").kind {
+        FirExprKind::ImplicitConversion {
+            value,
+            conversion:
+                FirConversion {
+                    kind: FirConversionKind::NullabilityWidening { to },
+                    ..
+                },
+        } => {
+            assert_eq!(to.get(), Ty::nullable(Ty::obj("java/io/PrintStream")));
+            *value
+        }
+        _ => root,
+    };
     let FirExprKind::PropertyRead {
         target,
         dispatch_receiver,
         extension_receiver,
         context_arguments,
         substitutions,
-    } = &body
-        .expr(root_expression(&body))
-        .expect("static field read")
-        .kind
+    } = &body.expr(property).expect("static field read").kind
     else {
         panic!("a selected dependency field must become checked property FIR")
     };
@@ -587,6 +630,26 @@ fn primitive_write_to_nullable_property_publishes_the_boxing_boundary() {
         panic!("Int to Int? property assignment must publish its boxing boundary")
     };
     assert_eq!(to.get(), Ty::nullable(Ty::Int));
+}
+
+#[test]
+fn expression_body_publishes_primitive_to_nullable_return_boundary() {
+    let (body, _) = checked_function_body("fun nullable(): Int? = 41\n", "nullable");
+    let root = root_expression(&body);
+    assert!(matches!(
+        body.expr(root).map(|expression| &expression.kind),
+        Some(FirExprKind::ImplicitConversion {
+            value,
+            conversion: FirConversion {
+                kind: FirConversionKind::NullabilityWidening { to },
+                ..
+            },
+        }) if to.get() == Ty::nullable(Ty::Int)
+            && matches!(
+                body.expr(*value).map(|expression| &expression.kind),
+                Some(FirExprKind::Constant(FirConstant::Int(41)))
+            )
+    ));
 }
 
 #[test]

@@ -65,17 +65,16 @@ impl SymbolResolver<'_> {
             }
         };
 
-        // Package and classifier roots are namespace facets, unlike a lexical VALUE root which
-        // commits the whole expression. Collect both complete paths before deciding: this lets a
-        // source package `Package.Outer` coexist with the default-imported `java.lang.Package`
-        // classifier without retrying after a value selection.
-        let mut candidates = Vec::new();
-        let mut failures = Vec::new();
+        // A complete classifier-rooted path outranks a package-rooted path: a visible classifier
+        // named `pkg1` therefore makes `pkg1.Cls` mean its nested `Cls` when that child exists. An
+        // incomplete classifier path does not hide a complete package path, however; this is what
+        // lets package `Package.Outer` coexist with default-imported `java.lang.Package`.
+        let mut failure = None;
         match self.classifier_in_scope(first) {
             CandidateSelection::Selected(classifier) => {
                 match advance(ClassifierPathPrefix::Classifier(classifier)) {
-                    Ok(classifier) => candidates.push(classifier),
-                    Err(failure) => failures.push(failure),
+                    Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
+                    Err(classifier_failure) => failure = Some(classifier_failure),
                 }
             }
             CandidateSelection::Ambiguous => {
@@ -87,24 +86,22 @@ impl SymbolResolver<'_> {
             match advance(ClassifierPathPrefix::Package(
                 crate::types::type_name_child(TypeName::ROOT, first),
             )) {
-                Ok(classifier) => {
-                    if !candidates.contains(&classifier) {
-                        candidates.push(classifier);
+                Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
+                Err(package_failure) => {
+                    if failure
+                        .as_ref()
+                        .is_none_or(|(depth, _)| package_failure.0 > *depth)
+                    {
+                        failure = Some(package_failure);
                     }
                 }
-                Err(failure) => failures.push(failure),
             }
         }
-        let selection = match candidates.as_slice() {
-            [classifier] => CandidateSelection::Selected(*classifier),
-            [] => CandidateSelection::None,
-            [_, _, ..] => CandidateSelection::Ambiguous,
-        };
-        let failed_segment = failures
-            .into_iter()
-            .max_by_key(|(depth, _)| *depth)
-            .map(|(_, segment)| segment)
-            .or_else(|| matches!(selection, CandidateSelection::None).then(|| first.to_string()));
-        (selection, failed_segment)
+        (
+            CandidateSelection::None,
+            failure
+                .map(|(_, segment)| segment)
+                .or_else(|| Some(first.to_string())),
+        )
     }
 }

@@ -40,37 +40,30 @@ fn plain_inline_fun_called_cross_file() {
     );
 }
 
-/// A non-local `return` in the lambda is legal ONLY when the callee is spliced. The cross-file
-/// `invokestatic` fallback must keep the honest backend rejection — never link a broken closure.
+/// A non-local `return` in the lambda requires the retained inline body to splice across the source
+/// file boundary; it must return from `box`, not from a synthesized closure.
 #[test]
-fn non_local_return_in_cross_file_inline_lambda_still_rejects() {
+fn non_local_return_in_cross_file_inline_lambda_executes() {
     const LIB: &str = "inline fun untilDone(x: Int, block: (Int) -> Unit): Int {\n\
                        \x20   block(x)\n\
                        \x20   return x + 1\n\
                        }\n";
     const MAIN: &str = "fun box(): String {\n\
                         \x20   var hit = 0\n\
-                        \x20   untilDone(4) { hit = it; if (it == 4) return \"early\" }\n\
+                        \x20   untilDone(4) { hit = it; if (it == 4) return \"OK\" }\n\
                         \x20   return if (hit == 4) \"OK\" else \"fail: $hit\"\n\
                         }\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file inline call with a non-local return must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_non_local_return",
     );
 }
 
-/// An inline function whose SIGNATURE mentions a value class needs mangling/erasure a cross-file
-/// `invokestatic` doesn't apply — it stays splice-only, and the cross-file call must REJECT
-/// (a fall-through once misread this call as a constructor of its result type — a miscompile).
+/// An inline function whose signature mentions a value class keeps the checked value-class return
+/// through cross-file inlining. The result must use the carrier ABI rather than being misread as a
+/// constructor call or falling back to an unmangled invocation.
 #[test]
-fn value_class_signature_inline_fun_cross_file_still_rejects() {
+fn value_class_signature_inline_fun_cross_file_runs() {
     const LIB: &str = "inline fun new(init: (Z) -> Unit): Z = Z(42)\n\
                        @JvmInline\n\
                        value class Z(val value: Int)\n";
@@ -78,14 +71,15 @@ fn value_class_signature_inline_fun_cross_file_still_rejects() {
                         \x20   if (new(fun(z: Z) {}).value == 42) \"OK\" else \"Fail\"\n";
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    assert!(
+    assert_eq!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
             Some(jdk.as_path())
         )
-        .is_none(),
-        "cross-file call to a value-class-signature inline fun must be rejected, never emitted"
+        .as_deref(),
+        Some("OK"),
+        "cross-file value-class inline call must execute through its checked carrier ABI"
     );
 }
 
@@ -113,70 +107,47 @@ fn inline_fun_constructing_sealed_nested_class_cross_file() {
     );
 }
 
-/// A lambda that MUTATES a captured local of the caller is only sound when spliced (the checker
-/// analysed its captures for splicing — a closure would mutate a copy). The cross-file call must
-/// reject. Writes to top-level properties stay field accesses and remain fine.
+/// A lambda that mutates a captured caller local keeps the shared-cell identity when its retained
+/// checked inline body is spliced across a file boundary.
 #[test]
-fn mutable_capture_in_cross_file_inline_lambda_still_rejects() {
+fn mutable_capture_in_cross_file_inline_lambda_executes() {
     const LIB: &str = "inline fun foo(x: Int, action: (Int) -> Unit) = action(x)\n";
     const MAIN: &str = "fun box(): String {\n\
                         \x20   var x = 23\n\
                         \x20   foo(x) { x++ }\n\
                         \x20   return if (x == 24) \"OK\" else \"fail: $x\"\n\
                         }\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file inline call with a mutating capture must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_mutable_capture",
     );
 }
 
-/// A callable-reference argument's adapted/bound-reference lowering assumes splicing — the
-/// cross-file call must reject (`callableReference/kt49526`).
+/// A callable-reference argument retains its checked bound-reference adaptation when passed into
+/// an inline body from another source file (`callableReference/kt49526`).
 #[test]
-fn callable_ref_arg_in_cross_file_inline_call_still_rejects() {
+fn callable_ref_arg_in_cross_file_inline_call_executes() {
     const LIB: &str = "inline fun <T> useRef(value: T, f: (T) -> Boolean) = f(value)\n";
     const MAIN: &str = "fun box(): String {\n\
                         \x20   val chars = listOf('a') + \"-\"\n\
                         \x20   return if (useRef('a', chars::contains)) \"OK\" else \"Fail\"\n\
                         }\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file inline call with a callable-ref argument must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_callable_reference",
     );
 }
 
-/// An inline body carrying splice-only control flow (`try`/`finally` here) is analysed by the
-/// checker with splice assumptions, so it is never emitted standalone — the call rejects.
+/// Checked `try`/`finally` control flow in a retained inline body survives cross-file splicing.
 #[test]
-fn try_body_inline_fun_cross_file_still_rejects() {
+fn try_body_inline_fun_cross_file_executes() {
     const LIB: &str = "fun zap(s: String) = s\n\
                        inline fun tryZap(string: String, fn: (String) -> String) =\n\
                        \x20   fn(try { zap(string) } finally { zap(string) })\n";
     const MAIN: &str = "fun box(): String = tryZap(\"OK\") { it }\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file call to a try-bodied inline fun must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_try_finally",
     );
 }
 
@@ -344,51 +315,35 @@ fn inline_extension_lambda_param_forwarded_through_splice() {
     );
 }
 
-/// Guard against over-widening: an inline fn whose body STORES a lambda (closure synthesis with
-/// splice assumptions) stays splice-only — the cross-file call still rejects.
+/// A retained inline body may store and invoke an ordinary checked lambda when spliced from a
+/// sibling source file.
 #[test]
-fn stored_lambda_body_inline_fun_cross_file_still_rejects() {
+fn stored_lambda_body_inline_fun_cross_file_executes() {
     const LIB: &str = "inline fun makeAndCall(): String {\n\
                        \x20   val f = { \"OK\" }\n\
                        \x20   return f()\n\
                        }\n";
     const MAIN: &str = "fun box(): String = makeAndCall()\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file call to a stored-lambda-body inline fun must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_stored_lambda",
     );
 }
 
-/// Guard: a lambda argument carrying a `return` (a non-local return through the inline frame)
-/// keeps the callee splice-only — the framing only holds when spliced into a caller, so the
-/// cross-file call still rejects rather than emit a broken state (storeStackBeforeInline/
-/// unreachableMarker.kt).
+/// A lambda argument carrying a non-local `return` preserves its inline-frame target across a
+/// sibling-file splice (storeStackBeforeInline/unreachableMarker.kt).
 #[test]
-fn return_in_lambda_arg_body_inline_fun_cross_file_still_rejects() {
+fn return_in_lambda_arg_body_inline_fun_cross_file_executes() {
     const LIB: &str = "inline fun bar(block: () -> String): String {\n\
                        \x20   return block()\n\
                        }\n\
                        inline fun bar2(): String {\n\
-                       \x20   return bar { return \"def\" }\n\
+                       \x20   return bar { return \"OK\" }\n\
                        }\n";
     const MAIN: &str = "fun box(): String = bar2()\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file call to a non-local-return-lambda inline fun must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_nested_non_local_return",
     );
 }
 
@@ -414,32 +369,22 @@ fn value_class_receiver_inline_extension_cross_file_executes() {
     );
 }
 
-/// Guard: a REIFIED inline extension with a function-typed parameter (again outside the
-/// cross-module path) specializes per call site — it stays splice-only and the cross-file call
-/// still rejects.
+/// A reified inline extension with a function parameter specializes through its retained checked
+/// body at a sibling-file call site.
 #[test]
-fn reified_inline_extension_cross_file_still_rejects() {
+fn reified_inline_extension_cross_file_executes() {
     const LIB: &str = "inline fun <reified T> T.check(f: () -> Unit): Boolean = this is T\n";
     const MAIN: &str = "fun box(): String = if (1.check { }) \"OK\" else \"fail\"\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file call to a reified inline extension must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_reified_inline_extension",
     );
 }
 
-/// A reified parameter that appears only in a VALUE parameter cannot be inferred by the receiver
-/// splice path. The compiler still emits this extension's facade to publish its inline body, so this
-/// specifically guards the distinction between physical emission and a legal direct-call fallback:
-/// failed specialization must skip the file instead of invoking the erased reified body.
+/// A reified parameter inferred from a value parameter, rather than the extension receiver, retains
+/// that checked substitution through sibling-file inline specialization.
 #[test]
-fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
+fn reified_value_parameter_inline_extension_cross_file_executes() {
     const LIB: &str = "interface I\n\
                        inline fun <reified T : Any> I.check(value: T?): Boolean {\n\
                        \x20   T::class\n\
@@ -447,16 +392,9 @@ fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
                        }\n";
     const MAIN: &str = "class C : I\n\
                         fun box(): String = if (C().check(1)) \"OK\" else \"fail\"\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(&jdk)
-        )
-        .is_none(),
-        "cross-file call to a reified value-parameter extension must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_reified_value_parameter_extension",
     );
 }
 
@@ -541,16 +479,10 @@ fn suspend_operator_compare_to_convention_cross_file_runs_outside_an_if_conditio
     assert_module_answers_ok(&[("Lib.kt", LIB), ("Main.kt", &main)], "comparison");
 }
 
-/// The comparison form SKIPS when its suspension sits in the CONDITION of an if-EXPRESSION whose
-/// value is stored into a CAPTURED var — the labelled `SkipReason::Suspend` boundary the
-/// state-machine pass declines (`docs/SPEC.md`, the operator-convention suspension entry). Nothing
-/// here is about the convention, the extension, or the cross-file edge: the control above runs the
-/// same `compareTo` through the same convention into the same captured `var`, and
-/// `coroutine_intrinsics_e2e::suspend_in_an_if_expression_into_a_captured_var_skips_without_a_convention`
-/// reaches the same labelled bail in ONE file with no operator at all. kotlinc answers `7`. Pinned
-/// so that whoever lifts that boundary gets a failure here and asserts the answer instead.
+/// A suspending comparison in an `if` condition whose result is stored into a captured variable
+/// preserves both the convention target and the resumed branch value.
 #[test]
-fn suspend_operator_compare_to_convention_cross_file_still_skips_in_an_if_condition() {
+fn suspend_operator_compare_to_convention_cross_file_runs_in_an_if_condition() {
     const LIB: &str = "class Box(var v: Int)\n\
                        suspend operator fun Box.compareTo(o: Box): Int = v - o.v\n";
     let main = format!(
@@ -562,18 +494,9 @@ fn suspend_operator_compare_to_convention_cross_file_still_skips_in_an_if_condit
          \x20   return if (r == 7) \"OK\" else \"fail: $r\"\n\
          }}\n"
     );
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert_eq!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", &main)],
-            &[stdlib],
-            Some(&jdk)
-        ),
-        None,
-        "comparison: skipped only because the suspending condition feeds an if-EXPRESSION stored \
-         into a captured var — if this now compiles, assert the box() answer instead of deleting \
-         the check"
+    assert_module_answers_ok(
+        &[("Lib.kt", LIB), ("Main.kt", &main)],
+        "comparison in if condition",
     );
 }
 

@@ -21,10 +21,8 @@ fn inline_bounded_return_declines_unrelated_nullable_context() {
     let Some(diags) = common::checker_diags_with_stdlib(SRC) else {
         return;
     };
-    assert!(
-        diags
-            .iter()
-            .any(|m| m.contains("mismatch") && m.contains("Unrelated")),
-        "expected an initializer type-mismatch diagnostic for the unsatisfied bound, got: {diags:?}"
+    assert_eq!(
+        diags,
+        vec!["initializer type mismatch: expected 'Unrelated?', actual 'T?'.".to_string()]
     );
 }

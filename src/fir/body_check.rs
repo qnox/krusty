@@ -9,6 +9,8 @@ mod arrays;
 mod assignment_tests;
 mod assignments;
 #[cfg(test)]
+mod builder_inference_tests;
+#[cfg(test)]
 mod call_tests;
 mod calls;
 #[cfg(test)]
@@ -70,9 +72,11 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, StmtId, TemplatePart, UnOp};
 use crate::diag::Span;
 use crate::resolve::{
-    ExprLowering, IncDecSite, InvokeKind, ResolvedCall, ReturnTarget, StmtLowering, TypeInfo,
+    ExprLowering, IncDecSite, InvokeKind, PlatformNarrowing, ResolvedCall, ReturnTarget,
+    StmtLowering, TypeInfo,
 };
 use crate::types::Ty;
+use crate::wide_stack::on_wide_stack;
 
 use super::coverage::{ExpressionForm, StatementForm};
 use super::{
@@ -80,22 +84,28 @@ use super::{
     BodyOwnerId, BodyWorkItem, CheckedBodySink, ClassBodyContext, ClassCaptureBinding,
     ClassReceiverCaptureSource, ControlTargetId, DeclarationId, DeclarationKind,
     DefaultArgumentProvider, DelegateStorage, ExternalCallableId, FirAdaptedReferenceArgument,
-    FirAnonymousObject, FirArrayElement, FirBinaryOperation, FirBody, FirBuiltinIterableKind,
-    FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
-    FirCallableReferenceTarget, FirCapture, FirCatch, FirClassifierProperty, FirConstant,
-    FirConstructorCall, FirConstructorTarget, FirControlTarget, FirControlTargetKind,
-    FirConversion, FirConversionKind, FirDefaultValue, FirDelegateCall,
-    FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr, FirExprId, FirExprKind,
-    FirImplicitReceiverCapture, FirIndexedAccessKind, FirInterfaceDelegateArgument, FirIntrinsic,
-    FirJumpKind, FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource,
-    FirLoopHeader, FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget,
-    FirPropertyTarget, FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion,
-    FirStatement, FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef,
-    FirTypeSubstitution, FirUnaryOperation, FirValueParameter, FirVarargElement, FirWhenBranch,
-    FirWhenCondition, InlineBodyStore, LocalBinding, LocalCallableId, LocalDelegateBinding,
-    LocalValueId, OriginId, OriginStore, PropertyId, ResolvedCallableHeader, ResolvedModuleIndex,
-    ResolvedTy, SourceFileId, SyntheticOriginKind, UnpublishableType,
+    FirAnnotationConstruction, FirAnnotationDefaultValue, FirAnonymousObject, FirArrayElement,
+    FirBinaryOperation, FirBody, FirBuiltinIterableKind, FirCall, FirCallArgument, FirCallTarget,
+    FirCallableReferenceBinding, FirCallableReferenceTarget, FirCapture, FirCatch,
+    FirClassifierProperty, FirConstant, FirConstructorCall, FirConstructorTarget, FirControlTarget,
+    FirControlTargetKind, FirConversion, FirConversionKind, FirConvertedValue, FirDefaultValue,
+    FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr, FirExprId,
+    FirExprKind, FirExpressionDebugLines, FirImplicitReceiverCapture, FirIndexedAccessKind,
+    FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind, FirLocalCallableRef,
+    FirLocalClassCapture, FirLocalClassCaptureSource, FirLoopHeader, FirPlatformNarrowing,
+    FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget,
+    FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement,
+    FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
+    FirUnaryOperation, FirValueParameter, FirVarargElement, FirWhenBranch, FirWhenCondition,
+    InlineBodyStore, LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId,
+    OriginStore, PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
+    SyntheticOriginKind, UnpublishableType,
 };
+
+/// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
+/// first frame and then every 64 nested frames keeps the largest unchecked run well below one
+/// grown segment, without paying `stacker`'s TLS/stack-pointer probe for every ordinary AST node.
+const EXPRESSION_STACK_CHECK_INTERVAL: u32 = 64;
 
 fn checked_constant_value(constant: &crate::libraries::LibraryConst) -> FirConstant {
     match &constant.value {
@@ -311,6 +321,7 @@ fn check_expression_body_with_parameters_in_session(
         &[],
         CheckedBodyReceiverShape::EMPTY,
         None,
+        None,
         index,
         origins,
         session,
@@ -329,6 +340,7 @@ fn check_body_unit_with_parameters_and_defaults(
     defaults: &[CheckedBodyDefault],
     receiver_shape: CheckedBodyReceiverShape<'_>,
     property_storage_type: Option<ResolvedTy>,
+    root_value_target: Option<ResolvedTy>,
     index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     session: &mut BodyCheckSession,
@@ -355,50 +367,20 @@ fn check_body_unit_with_parameters_and_defaults(
     bind_parameters_and_check_defaults(&mut checker, parameters, defaults, receiver_shape)?;
     if let Some(root) = root {
         let origin = checker.expression_origin(root)?;
-        let value = checker.expression(root)?;
-        // Expression-bodied declarations and checked property initializers are value boundaries.
-        // Their finalized signature result is installed by `BodyFirChecker::new`; apply only a
-        // conversion the resolver explicitly selected for this root. Block bodies have no such
-        // root decision and therefore remain untouched.
-        let value_type = checker
-            .body
-            .expr(value)
-            .map(|expression| expression.ty)
-            .ok_or_else(|| checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
-        let recorded_root_conversion = checker
-            .info
-            .selected_numeric_conversions
-            .get(&root)
-            .is_some_and(|selected| ResolvedTy::new(*selected).ok() == checker.body.result_type())
-            || checker.info.resolved_sam_conversions.contains_key(&root)
-            || checker
-                .info
-                .selected_suspend_function_conversions
-                .get(&root)
-                .is_some_and(|(_, selected)| {
-                    ResolvedTy::new(*selected).ok() == checker.body.result_type()
-                })
-            || checker
-                .info
-                .selected_value_smartcasts
-                .get(&root)
-                .is_some_and(|selected| {
-                    ResolvedTy::new(*selected).ok() == checker.body.result_type()
-                });
-        let expression = match checker
-            .body
-            .result_type()
-            .filter(|target| *target != value_type && recorded_root_conversion)
-        {
-            Some(target) => match checker.selected_value_conversion(root, target, origin)? {
-                Some(conversion) => checker.body.add_expr(FirExpr {
-                    origin,
-                    ty: target,
-                    kind: FirExprKind::ImplicitConversion { value, conversion },
-                }),
-                None => value,
-            },
-            None => value,
+        // Only the declaration driver knows whether this syntax root is a returned value or a
+        // block/delegate execution root. Publish that decision explicitly: FIR checking selects
+        // the semantic conversion, and lowering merely consumes it.
+        let named_unit_function_effect = root_value_target.is_some_and(|target| {
+            target.get().canonical_semantic() == Ty::Unit
+                && info.semantic_ty(root).canonical_semantic() == Ty::Unit
+                && index
+                    .declaration_anchor(DeclarationId::from_raw(owner.raw()))
+                    .is_some_and(|anchor| anchor.kind == DeclarationKind::Function)
+        });
+        let expression = match root_value_target {
+            Some(_) if named_unit_function_effect => checker.expression(root)?,
+            Some(target) => checker.value_at_selected_boundary(root, target)?,
+            None => checker.expression(root)?,
         };
         let statement = checker.body.add_statement(FirStatement {
             origin,
@@ -407,6 +389,38 @@ fn check_body_unit_with_parameters_and_defaults(
         checker.body.push_root(statement);
     }
     checker.body.finalize_capture_forwarding();
+    // Convert transient parser coordinates into line-only output facts before this bounded syntax
+    // unit is released. Checked/default/inline FIR may carry the resulting numbers, but never a
+    // file offset or AST identity.
+    let expression_lines = file
+        .expr_spans
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(raw, span)| {
+            (
+                span,
+                FirExpressionDebugLines {
+                    source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
+                    end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let statement_lines = file
+        .stmt_spans
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(raw, span)| (span, file.stmt_lines.get(raw).copied().unwrap_or(0)))
+        .collect::<HashMap<_, _>>();
+    checker.body.attach_debug_lines(
+        source,
+        file.source_line_count,
+        checker.origins,
+        &expression_lines,
+        &statement_lines,
+    );
     Ok(checker.body)
 }
 
@@ -434,11 +448,12 @@ fn bind_parameters_and_check_defaults(
             .is_some_and(|default| default.parameter == ordinal)
         {
             let default = defaults.next().expect("peeked constructor default");
-            let value = checker.expression(default.expression)?;
+            let value = checker.value_at_selected_boundary(default.expression, parameter.ty)?;
             let origin = checker.expression_origin(default.expression)?;
             checker.body.add_default_value(FirDefaultValue {
                 origin,
                 parameter: default.parameter,
+                ty: parameter.ty,
                 value,
             });
         }
@@ -500,12 +515,16 @@ struct BodyFirChecker<'a> {
     /// Temporary AST-expression replacements used while publishing evaluation-order-sensitive
     /// desugarings. The map is scoped to one statement and never survives checked FIR.
     expression_substitutions: HashMap<ExprId, FirExprId>,
+    /// Source binding whose initializer currently contains a lambda. This is debug/naming context
+    /// only; value resolution continues to use the lexical scope maps above.
+    lambda_binding_name: Option<String>,
     outer_callables: HashMap<BodyLocalCallableDeclarationId, (u32, LocalCallableId)>,
     /// Callables whose declaration lives in an enclosing independently streamed body. Nested
     /// lambdas/local functions retain this set so their references publish explicit closure
     /// operands instead of mistaking a streaming boundary for an ordinary nested-body scope.
     streamed_outer_callables: std::collections::HashSet<BodyLocalCallableDeclarationId>,
     nested_body_depth: u32,
+    expression_depth: u32,
     owned_receiver_count: u32,
     outer_receiver_frames: Vec<ReceiverFrame>,
     /// Constructor delegation and constructor-owned defaults execute before local-class capture
@@ -595,6 +614,18 @@ impl BodyCheckSession {
 }
 
 impl BodyFirChecker<'_> {
+    fn safe_call_guard_receiver(&self, mut receiver: FirReceiver) -> FirReceiver {
+        while let Some(FirExprKind::ImplicitConversion { value, .. }) = self
+            .body
+            .expr(receiver.value)
+            .map(|expression| &expression.kind)
+        {
+            receiver.value = *value;
+        }
+        receiver.conversion = None;
+        receiver
+    }
+
     fn safe_selector_receiver(kind: &FirExprKind) -> Option<FirReceiver> {
         match kind {
             FirExprKind::Call(call) => call.extension_receiver.or(call.dispatch_receiver),
@@ -643,6 +674,7 @@ impl BodyFirChecker<'_> {
             | FirExprKind::ClassifierPropertyRead { .. }
             | FirExprKind::ValueRead(_)
             | FirExprKind::CapturedValueRead { .. }
+            | FirExprKind::LateinitRead { .. }
             | FirExprKind::ClassStorageRead { .. }
             | FirExprKind::ConstructorCaptureRead { .. }
             | FirExprKind::ConstructorContextRead { .. }
@@ -674,6 +706,7 @@ impl BodyFirChecker<'_> {
             | FirExprKind::ClassLiteral { .. }
             | FirExprKind::TypeOperation { .. }
             | FirExprKind::NullablePrimitiveComparison { .. }
+            | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::InRange { .. }
             | FirExprKind::IndexedRead { .. }
             | FirExprKind::IndexedWrite { .. }
@@ -722,6 +755,9 @@ impl BodyFirChecker<'_> {
         let target_origin = origins.source(source, root_span);
         let mut body = FirBody::new(owner);
         let declaration = DeclarationId::from_raw(owner.raw());
+        if let Some(name) = index.declaration_name(declaration) {
+            body.set_debug_name(name.to_owned());
+        }
         let lexical_class_owner = {
             let mut current = declaration;
             let mut first = true;
@@ -788,6 +824,7 @@ impl BodyFirChecker<'_> {
                     anchor.kind,
                     crate::fir::DeclarationKind::Constructor
                         | crate::fir::DeclarationKind::Initializer
+                        | crate::fir::DeclarationKind::Property
                 )
             })
             .and_then(|_| enclosing_classifier)
@@ -837,6 +874,7 @@ impl BodyFirChecker<'_> {
                     anchor.kind,
                     crate::fir::DeclarationKind::Constructor
                         | crate::fir::DeclarationKind::Initializer
+                        | crate::fir::DeclarationKind::Property
                 )
             })
             .and_then(|_| enclosing_classifier)
@@ -956,9 +994,11 @@ impl BodyFirChecker<'_> {
             loops: Vec::new(),
             local_callable_scopes: vec![HashMap::new()],
             expression_substitutions: HashMap::new(),
+            lambda_binding_name: None,
             outer_callables: class_context.callables,
             streamed_outer_callables,
             nested_body_depth: 0,
+            expression_depth: 0,
             owned_receiver_count: u32::from(has_dispatch_receiver),
             outer_receiver_frames: Vec::new(),
             constructor_prefix_capture_access: false,
@@ -983,6 +1023,7 @@ impl BodyFirChecker<'_> {
                 u32::try_from(context_receivers.len())
                     .expect("too many checked-body context parameters"),
             )
+            .and_then(|count| count.checked_sub(context_value_count))
             .and_then(|count| count.checked_add(u32::from(extension_receiver.is_some())))
             .expect("too many checked-body implicit receivers");
     }
@@ -1008,9 +1049,9 @@ impl BodyFirChecker<'_> {
         for declaration_ordinal in (0..context_count).rev() {
             if declaration_ordinal >= context_value_count {
                 capture_depths.insert(semantic_depth, runtime_depth);
+                semantic_depth += 1;
                 runtime_depth += 1;
             }
-            semantic_depth += 1;
         }
         if self.body.local_callable().is_some() {
             return ReceiverFrame {
@@ -1267,38 +1308,105 @@ impl BodyFirChecker<'_> {
                 )
             })
             .transpose()?;
+        self.checked_binary_expression_at_targets(
+            operation, lhs, rhs, lhs_type, rhs_type, promoted, promoted,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn checked_binary_expression_at_targets(
+        &mut self,
+        operation: FirBinaryOperation,
+        lhs: ExprId,
+        rhs: ExprId,
+        lhs_type: ResolvedTy,
+        rhs_type: ResolvedTy,
+        lhs_target: Option<ResolvedTy>,
+        rhs_target: Option<ResolvedTy>,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
         let operand = |checker: &mut Self,
                        source: ExprId,
-                       actual: ResolvedTy|
+                       actual: ResolvedTy,
+                       target: Option<ResolvedTy>|
          -> Result<FirExprId, BodyCheckFailure> {
             let value = checker.expression(source)?;
-            let Some(target) = promoted else {
-                return Ok(value);
-            };
             let cause = checker.expression_origin(source)?;
-            let Some(conversion) = checker.selected_type_conversion(actual, target, cause) else {
+            // Binary operands are value positions. A Unit-returning call is effect-only at its
+            // callable boundary, so publish the language-level Unit materialization explicitly;
+            // common lowering must not infer that requirement from the eventual operation.
+            let unit_value = actual.get().canonical_semantic() == Ty::Unit;
+            let Some(target) = target.or(unit_value.then_some(actual)) else {
                 return Ok(value);
             };
-            Ok(checker.body.add_expr(FirExpr {
-                origin: cause,
-                ty: target,
-                kind: FirExprKind::ImplicitConversion { value, conversion },
-            }))
+            // The expression's semantic type may already be the smart-cast target while its source
+            // value still occupies a nullable/platform reference slot. Consume the resolver's exact
+            // selected boundary as call arguments do; comparing only `actual == target` loses the
+            // required unbox on primitive operators inside a non-null branch.
+            let conversion =
+                checker.selected_value_conversion_from(source, value, actual, target, cause)?;
+            Ok(checker.convert_fir_value(value, target, cause, conversion))
         };
         Ok(FirExprKind::Binary {
             operation,
-            lhs: operand(self, lhs, lhs_type)?,
-            rhs: operand(self, rhs, rhs_type)?,
+            lhs: operand(self, lhs, lhs_type, lhs_target)?,
+            rhs: operand(self, rhs, rhs_type, rhs_target)?,
+        })
+    }
+
+    /// Attach an already-selected semantic conversion to a checked value. Call and operator paths
+    /// converge here so neither common lowering nor a backend has to reconstruct a boundary from
+    /// the operation that eventually consumes the value.
+    pub(super) fn convert_fir_value(
+        &mut self,
+        value: FirExprId,
+        target: ResolvedTy,
+        cause: OriginId,
+        conversion: Option<FirConversion>,
+    ) -> FirExprId {
+        conversion.map_or(value, |conversion| {
+            self.body.add_expr(FirExpr {
+                origin: cause,
+                ty: target,
+                kind: FirExprKind::ImplicitConversion { value, conversion },
+            })
         })
     }
 
     fn bind_local(&mut self, name: &str, ty: ResolvedTy) -> LocalValueId {
+        self.bind_local_with_lateinit(name, ty, false)
+    }
+
+    fn bind_local_with_lateinit(
+        &mut self,
+        name: &str,
+        ty: ResolvedTy,
+        lateinit: bool,
+    ) -> LocalValueId {
         let local = self.allocate_local();
+        self.body.set_debug_value_name(local, name.to_owned());
         self.scopes
             .last_mut()
             .expect("a FIR checker always owns a lexical scope")
-            .insert(name.to_owned(), LocalBinding { value: local, ty });
+            .insert(
+                name.to_owned(),
+                LocalBinding {
+                    value: local,
+                    ty,
+                    lateinit,
+                },
+            );
         local
+    }
+
+    fn with_lambda_binding<T>(
+        &mut self,
+        name: &str,
+        check: impl FnOnce(&mut Self) -> Result<T, BodyCheckFailure>,
+    ) -> Result<T, BodyCheckFailure> {
+        let previous = self.lambda_binding_name.replace(name.to_owned());
+        let result = check(self);
+        self.lambda_binding_name = previous;
+        result
     }
 
     fn allocate_local(&mut self) -> LocalValueId {
@@ -1411,7 +1519,7 @@ impl BodyFirChecker<'_> {
                 }
                 _ => self.expression(body)?,
             };
-            let checked_condition = self.expression(condition)?;
+            let checked_condition = self.boolean_condition(condition)?;
             Ok((checked_body, checked_condition))
         })();
         self.local_callable_scopes.pop();
@@ -1419,6 +1527,33 @@ impl BodyFirChecker<'_> {
         self.scopes.pop();
         self.loops.pop();
         result
+    }
+
+    /// Materialize the frontend-selected boundary for a Boolean control-flow operand. Java boxed
+    /// Boolean platform values are accepted by Kotlin here, but their checked FIR must retain the
+    /// yields-or-throws narrowing and non-null scalar target so common lowering never guesses from
+    /// an `if`/loop/guard shape.
+    fn boolean_condition(&mut self, expression: ExprId) -> Result<FirExprId, BodyCheckFailure> {
+        let span = self
+            .file
+            .expr_span(expression)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let target = self.resolved_type(span, Ty::Boolean)?;
+        self.value_at_selected_boundary(expression, target)
+    }
+
+    fn builtin_index(&mut self, expression: ExprId) -> Result<FirConvertedValue, BodyCheckFailure> {
+        let span = self
+            .file
+            .expr_span(expression)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let target = self.resolved_type(span, Ty::Int)?;
+        let origin = self.expression_origin(expression)?;
+        let value = self.expression(expression)?;
+        Ok(FirConvertedValue {
+            value,
+            conversion: self.selected_value_conversion(expression, value, target, origin)?,
+        })
     }
 
     fn increment_value(
@@ -1547,20 +1682,36 @@ impl BodyFirChecker<'_> {
             Some(temporary)
         };
         let updated = self.increment_value(expression, target, decrement)?;
+        let storage_ty = match (local, captured, class_storage) {
+            (Some(_), _, _) => {
+                self.local_binding(name)
+                    .expect("the increment target is a bound local")
+                    .ty
+            }
+            (None, Some((_, binding)), _) => binding.ty,
+            (None, None, Some(binding)) => binding.ty,
+            (None, None, None) => unreachable!("increment target was checked above"),
+        };
+        let actual_updated_ty = self
+            .body
+            .expr(updated)
+            .expect("the checked increment result exists")
+            .ty;
+        let write_conversion = self.selected_type_conversion(actual_updated_ty, storage_ty, cause);
         let write_kind = match (local, captured, class_storage) {
             (Some(local), _, _) => FirExprKind::ValueWrite {
                 target: local,
                 value: updated,
-                conversion: None,
+                conversion: write_conversion,
             },
             (None, Some((enclosing_depth, binding)), _) => FirExprKind::CapturedValueWrite {
                 enclosing_depth,
                 source: binding.value,
                 value: updated,
-                conversion: None,
+                conversion: write_conversion,
             },
             (None, None, Some(binding)) => {
-                self.class_storage_shared_write_kind(binding, cause, updated, None)?
+                self.class_storage_shared_write_kind(binding, cause, updated, write_conversion)?
             }
             (None, None, None) => unreachable!("increment target was checked above"),
         };
@@ -1666,7 +1817,29 @@ impl BodyFirChecker<'_> {
             })
     }
 
+    /// Keep the recursive entry frame small enough to ask `stacker` for another segment before
+    /// entering the large per-variant dispatcher. Periodic checks are sufficient because the
+    /// interval is bounded against the measured unoptimized frame size; checking every AST node
+    /// would make shallow production bodies pay for pathological-depth protection.
     fn expression(&mut self, expression: ExprId) -> Result<FirExprId, BodyCheckFailure> {
+        self.expression_depth = self
+            .expression_depth
+            .checked_add(1)
+            .expect("expression nesting exceeds u32");
+        let check_stack = self.expression_depth == 1
+            || self
+                .expression_depth
+                .is_multiple_of(EXPRESSION_STACK_CHECK_INTERVAL);
+        let result = if check_stack {
+            on_wide_stack(|| self.expression_inner(expression))
+        } else {
+            self.expression_inner(expression)
+        };
+        self.expression_depth -= 1;
+        result
+    }
+
+    fn expression_inner(&mut self, expression: ExprId) -> Result<FirExprId, BodyCheckFailure> {
         if let Some(replacement) = self.expression_substitutions.get(&expression).copied() {
             return Ok(replacement);
         }
@@ -1779,8 +1952,16 @@ impl BodyFirChecker<'_> {
                         self.info.expr_lowers.get(&expression),
                         Some(ExprLowering::BackingFieldRead)
                     ) {
+                        let target = self.enclosing_property(expression)?;
+                        let cause = self.expression_origin(expression)?;
+                        let dispatch_receiver = self.backing_field_dispatch_receiver(
+                            target,
+                            cause,
+                            self.file.expr_span(expression),
+                        )?;
                         FirExprKind::BackingFieldRead {
-                            target: self.enclosing_property(expression)?,
+                            target,
+                            dispatch_receiver,
                         }
                     } else if let Some(ExprLowering::ClassStorageRead { field }) =
                         self.info.expr_lowers.get(&expression)
@@ -1812,10 +1993,11 @@ impl BodyFirChecker<'_> {
                     } else if let Some((depth, delegate)) = self.delegated_binding(name) {
                         return self.delegated_read(expression, depth, delegate);
                     } else if let Some(local) = self.local_binding(name) {
-                        return self.checked_storage_read(
+                        return self.checked_storage_read_with_lateinit(
                             expression,
                             local.ty,
                             FirExprKind::ValueRead(local.value),
+                            local.lateinit.then_some(name.as_str()),
                         );
                     } else if let Some((enclosing_depth, source)) =
                         self.outer_values.get(name).copied()
@@ -1828,13 +2010,14 @@ impl BodyFirChecker<'_> {
                             ty: source.ty,
                             shared_cell: false,
                         });
-                        return self.checked_storage_read(
+                        return self.checked_storage_read_with_lateinit(
                             expression,
                             source.ty,
                             FirExprKind::CapturedValueRead {
                                 enclosing_depth,
                                 source: source.value,
                             },
+                            source.lateinit.then_some(name.as_str()),
                         );
                     } else if let Some(binding) = self.class_values.get(name).copied() {
                         let origin = self.expression_origin(expression)?;
@@ -1921,6 +2104,7 @@ impl BodyFirChecker<'_> {
                 }
                 Expr::Throw { operand } => FirExprKind::Throw(self.expression(*operand)?),
                 Expr::Return { value, label } => {
+                    let cause = self.expression_origin(expression)?;
                     let target = self
                         .info
                         .expr_return_targets
@@ -1936,9 +2120,10 @@ impl BodyFirChecker<'_> {
                     FirExprKind::Jump {
                         kind: FirJumpKind::Return { target_depth },
                         target: self.return_target,
-                        value: value
-                            .map(|value| self.return_value(value, target.as_ref()))
-                            .transpose()?,
+                        value: match value {
+                            Some(value) => Some(self.return_value(*value, target.as_ref())?),
+                            None => self.valueless_lambda_return_value(target.as_ref(), cause)?,
+                        },
                     }
                 }
                 Expr::Is {
@@ -2007,17 +2192,20 @@ impl BodyFirChecker<'_> {
                         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some("compareTo"),
                         BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => None,
                     };
-                    if let Some(operation) = selected_name
+                    if let Some((operation, lhs_target, rhs_target)) = selected_name
                         .and_then(|name| self.selected_primitive_binary_operation(expression, name))
                     {
-                        self.checked_binary_expression(
-                            expression,
+                        let span = self.file.expr_span(expression).ok_or_else(|| {
+                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                        })?;
+                        self.checked_binary_expression_at_targets(
                             operation,
-                            true,
                             *lhs,
                             *rhs,
                             self.expression_type(*lhs)?,
                             self.expression_type(*rhs)?,
+                            Some(self.resolved_type(span, lhs_target)?),
+                            Some(self.resolved_type(span, rhs_target)?),
                         )?
                     } else if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
                         && self.selected_ieee_relational_operation(expression)
@@ -2066,36 +2254,74 @@ impl BodyFirChecker<'_> {
                             self.source_member_operator_call(expression, convention, *lhs, &[*rhs])?
                         }
                     } else if matches!(op, BinOp::Eq | BinOp::Ne) {
-                        let lhs_ty = self.info.semantic_ty(*lhs);
-                        let rhs_ty = self.info.semantic_ty(*rhs);
-                        let nullable_primitive = lhs_ty
+                        let lhs_ty = self.info.semantic_ty(*lhs).canonical_semantic();
+                        let rhs_ty = self.info.semantic_ty(*rhs).canonical_semantic();
+                        crate::trace_compiler!(
+                            "fir",
+                            "checked equality expression={expression:?} lhs={lhs_ty:?} rhs={rhs_ty:?}"
+                        );
+                        let nullable_numeric = lhs_ty
                             .nullable_primitive()
-                            .filter(|primitive| *primitive == rhs_ty)
-                            .map(|primitive| (*lhs, *rhs, primitive))
-                            .or_else(|| {
-                                rhs_ty
-                                    .nullable_primitive()
-                                    .filter(|primitive| *primitive == lhs_ty)
-                                    .map(|primitive| (*rhs, *lhs, primitive))
+                            .zip(rhs_ty.nullable_primitive())
+                            .and_then(|(lhs_primitive, rhs_primitive)| {
+                                Ty::promote(lhs_primitive, rhs_primitive)
+                                    .map(|comparison| (lhs_primitive, rhs_primitive, comparison))
                             });
-                        if let Some((nullable, primitive, primitive_ty)) = nullable_primitive {
-                            FirExprKind::NullablePrimitiveComparison {
+                        if let Some((lhs_primitive, rhs_primitive, comparison)) = nullable_numeric {
+                            let resolved = |checker: &Self, source: ExprId, ty: Ty| {
+                                checker.resolved_type(
+                                    checker.file.expr_span(source).ok_or_else(|| {
+                                        checker
+                                            .failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                                    })?,
+                                    ty,
+                                )
+                            };
+                            FirExprKind::NullableNumericComparison {
                                 operation: if *op == BinOp::Eq {
                                     FirBinaryOperation::Equal
                                 } else {
                                     FirBinaryOperation::NotEqual
                                 },
-                                nullable: self.expression(nullable)?,
-                                primitive: self.expression(primitive)?,
-                                primitive_ty: self.resolved_type(
-                                    self.file.expr_span(primitive).ok_or_else(|| {
-                                        self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                                    })?,
-                                    primitive_ty,
-                                )?,
+                                lhs: self.expression(*lhs)?,
+                                rhs: self.expression(*rhs)?,
+                                lhs_primitive: resolved(self, *lhs, lhs_primitive)?,
+                                rhs_primitive: resolved(self, *rhs, rhs_primitive)?,
+                                comparison: resolved(self, expression, comparison)?,
                             }
                         } else {
-                            self.builtin_binary_expression(expression, *op, *lhs, *rhs)?
+                            let nullable_primitive = lhs_ty
+                                .nullable_primitive()
+                                .filter(|primitive| *primitive == rhs_ty)
+                                .map(|primitive| (*lhs, *rhs, primitive))
+                                .or_else(|| {
+                                    rhs_ty
+                                        .nullable_primitive()
+                                        .filter(|primitive| *primitive == lhs_ty)
+                                        .map(|primitive| (*rhs, *lhs, primitive))
+                                });
+                            if let Some((nullable, primitive, primitive_ty)) = nullable_primitive {
+                                FirExprKind::NullablePrimitiveComparison {
+                                    operation: if *op == BinOp::Eq {
+                                        FirBinaryOperation::Equal
+                                    } else {
+                                        FirBinaryOperation::NotEqual
+                                    },
+                                    nullable: self.expression(nullable)?,
+                                    primitive: self.expression(primitive)?,
+                                    primitive_ty: self.resolved_type(
+                                        self.file.expr_span(primitive).ok_or_else(|| {
+                                            self.failure(
+                                                None,
+                                                BodyCheckFailureKind::MissingSourceSpan,
+                                            )
+                                        })?,
+                                        primitive_ty,
+                                    )?,
+                                }
+                            } else {
+                                self.builtin_binary_expression(expression, *op, *lhs, *rhs)?
+                            }
                         }
                     } else {
                         self.builtin_binary_expression(expression, *op, *lhs, *rhs)?
@@ -2242,7 +2468,7 @@ impl BodyFirChecker<'_> {
                             receiver: self.expression(*array)?,
                             indices: indices
                                 .iter()
-                                .map(|index| self.expression(*index))
+                                .map(|index| self.builtin_index(*index))
                                 .collect::<Result<Vec<_>, _>>()?
                                 .into_boxed_slice(),
                         }
@@ -2255,15 +2481,22 @@ impl BodyFirChecker<'_> {
                 } => {
                     let result_ty = self.expression_type(expression)?;
                     let then_origin = self.expression_origin(*then_branch)?;
-                    let then_conversion =
-                        self.selected_value_conversion(*then_branch, result_ty, then_origin)?;
+                    let checked_then = self.expression(*then_branch)?;
+                    let then_conversion = self.selected_value_conversion(
+                        *then_branch,
+                        checked_then,
+                        result_ty,
+                        then_origin,
+                    )?;
                     let (else_branch, else_conversion) = match else_branch {
                         Some(else_branch) => {
                             let else_origin = self.expression_origin(*else_branch)?;
+                            let checked_else = self.expression(*else_branch)?;
                             (
-                                self.expression(*else_branch)?,
+                                checked_else,
                                 self.selected_value_conversion(
                                     *else_branch,
+                                    checked_else,
                                     result_ty,
                                     else_origin,
                                 )?,
@@ -2289,14 +2522,14 @@ impl BodyFirChecker<'_> {
                         }
                     };
                     FirExprKind::Conditional {
-                        condition: self.expression(*cond)?,
-                        then_branch: self.expression(*then_branch)?,
+                        condition: self.boolean_condition(*cond)?,
+                        then_branch: checked_then,
                         then_conversion,
                         else_branch,
                         else_conversion,
                     }
                 }
-                Expr::Block { stmts, trailing } => self.block(stmts, *trailing)?,
+                Expr::Block { stmts, trailing } => self.block(expression, stmts, *trailing)?,
                 Expr::When { subject, arms } => {
                     let has_subject = subject.is_some();
                     let subject = subject
@@ -2310,7 +2543,11 @@ impl BodyFirChecker<'_> {
                                 .conditions
                                 .iter()
                                 .map(|condition| {
-                                    let checked = self.expression(condition.expression())?;
+                                    let checked = if has_subject && !condition.is_predicate() {
+                                        self.expression(condition.expression())?
+                                    } else {
+                                        self.boolean_condition(condition.expression())?
+                                    };
                                     Ok(if has_subject && !condition.is_predicate() {
                                         FirWhenCondition::SubjectEquals(checked)
                                     } else {
@@ -2318,8 +2555,10 @@ impl BodyFirChecker<'_> {
                                     })
                                 })
                                 .collect::<Result<Vec<_>, _>>()?;
-                            let guard =
-                                arm.guard.map(|guard| self.expression(guard)).transpose()?;
+                            let guard = arm
+                                .guard
+                                .map(|guard| self.boolean_condition(guard))
+                                .transpose()?;
                             Ok(FirWhenBranch {
                                 origin,
                                 conditions: conditions.into_boxed_slice(),
@@ -2661,7 +2900,7 @@ impl BodyFirChecker<'_> {
                         "fir",
                         "safe selector expression={expression:?} kind={selector_kind:?}",
                     );
-                    let guarded_receiver = property_guarded_receiver
+                    let selector_receiver = property_guarded_receiver
                         .or_else(|| {
                             if receiver_function {
                                 Self::receiver_function_argument(&selector_kind)
@@ -2677,6 +2916,12 @@ impl BodyFirChecker<'_> {
                                 ),
                             )
                         })?;
+                    // The safe-call guard evaluates the source receiver before any conversion
+                    // required by the selected member/extension. In particular, a primitive
+                    // intrinsic's selector operand is already unboxed; guarding that operand would
+                    // throw on null before the branch. The selector retains its checked conversion
+                    // and reuses this raw value only inside the non-null branch.
+                    let guarded_receiver = self.safe_call_guard_receiver(selector_receiver);
                     let span = self.file.expr_span(expression).ok_or_else(|| {
                         self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
                     })?;
@@ -2719,17 +2964,75 @@ impl BodyFirChecker<'_> {
 
     fn block(
         &mut self,
+        expression: ExprId,
         statements: &[StmtId],
         trailing: Option<ExprId>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         self.scopes.push(HashMap::new());
         self.delegate_scopes.push(HashMap::new());
         self.local_callable_scopes.push(HashMap::new());
-        let result = self.block_in_current_scope(statements, trailing);
+        let result = self.checked_block_with_shared_operands(expression, statements, trailing);
         self.scopes.pop();
         self.delegate_scopes.pop();
         self.local_callable_scopes.pop();
         result
+    }
+
+    /// Publish the evaluate-once contract selected for a parser-expanded access increment. The
+    /// resolver has already removed package/classifier/`super` qualifiers from this list, leaving
+    /// only runtime operands in source order. Bind those values before checking the generated
+    /// read-modify-write block and replace every shared AST occurrence with its FIR value identity.
+    fn checked_block_with_shared_operands(
+        &mut self,
+        expression: ExprId,
+        statements: &[StmtId],
+        trailing: Option<ExprId>,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let operands = match self.info.expr_lowers.get(&expression) {
+            Some(ExprLowering::IncDecAccessOperands(operands)) => operands.clone(),
+            _ => return self.block_in_current_scope(statements, trailing),
+        };
+        let origin = self.expression_origin(expression)?;
+        let mut bindings = Vec::with_capacity(operands.len());
+        let mut inserted = Vec::with_capacity(operands.len());
+        for operand in operands {
+            if self.expression_substitutions.contains_key(&operand) {
+                continue;
+            }
+            let initializer = self.expression(operand)?;
+            let ty = self.expression_type(operand)?;
+            let target = self.allocate_local();
+            bindings.push(self.body.add_statement(FirStatement {
+                origin,
+                kind: FirStatementKind::Local {
+                    target,
+                    ty,
+                    mutable: false,
+                    lateinit: false,
+                    initializer: Some(initializer),
+                    conversion: None,
+                },
+            }));
+            let replacement = self.body.add_expr(FirExpr {
+                origin,
+                ty,
+                kind: FirExprKind::ValueRead(target),
+            });
+            self.expression_substitutions.insert(operand, replacement);
+            inserted.push(operand);
+        }
+        let checked = self.block_in_current_scope(statements, trailing);
+        for operand in inserted {
+            self.expression_substitutions.remove(&operand);
+        }
+        let FirExprKind::Block { statements, result } = checked? else {
+            unreachable!("checking a block must produce a FIR block")
+        };
+        bindings.extend(statements);
+        Ok(FirExprKind::Block {
+            statements: bindings.into_boxed_slice(),
+            result,
+        })
     }
 
     /// Build a block after its owner has opened the lexical scope. Do-while owns that scope because
@@ -2786,6 +3089,27 @@ impl BodyFirChecker<'_> {
                 receiver: read_receiver,
                 name: read_name,
             } if *read_receiver == receiver && read_name == name
+        )
+    }
+
+    /// The parser represents `receiver[indices] op= rhs` as a write whose value contains the
+    /// matching indexed read and reuses every operand identity. Checked FIR binds those operands
+    /// once before publishing the read-modify-write, just as it does for compound member access.
+    fn is_compound_index_assignment(
+        &self,
+        receiver: ExprId,
+        indices: &[ExprId],
+        value: ExprId,
+    ) -> bool {
+        let Expr::Binary { lhs, .. } = self.file.expr(value) else {
+            return false;
+        };
+        matches!(
+            self.file.expr(*lhs),
+            Expr::Index {
+                array: read_receiver,
+                indices: read_indices,
+            } if *read_receiver == receiver && read_indices == indices
         )
     }
 
@@ -2860,6 +3184,7 @@ impl BodyFirChecker<'_> {
             });
             let variable_ty = self.resolved_type(span, plan.protocol.elem_ty)?;
             let variable = self.allocate_local();
+            self.body.set_debug_value_name(variable, name.clone());
             let body = self.checked_loop_body(
                 target,
                 &label,
@@ -2868,6 +3193,7 @@ impl BodyFirChecker<'_> {
                     LocalBinding {
                         value: variable,
                         ty: variable_ty,
+                        lateinit: false,
                     },
                 )),
                 source_body,
@@ -2895,7 +3221,8 @@ impl BodyFirChecker<'_> {
                 ty,
                 init,
             } => {
-                let initializer = self.expression(*init)?;
+                let initializer =
+                    self.with_lambda_binding(name, |checker| checker.expression(*init))?;
                 // An unnamed local is an evaluation statement, not storage. Kotlin guarantees the
                 // initializer runs, but `_` introduces no readable binding and therefore has no
                 // value slot for common lowering to store into. This is distinct from an ignored
@@ -2925,7 +3252,8 @@ impl BodyFirChecker<'_> {
                     return Err(self.failure(None, BodyCheckFailureKind::MissingSourceSpan));
                 };
                 let local_ty = self.resolved_type(type_span, local_ty)?;
-                let conversion = self.selected_value_conversion(*init, local_ty, origin)?;
+                let conversion =
+                    self.selected_value_conversion(*init, initializer, local_ty, origin)?;
                 FirStatementKind::Local {
                     target: self.bind_local(name, local_ty),
                     ty: local_ty,
@@ -2941,7 +3269,7 @@ impl BodyFirChecker<'_> {
                 })?;
                 let local_ty = self.resolved_type(ty.span, local_ty)?;
                 FirStatementKind::Local {
-                    target: self.bind_local(name, local_ty),
+                    target: self.bind_local_with_lateinit(name, local_ty, true),
                     ty: local_ty,
                     mutable: true,
                     lateinit: true,
@@ -2952,20 +3280,30 @@ impl BodyFirChecker<'_> {
             Stmt::Assign { name, value } => {
                 let write = if matches!(
                     self.info.stmt_lowers.get(&statement),
-                    Some(StmtLowering::BackingFieldWrite)
+                    Some(StmtLowering::BackingFieldWrite { .. })
                 ) {
+                    let target = self.enclosing_property_for_statement(statement)?;
+                    let dispatch_receiver = self.backing_field_dispatch_receiver(
+                        target,
+                        origin,
+                        self.file.stmt_spans.get(statement.0 as usize).copied(),
+                    )?;
                     FirExprKind::BackingFieldWrite {
-                        target: self.enclosing_property_for_statement(statement)?,
+                        target,
+                        dispatch_receiver,
                         value: self.expression(*value)?,
                         conversion: None,
                     }
                 } else if let Some((depth, delegate)) = self.delegated_binding(name) {
                     self.delegated_write(statement, depth, delegate, *value)?
-                } else if let Some(target) = self.local(name) {
+                } else if let Some(binding) = self.local_binding(name) {
+                    let checked = self.expression(*value)?;
+                    let cause = self.expression_origin(*value)?;
                     FirExprKind::ValueWrite {
-                        target,
-                        value: self.expression(*value)?,
-                        conversion: None,
+                        target: binding.value,
+                        value: checked,
+                        conversion: self
+                            .selected_value_conversion(*value, checked, binding.ty, cause)?,
                     }
                 } else if let Some((enclosing_depth, binding)) =
                     self.outer_values.get(name).copied()
@@ -2977,11 +3315,14 @@ impl BodyFirChecker<'_> {
                         ty: binding.ty,
                         shared_cell: true,
                     });
+                    let checked = self.expression(*value)?;
+                    let cause = self.expression_origin(*value)?;
                     FirExprKind::CapturedValueWrite {
                         enclosing_depth,
                         source: binding.value,
-                        value: self.expression(*value)?,
-                        conversion: None,
+                        value: checked,
+                        conversion: self
+                            .selected_value_conversion(*value, checked, binding.ty, cause)?,
                     }
                 } else if let Some(binding) = self.class_values.get(name).copied() {
                     if !binding.shared_cell {
@@ -3011,6 +3352,11 @@ impl BodyFirChecker<'_> {
                         })?;
                     FirExprKind::BackingFieldWrite {
                         target,
+                        dispatch_receiver: self.backing_field_dispatch_receiver(
+                            target,
+                            origin,
+                            self.file.stmt_spans.get(statement.0 as usize).copied(),
+                        )?,
                         value: self.expression(*value)?,
                         conversion: None,
                     }
@@ -3165,7 +3511,7 @@ impl BodyFirChecker<'_> {
                     // with no getter/setter in between.
                     if matches!(
                         self.info.stmt_lowers.get(&statement),
-                        Some(StmtLowering::BackingFieldWrite)
+                        Some(StmtLowering::BackingFieldWrite { .. })
                     ) {
                         let property = self.enclosing_property_for_statement(statement)?;
                         let span = self
@@ -3189,10 +3535,15 @@ impl BodyFirChecker<'_> {
                                     ),
                                 )
                             })?;
+                        let dispatch_receiver =
+                            self.backing_field_dispatch_receiver(property, origin, Some(span))?;
                         let read = self.body.add_expr(FirExpr {
                             origin,
                             ty: self.resolved_type(span, resolution.receiver_ty)?,
-                            kind: FirExprKind::BackingFieldRead { target: property },
+                            kind: FirExprKind::BackingFieldRead {
+                                target: property,
+                                dispatch_receiver,
+                            },
                         });
                         let convention = if *dec { "dec" } else { "inc" };
                         let updated_kind = if self
@@ -3223,6 +3574,7 @@ impl BodyFirChecker<'_> {
                             ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
                             kind: FirExprKind::BackingFieldWrite {
                                 target: property,
+                                dispatch_receiver,
                                 value: updated,
                                 conversion: None,
                             },
@@ -3278,6 +3630,17 @@ impl BodyFirChecker<'_> {
                         shared_cell: true,
                     });
                 }
+                let storage_ty = match (target, captured, class_storage) {
+                    (Some(_), _, _) => {
+                        self.local_binding(name)
+                            .expect("the increment target is a bound local")
+                            .ty
+                    }
+                    (None, Some((_, binding)), _) => binding.ty,
+                    (None, None, Some(binding)) => binding.ty,
+                    (None, None, None) => unreachable!("increment target was checked above"),
+                };
+                let receiver_ty = self.resolved_type(span, resolution.receiver_ty)?;
                 let read_kind = match (target, captured, class_storage) {
                     (Some(target), _, _) => FirExprKind::ValueRead(target),
                     (None, Some((enclosing_depth, binding)), _) => FirExprKind::CapturedValueRead {
@@ -3287,11 +3650,21 @@ impl BodyFirChecker<'_> {
                     (None, None, Some(binding)) => self.class_storage_read_kind(binding, origin)?,
                     (None, None, None) => unreachable!("increment target was checked above"),
                 };
-                let read = self.body.add_expr(FirExpr {
+                let storage_read = self.body.add_expr(FirExpr {
                     origin,
-                    ty: self.resolved_type(span, resolution.receiver_ty)?,
+                    ty: storage_ty,
                     kind: read_kind,
                 });
+                let read_conversion = self
+                    .selected_type_conversion(storage_ty, receiver_ty, origin)
+                    .or_else(|| {
+                        (storage_ty != receiver_ty).then_some(FirConversion {
+                            origin,
+                            kind: FirConversionKind::SmartCast { to: receiver_ty },
+                        })
+                    });
+                let read =
+                    self.convert_fir_value(storage_read, receiver_ty, origin, read_conversion);
                 let updated_kind = if selected_operator {
                     self.zero_arg_statement_operator_call_on_value(statement, convention, read)?
                 } else {
@@ -3309,23 +3682,33 @@ impl BodyFirChecker<'_> {
                     ty: self.resolved_type(span, resolution.updated_ty)?,
                     kind: updated_kind,
                 });
+                let updated_ty = self
+                    .body
+                    .expr(updated)
+                    .expect("the checked increment result exists")
+                    .ty;
+                let write_conversion =
+                    self.selected_type_conversion(updated_ty, storage_ty, origin);
                 let write_kind = match (target, captured, class_storage) {
                     (Some(target), _, _) => FirExprKind::ValueWrite {
                         target,
                         value: updated,
-                        conversion: None,
+                        conversion: write_conversion,
                     },
                     (None, Some((enclosing_depth, binding)), _) => {
                         FirExprKind::CapturedValueWrite {
                             enclosing_depth,
                             source: binding.value,
                             value: updated,
-                            conversion: None,
+                            conversion: write_conversion,
                         }
                     }
-                    (None, None, Some(binding)) => {
-                        self.class_storage_shared_write_kind(binding, origin, updated, None)?
-                    }
+                    (None, None, Some(binding)) => self.class_storage_shared_write_kind(
+                        binding,
+                        origin,
+                        updated,
+                        write_conversion,
+                    )?,
                     (None, None, None) => unreachable!("increment target was checked above"),
                 };
                 let write = self.body.add_expr(FirExpr {
@@ -3340,6 +3723,38 @@ impl BodyFirChecker<'_> {
                 indices,
                 value,
             } => {
+                let mut operand_bindings = Vec::new();
+                if self.is_compound_index_assignment(*array, indices, *value) {
+                    let operands = std::iter::once(*array)
+                        .chain(indices.iter().copied())
+                        .collect::<Vec<_>>();
+                    for operand in operands {
+                        if self.expression_substitutions.contains_key(&operand) {
+                            continue;
+                        }
+                        let initializer = self.expression(operand)?;
+                        let ty = self.expression_type(operand)?;
+                        let target = self.allocate_local();
+                        let declaration = self.body.add_statement(FirStatement {
+                            origin,
+                            kind: FirStatementKind::Local {
+                                target,
+                                ty,
+                                mutable: false,
+                                lateinit: false,
+                                initializer: Some(initializer),
+                                conversion: None,
+                            },
+                        });
+                        let replacement = self.body.add_expr(FirExpr {
+                            origin,
+                            ty,
+                            kind: FirExprKind::ValueRead(target),
+                        });
+                        self.expression_substitutions.insert(operand, replacement);
+                        operand_bindings.push((operand, declaration));
+                    }
+                }
                 let receiver_ty = self.info.semantic_ty(*array).non_null();
                 let selected_convention = ["set", "put"].into_iter().find(|convention| {
                     self.info
@@ -3402,7 +3817,7 @@ impl BodyFirChecker<'_> {
                     let receiver = self.expression(*array)?;
                     let indices = indices
                         .iter()
-                        .map(|index| self.expression(*index))
+                        .map(|index| self.builtin_index(*index))
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice();
                     let element_type = self.resolved_type(
@@ -3417,17 +3832,40 @@ impl BodyFirChecker<'_> {
                             .array_elem()
                             .expect("checked array element type"),
                     )?;
-                    let conversion =
-                        self.selected_value_conversion(*value, element_type, origin)?;
-                    let value = self.expression(*value)?;
+                    let checked_value = self.expression(*value)?;
+                    let conversion = self.selected_value_conversion(
+                        *value,
+                        checked_value,
+                        element_type,
+                        origin,
+                    )?;
                     self.body.add_expr(FirExpr {
                         origin,
                         ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
                         kind: FirExprKind::IndexedWrite {
                             receiver,
                             indices,
-                            value,
+                            value: checked_value,
                             conversion,
+                        },
+                    })
+                };
+                for (operand, _) in &operand_bindings {
+                    self.expression_substitutions.remove(operand);
+                }
+                let expression = if operand_bindings.is_empty() {
+                    expression
+                } else {
+                    self.body.add_expr(FirExpr {
+                        origin,
+                        ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+                        kind: FirExprKind::Block {
+                            statements: operand_bindings
+                                .into_iter()
+                                .map(|(_, declaration)| declaration)
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                            result: Some(expression),
                         },
                     })
                 };
@@ -3446,9 +3884,10 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedStatement(StatementForm::Return),
                     ));
                 };
-                let value = value
-                    .map(|value| self.return_value(value, target.as_ref()))
-                    .transpose()?;
+                let value = match value {
+                    Some(value) => Some(self.return_value(*value, target.as_ref())?),
+                    None => self.valueless_lambda_return_value(target.as_ref(), origin)?,
+                };
                 let expression = self.body.add_expr(FirExpr {
                     origin,
                     ty: ResolvedTy::new(Ty::Nothing).expect("Nothing is a publishable FIR type"),
@@ -3490,7 +3929,7 @@ impl BodyFirChecker<'_> {
                     origin,
                     kind: FirControlTargetKind::Loop,
                 });
-                let condition = self.expression(*cond)?;
+                let condition = self.boolean_condition(*cond)?;
                 let body = self.checked_loop_body(target, label, None, *body)?;
                 FirStatementKind::Loop {
                     target,
@@ -3565,6 +4004,7 @@ impl BodyFirChecker<'_> {
                 let start = self.expression(range.start)?;
                 let end = self.expression(range.end)?;
                 let variable = self.allocate_local();
+                self.body.set_debug_value_name(variable, name.clone());
                 let body = self.checked_loop_body(
                     target,
                     label,
@@ -3573,6 +4013,7 @@ impl BodyFirChecker<'_> {
                         LocalBinding {
                             value: variable,
                             ty: variable_ty,
+                            lateinit: false,
                         },
                     )),
                     *body,
@@ -3625,6 +4066,7 @@ impl BodyFirChecker<'_> {
                     element_ty,
                 )?;
                 let variable = self.allocate_local();
+                self.body.set_debug_value_name(variable, name.clone());
                 let body = self.checked_loop_body(
                     target,
                     label,
@@ -3633,6 +4075,7 @@ impl BodyFirChecker<'_> {
                         LocalBinding {
                             value: variable,
                             ty: element_ty,
+                            lateinit: false,
                         },
                     )),
                     *body,
@@ -3749,8 +4192,19 @@ impl BodyFirChecker<'_> {
             )
         })?;
         let cause = self.expression_origin(source)?;
-        let conversion = self.selected_value_conversion(source, target_type, cause)?;
+        let actual_type = self.expression_type(source)?;
         let value = self.expression(source)?;
+        let conversion = self
+            .selected_value_conversion(source, value, target_type, cause)?
+            .filter(|conversion| {
+                // A named function's Unit return is a statement boundary. Its effect must remain
+                // void here; callable realization materializes Unit only for lambdas/adapters that
+                // actually return it as a value.
+                !(matches!(target, Some(ReturnTarget::Function))
+                    && actual_type.get().canonical_semantic() == Ty::Unit
+                    && target_type.get().canonical_semantic() == Ty::Unit
+                    && matches!(conversion.kind, FirConversionKind::CoerceToUnit))
+            });
         let Some(conversion) = conversion else {
             return Ok(value);
         };
@@ -3759,6 +4213,67 @@ impl BodyFirChecker<'_> {
             ty: target_type,
             kind: FirExprKind::ImplicitConversion { value, conversion },
         }))
+    }
+
+    /// A valueless return from a lambda still has Kotlin's `Unit` value. Preserve it in checked FIR
+    /// whenever the selected lambda result is `Unit` or `Unit?`; an ordinary named Unit function
+    /// keeps a valueless return because its callable boundary is statement-valued.
+    fn valueless_lambda_return_value(
+        &mut self,
+        target: Option<&ReturnTarget>,
+        cause: OriginId,
+    ) -> Result<Option<FirExprId>, BodyCheckFailure> {
+        let Some(ReturnTarget::Lambda(lambda)) = target else {
+            return Ok(None);
+        };
+        let target_type = if Some(*lambda) == self.lambda_return_source {
+            self.body.result_type()
+        } else {
+            let Ty::Fun(signature) = self.info.semantic_ty(*lambda).non_null() else {
+                return Err(self.failure(
+                    self.file.expr_span(*lambda),
+                    BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::Return),
+                ));
+            };
+            ResolvedTy::new(signature.ret).ok()
+        }
+        .ok_or_else(|| {
+            self.failure(
+                self.file.expr_span(*lambda),
+                BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::Return),
+            )
+        })?;
+        if target_type.get().non_null() != Ty::Unit {
+            return Ok(None);
+        }
+        let value_origin = self
+            .origins
+            .synthetic(cause, SyntheticOriginKind::GeneratedControlFlow);
+        let unit_type = ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type");
+        let unit = self.body.add_expr(FirExpr {
+            origin: value_origin,
+            ty: unit_type,
+            kind: FirExprKind::SingletonValue {
+                classifier: crate::types::type_name("kotlin/Unit"),
+            },
+        });
+        if target_type == unit_type {
+            return Ok(Some(unit));
+        }
+        let conversion_origin = self
+            .origins
+            .synthetic(cause, SyntheticOriginKind::ImplicitConversion);
+        Ok(Some(self.body.add_expr(FirExpr {
+            origin: conversion_origin,
+            ty: target_type,
+            kind: FirExprKind::ImplicitConversion {
+                value: unit,
+                conversion: FirConversion {
+                    origin: conversion_origin,
+                    kind: FirConversionKind::NullabilityWidening { to: target_type },
+                },
+            },
+        })))
     }
 
     /// Whether a checked `return` leaves the body this checker is constructing.

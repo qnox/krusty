@@ -1,7 +1,7 @@
 //! Checked FIR for local destructuring declarations.
 
 use super::*;
-use crate::resolve::{DestructureComponentTarget, ResolvedCall};
+use crate::resolve::ResolvedCall;
 
 impl BodyFirChecker<'_> {
     pub(super) fn destructure_statement(
@@ -38,23 +38,13 @@ impl BodyFirChecker<'_> {
                     .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
                 target.ret(),
             )?;
-            let component_kind = match target {
-                DestructureComponentTarget::Call(call) => self.destructure_component_call(
-                    statement,
-                    initializer_source,
-                    initializer,
-                    *call,
-                    origin,
-                )?,
-                DestructureComponentTarget::IndexedGet(member) => self.destructure_indexed_get(
-                    statement,
-                    initializer_source,
-                    initializer,
-                    index,
-                    *member,
-                    origin,
-                )?,
-            };
+            let component_kind = self.destructure_component_call(
+                statement,
+                initializer_source,
+                initializer,
+                *target,
+                origin,
+            )?;
             let component = self.body.add_expr(FirExpr {
                 origin,
                 ty: component_ty,
@@ -162,6 +152,7 @@ impl BodyFirChecker<'_> {
                         can_inline: member.member.inline.can_inline(),
                         inline_plan: super::calls::fir_inline_body_plan(
                             member.member.inline_body_plan.as_deref(),
+                            None,
                         ),
                         extension_receiver_parameter: None,
                     }
@@ -208,6 +199,7 @@ impl BodyFirChecker<'_> {
                         can_inline: callable.inline.can_inline(),
                         inline_plan: super::calls::fir_inline_body_plan(
                             callable.inline_body_plan.as_deref(),
+                            Some(0),
                         ),
                         extension_receiver_parameter: None,
                     }
@@ -273,6 +265,7 @@ impl BodyFirChecker<'_> {
                         can_inline: inline.can_inline(),
                         inline_plan: super::calls::fir_inline_body_plan(
                             inline_body_plan.as_deref(),
+                            None,
                         ),
                         extension_receiver_parameter: Some(0),
                     }
@@ -330,89 +323,6 @@ impl BodyFirChecker<'_> {
             extension_receiver,
             parameter_types: Box::new([]),
             arguments: Box::new([]),
-            substitutions: Box::new([]),
-        }))
-    }
-
-    /// Checked realization of the indexed destructuring convention used by map entries and other
-    /// declarations whose component operation is their selected `get(Int)`. Resolution has already
-    /// selected the exact member; FIR records that identity and the synthetic index argument.
-    fn destructure_indexed_get(
-        &mut self,
-        statement: StmtId,
-        receiver_source: ExprId,
-        receiver: FirExprId,
-        index: usize,
-        selected: crate::symbol_resolver::ResolvedMember,
-        origin: OriginId,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let span = self.file.stmt_spans.get(statement.0 as usize).copied();
-        if !selected.context_args.is_empty() || selected.member.params.len() != 1 {
-            return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
-        }
-        let resolved = |ty| {
-            ResolvedTy::new(ty)
-                .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
-        };
-        let target = if let Some(declaration) = selected.member.stable_declaration {
-            self.index
-                .callable_for_declaration(declaration)
-                .map(|callable| FirCallTarget::Module(callable.id))
-                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?
-        } else {
-            crate::trace_compiler!(
-                "fir",
-                "checked indexed destructure target member={:?} external={:?}",
-                selected.member,
-                selected.member.external_identity,
-            );
-            FirCallTarget::External {
-                declaration: selected.member.external_identity.ok_or_else(|| {
-                    self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                })?,
-                receiver: Some(resolved(selected.receiver)?),
-                declared_receiver: None,
-                parameters: selected
-                    .member
-                    .params
-                    .iter()
-                    .copied()
-                    .map(resolved)
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_boxed_slice(),
-                result: resolved(selected.ret)?,
-                declared_result: selected.member.declared_ret.map(resolved).transpose()?,
-                suspend: selected.suspend,
-                can_inline: selected.member.inline.can_inline(),
-                inline_plan: super::calls::fir_inline_body_plan(
-                    selected.member.inline_body_plan.as_deref(),
-                ),
-                extension_receiver_parameter: None,
-            }
-        };
-        let index = i64::try_from(index)
-            .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-        let index = self.body.add_expr(FirExpr {
-            origin,
-            ty: resolved(Ty::Int)?,
-            kind: FirExprKind::Constant(FirConstant::Int(index)),
-        });
-        Ok(FirExprKind::Call(FirCall {
-            target,
-            dispatch_receiver: Some(self.destructure_receiver(
-                receiver_source,
-                receiver,
-                selected.receiver,
-                origin,
-            )?),
-            extension_receiver: None,
-            parameter_types: self.published_parameter_types(span, &selected.member.params)?,
-            arguments: vec![FirCallArgument::Expression {
-                parameter: 0,
-                value: index,
-                conversion: None,
-            }]
-            .into_boxed_slice(),
             substitutions: Box::new([]),
         }))
     }

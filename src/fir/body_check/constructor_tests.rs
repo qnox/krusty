@@ -187,6 +187,30 @@ fn generic_secondary_constructor_keeps_inferred_class_substitution() {
 }
 
 #[test]
+fn structured_primary_constructor_beats_bare_type_parameter_secondary_after_inference() {
+    let (body, index) = checked_function_body_with_platform(
+        "class Box<T>(val values: List<T>) { constructor(value: T): this(listOf(value)) }\n\
+         fun make(): Any = Box(listOf(\"answer\"))\n",
+        "make",
+        super::test_support::jvm_semantics(),
+    );
+    let FirExprKind::ConstructorCall(call) = &body
+        .expr(root_expression(&body))
+        .expect("generic constructor call")
+        .kind
+    else {
+        panic!("construction must become checked constructor-call FIR")
+    };
+    assert!(index.callable(module_target(call)).is_some());
+    assert_eq!(call.substitutions.len(), 1);
+    assert_eq!(call.substitutions[0].value.get(), Ty::String);
+    assert_eq!(
+        call.parameter_types[0].get(),
+        Ty::obj_args("kotlin/collections/List", &[Ty::String]),
+    );
+}
+
+#[test]
 fn generic_vararg_secondary_constructor_keeps_inferred_class_substitution() {
     let (body, index) = checked_function_body(
         "class Box<T>(val value: T) { constructor(vararg values: T): this(values[0]) }\n\
@@ -312,14 +336,25 @@ fn generic_constructor_infers_its_argument_from_an_expected_supertype() {
 #[test]
 fn expected_supertype_contextualizes_nested_constructor_lambdas() {
     let (body, _) = checked_function_body_with_platform(
-        "class Yield<T>(val factory: () -> (() -> T?)) : Iterable<T> {\n\
-             override fun iterator(): Iterator<T> = null as Iterator<T>\n\
+        "class YieldingIterator<T>(val yieldingFunction: () -> T?) : Iterator<T> {\n\
+             var current: T? = yieldingFunction()\n\
+             override fun next(): T {\n\
+                 val next = current\n\
+                 if (next != null) {\n\
+                     current = yieldingFunction()\n\
+                     return next\n\
+                 } else throw IndexOutOfBoundsException()\n\
+             }\n\
+             override fun hasNext(): Boolean = current != null\n\
          }\n\
-         fun <T> Iterable<T>.make(): Iterable<T> = Yield {\n\
-             val iterator = this.iterator()\n\
+         class YieldingIterable<T>(val yielderFactory: () -> (() -> T?)) : Iterable<T> {\n\
+             override fun iterator(): Iterator<T> = YieldingIterator(yielderFactory())\n\
+         }\n\
+         public fun <TItem> Iterable<TItem>.lazy(): Iterable<TItem> = YieldingIterable {\n\
+             val iterator = this.iterator();\n\
              { if (iterator.hasNext()) iterator.next() else null }\n\
          }\n",
-        "make",
+        "lazy",
         jvm_stdlib_semantics(),
     );
 

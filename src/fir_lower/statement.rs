@@ -2,6 +2,7 @@ use crate::fir::{
     FirLocalClassCapture, FirLocalClassCaptureSource, FirStatementId, FirStatementKind,
 };
 use crate::ir::{ExprId, IrCtorArg, IrExpr, IrField};
+use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
 
@@ -30,24 +31,31 @@ impl BodyLowering<'_> {
                 target,
                 ty,
                 mutable: _,
-                lateinit: _,
+                lateinit,
                 initializer,
                 conversion,
             } => {
-                let init = initializer
+                let mut init = initializer
                     .map(|initializer| self.expression_with_conversion(initializer, *conversion))
                     .transpose()?;
+                if *lateinit && init.is_none() {
+                    init = Some(self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
+                }
                 let init = if self.shared_local_type(*target).is_some() {
                     Some(self.shared_cell_new(*ty, init))
                 } else {
                     init
                 };
-                self.ir.add_expr(IrExpr::Variable {
+                let variable = self.ir.add_expr(IrExpr::Variable {
                     index: self.value_slot(*target),
                     ty: ty.get(),
                     init,
                     named: true,
-                })
+                });
+                if let Some(name) = self.body.debug_value_name(*target) {
+                    self.ir.value_names.insert(variable, name.to_owned());
+                }
+                variable
             }
             FirStatementKind::Expression(expression) => self.expression(*expression)?,
             FirStatementKind::Destructure {
@@ -81,12 +89,21 @@ impl BodyLowering<'_> {
                         } => {
                             let component =
                                 self.expression_with_conversion(component, conversion)?;
-                            statements.push(self.ir.add_expr(IrExpr::Variable {
+                            let initializer = if self.shared_local_type(target).is_some() {
+                                Some(self.shared_cell_new(ty, Some(component)))
+                            } else {
+                                Some(component)
+                            };
+                            let variable = self.ir.add_expr(IrExpr::Variable {
                                 index: self.value_slot(target),
                                 ty: ty.get(),
-                                init: Some(component),
+                                init: initializer,
                                 named: true,
-                            }));
+                            });
+                            if let Some(name) = self.body.debug_value_name(target) {
+                                self.ir.value_names.insert(variable, name.to_owned());
+                            }
+                            statements.push(variable);
                         }
                         crate::fir::FirDestructureEntry::Ignored { .. } => {}
                     }
@@ -123,8 +140,50 @@ impl BodyLowering<'_> {
             }),
         };
         self.record_expression_origins(first_generated, lowered, origin);
+        let line = self.body.statement_debug_line(statement_id);
+        if line != 0 {
+            self.ir.expr_lines.insert(lowered, line);
+        }
         self.set_statement_state(statement_id, LoweringState::Lowered(lowered));
         Ok(lowered)
+    }
+
+    /// A checked FIR expression statement consumes its value. Preserve that semantic boundary in
+    /// common IR for exhaustive `when` expressions, whose branch result type would otherwise make
+    /// a backend treat the join as value-producing. A non-exhaustive no-else `when` deliberately
+    /// has no marker and keeps its implicit no-match fallthrough.
+    pub(super) fn consumed_statement(
+        &mut self,
+        statement: FirStatementId,
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let consumes_expression = matches!(
+            self.body
+                .statement(statement)
+                .map(|statement| &statement.kind),
+            Some(FirStatementKind::Expression(_))
+        );
+        let lowered = self.statement(statement)?;
+        if consumes_expression {
+            self.coerce_statement_when_to_unit(lowered);
+        }
+        Ok(lowered)
+    }
+
+    fn coerce_statement_when_to_unit(&mut self, mut expression: ExprId) {
+        loop {
+            match self.ir.expr(expression) {
+                IrExpr::Block {
+                    value: Some(value), ..
+                } => expression = *value,
+                IrExpr::When { .. } => {
+                    if self.ir.exhaustive_whens.contains_key(&expression) {
+                        self.ir.exhaustive_whens.insert(expression, Ty::Unit);
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
     }
 }
 
@@ -275,6 +334,7 @@ impl BodyLowering<'_> {
                 ty: capture.ty.get(),
                 declared_ty: None,
                 is_field: true,
+                field_index: Some(u32::try_from(field).expect("too many captured class fields")),
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -296,6 +356,14 @@ impl BodyLowering<'_> {
             }
         }
         let class = &mut self.ir.classes[class as usize];
+        let shifted = u32::try_from(captures.len()).expect("too many captured class fields");
+        for argument in &mut class.ctor_args {
+            if let Some(field) = &mut argument.field_index {
+                *field = field
+                    .checked_add(shifted)
+                    .expect("captured class field index overflow");
+            }
+        }
         class.fields.splice(0..0, fields);
         class.ctor_args.splice(0..0, arguments);
         class.ctor_param_count += captures.len() as u32;

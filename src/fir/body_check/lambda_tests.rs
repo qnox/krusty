@@ -5,6 +5,50 @@ use super::test_support::{
 use super::*;
 
 #[test]
+fn valueless_nullable_unit_lambda_return_retains_its_unit_value() {
+    let (body, _) = checked_function_body(
+        "fun consume(block: () -> Unit?) {}\n\
+         fun test() { consume { if (true) return@consume; null } }\n",
+        "test",
+    );
+    let lambda = (0..body.expression_count())
+        .find_map(
+            |raw| match &body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
+                _ => None,
+            },
+        )
+        .expect("checked nullable-Unit lambda");
+    let returned = (0..lambda.expression_count())
+        .find_map(
+            |raw| match &lambda.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Jump {
+                    kind: FirJumpKind::Return { target_depth: 0 },
+                    value: Some(value),
+                    ..
+                } => Some(*value),
+                _ => None,
+            },
+        )
+        .expect("local return with a checked value");
+    let FirExprKind::ImplicitConversion { value, conversion } =
+        &lambda.expr(returned).expect("return value").kind
+    else {
+        panic!("Unit must be explicitly widened to Unit?")
+    };
+    assert!(matches!(
+        conversion.kind,
+        FirConversionKind::NullabilityWidening { to }
+            if to.get() == Ty::nullable(Ty::Unit)
+    ));
+    assert!(matches!(
+        lambda.expr(*value).map(|expression| &expression.kind),
+        Some(FirExprKind::SingletonValue { classifier })
+            if classifier.matches("kotlin/Unit")
+    ));
+}
+
+#[test]
 fn capture_free_lambda_owns_a_body_local_callable_and_checked_body() {
     let (body, _) = checked_function_body("fun make(): () -> Int = { 42 }\n", "make");
     let FirExprKind::Lambda {
@@ -146,6 +190,26 @@ fn sibling_lambdas_use_one_shared_cell_when_either_writes_the_capture() {
 }
 
 #[test]
+fn lambda_read_of_enclosing_var_uses_a_shared_cell() {
+    let (body, _) = checked_function_body(
+        "fun read(): Int { var value = 1; val get = { value }; value = 2; return get() }\n",
+        "read",
+    );
+    let capture = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Lambda {
+                body: lambda_body, ..
+            } = &body.expr(FirExprId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            lambda_body.captures().first().copied()
+        })
+        .expect("lambda must capture the enclosing var");
+    assert!(capture.shared_cell);
+}
+
+#[test]
 fn guarded_and_asserted_receivers_capture_their_non_null_flow_type() {
     let (body, index) = checked_function_body(
         "class Token\n\
@@ -268,6 +332,47 @@ fn lambda_in_nested_inner_class_captures_full_outer_receiver_depth() {
     }
 
     assert!(has_outer_capture(&body));
+}
+
+#[test]
+fn lambda_captures_current_dispatch_receiver_independently_of_named_context_values() {
+    let (body, _) = checked_function_body_with_platform(
+        "// LANGUAGE: +ContextParameters\n\
+         // WITH_STDLIB\n\
+         class Marker\n\
+         class Host {\n\
+             context(marker: Marker)\n\
+             fun result(): String = listOf(1).map { hostValue() }.single()\n\
+         }\n\
+         context(host: Host) fun hostValue(): String = \"OK\"\n",
+        "result",
+        jvm_stdlib_semantics(),
+    );
+
+    let lambda = (0..body.expression_count())
+        .find_map(
+            |raw| match &body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
+                _ => None,
+            },
+        )
+        .expect("map lambda");
+    assert!(
+        (0..lambda.expression_count()).any(|raw| matches!(
+            lambda.expr(FirExprId::from_raw(raw as u32)),
+            Some(FirExpr {
+                ty,
+                kind: FirExprKind::CapturedImplicitReceiver {
+                    enclosing_depth: 0,
+                    current: true,
+                    depth: 0,
+                    ..
+                },
+                ..
+            }) if ty.get() == Ty::obj("Host")
+        )),
+        "named context values do not alter the semantic implicit-receiver tower"
+    );
 }
 
 #[test]
@@ -535,6 +640,36 @@ fn sam_argument_retains_the_selected_interface_method_shape() {
     assert_eq!(sam.result.get(), Ty::String);
     assert!(!sam.suspend);
     assert!(!sam.nullable);
+}
+
+#[test]
+fn generic_sam_accepts_the_same_nullable_lexical_type_parameter_result() {
+    let (body, _) = checked_function_body(
+        "class Box<T>(val value: T)\n\
+         fun interface Mapper<I, O> { fun map(value: I): O }\n\
+         fun <I, O> apply(value: I, mapper: Mapper<I, O>): O = mapper.map(value)\n\
+         fun <T> use(value: Box<T>?): T? = apply(value) { it?.value }\n",
+        "use",
+    );
+    let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("apply call").kind
+    else {
+        panic!("generic SAM argument must belong to the checked source call")
+    };
+    let FirCallArgument::Expression {
+        conversion:
+            Some(FirConversion {
+                kind: FirConversionKind::Sam(sam),
+                ..
+            }),
+        ..
+    } = call.arguments[1]
+    else {
+        panic!("generic SAM conversion must be explicit in FIR")
+    };
+    let sam = body.sam_conversion(sam).expect("body-local SAM target");
+    assert_eq!(sam.parameters[0].get(), body.parameters()[0].ty.get());
+    assert!(sam.result.get().is_nullable());
+    assert!(sam.result.get().mentions_ty_param());
 }
 
 #[test]

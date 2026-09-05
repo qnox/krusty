@@ -49,6 +49,43 @@ fn named_context_parameters(
         .collect()
 }
 
+fn set_extension_accessor_parameter_names(
+    index: &ResolvedModuleIndex,
+    property: DeclarationId,
+    property_name: &str,
+    setter: bool,
+    function: FunId,
+    ir: &mut IrFile,
+) -> Result<(), FirFileLoweringFailure> {
+    let accessor = index
+        .owned_declaration(property, DeclarationKind::Accessor, u32::from(setter))
+        .ok_or(FirFileLoweringFailure::MissingCallable(property))?;
+    let callable = index
+        .callable_for_declaration(accessor)
+        .ok_or(FirFileLoweringFailure::MissingCallable(accessor))?;
+    let mut names = (0..index.callable_parameter_name_count(callable.id))
+        .map(|ordinal| {
+            index
+                .callable_parameter_name(callable.id, ordinal as u32)
+                .map(str::to_owned)
+                .ok_or(FirFileLoweringFailure::MissingCallable(accessor))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if callable.shape.extension_receiver.is_some() {
+        let receiver_position = callable.shape.context_parameter_count as usize;
+        if receiver_position > names.len() {
+            return Err(FirFileLoweringFailure::MissingCallable(accessor));
+        }
+        names.insert(receiver_position, format!("$this${property_name}"));
+    }
+    if ir.functions[function as usize].params.len() != names.len() {
+        return Err(FirFileLoweringFailure::MissingCallable(accessor));
+    }
+    ir.fn_params
+        .insert(function, crate::ir::FnParamInfo::names(names));
+    Ok(())
+}
+
 pub(super) fn predeclare_properties(
     index: &ResolvedModuleIndex,
     source: SourceFileId,
@@ -119,6 +156,7 @@ pub(super) fn predeclare_properties(
                     property.id,
                     IrCheckedProperty {
                         declaration,
+                        decl_line: 0,
                         initialization_order: header.initialization_order,
                         class,
                         name,
@@ -171,6 +209,8 @@ pub(super) fn finalize_properties(
     let mut realizations = HashMap::new();
     let mut initialization: HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>> = HashMap::new();
     for (source_order, anchor, property_id, property) in properties {
+        let declaration = property.declaration;
+        let decl_line = property.decl_line;
         let shape = index
             .property(property_id)
             .ok_or(FirFileLoweringFailure::MissingProperty(
@@ -232,11 +272,63 @@ pub(super) fn finalize_properties(
                 &mut realizations,
             )?,
         }
+        if decl_line != 0 {
+            let layout = realizations
+                .get(&property_id)
+                .cloned()
+                .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
+            apply_property_decl_line(ir, &layout, decl_line);
+        }
     }
     merge_class_initialization(ir, initialization)?;
     realize_backing_field_operations(index, ir, &realizations)?;
     ir.local_property_layouts.extend(realizations);
     Ok(())
+}
+
+fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalPropertyLayout, line: u32) {
+    match layout {
+        IrLocalPropertyLayout::TopLevelStorage {
+            storage,
+            getter,
+            setter,
+            ..
+        } => {
+            if let Some(storage) = ir.statics.get_mut(*storage as usize) {
+                storage.line = line;
+            }
+            for function in getter.iter().chain(setter.iter()) {
+                ir.fn_decl_lines.insert(*function, line);
+            }
+        }
+        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
+            ir.fn_decl_lines.insert(*getter, line);
+            if let Some(setter) = setter {
+                ir.fn_decl_lines.insert(*setter, line);
+            }
+        }
+        IrLocalPropertyLayout::Member {
+            class,
+            owner,
+            getter,
+            setter,
+            name,
+            property,
+            ..
+        } => {
+            ir.prop_decl_lines.insert((*owner, name.clone()), line);
+            if let Some(property) = ir.classes[*class as usize]
+                .properties
+                .get_mut(*property as usize)
+            {
+                property.decl_line = line;
+            }
+            for function in getter.iter().chain(setter.iter()) {
+                ir.fn_decl_lines.insert(*function, line);
+            }
+        }
+        IrLocalPropertyLayout::MemberExtension { .. } => {}
+    }
 }
 
 fn materialize_member_extension_property(
@@ -371,6 +463,7 @@ fn materialize_member_extension_property(
             owner,
             interface,
             name: property.name,
+            getter,
             setter,
             receiver,
             ty: property.ty,
@@ -479,6 +572,8 @@ fn materialize_top_level_property(
         .copied()
         .chain(extension_receiver)
         .collect::<Vec<_>>();
+    let declaration = property.declaration;
+    let property_name = property.name.clone();
     let getter = add_accessor_function(
         ir,
         crate::names::property_getter_name(&property.name),
@@ -501,6 +596,17 @@ fn materialize_top_level_property(
             None,
         )
     });
+    set_extension_accessor_parameter_names(index, declaration, &property_name, false, getter, ir)?;
+    if let Some(setter) = setter {
+        set_extension_accessor_parameter_names(
+            index,
+            declaration,
+            &property_name,
+            true,
+            setter,
+            ir,
+        )?;
+    }
     realizations.insert(
         property_id,
         IrLocalPropertyLayout::TopLevelAccessor {
@@ -1039,6 +1145,7 @@ fn materialize_member_extension_delegate(
             owner,
             interface: false,
             name: property.name,
+            getter,
             setter,
             receiver: extension_receiver,
             ty: property.ty,
@@ -1057,6 +1164,7 @@ fn delegated_property_reference(
 ) -> ExprId {
     ir.add_expr(IrExpr::Checked(IrCheckedOperation::PropertyReference {
         target: FirPropertyReferenceTarget::Module(property),
+        delegated: true,
         binding: if unbound {
             FirCallableReferenceBinding::Unbound
         } else {
@@ -1153,12 +1261,18 @@ fn delegated_call(
                     ))? as u32;
                 let mut arguments = arguments;
                 arguments.insert(callable.shape.context_parameter_count as usize, receiver);
-                return Ok(ir.add_expr(IrExpr::MethodCall {
+                let expression = ir.add_expr(IrExpr::MethodCall {
                     class,
                     index: method,
                     receiver: dispatch,
                     args: arguments.into_iter().map(Some).collect(),
-                }));
+                });
+                return Ok(materialize_delegated_result(
+                    ir,
+                    expression,
+                    signature.result.get(),
+                    call.result.get(),
+                ));
             }
             if !call.extension {
                 if let Some(owner) = owner {
@@ -1175,14 +1289,20 @@ fn delegated_call(
                             .ok_or(FirFileLoweringFailure::MissingCallable(
                                 callable.declaration,
                             ))? as u32;
-                        return Ok(ir.add_expr(IrExpr::MethodCall {
+                        let expression = ir.add_expr(IrExpr::MethodCall {
                             class,
                             index: method,
                             receiver,
                             args: arguments.into_iter().map(Some).collect(),
-                        }));
+                        });
+                        return Ok(materialize_delegated_result(
+                            ir,
+                            expression,
+                            signature.result.get(),
+                            call.result.get(),
+                        ));
                     }
-                    return Ok(ir.add_expr(IrExpr::Call {
+                    let expression = ir.add_expr(IrExpr::Call {
                         callee: Callee::Virtual {
                             owner: owner.classifier,
                             name: index
@@ -1202,7 +1322,13 @@ fn delegated_call(
                         },
                         dispatch_receiver: Some(receiver),
                         args: arguments,
-                    }));
+                    });
+                    return Ok(materialize_delegated_result(
+                        ir,
+                        expression,
+                        signature.result.get(),
+                        call.result.get(),
+                    ));
                 }
             }
             let mut arguments = arguments;
@@ -1210,7 +1336,7 @@ fn delegated_call(
                 arguments.insert(callable.shape.context_parameter_count as usize, receiver);
             }
             let function = ir.checked_callable_functions.get(target).copied();
-            Ok(ir.add_expr(IrExpr::Call {
+            let expression = ir.add_expr(IrExpr::Call {
                 callee: function.map_or_else(
                     || Callee::Module {
                         target: *target,
@@ -1223,7 +1349,13 @@ fn delegated_call(
                 ),
                 dispatch_receiver: None,
                 args: arguments,
-            }))
+            });
+            Ok(materialize_delegated_result(
+                ir,
+                expression,
+                signature.result.get(),
+                call.result.get(),
+            ))
         }
         FirCallTarget::External {
             declaration,
@@ -1282,6 +1414,7 @@ fn delegated_call(
                     ret: result.get(),
                     substitutions: Vec::new(),
                     defaults: Vec::new(),
+                    extension_receiver_parameter: None,
                 },
                 dispatch_receiver: Some(dispatch_receiver),
                 args: arguments,
@@ -1305,6 +1438,28 @@ fn delegated_call(
             DeclarationId::from_raw(0),
         )),
     }
+}
+
+/// Preserve the selected call-site result separately from the declaration's erased result slot.
+/// This is the same mechanical boundary used by ordinary checked calls: the frontend has already
+/// specialized `result`, while the declaration signature remains authoritative for the physical
+/// value produced by the call.
+fn materialize_delegated_result(
+    ir: &mut IrFile,
+    expression: ExprId,
+    declared: Ty,
+    result: Ty,
+) -> ExprId {
+    if declared == result {
+        return expression;
+    }
+    ir.call_declared_ret.insert(expression, declared);
+    ir.physical_types.insert(expression, declared.erased_recv());
+    ir.add_expr(IrExpr::TypeOp {
+        op: crate::ir::IrTypeOp::ImplicitCoercion,
+        arg: expression,
+        type_operand: result,
+    })
 }
 
 fn stamp_generated_property_nodes(
@@ -1612,6 +1767,12 @@ fn materialize_member_property(
         ir.classes[class_id as usize].methods.push(function);
         function
     });
+    // Accessor bodies are streamed after ordinary function declarations, but their declaration
+    // position is the property's position. Publish that stable order on every concrete accessor so
+    // targets can interleave properties and functions without consulting syntax or names.
+    for function in getter.iter().chain(setter.iter()) {
+        ir.fn_source_order.insert(*function, source_order);
+    }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
@@ -1861,15 +2022,38 @@ fn realize_backing_field_operations(
             _ => continue,
         };
         let replacement = match operation {
-            IrCheckedOperation::LateinitFieldRead { target } => {
-                lateinit_field_read(ir, realizations.get(&target), index, target)?
-            }
-            IrCheckedOperation::BackingFieldRead { target } => {
-                backing_field_read(ir, realizations.get(&target), index, target)?
-            }
-            IrCheckedOperation::BackingFieldWrite { target, value } => {
-                backing_field_write(ir, realizations.get(&target), value, index, target)?
-            }
+            IrCheckedOperation::LateinitFieldRead {
+                target,
+                dispatch_receiver,
+            } => lateinit_field_read(
+                ir,
+                realizations.get(&target),
+                dispatch_receiver,
+                index,
+                target,
+            )?,
+            IrCheckedOperation::BackingFieldRead {
+                target,
+                dispatch_receiver,
+            } => backing_field_read(
+                ir,
+                realizations.get(&target),
+                dispatch_receiver,
+                index,
+                target,
+            )?,
+            IrCheckedOperation::BackingFieldWrite {
+                target,
+                dispatch_receiver,
+                value,
+            } => backing_field_write(
+                ir,
+                realizations.get(&target),
+                dispatch_receiver,
+                value,
+                index,
+                target,
+            )?,
             _ => continue,
         };
         ir.exprs[raw] = replacement;
@@ -1878,13 +2062,16 @@ fn realize_backing_field_operations(
 }
 
 fn backing_field_read(
-    ir: &mut IrFile,
+    _ir: &mut IrFile,
     realization: Option<&IrLocalPropertyLayout>,
+    dispatch_receiver: Option<ExprId>,
     index: &ResolvedModuleIndex,
     target: crate::fir::PropertyId,
 ) -> Result<IrExpr, FirFileLoweringFailure> {
     match realization {
-        Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. }) => {
+        Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. })
+            if dispatch_receiver.is_none() =>
+        {
             Ok(IrExpr::GetStatic(*storage))
         }
         Some(IrLocalPropertyLayout::Member {
@@ -1892,7 +2079,7 @@ fn backing_field_read(
             backing_field: Some(field),
             ..
         }) => {
-            let receiver = ir.add_expr(IrExpr::GetValue(0));
+            let receiver = dispatch_receiver.ok_or_else(|| property_failure(index, target))?;
             Ok(IrExpr::GetField {
                 receiver,
                 class: *class,
@@ -1907,13 +2094,16 @@ fn backing_field_read(
 /// primitive the old lowering used for exactly this: it reads the field without the
 /// uninitialized-access guard that an ordinary `lateinit` read carries.
 fn lateinit_field_read(
-    ir: &mut IrFile,
+    _ir: &mut IrFile,
     realization: Option<&IrLocalPropertyLayout>,
+    dispatch_receiver: Option<ExprId>,
     index: &ResolvedModuleIndex,
     target: crate::fir::PropertyId,
 ) -> Result<IrExpr, FirFileLoweringFailure> {
     match realization {
-        Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. }) => {
+        Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. })
+            if dispatch_receiver.is_none() =>
+        {
             Ok(IrExpr::GetStatic(*storage))
         }
         Some(IrLocalPropertyLayout::Member {
@@ -1921,7 +2111,7 @@ fn lateinit_field_read(
             backing_field: Some(field),
             ..
         }) => {
-            let receiver = ir.add_expr(IrExpr::GetValue(0));
+            let receiver = dispatch_receiver.ok_or_else(|| property_failure(index, target))?;
             Ok(IrExpr::LateinitInitialized {
                 receiver,
                 class: *class,
@@ -1933,23 +2123,28 @@ fn lateinit_field_read(
 }
 
 fn backing_field_write(
-    ir: &mut IrFile,
+    _ir: &mut IrFile,
     realization: Option<&IrLocalPropertyLayout>,
+    dispatch_receiver: Option<ExprId>,
     value: ExprId,
     index: &ResolvedModuleIndex,
     target: crate::fir::PropertyId,
 ) -> Result<IrExpr, FirFileLoweringFailure> {
     match realization {
-        Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. }) => Ok(IrExpr::SetStatic {
-            index: *storage,
-            value,
-        }),
+        Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. })
+            if dispatch_receiver.is_none() =>
+        {
+            Ok(IrExpr::SetStatic {
+                index: *storage,
+                value,
+            })
+        }
         Some(IrLocalPropertyLayout::Member {
             class,
             backing_field: Some(field),
             ..
         }) => {
-            let receiver = ir.add_expr(IrExpr::GetValue(0));
+            let receiver = dispatch_receiver.ok_or_else(|| property_failure(index, target))?;
             Ok(IrExpr::SetField {
                 receiver,
                 class: *class,
@@ -2007,6 +2202,22 @@ pub(super) fn accept_property_body(
         ));
     }
     let value = body_value(lowered.roots.into_vec(), origin, ir)?;
+    let has_constant_initializer = anchor.kind == DeclarationKind::Property
+        && anchor.owner.is_none()
+        && index
+            .property(property_id)
+            .is_some_and(|property| !property.mutable)
+        && super::constant_folding::is_metadata_constant(ir.expr(value));
+    if has_constant_initializer {
+        let package_property = ir
+            .package_properties
+            .iter_mut()
+            .find(|property| property.property == property_id)
+            .ok_or(FirFileLoweringFailure::MissingProperty(
+                property_declaration,
+            ))?;
+        package_property.has_constant = true;
+    }
     let property = ir.checked_properties.get_mut(&property_id).ok_or(
         FirFileLoweringFailure::MissingProperty(property_declaration),
     )?;

@@ -5,6 +5,7 @@
 use crate::kt_string::KtString;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -3007,15 +3008,21 @@ fn write_annotation_attr(out: &mut Vec<u8>, name_index: Option<u16>, anns: &[Vec
 // ---- CodeBuilder: opcode emission with automatic max_stack/max_locals tracking ----------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Label(u32);
+pub struct Label {
+    builder: u64,
+    index: u32,
+}
+
+static NEXT_CODE_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct CodeBuilder {
+    id: u64,
     pub bytes: Vec<u8>,
     pub max_stack: u16,
     pub max_locals: u16,
     cur_stack: i32,
     labels: Vec<usize>, // label id -> bound byte offset (usize::MAX until bound)
-    fixups: Vec<(usize, u32)>, // (operand position, label id) to patch in link()
+    fixups: Vec<(usize, Label)>, // (operand position, destination) to patch in link()
     /// Exception-table entries by label: `(start, end, handler, catch_type)`, resolved in `link()`.
     exceptions: Vec<(Label, Label, Label, u16)>,
     /// Whether this method creates a lambda object (new $ClassName$lambda$N). When true, we must
@@ -3061,6 +3068,7 @@ pub struct CodeBuilder {
 impl CodeBuilder {
     pub fn new(arg_locals: u16) -> CodeBuilder {
         CodeBuilder {
+            id: NEXT_CODE_BUILDER_ID.fetch_add(1, Ordering::Relaxed),
             bytes: Vec::new(),
             max_stack: 0,
             max_locals: arg_locals,
@@ -3083,6 +3091,14 @@ impl CodeBuilder {
             .get(label as usize)
             .copied()
             .unwrap_or(false)
+    }
+
+    fn label_index(&self, label: Label) -> usize {
+        assert_eq!(
+            label.builder, self.id,
+            "a label can only be bound by its owning bytecode builder"
+        );
+        label.index as usize
     }
 
     /// Record a local; a missing length extends to method end.
@@ -3159,7 +3175,7 @@ impl CodeBuilder {
         locals: Vec<VerifType>,
         stack: Vec<VerifType>,
     ) {
-        let lid = label.0;
+        let lid = self.label_index(label) as u32;
         if !self.frames.iter().any(|(id, _, _)| *id == lid) {
             self.frames.push((lid, locals, stack));
         }
@@ -3337,13 +3353,13 @@ impl CodeBuilder {
             .filter(|&&(s, e, h, _)| {
                 [s, e, h]
                     .iter()
-                    .all(|l| self.labels[l.0 as usize] != usize::MAX)
+                    .all(|&label| self.labels[self.label_index(label)] != usize::MAX)
             })
             .map(|&(s, e, h, t)| {
                 (
-                    self.labels[s.0 as usize] as u16,
-                    self.labels[e.0 as usize] as u16,
-                    self.labels[h.0 as usize] as u16,
+                    self.labels[self.label_index(s)] as u16,
+                    self.labels[self.label_index(e)] as u16,
+                    self.labels[self.label_index(h)] as u16,
                     t,
                 )
             })
@@ -3363,6 +3379,7 @@ impl CodeBuilder {
     pub fn splice_inline(
         &mut self,
         bytes: &[u8],
+        external_branches: &[(usize, Label)],
         body_stack: u16,
         top_local: u16,
         arg_words: i32,
@@ -3378,6 +3395,7 @@ impl CodeBuilder {
             self.cur_stack = baseline + ret_words;
             return;
         }
+        self.fixups.extend(external_branches.iter().copied());
         if top_local > self.max_locals {
             self.max_locals = top_local;
         }
@@ -3407,7 +3425,10 @@ impl CodeBuilder {
         let id = self.labels.len() as u32;
         self.labels.push(usize::MAX);
         self.dead_bound.push(false);
-        Label(id)
+        Label {
+            builder: self.id,
+            index: id,
+        }
     }
     /// Bind `l` here. Inside a dropped dead region this revives emission only if control can actually
     /// arrive: some branch to `l` was ALREADY EMITTED (it recorded a fixup). A branch emitted while
@@ -3416,12 +3437,13 @@ impl CodeBuilder {
     /// so never revives — correct, because reaching the head while dead means the whole loop is
     /// unreachable. For an entry point control reaches WITHOUT a branch, see [`Self::bind_handler`].
     pub fn bind(&mut self, l: Label) {
-        self.labels[l.0 as usize] = self.bytes.len();
+        let index = self.label_index(l);
+        self.labels[index] = self.bytes.len();
         if self.dead {
-            if self.fixups.iter().any(|&(_, lid)| lid == l.0) {
+            if self.fixups.iter().any(|&(_, target)| target == l) {
                 self.dead = false;
             } else {
-                self.dead_bound[l.0 as usize] = true;
+                self.dead_bound[index] = true;
             }
         }
     }
@@ -3432,15 +3454,17 @@ impl CodeBuilder {
     /// the handler runs. A range that is empty, or whose start was itself bound inside a dropped
     /// region, guards nothing: the whole `try` was dead code and the handler goes with it.
     pub fn bind_handler(&mut self, l: Label, protects: &[(Label, Label)]) {
-        self.labels[l.0 as usize] = self.bytes.len();
+        let index = self.label_index(l);
+        self.labels[index] = self.bytes.len();
         let guards_live_code = protects.iter().any(|&(s, e)| {
-            let (s_off, e_off) = (self.labels[s.0 as usize], self.labels[e.0 as usize]);
-            s_off != usize::MAX && s_off < e_off && !self.is_dead_bound(s.0)
+            let (s_index, e_index) = (self.label_index(s), self.label_index(e));
+            let (s_off, e_off) = (self.labels[s_index], self.labels[e_index]);
+            s_off != usize::MAX && s_off < e_off && !self.is_dead_bound(s.index)
         });
         if guards_live_code {
             self.dead = false;
         } else if self.dead {
-            self.dead_bound[l.0 as usize] = true;
+            self.dead_bound[index] = true;
         }
     }
     /// Bind a label at an explicit byte offset (used to attach a relocated StackMapTable frame to a
@@ -3452,7 +3476,8 @@ impl CodeBuilder {
         if self.dead {
             return;
         }
-        self.labels[l.0 as usize] = offset;
+        let index = self.label_index(l);
+        self.labels[index] = offset;
     }
     fn branch(&mut self, opcode: u8, l: Label, delta: i32) {
         if self.dead {
@@ -3461,7 +3486,7 @@ impl CodeBuilder {
         }
         self.bytes.push(opcode);
         let pos = self.bytes.len();
-        self.fixups.push((pos, l.0));
+        self.fixups.push((pos, l));
         self.bytes.extend_from_slice(&[0, 0]);
         self.adjust(delta);
     }
@@ -3522,15 +3547,40 @@ impl CodeBuilder {
     }
 
     /// Resolve all branch offsets. Call once after the method body is built.
-    pub fn link(&mut self) {
-        for &(pos, lid) in &self.fixups {
-            let target = self.labels[lid as usize];
-            debug_assert!(target != usize::MAX, "unbound label {lid}");
+    pub fn link_local_branches(&mut self) {
+        for &(pos, label) in &self.fixups {
+            if label.builder != self.id {
+                continue;
+            }
+            let target = self.labels[label.index as usize];
+            debug_assert!(target != usize::MAX, "unbound label {}", label.index);
             let off = target as i64 - (pos - 1) as i64; // opcode is 1 byte before operand
             let b = (off as i16).to_be_bytes();
             self.bytes[pos] = b[0];
             self.bytes[pos + 1] = b[1];
         }
+    }
+
+    /// Branch operands whose destinations belong to an enclosing bytecode builder. Inline-body
+    /// assembly carries these across each nested splice and lets the final owner patch them.
+    pub fn external_branches(&self) -> Vec<(usize, Label)> {
+        self.fixups
+            .iter()
+            .filter(|(_, label)| label.builder != self.id)
+            .copied()
+            .collect()
+    }
+
+    /// Resolve every branch in a completed method. A foreign destination here means an inline
+    /// splice failed to transfer its branch ownership to the enclosing builder.
+    pub fn link(&mut self) {
+        assert!(
+            self.fixups
+                .iter()
+                .all(|(_, label)| label.builder == self.id),
+            "an external inline branch reached final method linking"
+        );
+        self.link_local_branches();
     }
 
     /// Ensure the local-variable table is at least `n` slots.

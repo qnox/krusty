@@ -1,11 +1,4 @@
-//! Pins for the PRECISE `BackendOutcome::LowerBail` reason each pre-pass-2 lowering gate reports.
-//!
-//! `src/ir_lower.rs` seeds the caller-owned bail sink with the catch-all `"deep"` and is supposed to
-//! refine it as lowering progresses — but every gate/pass-1 bail that returned `None` without a
-//! `set_bail` left the reason unrefined, lumping ~195 box-corpus skips into one unactionable survey
-//! bucket (`lower: deep`, the top skip-bucket). Each gate now records its precise unsupported-feature
-//! boundary so the survey stays attributable; a failure here means a bail path lost (or never got) its
-//! label.
+//! Runtime regressions for constructs once rejected by the retired AST-to-IR lowerer.
 //!
 use super::common;
 

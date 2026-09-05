@@ -5,7 +5,7 @@ mod metadata_handoff;
 mod streaming_tests;
 
 use crate::ast::File;
-use crate::backend::{Artifact, Backend};
+pub use crate::backend::{Artifact, Backend};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::{check_source_set, CheckedFile, FrontendSymbols, StreamingSourceSetAnalysis};
 
@@ -21,6 +21,12 @@ fn accept_active_debug_metadata(
         if let Some((_, classifier)) = active.class(file, declaration) {
             if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
                 ir.classes[class as usize].decl_line = classifier.decl_line;
+                if classifier.ctor_close_line != 0 {
+                    ir.ctor_close_lines.insert(
+                        ir.classes[class as usize].fq_name_id(),
+                        classifier.ctor_close_line,
+                    );
+                }
             }
         }
 
@@ -48,45 +54,8 @@ fn accept_active_debug_metadata(
             });
         if let Some(line) = property_line.filter(|line| *line != 0) {
             if let Some(property) = index.property_for_declaration(declaration) {
-                if let Some(layout) = ir.local_property_layouts.get(&property) {
-                    match layout {
-                        crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                            storage,
-                            getter,
-                            setter,
-                            ..
-                        } => {
-                            if let Some(storage) = ir.statics.get_mut(*storage as usize) {
-                                storage.line = line;
-                            }
-                            for function in getter.iter().chain(setter.iter()) {
-                                ir.fn_decl_lines.insert(*function, line);
-                            }
-                        }
-                        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-                            getter,
-                            setter,
-                            ..
-                        } => {
-                            ir.fn_decl_lines.insert(*getter, line);
-                            if let Some(setter) = setter {
-                                ir.fn_decl_lines.insert(*setter, line);
-                            }
-                        }
-                        crate::ir::IrLocalPropertyLayout::Member {
-                            owner,
-                            getter,
-                            setter,
-                            name,
-                            ..
-                        } => {
-                            ir.prop_decl_lines.insert((*owner, name.clone()), line);
-                            for function in getter.iter().chain(setter.iter()) {
-                                ir.fn_decl_lines.insert(*function, line);
-                            }
-                        }
-                        crate::ir::IrLocalPropertyLayout::MemberExtension { .. } => {}
-                    }
+                if let Some(property) = ir.checked_properties.get_mut(&property) {
+                    property.decl_line = line;
                 }
             }
         }
@@ -387,9 +356,6 @@ pub fn emit_analyzed<B: Backend>(
                     return;
                 }
             };
-            if work.is_empty() {
-                return;
-            }
             let groups = active_body_check_groups(work, &active_file, &active, &index);
             crate::trace_compiler!(
                 "fir",
@@ -644,7 +610,33 @@ fn active_body_check_groups(
         }
         rooted.push((root, unit));
     }
-    body_check_groups(rooted)
+    let mut groups = body_check_groups(rooted);
+    // Declaration annotations and other checked header metadata are consumed during this same
+    // bounded Pass-2 reparse. A classifier with no executable body (most notably an interface or
+    // annotation class) still needs one semantic group; tying metadata handoff to body presence
+    // silently dropped it. This group selects no body and retains no syntax/FIR after the callback.
+    for declaration in active.stable_declarations().filter(|declaration| {
+        index
+            .declaration_header(*declaration)
+            .is_some_and(|header| header.kind == crate::fir::DeclarationKind::Classifier)
+    }) {
+        if groups.iter().any(|group| group.root == declaration) {
+            continue;
+        }
+        groups.push(BodyCheckGroup {
+            root: declaration,
+            bodies: std::collections::HashSet::new(),
+            work: Vec::new(),
+        });
+    }
+    groups.sort_by_key(|group| {
+        active
+            .span(file, group.root)
+            .map_or((u32::MAX, u32::MAX, group.root), |span| {
+                (span.lo, span.hi, group.root)
+            })
+    });
+    groups
 }
 
 fn check_body_group(
@@ -1136,6 +1128,7 @@ pub fn check_frontend_only(
         }
         let source_diagnostic_start = diags.diags.len();
         let mut source_failed = false;
+        let mut source_rejected = false;
         source.visit_declaration_units(diags, |active_file, diags| {
             if source_failed {
                 return;
@@ -1199,8 +1192,15 @@ pub fn check_frontend_only(
                             .map(|diagnostic| diagnostic.msg.clone())
                             .unwrap_or_default(),
                     });
-                    source_failed = true;
-                    return;
+                    if internal {
+                        source_failed = true;
+                        return;
+                    }
+                    // An ordinary semantic rejection invalidates only this bounded body group.
+                    // Keep binding and checking later declaration units so frontend diagnostics
+                    // are complete; the successful emission path follows the same rule.
+                    source_rejected = true;
+                    continue;
                 };
                 for body in group.work {
                     if let Err(error) = crate::fir::check_and_dispatch_active_body_in_session(
@@ -1247,7 +1247,7 @@ pub fn check_frontend_only(
             });
             source_failed = true;
         }
-        if !source_failed {
+        if !source_failed && !source_rejected {
             if let Some(reported) = diags.diags[source_diagnostic_start..]
                 .iter()
                 .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
@@ -1360,6 +1360,8 @@ mod tests {
     struct FileAnnotationRecordingBackend;
 
     struct MemberAnnotationRecordingBackend;
+
+    struct BodylessClassAnnotationRecordingBackend;
 
     struct EnumEntryCallRecordingBackend;
 
@@ -1514,6 +1516,45 @@ mod tests {
         fn finalize(&self, state: Self::State, _module_name: &str) -> Vec<Artifact> {
             vec![(
                 "member-annotations.out".to_string(),
+                state.to_string().into_bytes(),
+            )]
+        }
+    }
+
+    impl Backend for BodylessClassAnnotationRecordingBackend {
+        type State = usize;
+
+        fn lower_file(
+            &self,
+            _checked: CheckedFile<'_>,
+            _stem: &str,
+            _state: &mut Self::State,
+            _diags: &mut DiagSink,
+        ) -> Vec<Artifact> {
+            panic!("streamed production emission must not invoke legacy syntax lowering")
+        }
+
+        fn lower_ir_file(
+            &self,
+            file: crate::backend::CheckedIrFile<'_>,
+            state: &mut Self::State,
+            _diags: &mut DiagSink,
+        ) -> Vec<Artifact> {
+            if file.ir.classes.iter().any(|class| {
+                class.fq_name.matches("Bodyless")
+                    && class
+                        .applied_annotations
+                        .applications()
+                        .any(|annotation| annotation.internal.matches("Marker"))
+            }) {
+                *state += 1;
+            }
+            Vec::new()
+        }
+
+        fn finalize(&self, state: Self::State, _module_name: &str) -> Vec<Artifact> {
+            vec![(
+                "bodyless-class-annotations.out".to_string(),
                 state.to_string().into_bytes(),
             )]
         }
@@ -2195,6 +2236,37 @@ mod tests {
         assert_eq!(
             outputs,
             [("member-annotations.out".to_string(), b"3".to_vec())]
+        );
+    }
+
+    #[test]
+    fn production_stream_checks_metadata_for_a_classifier_without_a_body() {
+        let inputs = [SourceInput::kotlin(
+            r#"annotation class Marker
+               @Marker interface Bodyless"#,
+        )
+        .with_file_stem("BodylessClassAnnotation")];
+        let stems = ["BodylessClassAnnotation".to_string()];
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        let outputs = emit_analyzed(
+            analysis,
+            &stems,
+            &BodylessClassAnnotationRecordingBackend,
+            "main",
+            &mut diagnostics,
+        );
+
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        assert_eq!(
+            outputs,
+            [("bodyless-class-annotations.out".to_string(), b"1".to_vec())]
         );
     }
 

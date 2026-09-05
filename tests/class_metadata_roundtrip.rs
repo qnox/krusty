@@ -9,7 +9,9 @@ use krusty::jvm::classreader::ClassInfo;
 use krusty::jvm::metadata::{
     class_constructors, class_functions, decode_metadata, package_functions,
 };
-use krusty::metadata::class_builder::{build_class, ClassTail, CtorMeta, FnMeta};
+use krusty::metadata::class_builder::{
+    build_class, ClassTail, CtorMeta, FnMeta, DEFAULT_CLASS_FLAGS, EQUALS_FN_FLAGS,
+};
 use krusty::types::{type_name, Ty, TypeVariance};
 
 /// Wrap built `(d1_bytes, d2)` into a `ClassInfo` the reader consumes. `d1` is the protobuf payload with
@@ -169,12 +171,43 @@ fn class_member_equality_bound_round_trips() {
 }
 
 #[test]
+fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
+    let owner = Ty::obj("sample/Data");
+    let mut equals = FnMeta::plain(
+        "equals".to_string(),
+        vec![("other".to_string(), Ty::nullable(Ty::obj("kotlin/Any")))],
+        Ty::Boolean,
+    );
+    equals.flags = EQUALS_FN_FLAGS;
+    let (d1, d2) = build_class(
+        "sample/Data",
+        &[],
+        "()V",
+        &[],
+        &[equals],
+        &[],
+        &ClassTail {
+            flags: DEFAULT_CLASS_FLAGS | (1 << 10),
+            ..Default::default()
+        },
+    );
+    let ci = class_info_kind("sample/Data", d1, d2, Some(1));
+    let equals = class_functions(&ci)
+        .iter()
+        .find(|function| function.jvm_name == "equals")
+        .expect("synthesized equals metadata");
+
+    assert_eq!(equals.equality_bound, Some(owner));
+}
+
+#[test]
 fn class_type_parameter_bound_and_variance_round_trip() {
     let parameter = krusty::ir::IrTypeParameter {
         name: "T".to_string(),
         semantic_name: "T".to_string(),
         bounds: vec![(Ty::obj("kotlin/CharSequence"), true)],
         variance: TypeVariance::Out,
+        reified: false,
     };
     let names = vec!["T".to_string()];
     let (d1, d2) = build_class(
@@ -210,6 +243,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         semantic_name: own.clone(),
         bounds: vec![(Ty::obj("kotlin/Any"), false)],
         variance: TypeVariance::Invariant,
+        reified: false,
     };
     let methods = vec![FnMeta {
         context_count: 0,
@@ -288,6 +322,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         semantic_name: own.clone(),
         bounds: vec![(bound, false)],
         variance: TypeVariance::Invariant,
+        reified: false,
     };
     let parameter = |name: &str| (name.to_string(), Ty::ty_param(name, bound));
     let methods = vec![FnMeta {
@@ -342,6 +377,55 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         Ty::TyParam("middle-semantic", _)
     ));
     assert!(matches!(signature.params[2], Ty::TyParam("V", _)));
+}
+
+#[test]
+fn member_type_parameter_bounds_can_reference_later_parameters() {
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let t_semantic = "\0tp:member:0".to_string();
+    let r_semantic = "\0tp:member:1".to_string();
+    let t = Ty::ty_param(&t_semantic, any);
+    let r = Ty::ty_param(&r_semantic, any);
+    let t_bound = Ty::obj_args("sample/Key", &[t, r]);
+    let mut get = FnMeta::plain(
+        "get".to_string(),
+        vec![("key".to_string(), Ty::ty_param(&t_semantic, t_bound))],
+        Ty::nullable(r),
+    );
+    get.type_params = vec!["T".to_string(), "R".to_string()];
+    get.semantic_type_params = vec![t_semantic, r_semantic];
+    get.type_param_bounds = vec![vec![t_bound], vec![any]];
+
+    let (d1, d2) = build_class(
+        "sample/ErrorTest",
+        &[],
+        "()V",
+        &[],
+        &[get],
+        &[],
+        &ClassTail::default(),
+    );
+    let ci = class_info("sample/ErrorTest", d1, d2);
+    let signature = class_functions(&ci)
+        .iter()
+        .find(|function| function.jvm_name == "get")
+        .and_then(|function| function.generic_sig.as_ref())
+        .expect("generic get metadata signature");
+
+    assert_eq!(signature.formals, ["T", "R"]);
+    assert_eq!(signature.formal_bounds.len(), 2);
+    let [bound_t, bound_r] = signature.formal_bounds.as_slice() else {
+        panic!("two method type-parameter bounds")
+    };
+    assert_eq!(bound_r, &[any]);
+    let [key] = bound_t.as_slice() else {
+        panic!("T has one Key bound")
+    };
+    assert_eq!(key.obj_internal(), Some(type_name("sample/Key")));
+    assert!(matches!(
+        key.type_args(),
+        [Ty::TyParam("T", _), Ty::TyParam("R", _)]
+    ));
 }
 
 #[test]

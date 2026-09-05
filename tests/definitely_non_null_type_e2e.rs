@@ -417,27 +417,29 @@ fn non_null_top_level_extension_property_rejects_nullable_receiver() {
 
 #[test]
 fn inferred_nullable_constructor_type_is_retained_for_member_reads() {
-    for source in [
-        "class C<T : CharSequence?>(val x: T)\nfun f() { C(null).x.length }",
-        "class C<T : Int?>(val x: T)\nfun f() { C(null).x + 1 }",
-    ] {
-        let diagnostics = diagnostics(source);
-        if diagnostics
-            .iter()
-            .any(|message| message == "<skip: no stdlib>")
-        {
-            continue;
-        }
-        assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("only safe")
-                    || message.contains("nullable receiver")
-                    || message.contains("unresolved reference")
-                    || message.contains("operator cannot be applied")),
-            "{source}: {diagnostics:?}"
-        );
+    let unsafe_member = "class C<T : CharSequence?>(val x: T)\nfun f() { C(null).x.length }";
+    let unsafe_diagnostics = diagnostics(unsafe_member);
+    if unsafe_diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
     }
+    assert!(
+        unsafe_diagnostics
+            .iter()
+            .any(|message| message.contains("only safe")
+                || message.contains("nullable receiver")
+                || message.contains("unresolved reference")),
+        "{unsafe_member}: {unsafe_diagnostics:?}"
+    );
+
+    // `C(null).x` is `Nothing?`, which is a subtype of the nullable receiver of Kotlin's
+    // `String?.plus(Any?)` extension. Kotlinc 2.4.10 accepts this expression; retaining the inferred
+    // nullable-bottom type must therefore keep that real extension applicable, not manufacture a
+    // numeric nullable-receiver diagnostic.
+    let nullable_plus = "class C<T : Int?>(val x: T)\nfun f() { C(null).x + 1 }";
+    assert!(diagnostics(nullable_plus).is_empty(), "{nullable_plus}");
 }
 
 #[test]

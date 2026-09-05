@@ -67,15 +67,7 @@ pub(crate) trait SyntheticIrBuilder {
 pub(crate) type BodyFn =
     fn(&'static Synthetic, &mut dyn SyntheticIrBuilder, &SynthCall<'_>) -> Option<ExprId>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyntheticKind {
-    PrimitiveVararg(Ty),
-    PrimitiveSize(Ty),
-    ReferenceVararg,
-    ReferenceSize,
-    EmptyReference,
-    NullableReference,
-}
+pub use crate::types::ArrayFactoryKind as SyntheticKind;
 
 /// One synthetic function: its fully-qualified name (the identity shared with the JVM intrinsic
 /// registry), the source call name lookup matches on, and its mandatory IR body.

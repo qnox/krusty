@@ -61,16 +61,17 @@ fun box(): String {\n\
 #[test]
 fn positional_arguments_after_a_named_prefix_remain_vararg_elements() {
     const SOURCE: &str = r#"
-        fun collect(first: Int, vararg values: String, tail: Double) {}
+        fun collect(first: Int, vararg values: String, tail: Double): String =
+            "$first:${values[0]}${values[1]}:${tail.toInt()}"
 
         fun box(): String {
-            collect(first = 1, "a", "b", tail = 2.0)
-            return "OK"
+            val actual = collect(first = 1, "a", "b", tail = 2.0)
+            return if (actual == "1:ab:2") "OK" else "FAIL: $actual"
         }
     "#;
 
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(SOURCE, &[stdlib], Some(jdk.as_path()));
-    assert_eq!(diagnostics, Vec::<String>::new());
+    assert_eq!(
+        run(SOURCE).expect("positional arguments after named prefix"),
+        "OK"
+    );
 }

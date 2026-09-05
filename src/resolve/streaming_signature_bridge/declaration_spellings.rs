@@ -5,7 +5,7 @@
 //! production signature collection never reopens `File::alias_spellings` or walks declarations by
 //! parser coordinates.
 
-use super::super::{spelling_of_ref, spelling_scope, ClassNames, SymbolTable, TParams};
+use super::super::{spelling_of_ref_with, spelling_scope, ClassNames, SymbolTable, TParams};
 use crate::fir::{
     DeclarationId, DeclarationKind, HeaderDeclarationKind, HeaderTypeBoundRange, HeaderTypeId,
     HeaderTypeParameterRange, StreamedHeaderModule,
@@ -78,6 +78,8 @@ fn declaration_scope(
 
 fn spelling(
     headers: &StreamedHeaderModule,
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    scope_owner: DeclarationId,
     ty: HeaderTypeId,
     classes: &ClassNames,
     scope: &TParams,
@@ -92,17 +94,28 @@ fn spelling(
     let source_spellings = headers
         .syntax
         .transient_source_spellings(ty, &headers.lookup_names)?;
-    Some(spelling_of_ref(
+    let signature_scope = crate::fir::SignatureScope {
+        owner: scope_owner,
+        source: headers.declarations.anchor(scope_owner)?.source,
+    };
+    let mut resolve_argument = |argument: &crate::ast::TypeRef| {
+        semantics
+            .resolve_signature_type_reference(signature_scope, argument)
+            .unwrap_or(crate::types::Ty::Error)
+    };
+    Some(spelling_of_ref_with(
         &materialized,
         classes,
         scope,
         expansions,
         &source_spellings,
+        &mut resolve_argument,
     ))
 }
 
 fn bound_spellings(
-    headers: &StreamedHeaderModule,
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    scope_owner: DeclarationId,
     range: HeaderTypeBoundRange,
     parameters: &[String],
     classes: &ClassNames,
@@ -112,6 +125,7 @@ fn bound_spellings(
         (Spelled, Vec<String>, crate::types::Ty),
     >,
 ) -> Option<Vec<Vec<Spelled>>> {
+    let headers = semantics.headers;
     parameters
         .iter()
         .map(|parameter| {
@@ -120,7 +134,17 @@ fn bound_spellings(
                 .bounds(range)
                 .iter()
                 .filter(|bound| headers.lookup_names.get(bound.parameter) == Some(parameter))
-                .map(|bound| spelling(headers, bound.ty, classes, scope, expansions))
+                .map(|bound| {
+                    spelling(
+                        headers,
+                        semantics,
+                        scope_owner,
+                        bound.ty,
+                        classes,
+                        scope,
+                        expansions,
+                    )
+                })
                 .collect()
         })
         .collect()
@@ -133,6 +157,31 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
     file_class_names: &[ClassNames],
 ) {
     let expansions = table.alias_expansion_spellings.clone();
+    let classifier_types = table
+        .classes
+        .values()
+        .filter_map(|classifier| {
+            classifier
+                .stable_declaration
+                .map(|declaration| (declaration, classifier.internal))
+        })
+        .collect();
+    let empty_receivers = std::collections::HashMap::new();
+    let semantics = super::ProductionSignatureSemantics {
+        headers,
+        table,
+        classifier_types: &classifier_types,
+        parameters: std::collections::HashMap::new(),
+        extension_receivers: &empty_receivers,
+        source_orders: std::collections::HashMap::new(),
+        signature_origins: std::collections::HashMap::new(),
+        scoped_receivers: std::cell::RefCell::new(std::collections::HashMap::new()),
+        scoped_constraint_inputs: std::cell::RefCell::new(std::collections::HashMap::new()),
+        scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
+        completed_scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
+        diagnostics: std::cell::RefCell::new(Vec::new()),
+    };
+    let mut records = Vec::new();
     for stub in &headers.stubs {
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
             continue;
@@ -153,9 +202,15 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                     let (own, scope) = declaration_scope(headers, stub.id, type_parameters)
                         .expect("compact callable scope must be materializable");
                     let ret = match result {
-                        crate::fir::HeaderResultType::Explicit(result) => {
-                            spelling(headers, result, classes, &scope, &expansions)
-                        }
+                        crate::fir::HeaderResultType::Explicit(result) => spelling(
+                            headers,
+                            &semantics,
+                            stub.id,
+                            result,
+                            classes,
+                            &scope,
+                            &expansions,
+                        ),
                         crate::fir::HeaderResultType::ImplicitUnit
                         | crate::fir::HeaderResultType::Inferred => Some(Spelled::default()),
                     };
@@ -166,17 +221,32 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                             .parameters(parameters)
                             .iter()
                             .map(|parameter| {
-                                spelling(headers, parameter.ty, classes, &scope, &expansions)
+                                spelling(
+                                    headers,
+                                    &semantics,
+                                    stub.id,
+                                    parameter.ty,
+                                    classes,
+                                    &scope,
+                                    &expansions,
+                                )
                             })
                             .collect::<Option<Vec<_>>>()?,
                         receiver: match receiver {
-                            Some(receiver) => {
-                                spelling(headers, receiver, classes, &scope, &expansions)?
-                            }
+                            Some(receiver) => spelling(
+                                headers,
+                                &semantics,
+                                stub.id,
+                                receiver,
+                                classes,
+                                &scope,
+                                &expansions,
+                            )?,
                             None => Spelled::default(),
                         },
                         type_param_bounds: bound_spellings(
-                            headers,
+                            &semantics,
+                            stub.id,
                             bounds,
                             &own,
                             classes,
@@ -197,15 +267,32 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                         .expect("compact property scope must be materializable");
                     Some(DeclaredSpellings {
                         ret: match declared_type {
-                            Some(ty) => spelling(headers, ty, classes, &scope, &expansions)?,
+                            Some(ty) => spelling(
+                                headers,
+                                &semantics,
+                                stub.id,
+                                ty,
+                                classes,
+                                &scope,
+                                &expansions,
+                            )?,
                             None => Spelled::default(),
                         },
                         receiver: match receiver {
-                            Some(ty) => spelling(headers, ty, classes, &scope, &expansions)?,
+                            Some(ty) => spelling(
+                                headers,
+                                &semantics,
+                                stub.id,
+                                ty,
+                                classes,
+                                &scope,
+                                &expansions,
+                            )?,
                             None => Spelled::default(),
                         },
                         type_param_bounds: bound_spellings(
-                            headers,
+                            &semantics,
+                            stub.id,
                             bounds,
                             &own,
                             classes,
@@ -231,21 +318,48 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                             .parameters(primary_parameters)
                             .iter()
                             .map(|parameter| {
-                                spelling(headers, parameter.ty, classes, &scope, &expansions)
+                                spelling(
+                                    headers,
+                                    &semantics,
+                                    stub.id,
+                                    parameter.ty,
+                                    classes,
+                                    &scope,
+                                    &expansions,
+                                )
                             })
                             .collect::<Option<Vec<_>>>()?,
                         superclass: match base {
-                            Some(ty) => spelling(headers, ty, classes, &scope, &expansions)?,
+                            Some(ty) => spelling(
+                                headers,
+                                &semantics,
+                                stub.id,
+                                ty,
+                                classes,
+                                &scope,
+                                &expansions,
+                            )?,
                             None => Spelled::default(),
                         },
                         supertypes: headers
                             .syntax
                             .type_operands(supertypes)
                             .iter()
-                            .map(|ty| spelling(headers, *ty, classes, &scope, &expansions))
+                            .map(|ty| {
+                                spelling(
+                                    headers,
+                                    &semantics,
+                                    stub.id,
+                                    *ty,
+                                    classes,
+                                    &scope,
+                                    &expansions,
+                                )
+                            })
                             .collect::<Option<Vec<_>>>()?,
                         type_param_bounds: bound_spellings(
-                            headers,
+                            &semantics,
+                            stub.id,
                             bounds,
                             &own,
                             classes,
@@ -268,7 +382,15 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                             .parameters(parameters)
                             .iter()
                             .map(|parameter| {
-                                spelling(headers, parameter.ty, classes, &scope, &expansions)
+                                spelling(
+                                    headers,
+                                    &semantics,
+                                    stub.id,
+                                    parameter.ty,
+                                    classes,
+                                    &scope,
+                                    &expansions,
+                                )
                             })
                             .collect::<Option<Vec<_>>>()?,
                         ..DeclaredSpellings::default()
@@ -278,7 +400,9 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
             }
         })();
         if let Some(record) = record.filter(|record| !record.is_none()) {
-            table.stable_declared_spellings.insert(stub.id, record);
+            records.push((stub.id, record));
         }
     }
+    drop(semantics);
+    table.stable_declared_spellings.extend(records);
 }

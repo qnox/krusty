@@ -12,6 +12,19 @@ pub(super) struct MemberExtensionFirTarget {
 }
 use crate::fir::FirInlineBodyPlan;
 
+struct ExternalCallTarget<'a> {
+    declaration: ExternalCallableId,
+    receiver: Option<Ty>,
+    declared_receiver: Option<Ty>,
+    parameters: Vec<Ty>,
+    result: Ty,
+    declared_result: Option<Ty>,
+    suspend: bool,
+    can_inline: bool,
+    inline_plan: Option<&'a crate::libraries::InlineBodyPlan>,
+    inline_receiver_parameter: Option<usize>,
+}
+
 /// One already-selected operator target. Context parameters stay separate while source operands
 /// are mapped, then join the value parameters in the checked call's semantic parameter list.
 pub(super) struct SelectedOperatorTarget {
@@ -35,36 +48,91 @@ impl SelectedOperatorTarget {
 
 pub(super) fn fir_inline_body_plan(
     plan: Option<&crate::libraries::InlineBodyPlan>,
+    receiver_parameter: Option<usize>,
 ) -> Option<Box<crate::fir::FirInlineBodyPlan>> {
-    let crate::libraries::InlineBodyPlan::InvokeLambda {
-        lambda_parameter,
-        argument_parameters,
-        return_parameter,
-    } = plan?
-    else {
-        // The suspend/finally plan also needs stable identities for its two selected member calls.
-        // Keep it out of FIR until the provider interns those declarations; retaining LibraryMember
-        // here would leak JVM linkage into the checked representation.
-        return None;
+    let map_value = |parameter: usize| {
+        if receiver_parameter == Some(parameter) {
+            crate::fir::FirInlineValue::Receiver
+        } else {
+            let parameter = parameter
+                .checked_sub(usize::from(
+                    receiver_parameter.is_some_and(|receiver| parameter > receiver),
+                ))
+                .expect("inline receiver remapping underflow");
+            crate::fir::FirInlineValue::Parameter(
+                u32::try_from(parameter)
+                    .expect("inline plan parameter ordinal exceeds packed FIR range"),
+            )
+        }
     };
-    Some(Box::new(crate::fir::FirInlineBodyPlan::InvokeLambda {
-        lambda_parameter: u32::try_from(*lambda_parameter)
-            .expect("inline plan parameter ordinal exceeds packed FIR range"),
-        argument_parameters: argument_parameters
-            .iter()
-            .map(|parameter| {
-                u32::try_from(*parameter)
-                    .expect("inline plan parameter ordinal exceeds packed FIR range")
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-        return_parameter: return_parameter.map(|parameter| {
-            u32::try_from(parameter)
-                .expect("inline plan parameter ordinal exceeds packed FIR range")
-        }),
+    let map_parameter = |parameter| match map_value(parameter) {
+        crate::fir::FirInlineValue::Parameter(parameter) => Some(parameter),
+        crate::fir::FirInlineValue::Receiver => None,
+    };
+    let member_call = |member: &crate::libraries::LibraryMember| {
+        Some(crate::fir::FirInlineMemberCall {
+            declaration: member.external_identity?,
+            parameters: member
+                .params
+                .iter()
+                .copied()
+                .map(ResolvedTy::new)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?
+                .into_boxed_slice(),
+            result: ResolvedTy::new(member.ret).ok()?,
+            suspend: member.suspend(),
+        })
+    };
+    Some(Box::new(match plan? {
+        crate::libraries::InlineBodyPlan::InvokeLambda {
+            lambda_parameter,
+            argument_parameters,
+            return_parameter,
+        } => crate::fir::FirInlineBodyPlan::InvokeLambda {
+            lambda_parameter: map_parameter(*lambda_parameter)?,
+            arguments: argument_parameters
+                .iter()
+                .copied()
+                .map(map_value)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            result: return_parameter.map(map_value),
+        },
+        crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
+            lambda_parameter,
+            state_parameter,
+            state_default,
+            enter,
+            cleanup,
+        } => crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
+            lambda_parameter: map_parameter(*lambda_parameter)?,
+            state_parameter: map_parameter(*state_parameter)?,
+            state_default: match state_default {
+                crate::libraries::DefaultValue::Null => crate::fir::FirInlineDefaultValue::Null,
+                _ => return None,
+            },
+            enter: member_call(enter)?,
+            cleanup: member_call(cleanup)?,
+        },
+        // This plan also needs the call-site-selected iterator protocol and applied element type.
+        // `selected_extension_call` publishes the complete checked variant below.
+        crate::libraries::InlineBodyPlan::CollectionTransform { .. } => return None,
     }))
 }
 use crate::resolve::ResolvedCall;
+
+fn selected_extension_intrinsic(
+    extension: &crate::resolve::ResolvedExtensionCall,
+) -> Option<crate::libraries::CompilerIntrinsic> {
+    extension
+        .callable
+        .compiler_intrinsic
+        .or(match extension.callable.member_realization {
+            crate::libraries::MemberRealization::Intrinsic(intrinsic) => Some(intrinsic),
+            _ => None,
+        })
+}
 
 fn intrinsic_binary_operation(
     intrinsic: crate::libraries::CompilerIntrinsic,
@@ -85,12 +153,14 @@ fn intrinsic_binary_operation(
         crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight => {
             FirBinaryOperation::UnsignedShiftRight
         }
-        crate::libraries::CompilerIntrinsic::ArraySize
+        crate::libraries::CompilerIntrinsic::ArrayFactory(_)
+        | crate::libraries::CompilerIntrinsic::ArraySize
         | crate::libraries::CompilerIntrinsic::CharCode
         | crate::libraries::CompilerIntrinsic::StringLength
         | crate::libraries::CompilerIntrinsic::StringPlus
         | crate::libraries::CompilerIntrinsic::NullableAnyToString
         | crate::libraries::CompilerIntrinsic::NumericConversion
+        | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
         | crate::libraries::CompilerIntrinsic::PrimitiveCompare
         | crate::libraries::CompilerIntrinsic::BooleanNot
         | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
@@ -115,6 +185,28 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::TrimIndent
         | crate::libraries::CompilerIntrinsic::TrimMargin => return None,
     })
+}
+
+/// Operand types of an exact compiler-supplied primitive operation. Arithmetic and bitwise
+/// declarations expose the carrier/result type after Kotlin numeric promotion (`Long.minus(Int)`
+/// returns `Long`, so both operands of the primitive subtraction are `Long`). Shift declarations
+/// deliberately keep their count parameter distinct (`Long.shl(Int)`).
+fn intrinsic_binary_semantics(
+    intrinsic: crate::libraries::CompilerIntrinsic,
+    parameter: Ty,
+    result: Ty,
+) -> Option<(FirBinaryOperation, Ty, Ty)> {
+    let operation = intrinsic_binary_operation(intrinsic)?;
+    let result = result.canonical_semantic().non_null();
+    let argument = match intrinsic {
+        crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft
+        | crate::libraries::CompilerIntrinsic::PrimitiveShiftRight
+        | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight => {
+            parameter.canonical_semantic().non_null()
+        }
+        _ => result,
+    };
+    Some((operation, result, argument))
 }
 
 impl BodyFirChecker<'_> {
@@ -177,6 +269,16 @@ impl BodyFirChecker<'_> {
                 .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
             Ty::Int,
         )?;
+        let cause = self.expression_origin(expression)?;
+        let receiver = FirReceiver {
+            value: receiver.value,
+            conversion: self.receiver_conversion(
+                expression,
+                cause,
+                receiver,
+                Some(operand.get()),
+            )?,
+        };
         Ok(FirExprKind::Call(FirCall {
             target: FirCallTarget::Intrinsic {
                 operation: FirIntrinsic::PrimitiveCompare { operand },
@@ -205,6 +307,13 @@ impl BodyFirChecker<'_> {
             .selected_value_smartcasts
             .get(&expression)
             .copied()
+            .or_else(|| {
+                self.info
+                    .narrowed_this_member
+                    .get(&expression)
+                    .copied()
+                    .map(Ty::obj_name)
+            })
             .map(|target| {
                 let to = ResolvedTy::new(target).map_err(|error| {
                     self.failure(
@@ -250,7 +359,7 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         convention: &str,
-    ) -> Option<FirBinaryOperation> {
+    ) -> Option<(FirBinaryOperation, Ty, Ty)> {
         let ResolvedCall::Member(selected) =
             self.info.resolved_operator_call(expression, convention)?
         else {
@@ -260,7 +369,11 @@ impl BodyFirChecker<'_> {
         else {
             return None;
         };
-        intrinsic_binary_operation(intrinsic)
+        intrinsic_binary_semantics(
+            intrinsic,
+            *selected.member.params.first()?,
+            selected.member.ret,
+        )
     }
 
     /// A primitive floating relational operator has IEEE-754 ordering semantics, distinct from an
@@ -317,6 +430,11 @@ impl BodyFirChecker<'_> {
                 self.selected_top_level_call(expression, arguments, *selected)
             }
             Some(ResolvedCall::Extension(extension)) => {
+                if let Some(constant) =
+                    self.selected_constant_string_normalization(receiver, arguments, &extension)
+                {
+                    return Ok(FirExprKind::Constant(FirConstant::String(constant)));
+                }
                 let source_receiver = receiver;
                 let receiver = self.explicit_receiver(receiver)?;
                 self.selected_extension_call(
@@ -488,6 +606,33 @@ impl BodyFirChecker<'_> {
         self.selected_member_call_with_semantics(expression, arguments, &selected, receiver)
     }
 
+    /// Fold a constant receiver only after resolution selected the compiler-owned `kotlin.text`
+    /// declaration. Source callables with the same spelling carry no intrinsic identity and remain
+    /// ordinary checked calls. The fold is performed while the bounded source AST is alive; checked
+    /// FIR retains only the resulting UTF-16 value.
+    fn selected_constant_string_normalization(
+        &self,
+        receiver: ExprId,
+        arguments: &[ExprId],
+        extension: &crate::resolve::ResolvedExtensionCall,
+    ) -> Option<crate::kt_string::KtString> {
+        if extension.callable.singleton_dispatch.is_some() || !arguments.is_empty() {
+            return None;
+        }
+        let intrinsic = selected_extension_intrinsic(extension)?;
+        let receiver = self.file.const_string_value(receiver)?;
+        match intrinsic {
+            crate::libraries::CompilerIntrinsic::TrimIndent => {
+                Some(crate::kt_string::trim_indent(&receiver))
+            }
+            crate::libraries::CompilerIntrinsic::TrimMargin => Some(crate::kt_string::trim_margin(
+                &receiver,
+                &crate::kt_string::KtString::from("|"),
+            )),
+            _ => None,
+        }
+    }
+
     fn classifier_call(
         &mut self,
         expression: ExprId,
@@ -568,20 +713,23 @@ impl BodyFirChecker<'_> {
         } else {
             self.external_call_target_with_identity(
                 expression,
-                member.external_identity.ok_or_else(|| {
-                    self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                })?,
-                member
-                    .singleton_dispatch
-                    .as_deref()
-                    .map(|singleton| singleton.ty()),
-                None,
-                parameters.iter().copied(),
-                member.ret,
-                member.declared_ret,
-                member.suspend(),
-                member.inline.can_inline(),
-                member.inline_body_plan.as_deref(),
+                ExternalCallTarget {
+                    declaration: member.external_identity.ok_or_else(|| {
+                        self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                    })?,
+                    receiver: member
+                        .singleton_dispatch
+                        .as_deref()
+                        .map(|singleton| singleton.ty()),
+                    declared_receiver: None,
+                    parameters: parameters.clone(),
+                    result: member.ret,
+                    declared_result: member.declared_ret,
+                    suspend: member.suspend(),
+                    can_inline: member.inline.can_inline(),
+                    inline_plan: member.inline_body_plan.as_deref(),
+                    inline_receiver_parameter: None,
+                },
             )?
         };
         Ok(FirExprKind::Call(FirCall {
@@ -608,7 +756,6 @@ impl BodyFirChecker<'_> {
         extension_receiver: FirReceiver,
         source_receiver: Option<ExprId>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        let (mut target, substitutions) = self.extension_call_target(expression, &extension)?;
         let dispatch_receiver = extension
             .callable
             .singleton_dispatch
@@ -626,40 +773,130 @@ impl BodyFirChecker<'_> {
             .collect::<Vec<_>>();
         let parameters =
             self.selected_call_parameters(expression, extension.stable_declaration, &parameters)?;
-        if extension.callable.compiler_intrinsic
-            == Some(crate::libraries::CompilerIntrinsic::ForEach)
-        {
-            let source_receiver = source_receiver.ok_or_else(|| {
-                self.failure(
-                    self.file.expr_span(expression),
-                    BodyCheckFailureKind::UnsupportedCallShape,
-                )
-            })?;
+        let (mut target, substitutions) = self.extension_call_target(expression, &extension)?;
+        if matches!(
+            extension.callable.compiler_intrinsic,
+            Some(
+                crate::libraries::CompilerIntrinsic::ForEach
+                    | crate::libraries::CompilerIntrinsic::Map
+                    | crate::libraries::CompilerIntrinsic::FlatMap
+            )
+        ) {
+            // Explicit receivers carry the protocol on their source expression. An implicit
+            // receiver has no synthetic AST node, so resolution keys the same selected protocol
+            // by the call expression. Both forms are consumed here and embedded into checked FIR.
+            let protocol_source = source_receiver.unwrap_or(expression);
             // The resolver records the declaration-scoped iterator protocol only when this call can
             // actually splice a lambda body. A callable-reference argument is an ordinary function
             // value: keep the already-selected external `forEach` call and do not invent iterator
             // convention decisions during FIR construction.
-            if let Some(protocol) = self.info.iterator_protocol(source_receiver) {
+            if let Some(protocol) = self.info.iterator_protocol(protocol_source) {
                 let span = self.file.expr_span(expression);
                 let origin = self.expression_origin(expression)?;
-                let plan = FirInlineBodyPlan::ForEach {
-                    lambda_parameter: u32::try_from(context_count).map_err(|_| {
-                        self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                    })?,
-                    iterator_ty: ResolvedTy::new(protocol.iter_ty).map_err(|error| {
-                        self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
-                    })?,
-                    iterator: Box::new(self.iterator_protocol_call(
-                        span,
-                        origin,
-                        &protocol.iterator,
-                    )?),
-                    has_next: Box::new(self.iterator_protocol_call(
-                        span,
-                        origin,
-                        &protocol.has_next,
-                    )?),
-                    next: Box::new(self.iterator_protocol_call(span, origin, &protocol.next)?),
+                let iterator_ty = ResolvedTy::new(protocol.iter_ty).map_err(|error| {
+                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                })?;
+                let iterator =
+                    Box::new(self.iterator_protocol_call(span, origin, &protocol.iterator)?);
+                let has_next =
+                    Box::new(self.iterator_protocol_call(span, origin, &protocol.has_next)?);
+                let next = Box::new(self.iterator_protocol_call(span, origin, &protocol.next)?);
+                let plan = match extension.callable.compiler_intrinsic {
+                    Some(crate::libraries::CompilerIntrinsic::ForEach) => {
+                        FirInlineBodyPlan::ForEach {
+                            lambda_parameter: u32::try_from(context_count).map_err(|_| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?,
+                            iterator_ty,
+                            iterator,
+                            has_next,
+                            next,
+                        }
+                    }
+                    Some(
+                        intrinsic @ (crate::libraries::CompilerIntrinsic::Map
+                        | crate::libraries::CompilerIntrinsic::FlatMap),
+                    ) => {
+                        let Some(crate::libraries::InlineBodyPlan::CollectionTransform {
+                            lambda_parameter,
+                            flatten,
+                            factory,
+                            append,
+                        }) = extension.callable.inline_body_plan.as_deref()
+                        else {
+                            return Err(
+                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                            );
+                        };
+                        debug_assert_eq!(
+                            *flatten,
+                            intrinsic == crate::libraries::CompilerIntrinsic::FlatMap
+                        );
+                        let receiver_parameter = context_count;
+                        let lambda_parameter = lambda_parameter
+                            .checked_sub(usize::from(*lambda_parameter > receiver_parameter))
+                            .filter(|_| *lambda_parameter != receiver_parameter)
+                            .ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?;
+                        let element = extension
+                            .callable
+                            .ret
+                            .type_args()
+                            .first()
+                            .copied()
+                            .ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?;
+                        let lambda_result = extension
+                            .params
+                            .get(lambda_parameter.checked_sub(context_count).ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?)
+                            .and_then(|parameter| match parameter {
+                                Ty::Fun(signature) => Some(signature.ret),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?;
+                        FirInlineBodyPlan::CollectionTransform {
+                            lambda_parameter: u32::try_from(lambda_parameter).map_err(|_| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?,
+                            flatten: *flatten,
+                            iterator_ty,
+                            iterator,
+                            has_next,
+                            next,
+                            factory: factory.external_identity.ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                            })?,
+                            factory_classifier: factory.owner.ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                            })?,
+                            append: append.external_identity.ok_or_else(|| {
+                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                            })?,
+                            accumulator: ResolvedTy::new(Ty::obj_args(
+                                "kotlin/collections/MutableList",
+                                &[element],
+                            ))
+                            .map_err(|error| {
+                                self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                            })?,
+                            append_parameter: ResolvedTy::new(if *flatten {
+                                lambda_result
+                            } else {
+                                Ty::nullable(Ty::obj("kotlin/Any"))
+                            })
+                            .map_err(|error| {
+                                self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                            })?,
+                            append_result: ResolvedTy::new(Ty::Boolean).expect("resolved Boolean"),
+                        }
+                    }
+                    _ => unreachable!("matched collection iteration intrinsic"),
                 };
                 let FirCallTarget::External { inline_plan, .. } = &mut target else {
                     return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
@@ -704,6 +941,62 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         extension: &crate::resolve::ResolvedExtensionCall,
     ) -> Result<(FirCallTarget, Box<[FirTypeSubstitution]>), BodyCheckFailure> {
+        let selected_intrinsic = selected_extension_intrinsic(extension);
+        if matches!(
+            selected_intrinsic,
+            Some(
+                crate::libraries::CompilerIntrinsic::StringPlus
+                    | crate::libraries::CompilerIntrinsic::NullableAnyToString
+            )
+        ) {
+            if extension.callable.singleton_dispatch.is_some() {
+                return Err(self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                ));
+            }
+            let context_count = extension
+                .callable
+                .context_count
+                .min(extension.callable.params.len());
+            let parameters = extension.callable.params[..context_count]
+                .iter()
+                .copied()
+                .chain(extension.params.iter().copied())
+                .collect::<Vec<_>>();
+            let parameters = self.selected_call_parameters(
+                expression,
+                extension.stable_declaration,
+                &parameters,
+            )?;
+            let span = self.file.expr_span(expression);
+            let resolved = |ty| {
+                ResolvedTy::new(ty).map_err(|error| {
+                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                })
+            };
+            let operation = match selected_intrinsic.expect("matched intrinsic") {
+                crate::libraries::CompilerIntrinsic::StringPlus => FirIntrinsic::StringPlus,
+                crate::libraries::CompilerIntrinsic::NullableAnyToString => {
+                    FirIntrinsic::NullableAnyToString
+                }
+                _ => unreachable!(),
+            };
+            return Ok((
+                FirCallTarget::Intrinsic {
+                    operation,
+                    receiver: Some(resolved(extension.receiver)?),
+                    parameters: parameters
+                        .iter()
+                        .copied()
+                        .map(resolved)
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice(),
+                    result: resolved(extension.callable.ret)?,
+                },
+                Vec::<FirTypeSubstitution>::new().into_boxed_slice(),
+            ));
+        }
         if let Some(declaration) = extension.stable_declaration {
             let callable = self
                 .index
@@ -739,15 +1032,18 @@ impl BodyFirChecker<'_> {
                 })?;
                 let (mut target, substitutions) = self.external_call_target_with_identity(
                     expression,
-                    declaration,
-                    Some(singleton.ty()),
-                    None,
-                    target_parameters,
-                    extension.callable.ret,
-                    extension.callable.declared_ret,
-                    extension.callable.suspend,
-                    extension.callable.inline.can_inline(),
-                    extension.callable.inline_body_plan.as_deref(),
+                    ExternalCallTarget {
+                        declaration,
+                        receiver: Some(singleton.ty()),
+                        declared_receiver: None,
+                        parameters: target_parameters,
+                        result: extension.callable.ret,
+                        declared_result: extension.callable.declared_ret,
+                        suspend: extension.callable.suspend,
+                        can_inline: extension.callable.inline.can_inline(),
+                        inline_plan: extension.callable.inline_body_plan.as_deref(),
+                        inline_receiver_parameter: None,
+                    },
                 )?;
                 let FirCallTarget::External {
                     extension_receiver_parameter,
@@ -770,6 +1066,7 @@ impl BodyFirChecker<'_> {
                     &extension.callable,
                     Some(extension.receiver),
                     parameters,
+                    Some(context_count),
                 )
             }
         }
@@ -934,6 +1231,7 @@ impl BodyFirChecker<'_> {
                         can_inline: selected.member.inline.can_inline(),
                         inline_plan: fir_inline_body_plan(
                             selected.member.inline_body_plan.as_deref(),
+                            None,
                         ),
                         extension_receiver_parameter: None,
                     }
@@ -1004,6 +1302,7 @@ impl BodyFirChecker<'_> {
                         can_inline: selected.callable.inline.can_inline(),
                         inline_plan: fir_inline_body_plan(
                             selected.callable.inline_body_plan.as_deref(),
+                            Some(context_count),
                         ),
                         extension_receiver_parameter: None,
                     }
@@ -1082,7 +1381,7 @@ impl BodyFirChecker<'_> {
                         declared_result: declared_ret.map(resolved).transpose()?,
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
-                        inline_plan: fir_inline_body_plan(inline_body_plan.as_deref()),
+                        inline_plan: fir_inline_body_plan(inline_body_plan.as_deref(), None),
                         extension_receiver_parameter: Some(extension_parameter),
                     }
                 };
@@ -1187,6 +1486,7 @@ impl BodyFirChecker<'_> {
         callable: &crate::libraries::LibraryCallable,
         receiver: Option<Ty>,
         parameters: impl IntoIterator<Item = Ty>,
+        inline_receiver_parameter: Option<usize>,
     ) -> Result<(FirCallTarget, Box<[FirTypeSubstitution]>), BodyCheckFailure> {
         let declaration = callable.external_identity.ok_or_else(|| {
             self.failure(
@@ -1196,15 +1496,18 @@ impl BodyFirChecker<'_> {
         })?;
         self.external_call_target_with_identity(
             expression,
-            declaration,
-            receiver,
-            callable.source_receiver,
-            parameters,
-            callable.ret,
-            callable.declared_ret,
-            callable.suspend,
-            callable.inline.can_inline(),
-            callable.inline_body_plan.as_deref(),
+            ExternalCallTarget {
+                declaration,
+                receiver,
+                declared_receiver: callable.source_receiver,
+                parameters: parameters.into_iter().collect(),
+                result: callable.ret,
+                declared_result: callable.declared_ret,
+                suspend: callable.suspend,
+                can_inline: callable.inline.can_inline(),
+                inline_plan: callable.inline_body_plan.as_deref(),
+                inline_receiver_parameter,
+            },
         )
     }
 
@@ -1224,12 +1527,14 @@ impl BodyFirChecker<'_> {
             dispatch_receiver,
             extension_receiver,
             params,
+            physical_params,
             context_args,
             ret,
             inline,
             inline_body_plan,
             suspend,
             declared_ret,
+            vararg_index,
             ..
         } = selected
         else {
@@ -1243,7 +1548,27 @@ impl BodyFirChecker<'_> {
             "publish member-extension expression={expression:?} span={:?} stable={stable_declaration:?} external={external_identity:?} owner={owner:?} name={name} dispatch={dispatch_receiver:?} extension={extension_receiver:?} params={params:?}",
             self.file.expr_span(expression),
         );
-        let parameters = self.selected_call_parameters(expression, *stable_declaration, params)?;
+        let mut parameters =
+            self.selected_call_parameters(expression, *stable_declaration, params)?;
+        // Resolution exposes a vararg's element type in `params` so applicability and inference see
+        // each source argument. Checked FIR instead publishes the selected declaration slot, which is
+        // the array consumed by packing/default materialization. Preserve every other semantic
+        // parameter and restore only that selected array slot.
+        if let Some(vararg) = *vararg_index {
+            let array = physical_params.get(vararg).copied().ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })?;
+            let parameter = parameters.get_mut(vararg).ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })?;
+            *parameter = array;
+        }
         if let Some(declaration) = stable_declaration {
             let callable = self
                 .index
@@ -1284,15 +1609,18 @@ impl BodyFirChecker<'_> {
         target_parameters.insert(extension_parameter, *extension_receiver);
         let (mut target, substitutions) = self.external_call_target_with_identity(
             expression,
-            declaration,
-            Some(dispatch_receiver.ty),
-            None,
-            target_parameters,
-            *ret,
-            *declared_ret,
-            *suspend,
-            inline.can_inline(),
-            inline_body_plan.as_deref(),
+            ExternalCallTarget {
+                declaration,
+                receiver: Some(dispatch_receiver.ty),
+                declared_receiver: None,
+                parameters: target_parameters,
+                result: *ret,
+                declared_result: *declared_ret,
+                suspend: *suspend,
+                can_inline: inline.can_inline(),
+                inline_plan: inline_body_plan.as_deref(),
+                inline_receiver_parameter: None,
+            },
         )?;
         let extension_parameter = u32::try_from(extension_parameter).map_err(|_| {
             self.failure(
@@ -1346,16 +1674,20 @@ impl BodyFirChecker<'_> {
     fn external_call_target_with_identity(
         &self,
         expression: ExprId,
-        declaration: ExternalCallableId,
-        receiver: Option<Ty>,
-        declared_receiver: Option<Ty>,
-        parameters: impl IntoIterator<Item = Ty>,
-        result: Ty,
-        declared_result: Option<Ty>,
-        suspend: bool,
-        can_inline: bool,
-        inline_plan: Option<&crate::libraries::InlineBodyPlan>,
+        call: ExternalCallTarget<'_>,
     ) -> Result<(FirCallTarget, Box<[FirTypeSubstitution]>), BodyCheckFailure> {
+        let ExternalCallTarget {
+            declaration,
+            receiver,
+            declared_receiver,
+            parameters,
+            result,
+            declared_result,
+            suspend,
+            can_inline,
+            inline_plan,
+            inline_receiver_parameter,
+        } = call;
         let resolved = |ty| {
             ResolvedTy::new(ty).map_err(|error| {
                 self.failure(
@@ -1419,7 +1751,7 @@ impl BodyFirChecker<'_> {
                 declared_result: declared_result.map(resolved).transpose()?,
                 suspend,
                 can_inline,
-                inline_plan: fir_inline_body_plan(inline_plan),
+                inline_plan: fir_inline_body_plan(inline_plan, inline_receiver_parameter),
                 extension_receiver_parameter: None,
             },
             substitutions.into_boxed_slice(),
@@ -1471,7 +1803,35 @@ impl BodyFirChecker<'_> {
             .singleton_dispatch
             .as_deref()
             .map(|singleton| singleton.ty());
+        let concrete_classifier = |ty: Ty| {
+            (!ty.mentions_ty_param())
+                .then(|| ty.kotlin_class_internal())
+                .flatten()
+        };
+        let selected_classifier_intrinsic = match selected.callable.compiler_intrinsic {
+            Some(crate::libraries::CompilerIntrinsic::EnumValues) => selected
+                .callable
+                .ret
+                .array_elem()
+                .and_then(concrete_classifier)
+                .map(|classifier| (classifier, crate::fir::FirClassifierCallable::EnumValues)),
+            Some(crate::libraries::CompilerIntrinsic::EnumValueOf) => {
+                concrete_classifier(selected.callable.ret)
+                    .map(|classifier| (classifier, crate::fir::FirClassifierCallable::EnumValueOf))
+            }
+            _ => None,
+        };
         let selected_intrinsic = match selected.callable.compiler_intrinsic {
+            Some(crate::libraries::CompilerIntrinsic::Assert) => {
+                let mode = if self.file.assert_always_disabled {
+                    crate::types::AssertionMode::AlwaysDisabled
+                } else if self.file.assert_always_enabled {
+                    crate::types::AssertionMode::AlwaysEnabled
+                } else {
+                    crate::types::AssertionMode::Runtime
+                };
+                Some(FirIntrinsic::Assert { mode })
+            }
             Some(crate::libraries::CompilerIntrinsic::SuspendCoroutine) => {
                 Some(FirIntrinsic::SuspendCoroutine)
             }
@@ -1480,57 +1840,88 @@ impl BodyFirChecker<'_> {
             }
             _ => None,
         };
-        let (target, substitutions) = if let Some(operation) = selected_intrinsic {
-            if dispatch_receiver.is_some() {
-                return Err(self.failure(
-                    self.file.expr_span(expression),
-                    BodyCheckFailureKind::UnsupportedCallShape,
-                ));
-            }
-            let span = self.file.expr_span(expression);
-            let resolved = |ty| {
-                ResolvedTy::new(ty).map_err(|error| {
-                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
-                })
-            };
-            (
-                FirCallTarget::Intrinsic {
-                    operation,
-                    receiver: None,
-                    parameters: selected
-                        .callable
-                        .params
-                        .iter()
-                        .copied()
-                        .map(resolved)
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice(),
-                    result: resolved(selected.callable.ret)?,
-                },
-                Vec::<FirTypeSubstitution>::new().into_boxed_slice(),
-            )
-        } else if let Some(declaration) = selected.stable_declaration {
-            let callable = self
-                .index
-                .callable_for_declaration(declaration)
-                .ok_or_else(|| {
-                    self.failure(
+        let (target, substitutions) =
+            if let Some((classifier, operation)) = selected_classifier_intrinsic {
+                if dispatch_receiver.is_some() {
+                    return Err(self.failure(
                         self.file.expr_span(expression),
-                        BodyCheckFailureKind::MissingStableCallTarget,
-                    )
-                })?;
-            (
-                FirCallTarget::Module(callable.id),
-                self.call_substitutions(expression, declaration)?,
-            )
-        } else {
-            self.external_call_target(
-                expression,
-                &selected.callable,
-                dispatch_ty,
-                selected.callable.params.iter().copied(),
-            )?
-        };
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    ));
+                }
+                let span = self.file.expr_span(expression);
+                let resolved = |ty| {
+                    ResolvedTy::new(ty).map_err(|error| {
+                        self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                    })
+                };
+                (
+                    FirCallTarget::Classifier {
+                        classifier,
+                        operation,
+                        parameters: selected
+                            .callable
+                            .params
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
+                        result: resolved(selected.callable.ret)?,
+                    },
+                    Vec::<FirTypeSubstitution>::new().into_boxed_slice(),
+                )
+            } else if let Some(operation) = selected_intrinsic {
+                if dispatch_receiver.is_some() {
+                    return Err(self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    ));
+                }
+                let span = self.file.expr_span(expression);
+                let resolved = |ty| {
+                    ResolvedTy::new(ty).map_err(|error| {
+                        self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                    })
+                };
+                (
+                    FirCallTarget::Intrinsic {
+                        operation,
+                        receiver: None,
+                        parameters: selected
+                            .callable
+                            .params
+                            .iter()
+                            .copied()
+                            .map(resolved)
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
+                        result: resolved(selected.callable.ret)?,
+                    },
+                    Vec::<FirTypeSubstitution>::new().into_boxed_slice(),
+                )
+            } else if let Some(declaration) = selected.stable_declaration {
+                let callable = self
+                    .index
+                    .callable_for_declaration(declaration)
+                    .ok_or_else(|| {
+                        self.failure(
+                            self.file.expr_span(expression),
+                            BodyCheckFailureKind::MissingStableCallTarget,
+                        )
+                    })?;
+                (
+                    FirCallTarget::Module(callable.id),
+                    self.call_substitutions(expression, declaration)?,
+                )
+            } else {
+                self.external_call_target(
+                    expression,
+                    &selected.callable,
+                    dispatch_ty,
+                    selected.callable.params.iter().copied(),
+                    None,
+                )?
+            };
         let parameters = self.selected_call_parameters(
             expression,
             selected.stable_declaration,
@@ -1627,14 +2018,93 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedCallShape,
                 ));
             };
+            // A platform/generic wrapper may select Kotlin's primitive operator while its source
+            // value still occupies a reference slot (`java.util.Map<K, Int>.forEach` exposes its
+            // second SAM parameter as flexible `Int!`). The selected intrinsic fixes the semantic
+            // primitive operands; publish both representation boundaries in FIR so common lowering
+            // never has to infer an unbox from the eventual arithmetic instruction.
+            let cause = self.expression_origin(expression)?;
+            let (_, lhs_target, rhs_target) = intrinsic_binary_semantics(
+                primitive_operation.expect("primitive binary operation"),
+                selected.member.params[0],
+                selected.member.ret,
+            )
+            .expect("the selected intrinsic already mapped to a binary operation");
+            let lhs_target = ResolvedTy::new(lhs_target).map_err(|error| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnpublishableType(error),
+                )
+            })?;
+            let rhs_target = ResolvedTy::new(rhs_target).map_err(|error| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnpublishableType(error),
+                )
+            })?;
+            let lhs_actual = self
+                .body
+                .expr(receiver.value)
+                .ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?
+                .ty;
+            let lhs_conversion = self
+                .selected_type_conversion(lhs_actual, lhs_target, cause)
+                .or(receiver.conversion);
+            let lhs = self.convert_fir_value(receiver.value, lhs_target, cause, lhs_conversion);
+            let rhs = self.value_at_selected_boundary(*argument, rhs_target)?;
             return Ok(FirExprKind::Binary {
                 operation,
-                lhs: receiver.value,
-                rhs: self.expression(*argument)?,
+                lhs,
+                rhs,
             });
         }
         if primitive_operation == Some(crate::libraries::CompilerIntrinsic::PrimitiveCompare) {
             return self.primitive_compare_call(expression, receiver, arguments, &selected);
+        }
+        if let Some(crate::libraries::CompilerIntrinsic::PrimitiveUnary(operation)) =
+            primitive_operation
+        {
+            if !arguments.is_empty() {
+                return Err(self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                ));
+            }
+            let cause = self.expression_origin(expression)?;
+            let target =
+                ResolvedTy::new(selected.ret.canonical_semantic().non_null()).map_err(|error| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnpublishableType(error),
+                    )
+                })?;
+            let actual = self
+                .body
+                .expr(receiver.value)
+                .ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?
+                .ty;
+            let conversion = self
+                .selected_type_conversion(actual, target, cause)
+                .or(receiver.conversion);
+            return Ok(FirExprKind::Unary {
+                operation: match operation {
+                    crate::libraries::PrimitiveUnaryIntrinsic::Identity => {
+                        FirUnaryOperation::Identity
+                    }
+                    crate::libraries::PrimitiveUnaryIntrinsic::Negate => FirUnaryOperation::Negate,
+                },
+                operand: self.convert_fir_value(receiver.value, target, cause, conversion),
+            });
         }
         if primitive_operation == Some(crate::libraries::CompilerIntrinsic::PrimitiveBitNot) {
             if !arguments.is_empty() {
@@ -1660,8 +2130,17 @@ impl BodyFirChecker<'_> {
                 operand: receiver.value,
             });
         }
-        if primitive_operation == Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) {
-            if !arguments.is_empty() {
+        if matches!(
+            primitive_operation,
+            Some(
+                crate::libraries::CompilerIntrinsic::StringPlus
+                    | crate::libraries::CompilerIntrinsic::NullableAnyToString
+            )
+        ) {
+            let expected_arguments = usize::from(
+                primitive_operation == Some(crate::libraries::CompilerIntrinsic::StringPlus),
+            );
+            if arguments.len() != expected_arguments {
                 return Err(self.failure(
                     self.file.expr_span(expression),
                     BodyCheckFailureKind::UnsupportedCallShape,
@@ -1677,15 +2156,41 @@ impl BodyFirChecker<'_> {
             };
             return Ok(FirExprKind::Call(FirCall {
                 target: FirCallTarget::Intrinsic {
-                    operation: FirIntrinsic::NullableAnyToString,
+                    operation: match primitive_operation.expect("matched intrinsic") {
+                        crate::libraries::CompilerIntrinsic::StringPlus => FirIntrinsic::StringPlus,
+                        crate::libraries::CompilerIntrinsic::NullableAnyToString => {
+                            FirIntrinsic::NullableAnyToString
+                        }
+                        _ => unreachable!(),
+                    },
                     receiver: Some(resolved(selected.receiver)?),
-                    parameters: Box::new([]),
+                    parameters: selected
+                        .member
+                        .params
+                        .iter()
+                        .copied()
+                        .map(resolved)
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice(),
                     result: resolved(selected.ret)?,
                 },
                 dispatch_receiver: Some(receiver),
                 extension_receiver: None,
-                parameter_types: Box::new([]),
-                arguments: Box::new([]),
+                parameter_types: selected
+                    .member
+                    .params
+                    .iter()
+                    .copied()
+                    .map(resolved)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                arguments: self.call_arguments_with_context(
+                    expression,
+                    arguments,
+                    &selected.member.params,
+                    selected.context_args.iter().map(Option::as_ref),
+                    selected.member.call_sig.vararg_index,
+                )?,
                 substitutions: Box::new([]),
             }));
         }
@@ -1701,7 +2206,7 @@ impl BodyFirChecker<'_> {
                 ));
             }
             let cause = self.expression_origin(expression)?;
-            let target = ResolvedTy::new(selected.ret).map_err(|error| {
+            let target = ResolvedTy::new(selected.ret.canonical_semantic()).map_err(|error| {
                 self.failure(
                     self.file.expr_span(expression),
                     BodyCheckFailureKind::UnpublishableType(error),
@@ -1796,12 +2301,14 @@ impl BodyFirChecker<'_> {
             .get(parameter)
             .copied()
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+        let value_expression = self.expression(value)?;
         arguments.push(FirCallArgument::Expression {
             parameter: u32::try_from(parameter)
                 .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
-            value: self.expression(value)?,
+            value: value_expression,
             conversion: self.selected_value_conversion(
                 value,
+                value_expression,
                 ResolvedTy::new(target_ty).map_err(|error| {
                     self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                 })?,
@@ -1860,15 +2367,18 @@ impl BodyFirChecker<'_> {
         );
         self.external_call_target_with_identity(
             expression,
-            declaration,
-            Some(selected.receiver),
-            None,
-            selected.member.params.iter().copied(),
-            selected.ret,
-            selected.member.declared_ret,
-            selected.member.suspend(),
-            selected.member.inline.can_inline(),
-            selected.member.inline_body_plan.as_deref(),
+            ExternalCallTarget {
+                declaration,
+                receiver: Some(selected.receiver),
+                declared_receiver: None,
+                parameters: selected.member.params.clone(),
+                result: selected.ret,
+                declared_result: selected.member.declared_ret,
+                suspend: selected.member.suspend(),
+                can_inline: selected.member.inline.can_inline(),
+                inline_plan: selected.member.inline_body_plan.as_deref(),
+                inline_receiver_parameter: None,
+            },
         )
     }
 
@@ -2068,7 +2578,12 @@ impl BodyFirChecker<'_> {
                 arguments.push(FirCallArgument::Expression {
                     parameter: parameter_id,
                     value,
-                    conversion: self.selected_value_conversion(operand, parameter_ty, cause)?,
+                    conversion: self.selected_value_conversion(
+                        operand,
+                        value,
+                        parameter_ty,
+                        cause,
+                    )?,
                 });
                 continue;
             }
@@ -2081,7 +2596,12 @@ impl BodyFirChecker<'_> {
                 arguments.push(FirCallArgument::Expression {
                     parameter: parameter_id,
                     value,
-                    conversion: self.selected_value_conversion(operand, parameter_ty, cause)?,
+                    conversion: self.selected_value_conversion(
+                        operand,
+                        value,
+                        parameter_ty,
+                        cause,
+                    )?,
                 });
                 continue;
             }
@@ -2104,7 +2624,7 @@ impl BodyFirChecker<'_> {
                 elements: vec![FirVarargElement {
                     value,
                     spread: self.file.is_spread_arg(operand),
-                    conversion: self.selected_value_conversion(operand, expected, cause)?,
+                    conversion: self.selected_value_conversion(operand, value, expected, cause)?,
                 }]
                 .into_boxed_slice(),
             });
@@ -2368,7 +2888,14 @@ impl BodyFirChecker<'_> {
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
         let cause = self.expression_origin(expression)?;
-        self.selected_super_call_at(span, cause, Some(expression), arguments, target)
+        self.selected_super_call_at(
+            span,
+            cause,
+            Some(expression),
+            arguments,
+            target,
+            crate::fir::FirSuperCallKind::Function,
+        )
     }
 
     /// As [`Self::selected_super_call`], but for a site that is a STATEMENT rather than an
@@ -2381,6 +2908,7 @@ impl BodyFirChecker<'_> {
         expression: Option<ExprId>,
         arguments: &[ExprId],
         target: &crate::resolve::ResolvedSuperCall,
+        kind: crate::fir::FirSuperCallKind,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let dispatch_receiver = self
             .materialize_implicit_receiver(cause, span, &target.receiver)?
@@ -2407,13 +2935,15 @@ impl BodyFirChecker<'_> {
                     .iter()
                     .enumerate()
                     .map(|(parameter, argument)| {
+                        let value = self.expression(*argument)?;
                         Ok(FirCallArgument::Expression {
                             parameter: u32::try_from(parameter).map_err(|_| {
                                 self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                             })?,
-                            value: self.expression(*argument)?,
+                            value,
                             conversion: self.selected_value_conversion(
                                 *argument,
+                                value,
                                 parameters[parameter],
                                 cause,
                             )?,
@@ -2424,13 +2954,23 @@ impl BodyFirChecker<'_> {
         };
         let result = ResolvedTy::new(target.ret)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        let dispatch_owner = target
+            .receiver
+            .ty
+            .non_null()
+            .obj_internal()
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
         Ok(FirExprKind::Call(FirCall {
             target: FirCallTarget::Super {
                 owner: target.owner,
+                dispatch_owner,
+                enclosing_dispatch: !target.receiver.current,
+                kind,
                 name: target.name.clone(),
                 parameters: parameters.clone().into_boxed_slice(),
                 result,
                 interface: target.interface,
+                realization: target.realization,
                 descriptor: target.descriptor.clone(),
                 physical_result: ResolvedTy::new(target.physical_ret).map_err(|error| {
                     self.failure(span, BodyCheckFailureKind::UnpublishableType(error))

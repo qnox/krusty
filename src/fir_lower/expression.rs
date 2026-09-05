@@ -1,8 +1,10 @@
 use crate::fir::{
     FirBinaryOperation, FirConstant, FirConversion, FirConversionKind, FirExprId, FirExprKind,
-    FirIndexedAccessKind, FirJumpKind, FirTypeOperation, FirUnaryOperation,
+    FirIndexedAccessKind, FirJumpKind, FirReceiver, FirTypeOperation, FirUnaryOperation,
+    ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrCatch, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
+use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
 
@@ -87,6 +89,13 @@ impl BodyLowering<'_> {
                     self.ir.add_expr(IrExpr::GetValue(self.value_slot(*value)))
                 }
             }
+            FirExprKind::LateinitRead { value, name } => {
+                let operand = self.expression(*value)?;
+                self.ir.add_expr(IrExpr::LateinitCheck {
+                    operand,
+                    name: name.to_string(),
+                })
+            }
             FirExprKind::ValueWrite {
                 target,
                 value,
@@ -151,21 +160,42 @@ impl BodyLowering<'_> {
                 *conversion,
                 substitutions,
             )?,
-            FirExprKind::LateinitFieldRead { target } => self.ir.add_expr(IrExpr::Checked(
-                crate::ir::IrCheckedOperation::LateinitFieldRead { target: *target },
-            )),
-            FirExprKind::BackingFieldRead { target } => self.ir.add_expr(IrExpr::Checked(
-                crate::ir::IrCheckedOperation::BackingFieldRead { target: *target },
-            )),
+            FirExprKind::LateinitFieldRead {
+                target,
+                dispatch_receiver,
+            } => {
+                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                self.ir.add_expr(IrExpr::Checked(
+                    crate::ir::IrCheckedOperation::LateinitFieldRead {
+                        target: *target,
+                        dispatch_receiver,
+                    },
+                ))
+            }
+            FirExprKind::BackingFieldRead {
+                target,
+                dispatch_receiver,
+            } => {
+                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                self.ir.add_expr(IrExpr::Checked(
+                    crate::ir::IrCheckedOperation::BackingFieldRead {
+                        target: *target,
+                        dispatch_receiver,
+                    },
+                ))
+            }
             FirExprKind::BackingFieldWrite {
                 target,
+                dispatch_receiver,
                 value,
                 conversion,
             } => {
+                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::Checked(
                     crate::ir::IrCheckedOperation::BackingFieldWrite {
                         target: *target,
+                        dispatch_receiver,
                         value,
                     },
                 ))
@@ -211,15 +241,14 @@ impl BodyLowering<'_> {
                 if let Some(declared) =
                     declared_result.filter(|declared| *declared != expression.ty.get())
                 {
-                    // The checked call returns through the declaration's erased JVM slot before
-                    // the frontend-selected coercion produces the substituted result. Preserve
-                    // that physical fact on the complete lowered call (which may be a block of
-                    // argument temporaries) so representation lowering can distinguish a boxed
-                    // value-class value in `fun <T> id(x: T): T` from a declaration whose value-
-                    // class return is already its unboxed carrier.
-                    self.ir
-                        .physical_types
-                        .insert(lowered, declared.erased_recv());
+                    // A retained inline body has already crossed and removed the declaration ABI:
+                    // its result slot is specialized to the call-site type. Ordinary calls still
+                    // return through the declaration's erased slot before this checked coercion.
+                    if !self.ir.inline_regions.contains(&lowered) {
+                        self.ir
+                            .physical_types
+                            .insert(lowered, declared.erased_recv());
+                    }
                     self.ir.add_expr(IrExpr::TypeOp {
                         op: IrTypeOp::ImplicitCoercion,
                         arg: lowered,
@@ -282,6 +311,7 @@ impl BodyLowering<'_> {
                                     ty: *ty,
                                     declared_ty: None,
                                     is_field: false,
+                                    field_index: None,
                                     has_default: false,
                                     is_vararg: false,
                                     type_param: None,
@@ -393,19 +423,25 @@ impl BodyLowering<'_> {
                 target,
             } => {
                 let operand_id = *operand;
+                let operand_ty = self
+                    .body
+                    .expr(operand_id)
+                    .ok_or(FirLoweringFailure::MissingExpression(operand_id))?
+                    .ty
+                    .get();
                 let operand = self.expression(operand_id)?;
+                let operand =
+                    if operand_ty == Ty::Unit && !matches!(operation, FirTypeOperation::SafeCast) {
+                        self.unit_value_after_effect(operand)
+                    } else {
+                        operand
+                    };
                 match operation {
                     FirTypeOperation::NotNullAssertion => {
                         let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
                             operand,
                             message: None,
                         });
-                        let operand_ty = self
-                            .body
-                            .expr(operand_id)
-                            .ok_or(FirLoweringFailure::MissingExpression(operand_id))?
-                            .ty
-                            .get();
                         if operand_ty != target.get() {
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
@@ -418,6 +454,68 @@ impl BodyLowering<'_> {
                     }
                     FirTypeOperation::SafeCast => {
                         self.safe_cast_expression(operand_id, target.get())?
+                    }
+                    FirTypeOperation::Is | FirTypeOperation::NotIs
+                        if target.get().is_nullable() =>
+                    {
+                        // JVM `instanceof` is false for null, while Kotlin's `x is T?` is true.
+                        // Evaluate the checked operand once, retain it as a language-level reference,
+                        // and expand the nullable test without resolving or reinterpreting its type.
+                        let operand_ty = self
+                            .body
+                            .expr(operand_id)
+                            .ok_or(FirLoweringFailure::MissingExpression(operand_id))?
+                            .ty
+                            .get();
+                        let reference = if operand_ty.is_reference() {
+                            operand
+                        } else {
+                            self.ir.add_expr(IrExpr::TypeOp {
+                                op: IrTypeOp::ImplicitCoercion,
+                                arg: operand,
+                                type_operand: crate::types::Ty::nullable(crate::types::Ty::obj(
+                                    "kotlin/Any",
+                                )),
+                            })
+                        };
+                        let temporary = self.allocate_temporary();
+                        let variable = self.ir.add_expr(IrExpr::Variable {
+                            index: temporary,
+                            ty: crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any")),
+                            init: Some(reference),
+                            named: false,
+                        });
+                        let nullable_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                        let negated = *operation == FirTypeOperation::NotIs;
+                        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: if negated {
+                                IrBinOp::RefNe
+                            } else {
+                                IrBinOp::RefEq
+                            },
+                            lhs: nullable_read,
+                            rhs: null,
+                        });
+                        let instance_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                        let instance_test = self.ir.add_expr(IrExpr::TypeOp {
+                            op: if negated {
+                                IrTypeOp::NotInstanceOf
+                            } else {
+                                IrTypeOp::InstanceOf
+                            },
+                            arg: instance_read,
+                            type_operand: target.get().non_null(),
+                        });
+                        let combined = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                            op: if negated { IrBinOp::And } else { IrBinOp::Or },
+                            lhs: null_test,
+                            rhs: instance_test,
+                        });
+                        self.ir.add_expr(IrExpr::Block {
+                            stmts: vec![variable],
+                            value: Some(combined),
+                        })
                     }
                     FirTypeOperation::Is | FirTypeOperation::NotIs | FirTypeOperation::Cast => {
                         self.ir.add_expr(IrExpr::TypeOp {
@@ -434,10 +532,23 @@ impl BodyLowering<'_> {
             FirExprKind::Unary { operation, operand } => {
                 let operand = self.expression(*operand)?;
                 match operation {
-                    FirUnaryOperation::Negate => self.ir.add_expr(IrExpr::PrimitiveNeg {
-                        operand,
-                        ty: expression.ty.get(),
-                    }),
+                    FirUnaryOperation::Negate => {
+                        if let IrExpr::Const(constant) = self.ir.expr(operand) {
+                            if let Some(constant) = super::constant_folding::negate(constant) {
+                                self.ir.add_expr(IrExpr::Const(constant))
+                            } else {
+                                self.ir.add_expr(IrExpr::PrimitiveNeg {
+                                    operand,
+                                    ty: expression.ty.get(),
+                                })
+                            }
+                        } else {
+                            self.ir.add_expr(IrExpr::PrimitiveNeg {
+                                operand,
+                                ty: expression.ty.get(),
+                            })
+                        }
+                    }
                     FirUnaryOperation::Identity => operand,
                     FirUnaryOperation::BooleanNot => {
                         let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
@@ -495,17 +606,11 @@ impl BodyLowering<'_> {
                 match operation {
                     FirBinaryOperation::BooleanAnd => {
                         let rhs = self.expression(*rhs)?;
-                        let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-                        self.ir.add_expr(IrExpr::When {
-                            branches: vec![(Some(lhs), rhs), (None, false_value)],
-                        })
+                        self.short_circuit_and(lhs, rhs)
                     }
                     FirBinaryOperation::BooleanOr => {
-                        let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
                         let rhs = self.expression(*rhs)?;
-                        self.ir.add_expr(IrExpr::When {
-                            branches: vec![(Some(lhs), true_value), (None, rhs)],
-                        })
+                        self.short_circuit_or(lhs, rhs)
                     }
                     FirBinaryOperation::Add
                     | FirBinaryOperation::Subtract
@@ -583,6 +688,108 @@ impl BodyLowering<'_> {
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(comparison),
+                })
+            }
+            FirExprKind::NullableNumericComparison {
+                operation,
+                lhs,
+                rhs,
+                lhs_primitive,
+                rhs_primitive,
+                comparison,
+            } => {
+                let lhs_value = self.expression(*lhs)?;
+                let rhs_value = self.expression(*rhs)?;
+                let lhs_temporary = self.allocate_temporary();
+                let rhs_temporary = self.allocate_temporary();
+                let lhs_ty = self
+                    .body
+                    .expr(*lhs)
+                    .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
+                    .ty
+                    .get();
+                let rhs_ty = self
+                    .body
+                    .expr(*rhs)
+                    .ok_or(FirLoweringFailure::MissingExpression(*rhs))?
+                    .ty
+                    .get();
+                let lhs_variable = self.ir.add_expr(IrExpr::Variable {
+                    index: lhs_temporary,
+                    ty: lhs_ty,
+                    init: Some(lhs_value),
+                    named: false,
+                });
+                let rhs_variable = self.ir.add_expr(IrExpr::Variable {
+                    index: rhs_temporary,
+                    ty: rhs_ty,
+                    init: Some(rhs_value),
+                    named: false,
+                });
+                let null_test = |lowering: &mut Self, temporary| {
+                    let value = lowering.ir.add_expr(IrExpr::GetValue(temporary));
+                    let null = lowering.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    lowering.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::RefEq,
+                        lhs: value,
+                        rhs: null,
+                    })
+                };
+                let converted = |lowering: &mut Self, temporary, primitive: ResolvedTy| {
+                    let value = lowering.ir.add_expr(IrExpr::GetValue(temporary));
+                    let unboxed = lowering.ir.add_expr(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg: value,
+                        type_operand: primitive.get(),
+                    });
+                    if primitive == *comparison {
+                        unboxed
+                    } else {
+                        lowering.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: unboxed,
+                            type_operand: comparison.get(),
+                        })
+                    }
+                };
+                let lhs_present = converted(self, lhs_temporary, *lhs_primitive);
+                let rhs_present = converted(self, rhs_temporary, *rhs_primitive);
+                let present_comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: lower_binary_operation(*operation),
+                    lhs: lhs_present,
+                    rhs: rhs_present,
+                });
+                let rhs_is_null = null_test(self, rhs_temporary);
+                let rhs_null_result = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(
+                    *operation == FirBinaryOperation::NotEqual,
+                )));
+                let lhs_present_result = self.ir.add_expr(IrExpr::When {
+                    branches: vec![
+                        (Some(rhs_is_null), rhs_null_result),
+                        (None, present_comparison),
+                    ],
+                });
+                let lhs_is_null = null_test(self, lhs_temporary);
+                let rhs_null_comparison = null_test(self, rhs_temporary);
+                let lhs_null_result = if *operation == FirBinaryOperation::Equal {
+                    rhs_null_comparison
+                } else {
+                    let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+                    self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::Eq,
+                        lhs: rhs_null_comparison,
+                        rhs: false_value,
+                    })
+                };
+                let result = self.ir.add_expr(IrExpr::When {
+                    branches: vec![
+                        (Some(lhs_is_null), lhs_null_result),
+                        (None, lhs_present_result),
+                    ],
+                });
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![lhs_variable, rhs_variable],
+                    value: Some(result),
                 })
             }
             FirExprKind::Range {
@@ -705,8 +912,7 @@ impl BodyLowering<'_> {
                 let receiver = self.expression(*receiver)?;
                 let arguments = indices
                     .iter()
-                    .copied()
-                    .map(|index| self.expression(index))
+                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
                     .collect::<Result<Vec<_>, _>>()?;
                 let operation = match kind {
                     FirIndexedAccessKind::Array => IrIntrinsic::ArrayGet,
@@ -730,8 +936,7 @@ impl BodyLowering<'_> {
                 let receiver = self.expression(*receiver)?;
                 let mut arguments = indices
                     .iter()
-                    .copied()
-                    .map(|index| self.expression(index))
+                    .map(|index| self.expression_with_conversion(index.value, index.conversion))
                     .collect::<Result<Vec<_>, _>>()?;
                 arguments.push(self.expression_with_conversion(*value, *conversion)?);
                 self.ir.add_expr(IrExpr::Call {
@@ -744,85 +949,57 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::SafeCall { receiver, selector } => {
-                let receiver_value =
-                    self.expression_with_conversion(receiver.value, receiver.conversion)?;
-                let receiver_type = self
-                    .body
-                    .expr(receiver.value)
-                    .ok_or(FirLoweringFailure::MissingExpression(receiver.value))?
-                    .ty
-                    .get();
-                let temporary = self.allocate_temporary();
-                let variable = self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: receiver_type,
-                    init: Some(receiver_value),
-                    named: false,
-                });
-                // The selector executes only on the non-null branch. Publish that data-flow fact as
-                // an explicit conversion so nullable primitive receivers are unboxed before an
-                // extension call/lambda binding; a raw nullable-slot read would put `Integer` into
-                // an `Int` local and fail JVM verification.
-                let selector_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                let selector_read = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: selector_read,
-                    type_operand: receiver_type.non_null(),
-                });
-                self.set_expression_state(receiver.value, LoweringState::Lowered(selector_read));
-                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: condition_read,
-                    rhs: null,
-                });
-                let selector = self.expression(*selector)?;
-                let selector = self.coerce_result(selector, expression.ty.get());
-                let null_result = if expression.ty.get() == crate::types::Ty::Unit {
-                    self.ir.add_expr(IrExpr::UnitInstance)
-                } else {
-                    self.ir.add_expr(IrExpr::Const(IrConst::Null))
-                };
-                let guarded = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(condition), null_result), (None, selector)],
-                });
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![variable],
-                    value: Some(guarded),
-                })
+                self.safe_call_expression(receiver, *selector, expression.ty.get(), None)?
             }
             FirExprKind::Elvis { lhs, rhs } => {
-                let lhs_value = self.expression(*lhs)?;
-                let temporary = self.allocate_temporary();
-                let variable = self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: self
-                        .body
-                        .expr(*lhs)
-                        .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
-                        .ty
-                        .get(),
-                    init: Some(lhs_value),
-                    named: false,
+                let target = expression.ty.get();
+                let fused_safe_call = self.body.expr(*lhs).and_then(|lhs| match &lhs.kind {
+                    FirExprKind::SafeCall { receiver, selector }
+                        if self.body.expr(*selector).is_some_and(|selector| {
+                            selector.ty.get() == target && !selector.ty.get().is_nullable()
+                        }) =>
+                    {
+                        Some((*receiver, *selector))
+                    }
+                    _ => None,
                 });
-                let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: condition_lhs,
-                    rhs: null,
-                });
-                let rhs = self.expression(*rhs)?;
-                let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                let lhs = self.coerce_result(lhs, expression.ty.get());
-                let result = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(condition), rhs), (None, lhs)],
-                });
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![variable],
-                    value: Some(result),
-                })
+                if let Some((receiver, selector)) = fused_safe_call {
+                    let rhs = self.expression(*rhs)?;
+                    let rhs = self.coerce_result(rhs, target);
+                    self.safe_call_expression(&receiver, selector, target, Some(rhs))?
+                } else {
+                    let lhs_value = self.expression(*lhs)?;
+                    let temporary = self.allocate_temporary();
+                    let variable = self.ir.add_expr(IrExpr::Variable {
+                        index: temporary,
+                        ty: self
+                            .body
+                            .expr(*lhs)
+                            .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
+                            .ty
+                            .get(),
+                        init: Some(lhs_value),
+                        named: false,
+                    });
+                    let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                    let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                    let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                        op: IrBinOp::Eq,
+                        lhs: condition_lhs,
+                        rhs: null,
+                    });
+                    let rhs = self.expression(*rhs)?;
+                    let rhs = self.coerce_result(rhs, expression.ty.get());
+                    let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                    let lhs = self.coerce_result(lhs, expression.ty.get());
+                    let result = self.ir.add_expr(IrExpr::When {
+                        branches: vec![(Some(condition), rhs), (None, lhs)],
+                    });
+                    self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![variable],
+                        value: Some(result),
+                    })
+                }
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
@@ -882,7 +1059,10 @@ impl BodyLowering<'_> {
                         )?;
                         Ok(IrCatch {
                             var: self.value_slot(catch.parameter),
-                            name: None,
+                            name: self
+                                .body
+                                .debug_value_name(catch.parameter)
+                                .map(str::to_owned),
                             exc_internal,
                             body: self.expression(catch.body)?,
                         })
@@ -942,22 +1122,14 @@ impl BodyLowering<'_> {
                             }
                         };
                         condition = Some(match condition {
-                            Some(previous) => self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: IrBinOp::Or,
-                                lhs: previous,
-                                rhs: candidate,
-                            }),
+                            Some(previous) => self.short_circuit_or(previous, candidate),
                             None => candidate,
                         });
                     }
                     if let Some(guard) = branch.guard {
                         let guard = self.expression(guard)?;
                         condition = Some(match condition {
-                            Some(previous) => self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                                op: IrBinOp::And,
-                                lhs: previous,
-                                rhs: guard,
-                            }),
+                            Some(previous) => self.short_circuit_and(previous, guard),
                             None => guard,
                         });
                     }
@@ -987,7 +1159,7 @@ impl BodyLowering<'_> {
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
                 for statement in statements.iter().copied() {
-                    let lowered = self.statement(statement)?;
+                    let lowered = self.consumed_statement(statement)?;
                     if matches!(
                         self.body
                             .statement(statement)
@@ -1008,7 +1180,20 @@ impl BodyLowering<'_> {
                         lowered_statements.push(lowered);
                     }
                 }
-                let value = result.map(|result| self.expression(result)).transpose()?;
+                let value = result
+                    .map(|result| {
+                        let lowered = self.expression(result)?;
+                        // The parser represents a block's final expression separately from its
+                        // statement list, but it is still a source statement for debug mapping.
+                        // Carry the checked line fact onto the lowered root just as ordinary FIR
+                        // statements do; emission only consumes this map.
+                        let line = self.body.expression_debug_lines(result).source;
+                        if line != 0 {
+                            self.ir.expr_lines.insert(lowered, line);
+                        }
+                        Ok(lowered)
+                    })
+                    .transpose()?;
                 self.ir.add_expr(IrExpr::Block {
                     stmts: lowered_statements,
                     value,
@@ -1181,6 +1366,27 @@ impl BodyLowering<'_> {
             }
         };
         self.ir.logical_types.insert(lowered, expression.ty.get());
+        let debug = self.body.expression_debug_lines(expression_id);
+        if debug.source != 0 {
+            self.ir.expr_source_lines.insert(lowered, debug.source);
+            for raw in first_generated..self.ir.exprs.len() {
+                let raw = raw as u32;
+                if !self.ir.suspend_calls.contains_key(&raw) {
+                    continue;
+                }
+                self.ir.expr_source_lines.entry(raw).or_insert(debug.source);
+            }
+        }
+        if debug.end != 0 {
+            self.ir.expr_end_lines.insert(lowered, debug.end);
+            for raw in first_generated..self.ir.exprs.len() {
+                let raw = raw as u32;
+                if !self.ir.suspend_calls.contains_key(&raw) {
+                    continue;
+                }
+                self.ir.expr_end_lines.entry(raw).or_insert(debug.end);
+            }
+        }
         self.record_expression_origins(first_generated, lowered, origin);
         self.set_expression_state(expression_id, LoweringState::Lowered(lowered));
         Ok(lowered)
@@ -1214,11 +1420,38 @@ impl BodyLowering<'_> {
             {
                 self.unit_value_after_effect(expression)
             }
-            FirConversionKind::NullabilityWidening { to } => self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: expression,
-                type_operand: to.get(),
-            }),
+            FirConversionKind::NullabilityWidening { to } => {
+                let target = to.get();
+                // A generic declaration returns through an erased reference slot. FIR can then
+                // carry two already-checked conversions: that reference to a specialized primitive
+                // result, followed by the primitive's nullability widening (`Object -> Int ->
+                // Int?`). Realizing both would unbox a possibly-null reference only to box it again.
+                // Retarget the mechanical carrier coercion directly to the nullable wrapper; no
+                // assignability or declaration lookup is performed here.
+                let erased_nullable_carrier = match self.ir.exprs.get(expression as usize) {
+                    Some(IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg,
+                        type_operand,
+                    }) if *type_operand == source_type
+                        && !source_type.is_reference()
+                        && target.nullable_primitive() == Some(source_type)
+                        && self
+                            .ir
+                            .physical_types
+                            .get(arg)
+                            .is_some_and(|physical| physical.is_reference()) =>
+                    {
+                        Some(*arg)
+                    }
+                    _ => None,
+                };
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: erased_nullable_carrier.unwrap_or(expression),
+                    type_operand: target,
+                })
+            }
             FirConversionKind::SmartCast { to } => self.ir.add_expr(IrExpr::TypeOp {
                 op: if to.get().is_reference() {
                     IrTypeOp::Cast
@@ -1228,6 +1461,51 @@ impl BodyLowering<'_> {
                 arg: expression,
                 type_operand: to.get(),
             }),
+            FirConversionKind::PlatformNarrowing { narrowing, to } => {
+                let message = self
+                    .body
+                    .platform_narrowing(narrowing)
+                    .ok_or(FirLoweringFailure::UnsupportedConversion {
+                        origin: conversion_origin,
+                    })?
+                    .message
+                    .to_string();
+                // A generic external call can already carry its checked result cast. Kotlin checks
+                // the value produced by the call and then casts that checked value; keep the
+                // frontend-selected assertion underneath that mechanical carrier conversion.
+                let cast_operand = match self.ir.exprs.get(expression as usize) {
+                    Some(IrExpr::TypeOp {
+                        op: IrTypeOp::Cast,
+                        arg,
+                        ..
+                    }) => Some(*arg),
+                    _ => None,
+                };
+                if let Some(operand) = cast_operand {
+                    let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
+                        operand,
+                        message: Some(message),
+                    });
+                    if let IrExpr::TypeOp { arg, .. } = &mut self.ir.exprs[expression as usize] {
+                        *arg = asserted;
+                    }
+                    expression
+                } else {
+                    let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
+                        operand: expression,
+                        message: Some(message),
+                    });
+                    if source_type != to.get() {
+                        self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: asserted,
+                            type_operand: to.get(),
+                        })
+                    } else {
+                        asserted
+                    }
+                }
+            }
             FirConversionKind::Sam(sam) => {
                 let conversion = self
                     .body
@@ -1285,6 +1563,20 @@ impl BodyLowering<'_> {
         })
     }
 
+    fn short_circuit_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+        self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(lhs), rhs), (None, false_value)],
+        })
+    }
+
+    fn short_circuit_or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(lhs), true_value), (None, rhs)],
+        })
+    }
+
     /// Realize a checked boundary at which semantic `Unit` becomes a first-class value. Common IR
     /// retains the source effect and names the language-level singleton; target backends decide how
     /// that singleton and a statement-like Unit result are represented physically.
@@ -1328,6 +1620,63 @@ impl BodyLowering<'_> {
             arg: expression,
             type_operand: target,
         })
+    }
+
+    fn safe_call_expression(
+        &mut self,
+        receiver: &FirReceiver,
+        selector: FirExprId,
+        result_type: Ty,
+        null_result: Option<ExprId>,
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let receiver_value =
+            self.expression_with_conversion(receiver.value, receiver.conversion)?;
+        let receiver_type = self
+            .body
+            .expr(receiver.value)
+            .ok_or(FirLoweringFailure::MissingExpression(receiver.value))?
+            .ty
+            .get();
+        let temporary = self.allocate_temporary();
+        let variable = self.ir.add_expr(IrExpr::Variable {
+            index: temporary,
+            ty: receiver_type,
+            init: Some(receiver_value),
+            named: false,
+        });
+        // The selector executes only on the non-null branch. Publish that data-flow fact as an
+        // explicit conversion so nullable primitive receivers are unboxed before their selected
+        // operation; a raw nullable-slot read would put a wrapper into a primitive local.
+        let selector_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let selector_read = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: selector_read,
+            type_operand: receiver_type.non_null().canonical_semantic(),
+        });
+        self.set_expression_state(receiver.value, LoweringState::Lowered(selector_read));
+        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Eq,
+            lhs: condition_read,
+            rhs: null,
+        });
+        let selector = self.expression(selector)?;
+        let selector = self.coerce_result(selector, result_type);
+        let null_result = null_result.unwrap_or_else(|| {
+            if result_type == Ty::Unit {
+                self.ir.add_expr(IrExpr::UnitInstance)
+            } else {
+                self.ir.add_expr(IrExpr::Const(IrConst::Null))
+            }
+        });
+        let guarded = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(condition), null_result), (None, selector)],
+        });
+        Ok(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![variable],
+            value: Some(guarded),
+        }))
     }
 
     fn storage_class(

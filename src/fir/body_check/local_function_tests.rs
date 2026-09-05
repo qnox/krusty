@@ -76,6 +76,70 @@ fn local_function_declaration_and_call_use_body_local_callable_identity() {
 }
 
 #[test]
+fn local_generic_bound_preserves_enclosing_type_argument() {
+    let (body, _) = checked_function_body(
+        "class Holder<T : Any>(val value: T)\n\
+         fun <T : Any> outer(value: T): T {\n\
+             fun <H : Holder<T>> inner(holder: H): T {\n\
+                 fun read() = holder.value\n\
+                 return read()\n\
+             }\n\
+             return inner(Holder(value))\n\
+         }\n",
+        "outer",
+    );
+
+    assert_eq!(
+        (0..body.statement_count())
+            .filter_map(|raw| body.statement(FirStatementId::from_raw(raw as u32)))
+            .filter(|statement| matches!(statement.kind, FirStatementKind::LocalFunction { .. }))
+            .count(),
+        1,
+    );
+}
+
+#[test]
+fn local_named_context_parameter_shadows_enclosing_context_value() {
+    let (body, _) = checked_function_body(
+        "// LANGUAGE: +ContextParameters\n\
+         context(a: String) fun contextual(): String = a\n\
+         context(a: String) fun outer(): String {\n\
+             context(a: String) fun local(): String = contextual()\n\
+             return \"OK\"\n\
+         }\n",
+        "outer",
+    );
+    let local_body = (0..body.statement_count())
+        .find_map(|raw| {
+            let statement = body.statement(FirStatementId::from_raw(raw as u32))?;
+            match &statement.kind {
+                FirStatementKind::LocalFunction { body, .. } => Some(body.as_ref()),
+                _ => None,
+            }
+        })
+        .expect("local contextual function");
+    let [context_parameter] = local_body.parameters() else {
+        panic!("local function must own its named context parameter")
+    };
+    let contextual_call = (0..local_body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &local_body.expr(FirExprId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            (!call.arguments.is_empty()).then_some(call)
+        })
+        .expect("contextual call inside local function");
+    let [FirCallArgument::Expression { value, .. }] = contextual_call.arguments.as_ref() else {
+        panic!("contextual call must carry the selected context value")
+    };
+    assert!(matches!(
+        local_body.expr(*value).map(|expression| &expression.kind),
+        Some(FirExprKind::ValueRead(target)) if *target == context_parameter.value
+    ));
+}
+
+#[test]
 fn local_type_parameter_bound_keeps_enclosing_parameter_identity() {
     let (body, _) = checked_function_body(
         "fun <T> outer(value: T): T {\n\
@@ -512,6 +576,29 @@ fn bare_local_extension_call_falls_through_to_enclosing_rung() {
     assert!(
         selected.contains(&(1, 1)),
         "the bare call must fall through to the applicable enclosing extension: {selected:?}"
+    );
+}
+
+#[test]
+fn nearer_local_extension_beats_applicable_enclosing_direct_function() {
+    let (body, _) = checked_function_body(
+        "class Receiver\n\
+         fun Receiver.box(): String {\n\
+             fun pick(value: Int): String = \"outer-direct\"\n\
+             if (true) {\n\
+                 fun Receiver.pick(value: Int): String = \"inner-extension\"\n\
+                 return pick(1)\n\
+             }\n\
+             return \"unreachable\"\n\
+         }\n",
+        "box",
+    );
+
+    let mut selected = Vec::new();
+    collect_local_call_shapes(&body, &mut selected);
+    assert!(
+        selected.contains(&(1, 0, true)),
+        "the nearer extension rung must win before an enclosing direct rung: {selected:?}"
     );
 }
 

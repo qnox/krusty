@@ -26,6 +26,8 @@
 
 set shell := ["bash", "-uc"]
 
+mod push
+
 manifest := "kotlin-versions"
 
 # List available recipes.

@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::SymbolTable;
 use crate::fir::{
-    DeclarationFlags, ResolvedFunctionOverride, ResolvedFunctionOverrideTarget,
-    ResolvedModuleIndex, ResolvedPropertyOverride, ResolvedPropertyOverrideTarget, ResolvedTy,
+    DeclarationFlags, DeclarationId, DeclarationKind, ResolvedAppliedClassifier,
+    ResolvedFunctionOverride, ResolvedFunctionOverrideTarget, ResolvedModuleIndex,
+    ResolvedPropertyOverride, ResolvedPropertyOverrideTarget, ResolvedTy,
 };
 use crate::libraries::{FnKind, FunctionInfo, PropKind, PropertyInfo};
 use crate::module_symbols::ModuleSymbols;
@@ -693,6 +694,132 @@ fn function_override_plans(
     overrides
 }
 
+/// Enum-entry bodies are anonymous subclasses semantically owned by the entry declaration rather
+/// than ordinary classifier headers. Their override decisions must nevertheless be frozen in Pass 1:
+/// a backend may need the exact erased super declaration to realize a bridge, and cannot rediscover
+/// that edge from a generated subclass name or descriptor.
+fn enum_entry_override_plans(
+    index: &ResolvedModuleIndex,
+    source: &dyn SymbolSource,
+) -> Vec<(
+    DeclarationId,
+    Vec<ResolvedPropertyOverride>,
+    Vec<ResolvedFunctionOverride>,
+)> {
+    let mut plans = Vec::new();
+    for raw in 0..index.declaration_count() {
+        let entry = DeclarationId::from_raw(raw as u32);
+        let Some(entry_header) = index
+            .declaration_header(entry)
+            .filter(|header| header.kind == DeclarationKind::EnumEntry)
+        else {
+            continue;
+        };
+        let Some(parent) = entry_header.owner else {
+            continue;
+        };
+        let Some(parent_header) = index.classifier_header(parent) else {
+            continue;
+        };
+        let Some(entry_name) = index.declaration_name(entry) else {
+            continue;
+        };
+        let implementation_owner = parent_header.classifier.nested_child(entry_name);
+        // The entry subclass directly extends the enum. Shift the enum's already-applied hierarchy
+        // down one rung so matching sees both enum-declared abstract members and its interfaces.
+        let hierarchy = index
+            .classifier_hierarchy(parent)
+            .unwrap_or_default()
+            .iter()
+            .map(|supertype| ResolvedAppliedClassifier {
+                classifier: supertype.classifier,
+                applied: supertype.applied,
+                depth: supertype.depth.saturating_add(1),
+            })
+            .collect::<Vec<_>>();
+        let mut properties = Vec::new();
+        let mut property_seen = HashSet::new();
+        let mut functions = Vec::new();
+        for member_raw in 0..index.declaration_count() {
+            let member = DeclarationId::from_raw(member_raw as u32);
+            let Some(header) = index
+                .declaration_header(member)
+                .filter(|header| header.owner == Some(entry))
+            else {
+                continue;
+            };
+            if !header.flags.has(DeclarationFlags::OVERRIDE) {
+                continue;
+            }
+            let Some(name) = index.declaration_name(member) else {
+                continue;
+            };
+            let Some(signature) = index.signature(member) else {
+                continue;
+            };
+            match header.kind {
+                DeclarationKind::Property => {
+                    let Some(property) = index.property_for_declaration(member) else {
+                        continue;
+                    };
+                    let Some(property_header) = index.property(property) else {
+                        continue;
+                    };
+                    append_property_override_edges(
+                        index,
+                        source,
+                        implementation_owner,
+                        name,
+                        property,
+                        signature.result,
+                        property_header.mutable,
+                        &hierarchy,
+                        &mut property_seen,
+                        &mut properties,
+                    );
+                }
+                DeclarationKind::Function => {
+                    let Some(callable) = index.callable_for_declaration(member) else {
+                        continue;
+                    };
+                    let parameters = signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect::<Vec<_>>();
+                    let formals = declaration_formals(index, member);
+                    let mut seen = HashSet::new();
+                    append_function_override_edges(
+                        index,
+                        source,
+                        implementation_owner,
+                        name,
+                        callable.id,
+                        &formals,
+                        &parameters,
+                        signature.result.get().canonical_semantic(),
+                        header.flags.has(DeclarationFlags::SUSPEND),
+                        &hierarchy,
+                        &mut seen,
+                        &mut functions,
+                    );
+                }
+                DeclarationKind::Classifier
+                | DeclarationKind::EnumEntry
+                | DeclarationKind::TypeAlias
+                | DeclarationKind::Constructor
+                | DeclarationKind::Accessor
+                | DeclarationKind::Initializer
+                | DeclarationKind::Script => {}
+            }
+        }
+        properties.sort_by_key(|edge| edge.depth);
+        functions.sort_by_key(|edge| edge.depth);
+        plans.push((entry, properties, functions));
+    }
+    plans
+}
+
 /// Complete the semantic override edges of body-local classifiers after their checked Pass-2
 /// signatures have been published. The matcher is the same one used for module declarations; the
 /// only difference is timing. No parser coordinate, target descriptor, or backend spelling enters
@@ -858,5 +985,9 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
         let functions = function_override_plans(index, &source, class, &hierarchy);
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);
+    }
+    for (entry, properties, functions) in enum_entry_override_plans(index, &source) {
+        index.publish_property_overrides(entry, properties);
+        index.publish_function_overrides(entry, functions);
     }
 }

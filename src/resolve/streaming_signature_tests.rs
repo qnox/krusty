@@ -4538,6 +4538,138 @@ fn callable_references_in_a_generic_vararg_use_the_selected_element_expectation(
 }
 
 #[test]
+fn compact_star_bounds_preserve_the_classifier_inside_a_vararg_array() {
+    let source = "class Token<T>\nfun take(vararg values: Token<*>) {}\n";
+    let inputs = [SourceInput::kotlin(source).with_file_stem("StarVarargSignature")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the explicit vararg signature must finalize in Pass 1")
+        .module
+        .index();
+    let signature = index
+        .declarations_named("take")
+        .iter()
+        .find_map(|declaration| index.signature(*declaration))
+        .expect("take signature");
+    let [parameter] = signature.parameters.as_ref() else {
+        panic!("one vararg parameter")
+    };
+    let element = parameter
+        .get()
+        .array_elem()
+        .expect("vararg has a semantic array slot");
+    assert_eq!(
+        element.obj_internal(),
+        Some(crate::types::type_name("Token"))
+    );
+    assert!(matches!(element.type_args(), [Ty::StarProjection(_)]));
+}
+
+#[test]
+fn compact_alias_spellings_resolve_arguments_in_the_declaration_lexical_scope() {
+    let source = r#"
+class Payload<T>
+typealias Alias<T> = Payload<T>
+class Outer {
+    class Nested
+    val value: Alias<Nested> = Payload<Nested>()
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("LexicalAliasSpelling")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the explicit property signature must finalize in Pass 1")
+        .module
+        .index();
+    let outer = index
+        .classifier_declaration(crate::types::type_name("Outer"))
+        .expect("outer classifier declaration");
+    let value = index
+        .declarations_named("value")
+        .iter()
+        .copied()
+        .find(|declaration| {
+            index
+                .declaration_header(*declaration)
+                .is_some_and(|header| header.owner == Some(outer))
+        })
+        .expect("nested property declaration");
+    let spelling = index
+        .declaration_spellings(value)
+        .expect("stable property spellings");
+
+    assert_eq!(spelling.ret.alias, Some(crate::types::type_name("Alias")));
+    let [(argument, _)] = spelling.ret.alias_args.as_slice() else {
+        panic!("one semantic alias argument")
+    };
+    assert_eq!(*argument, Ty::obj("Outer$Nested"));
+}
+
+#[test]
+fn compact_alias_spellings_preserve_an_alias_used_as_an_alias_argument() {
+    let source = r#"
+class Payload
+class PairBox<A, B>
+typealias Cargo = Payload
+typealias Boxed<T> = PairBox<T, T>
+fun nested(value: Boxed<Cargo>): Boxed<Cargo> = value
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("NestedAliasSpelling")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the explicit function signature must finalize in Pass 1")
+        .module
+        .index();
+    let declaration = index
+        .declarations_named("nested")
+        .first()
+        .copied()
+        .expect("nested declaration");
+    let spelling = index
+        .declaration_spellings(declaration)
+        .expect("stable function spellings");
+    let cargo = Some(crate::types::type_name("Cargo"));
+    let [(_, parameter_argument)] = spelling.param(0).alias_args.as_slice() else {
+        panic!("one abbreviated parameter argument")
+    };
+    let [(_, return_argument)] = spelling.ret.alias_args.as_slice() else {
+        panic!("one abbreviated return argument")
+    };
+    assert_eq!(parameter_argument.alias, cargo);
+    assert_eq!(return_argument.alias, cargo);
+}
+
+#[test]
 fn nested_builder_constraints_finalize_the_enclosing_signature() {
     let source = r#"fun <A, B> build(block: Builder<A>.() -> B): Provider<A, B> =
             object : Provider<A, B> { override fun value(): A = "OK" as A }

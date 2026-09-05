@@ -9,20 +9,22 @@ impl BodyFirChecker<'_> {
         plan: crate::plugins::PluginExpressionPlan,
     ) -> Result<FirExprId, BodyCheckFailure> {
         let cause = self.expression_origin(expression)?;
-        let operands =
-            plan.operands
-                .into_iter()
-                .map(|(source, expected)| {
-                    let span = self.file.expr_span(source).ok_or_else(|| {
-                        self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                    })?;
-                    let expected = self.resolved_type(span, expected)?;
-                    Ok(FirPluginOperand {
-                        value: self.expression(source)?,
-                        conversion: self.selected_value_conversion(source, expected, cause)?,
-                    })
+        let operands = plan
+            .operands
+            .into_iter()
+            .map(|(source, expected)| {
+                let span = self
+                    .file
+                    .expr_span(source)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+                let expected = self.resolved_type(span, expected)?;
+                let value = self.expression(source)?;
+                Ok(FirPluginOperand {
+                    value,
+                    conversion: self.selected_value_conversion(source, value, expected, cause)?,
                 })
-                .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
+            })
+            .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
         self.add_expression(
             expression,
             FirExprKind::PluginExpression {

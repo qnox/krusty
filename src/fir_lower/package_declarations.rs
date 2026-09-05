@@ -34,7 +34,11 @@ fn type_parameters(
                 .type_parameter_semantic_name(parameter)
                 .expect("a published type parameter must retain its semantic name")
                 .to_owned(),
-            bounds: header.bounds.iter().map(|bound| bound.ty.get()).collect(),
+            bounds: index
+                .type_parameter_bound_order(declaration, ordinal)
+                .into_iter()
+                .map(|bound| header.bounds[bound].ty.get())
+                .collect(),
             reified: header.flags.is_reified(),
         });
     }
@@ -146,10 +150,7 @@ pub(super) fn publish(
                     context_count: callable.shape.context_parameter_count as usize,
                     vararg_index,
                     visibility: header.visibility,
-                    spellings: index
-                        .declaration_spellings(declaration)
-                        .cloned()
-                        .unwrap_or_default(),
+                    spellings: index.declaration_spellings_primary_bound_first(declaration),
                     equality_bound: index
                         .callable_equality_bound(callable.id)
                         .map(crate::fir::ResolvedTy::get),
@@ -194,6 +195,7 @@ pub(super) fn publish(
                     .extension_receiver
                     .map(crate::fir::ResolvedTy::get);
                 ir.package_properties.push(IrPackageProperty {
+                    property: property_id,
                     name: property.name.clone(),
                     ty: signature.result.get(),
                     mutable: property_header.mutable,
@@ -204,10 +206,12 @@ pub(super) fn publish(
                     is_const: header.flags.has(DeclarationFlags::CONST),
                     has_constant: index.compile_time_constant(declaration).is_some(),
                     visibility: header.visibility,
-                    spellings: index
-                        .declaration_spellings(declaration)
-                        .cloned()
-                        .unwrap_or_default(),
+                    annotations: index
+                        .declaration_annotations(declaration)
+                        .to_vec()
+                        .into_boxed_slice(),
+                    flags: header.flags,
+                    spellings: index.declaration_spellings_primary_bound_first(declaration),
                     has_backing_field: receiver.is_none()
                         && (!header.flags.has(DeclarationFlags::CUSTOM_GETTER)
                             || header

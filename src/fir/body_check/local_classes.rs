@@ -161,7 +161,7 @@ impl BodyFirChecker<'_> {
     /// Exact dispatch receiver frame that owns `owner` and is visible to this local callable.
     /// Receiver-frame coordinates were fixed while entering each nested callable, so this does not
     /// re-run receiver selection.
-    fn enclosing_storage_receiver_source(
+    pub(super) fn enclosing_storage_receiver_source(
         &self,
         owner: DeclarationId,
     ) -> Option<ClassReceiverCaptureSource> {

@@ -32,13 +32,11 @@ pub struct CallArgumentRange {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SigCallArgument {
     pub value: SigExprId,
+    /// Exact source span of the written argument. This stays inside the temporary signature graph
+    /// and lets Pass 1 attach applicability diagnostics to the same source location as Pass 2.
+    pub origin: OriginId,
     pub name: Option<SigNameId>,
     pub spread: bool,
-    /// The folded value when this argument is an INTEGER LITERAL. Kotlin lets an integer literal
-    /// adopt any integer type its expected parameter asks for (`byteArrayOf(10, 20)` passes `Byte`),
-    /// and overload resolution needs the literal-ness, not just `Int`, to see that. Losing it here
-    /// made every such call unresolvable in an inferred signature.
-    pub integer_literal: Option<i32>,
     /// Whether this argument is a LAMBDA LITERAL. Overload resolution applies lambda-specific rules
     /// to one — most visibly, a lambda always conforms to an expected `… -> Unit` regardless of what
     /// its last expression evaluates to (`value.also { sb.append(x) }`).
@@ -50,6 +48,7 @@ pub struct SigCallArgument {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResolvedSigCallArgument<'a> {
     pub ty: ResolvedTy,
+    pub origin: OriginId,
     pub name: Option<&'a str>,
     pub spread: bool,
     pub integer_literal: Option<i32>,
@@ -149,6 +148,10 @@ pub enum SigBinaryOperator {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SigExpr {
     Known(ResolvedTy),
+    /// An `Int` literal keeps its value until compact semantic evaluation. This is not a published
+    /// type or a retained body: it is temporary literal provenance used by Kotlin's integer-
+    /// constant adaptation during overload selection, and is destroyed with the signature graph.
+    IntegerLiteral(i32),
     DeclarationType(DeclarationId),
     ClassifierType {
         declaration: DeclarationId,
@@ -1039,6 +1042,22 @@ pub trait SignatureSemantics {
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
+    /// Fold a binary integer constant only after [`Self::select_binary`] has semantically accepted
+    /// the operator and produced `result`. The graph evaluator never infers an operator from parser
+    /// syntax; implementations may return `None` when the selected operation is not a foldable
+    /// built-in integer operation.
+    fn fold_selected_integer_binary(
+        &self,
+        _operator: SigBinaryOperator,
+        _lhs_ty: ResolvedTy,
+        _lhs: i32,
+        _rhs_ty: ResolvedTy,
+        _rhs: i32,
+        _result: ResolvedTy,
+    ) -> Option<i32> {
+        None
+    }
+
     fn select_invoke(
         &self,
         scope: SignatureScope,
@@ -1531,6 +1550,7 @@ pub struct ResolvedModuleIndex {
     /// this declaration-owned semantic fact crosses into Pass 2.
     invisible_reference_suppressions: std::collections::HashSet<DeclarationId>,
     invisible_member_suppressions: std::collections::HashSet<DeclarationId>,
+    optional_declaration_usage_suppressions: std::collections::HashSet<DeclarationId>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
@@ -1563,6 +1583,11 @@ pub struct ResolvedModuleIndex {
     compile_time_constants: HashMap<DeclarationId, crate::libraries::LibraryConst>,
     callables: HashMap<CallableId, ResolvedCallableHeader>,
     callable_by_declaration: HashMap<DeclarationId, CallableId>,
+    /// Compiler-generated callable stubs that Kotlin suppresses after resolving the enclosing
+    /// classifier hierarchy. The motivating case is a data-class `toString`/`hashCode`/`equals`
+    /// whose nearest inherited declaration is final: the stable inventory still owns the generated
+    /// coordinate, but it is not a semantic declaration and must never enter lookup or lowering.
+    suppressed_generated_callables: std::collections::HashSet<DeclarationId>,
     /// Callable headers retained only while an invalid/locally deferred declaration has no
     /// signature. Pass-2 local publication may replace one with its finalized checked header.
     diagnostic_callables: std::collections::HashSet<CallableId>,
@@ -2113,11 +2138,20 @@ impl ResolvedModuleIndex {
         self.invisible_member_suppressions.contains(&declaration)
     }
 
+    pub(crate) fn declaration_suppresses_optional_declaration_usage(
+        &self,
+        declaration: DeclarationId,
+    ) -> bool {
+        self.optional_declaration_usage_suppressions
+            .contains(&declaration)
+    }
+
     pub(crate) fn publish_visibility_suppression(
         &mut self,
         declaration: DeclarationId,
         invisible_reference: bool,
         invisible_member: bool,
+        optional_declaration_usage: bool,
     ) {
         assert!(
             self.declaration_headers.contains_key(&declaration),
@@ -2128,6 +2162,10 @@ impl ResolvedModuleIndex {
         }
         if invisible_member {
             self.invisible_member_suppressions.insert(declaration);
+        }
+        if optional_declaration_usage {
+            self.optional_declaration_usage_suppressions
+                .insert(declaration);
         }
     }
 
@@ -2254,19 +2292,20 @@ impl ResolvedModuleIndex {
 
     pub(crate) fn publish_property_overrides(
         &mut self,
-        classifier: DeclarationId,
+        owner: DeclarationId,
         overrides: impl IntoIterator<Item = super::ResolvedPropertyOverride>,
     ) {
         assert!(
-            self.classifiers.contains_key(&classifier),
-            "property overrides require a published classifier header"
+            self.classifiers.contains_key(&owner)
+                || self
+                    .declaration_header(owner)
+                    .is_some_and(|header| header.kind == super::DeclarationKind::EnumEntry),
+            "property overrides require a published classifier or enum-entry owner"
         );
         let overrides = overrides.into_iter().collect::<Vec<_>>().into_boxed_slice();
         assert!(
-            self.property_overrides
-                .insert(classifier, overrides)
-                .is_none(),
-            "a source classifier may publish property overrides only once"
+            self.property_overrides.insert(owner, overrides).is_none(),
+            "a source classifier or enum entry may publish property overrides only once"
         );
     }
 
@@ -2286,19 +2325,20 @@ impl ResolvedModuleIndex {
 
     pub(crate) fn publish_function_overrides(
         &mut self,
-        classifier: DeclarationId,
+        owner: DeclarationId,
         overrides: impl IntoIterator<Item = super::ResolvedFunctionOverride>,
     ) {
         assert!(
-            self.classifiers.contains_key(&classifier),
-            "function overrides require a published classifier header"
+            self.classifiers.contains_key(&owner)
+                || self
+                    .declaration_header(owner)
+                    .is_some_and(|header| header.kind == super::DeclarationKind::EnumEntry),
+            "function overrides require a published classifier or enum-entry owner"
         );
         let overrides = overrides.into_iter().collect::<Vec<_>>().into_boxed_slice();
         assert!(
-            self.function_overrides
-                .insert(classifier, overrides)
-                .is_none(),
-            "a source classifier may publish function overrides only once"
+            self.function_overrides.insert(owner, overrides).is_none(),
+            "a source classifier or enum entry may publish function overrides only once"
         );
     }
 
@@ -2358,6 +2398,31 @@ impl ResolvedModuleIndex {
         self.classifier_own_type_parameter_counts
             .get(&classifier)
             .copied()
+    }
+
+    /// The classifier applied to its own stable semantic type-parameter identities.
+    ///
+    /// This is the root for publishing an applied hierarchy. Starting from a bare nominal type
+    /// would substitute every missing argument with its upper bound and erase declaration
+    /// variables from generic supertype edges.
+    pub fn classifier_self_type(&self, classifier: DeclarationId) -> Option<Ty> {
+        let identity = self.classifier_header(classifier)?.classifier;
+        let arguments = self
+            .classifier_type_arguments(classifier)
+            .unwrap_or_default()
+            .iter()
+            .map(|parameter| {
+                let header = self.type_parameter_header(*parameter)?;
+                let semantic_name = self.type_parameter_semantic_name(*parameter)?;
+                let bound = header
+                    .bounds
+                    .first()
+                    .map(|bound| bound.ty.get())
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                Some(Ty::ty_param(semantic_name, bound))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Ty::obj_args_name(identity, &arguments))
     }
 
     pub(crate) fn publish_classifier_type_arguments(
@@ -2837,6 +2902,19 @@ impl ResolvedModuleIndex {
             .and_then(|callable| self.callable(*callable))
     }
 
+    pub(crate) fn suppress_generated_callable(&mut self, declaration: DeclarationId) {
+        let header = self
+            .declaration_header(declaration)
+            .expect("a suppressed generated callable must have a stable header");
+        assert_eq!(header.kind, DeclarationKind::Function);
+        assert!(header.flags.has(DeclarationFlags::COMPILER_GENERATED));
+        assert!(self.suppressed_generated_callables.insert(declaration));
+    }
+
+    pub(crate) fn is_suppressed_generated_callable(&self, declaration: DeclarationId) -> bool {
+        self.suppressed_generated_callables.contains(&declaration)
+    }
+
     pub fn callable_name(&self, callable: CallableId) -> Option<&str> {
         let header = self.callable(callable)?;
         let super::body::ResolvedCallableName::Function(name) = header.name else {
@@ -3166,7 +3244,8 @@ impl ResolvedModuleIndex {
                 })
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
-                + self.invisible_member_suppressions.len())
+                + self.invisible_member_suppressions.len()
+                + self.optional_declaration_usage_suppressions.len())
                 * std::mem::size_of::<DeclarationId>()
             + self.classifiers.len()
                 * (std::mem::size_of::<DeclarationId>()

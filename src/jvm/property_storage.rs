@@ -4,7 +4,41 @@
 //! JVM-style zero-initialized instance fields. This pass removes only the exact declaration stores
 //! whose values the JVM supplies implicitly; later assignments to the same field remain observable.
 
-use crate::ir::{ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{ExprId, IrConst, IrExpr, IrFile, IrLocalPropertyLayout, IrTypeOp};
+
+/// Select the JVM `@JvmField` storage realization for top-level declarations.
+///
+/// The package declaration carries the resolved annotation and stable property identity; the
+/// common-IR layout carries that property's exact storage coordinate. Joining those identities
+/// here avoids both syntax inspection and `(owner, name)` rebinding.
+pub fn realize_top_level_jvm_fields(ir: &mut IrFile) {
+    let fields = ir
+        .package_properties
+        .iter()
+        .filter(|declaration| {
+            crate::jvm::property_realizations::jvm_field_eligible(
+                &declaration.annotations,
+                declaration.visibility,
+                declaration.flags,
+                declaration.receiver.is_some(),
+                !declaration.context_parameters.is_empty(),
+            )
+        })
+        .filter_map(
+            |declaration| match ir.local_property_layouts.get(&declaration.property) {
+                Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. }) => Some(*storage),
+                Some(IrLocalPropertyLayout::TopLevelAccessor { .. }) | None => None,
+                Some(
+                    IrLocalPropertyLayout::Member { .. }
+                    | IrLocalPropertyLayout::MemberExtension { .. },
+                ) => unreachable!("a package property cannot have a member layout"),
+            },
+        )
+        .collect::<Vec<_>>();
+    for field in fields {
+        ir.mark_jvm_field_static(field);
+    }
+}
 
 /// Whether `expression` is a constant the JVM already supplies as a field's initial value (`null`,
 /// zero of any width, `false`) — so a store of it is pure redundancy the emitter may drop.

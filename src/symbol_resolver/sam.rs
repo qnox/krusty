@@ -52,7 +52,12 @@ pub(crate) fn semantic_sam_signature(
         };
         let mut bindings = classifier_bindings(&classifier, applied);
         for argument in bindings.values_mut() {
-            if let Some(projected) = argument.projection_inner() {
+            // A SAM method receives/returns values, never use-site projection syntax. Composed
+            // variance can legitimately leave more than one capture shell here: selecting
+            // `Consumer<in T>` through `Holder<out X>` produces `in (out X)`. Consume the complete
+            // shell so the abstract method is specialized to the value type `X`, rather than
+            // publishing a top-level `out X` parameter into checked FIR.
+            while let Some(projected) = argument.projection_inner() {
                 *argument = projected;
             }
         }

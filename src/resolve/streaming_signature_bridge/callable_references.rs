@@ -13,7 +13,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         explicit_type_arguments: &[Ty],
     ) -> Option<(Vec<String>, Ty)> {
-        let (formals, expansion) = self.signature_source_alias_expansion(scope, spelling)?;
+        let (_, formals, expansion) = self.signature_source_alias_expansion(scope, spelling)?;
         if !explicit_type_arguments.is_empty() && explicit_type_arguments.len() != formals.len() {
             return None;
         }

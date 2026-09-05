@@ -8,6 +8,53 @@ use crate::types::Ty;
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
+    fn local_value_is_mutable(&self, value: crate::fir::LocalValueId) -> bool {
+        (0..self.body.statement_count()).any(|raw| {
+            let statement = self
+                .body
+                .statement(crate::fir::FirStatementId::from_raw(raw as u32))
+                .expect("FIR statement index");
+            match &statement.kind {
+                crate::fir::FirStatementKind::Local {
+                    target, mutable, ..
+                } => *target == value && *mutable,
+                crate::fir::FirStatementKind::Destructure { entries, .. } => {
+                    entries.iter().any(|entry| {
+                        matches!(
+                            entry,
+                            crate::fir::FirDestructureEntry::Binding {
+                                target,
+                                mutable: true,
+                                ..
+                            } if *target == value
+                        )
+                    })
+                }
+                _ => false,
+            }
+        })
+    }
+
+    fn loop_variable_declaration(
+        &mut self,
+        variable: u32,
+        ty: Ty,
+        initializer: ExprId,
+    ) -> (u32, ExprId) {
+        let source = crate::fir::LocalValueId::from_raw(variable);
+        let variable = self.value_slot(source);
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: variable,
+            ty,
+            init: Some(initializer),
+            named: true,
+        });
+        if let Some(name) = self.body.debug_value_name(source) {
+            self.ir.value_names.insert(declaration, name.to_owned());
+        }
+        (variable, declaration)
+    }
+
     pub(super) fn loop_statement(
         &mut self,
         target: ControlTargetId,
@@ -109,24 +156,31 @@ impl BodyLowering<'_> {
         }
         let start = self.expression(start)?;
         let start = self.coerce(start, ty);
-        let variable = self.value_slot(crate::fir::LocalValueId::from_raw(variable));
-        let variable_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: variable,
-            ty,
-            init: Some(start),
-            named: true,
-        });
+        let (variable, variable_declaration) = self.loop_variable_declaration(variable, ty, start);
         let end_value = self.expression(end)?;
         let end_value = self.coerce(end_value, ty);
-        let end_slot = self.allocate_temporary();
-        let end_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: end_slot,
-            ty,
-            init: Some(end_value),
-            named: false,
-        });
+        let constant_end = matches!(
+            self.ir.expr(end_value),
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } if matches!(self.ir.expr(*arg), IrExpr::Const(_))
+        );
+        let (end_declaration, end_read) = if constant_end {
+            (None, end_value)
+        } else {
+            let end_slot = self.allocate_temporary();
+            let declaration = self.ir.add_expr(IrExpr::Variable {
+                index: end_slot,
+                ty,
+                init: Some(end_value),
+                named: false,
+            });
+            let read = self.ir.add_expr(IrExpr::GetValue(end_slot));
+            (Some(declaration), read)
+        };
         let counter_read = self.ir.add_expr(IrExpr::GetValue(variable));
-        let end_read = self.ir.add_expr(IrExpr::GetValue(end_slot));
         let comparison = match operation {
             FirRangeOperation::Through => IrBinOp::Le,
             FirRangeOperation::OpenEnd | FirRangeOperation::Until => IrBinOp::Lt,
@@ -153,7 +207,11 @@ impl BodyLowering<'_> {
             lhs: counter_read,
             rhs: step,
         });
-        let updated = self.coerce(updated, ty);
+        let updated = if ty == Ty::Char {
+            self.coerce(updated, ty)
+        } else {
+            updated
+        };
         let write = self.ir.add_expr(IrExpr::SetValue {
             var: variable,
             value: updated,
@@ -165,7 +223,6 @@ impl BodyLowering<'_> {
             write
         } else {
             let counter_read = self.ir.add_expr(IrExpr::GetValue(variable));
-            let end_read = self.ir.add_expr(IrExpr::GetValue(end_slot));
             let at_end = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Eq,
                 lhs: counter_read,
@@ -189,8 +246,11 @@ impl BodyLowering<'_> {
             post_test: false,
             label: Some(self.control_label(0, target)?),
         });
+        let mut statements = vec![variable_declaration];
+        statements.extend(end_declaration);
+        statements.push(loop_expression);
         Ok(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![variable_declaration, end_declaration, loop_expression],
+            stmts: statements,
             value: None,
         }))
     }
@@ -205,25 +265,38 @@ impl BodyLowering<'_> {
         iterable: FirExprId,
         body: FirExprId,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let iterable_ty = self
+        let iterable_expression = self
             .body
             .expr(iterable)
-            .ok_or(FirLoweringFailure::MissingExpression(iterable))?
-            .ty
-            .get()
-            .non_null();
+            .ok_or(FirLoweringFailure::MissingExpression(iterable))?;
+        let iterable_ty = iterable_expression.ty.get().non_null();
+        let stable_local = match &iterable_expression.kind {
+            crate::fir::FirExprKind::ValueRead(value) if !self.local_value_is_mutable(*value) => {
+                Some(*value)
+            }
+            _ => None,
+        };
         let (size_operation, get_operation) = match kind {
             FirBuiltinIterableKind::Array => (IrIntrinsic::ArraySize, IrIntrinsic::ArrayGet),
             FirBuiltinIterableKind::String => (IrIntrinsic::StringLength, IrIntrinsic::StringGet),
         };
         let iterable_value = self.expression(iterable)?;
-        let iterable_slot = self.allocate_temporary();
-        let iterable_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: iterable_slot,
-            ty: iterable_ty,
-            init: Some(iterable_value),
-            named: false,
+        let stable_slot = stable_local.and_then(|value| {
+            matches!(self.ir.expr(iterable_value), IrExpr::GetValue(slot) if *slot == self.value_slot(value))
+                .then_some(self.value_slot(value))
         });
+        let (iterable_slot, iterable_declaration) = if let Some(slot) = stable_slot {
+            (slot, None)
+        } else {
+            let slot = self.allocate_temporary();
+            let declaration = self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty: iterable_ty,
+                init: Some(iterable_value),
+                named: false,
+            });
+            (slot, Some(declaration))
+        };
         let index_slot = self.allocate_temporary();
         let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let index_declaration = self.ir.add_expr(IrExpr::Variable {
@@ -265,13 +338,8 @@ impl BodyLowering<'_> {
             dispatch_receiver: Some(receiver),
             args: vec![index_read],
         });
-        let variable = self.value_slot(crate::fir::LocalValueId::from_raw(variable));
-        let variable_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: variable,
-            ty: variable_ty.get(),
-            init: Some(element),
-            named: true,
-        });
+        let (_, variable_declaration) =
+            self.loop_variable_declaration(variable, variable_ty.get(), element);
         let body = self.expression(body)?;
         let body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable_declaration, body],
@@ -295,13 +363,11 @@ impl BodyLowering<'_> {
             post_test: false,
             label: Some(self.control_label(0, target)?),
         });
+        let mut statements = Vec::with_capacity(4);
+        statements.extend(iterable_declaration);
+        statements.extend([index_declaration, size_declaration, loop_expression]);
         Ok(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![
-                iterable_declaration,
-                index_declaration,
-                size_declaration,
-                loop_expression,
-            ],
+            stmts: statements,
             value: None,
         }))
     }
@@ -348,13 +414,8 @@ impl BodyLowering<'_> {
         let condition = self.iterator_call(has_next, iterator_read)?;
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
         let element = self.iterator_call(next, iterator_read)?;
-        let variable = self.value_slot(crate::fir::LocalValueId::from_raw(variable));
-        let variable_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: variable,
-            ty: variable_ty.get(),
-            init: Some(element),
-            named: true,
-        });
+        let (_, variable_declaration) =
+            self.loop_variable_declaration(variable, variable_ty.get(), element);
         let body = self.expression(body)?;
         let body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable_declaration, body],

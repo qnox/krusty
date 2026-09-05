@@ -264,6 +264,19 @@ pub(crate) fn selected_context_values(
                         nested_receiver_count,
                     );
                 }
+                if let Some(StmtLowering::BackingFieldWrite {
+                    dispatch_receiver: Some(receiver),
+                }) = stmt_lowers.get(&statement)
+                {
+                    record_source(
+                        out,
+                        direct_implicit_receivers,
+                        &ResolvedContextArgument::ImplicitReceiver(receiver.clone()),
+                        nested_callable,
+                        nested_bound_names,
+                        nested_receiver_count,
+                    );
+                }
                 match file.stmt(statement) {
                     Stmt::For {
                         name, range, body, ..

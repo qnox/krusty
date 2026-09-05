@@ -22,8 +22,5 @@ fn enum_entry_init_may_assign_a_deferred_val_after_a_local_function() {
         fun box(): String = X.B.value
     "#;
 
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(source, &[stdlib], Some(jdk.as_path()));
-    assert_eq!(diagnostics, Vec::<String>::new());
+    common::expect_box_ok_with_stdlib(source, "EnumEntryDeferredValAfterLocalFunction");
 }

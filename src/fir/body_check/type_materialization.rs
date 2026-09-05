@@ -148,12 +148,31 @@ impl BodyFirChecker<'_> {
             },
             FirExprKind::PropertyRead {
                 target: FirPropertyTarget::Module(property),
+                substitutions,
                 ..
             } => self
                 .index
                 .property_declaration(*property)
                 .and_then(|declaration| self.index.signature(declaration))
-                .map(|signature| signature.result),
+                .and_then(|signature| {
+                    let bindings = substitutions
+                        .iter()
+                        .filter_map(|substitution| {
+                            let FirTypeParameterRef::Module(parameter) = substitution.parameter
+                            else {
+                                return None;
+                            };
+                            self.index
+                                .type_parameter_semantic_name(parameter)
+                                .map(|name| (name.to_owned(), substitution.value.get()))
+                        })
+                        .collect::<crate::symbol_resolver::GSigBinds>();
+                    ResolvedTy::new(crate::types::ty_subst_keep_unbound(
+                        signature.result.get(),
+                        &bindings,
+                    ))
+                    .ok()
+                }),
             FirExprKind::PropertyRead {
                 target: FirPropertyTarget::External { result, .. },
                 ..
@@ -202,12 +221,32 @@ impl BodyFirChecker<'_> {
         storage_ty: ResolvedTy,
         kind: FirExprKind,
     ) -> Result<FirExprId, BodyCheckFailure> {
+        self.checked_storage_read_with_lateinit(source, storage_ty, kind, None)
+    }
+
+    pub(super) fn checked_storage_read_with_lateinit(
+        &mut self,
+        source: ExprId,
+        storage_ty: ResolvedTy,
+        kind: FirExprKind,
+        lateinit_name: Option<&str>,
+    ) -> Result<FirExprId, BodyCheckFailure> {
         let origin = self.expression_origin(source)?;
-        let value = self.body.add_expr(FirExpr {
+        let mut value = self.body.add_expr(FirExpr {
             origin,
             ty: storage_ty,
             kind,
         });
+        if let Some(name) = lateinit_name {
+            value = self.body.add_expr(FirExpr {
+                origin,
+                ty: storage_ty,
+                kind: FirExprKind::LateinitRead {
+                    value,
+                    name: name.into(),
+                },
+            });
+        }
         // The stable binding is authoritative for a lexical read. During the two-pass cutover the
         // legacy checker can leave an `Error` cache entry for a nested function-type spelling even
         // though Pass 1 has already published the complete parameter type. Do not copy that stale
@@ -223,10 +262,18 @@ impl BodyFirChecker<'_> {
                 semantic,
             )?
         };
-        let conversion = self
-            .selected_type_conversion(storage_ty, result_ty, origin)
+        // A Unit local/capture/property is already stored as the language singleton. Resolution
+        // may expose its classifier view (`kotlin/Unit`) for member selection, but that is not a
+        // void-effect-to-value conversion. Preserve the stored read directly so lowering neither
+        // manufactures a second singleton nor leaves the original slot value on the stack.
+        let stored_unit_view = storage_ty.get().canonical_semantic() == Ty::Unit
+            && result_ty.get() == crate::types::stored_value_ty(Ty::Unit);
+        let conversion = (!stored_unit_view)
+            .then(|| self.selected_type_conversion(storage_ty, result_ty, origin))
+            .flatten()
             .or_else(|| {
-                (storage_ty != result_ty
+                (!stored_unit_view
+                    && storage_ty != result_ty
                     && storage_ty.get().is_reference()
                     && result_ty.get().is_reference())
                 .then_some(FirConversion {

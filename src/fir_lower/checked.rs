@@ -66,11 +66,11 @@ impl BodyLowering<'_> {
         }))
     }
 
-    /// Read one parameter of a structural callable-reference adapter in the representation expected
-    /// by the checker-selected declaration parameter. Kotlin's nullable bottom type (`Nothing?`)
-    /// is assignable to every nullable reference, but a backend may represent the adapter slot as
-    /// `Void`; retaining the checked coercion gives it the target reference type without repeating
-    /// subtype analysis during emission.
+    /// Read one parameter of a structural callable-reference adapter at the checker-selected target
+    /// boundary. Source and target are both final FIR facts; a differing type therefore requires an
+    /// explicit common-IR coercion. Backends consume that operation for representation changes such
+    /// as `Int` -> `Number`/`Any` boxing or nullable-bottom -> reference narrowing without repeating
+    /// assignability analysis.
     fn adapted_reference_argument_read(
         &mut self,
         slot: u32,
@@ -78,10 +78,7 @@ impl BodyLowering<'_> {
         target: crate::types::Ty,
     ) -> ExprId {
         let read = self.ir.add_expr(IrExpr::GetValue(slot));
-        if source != target
-            && source.non_null() == crate::types::Ty::Nothing
-            && target.is_reference()
-        {
+        if source != target {
             self.ir.add_expr(IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg: read,
@@ -145,6 +142,27 @@ impl BodyLowering<'_> {
                 binding,
                 adaptation,
                 reference_ty,
+            );
+        }
+        if let crate::fir::FirCallableReferenceTarget::ArrayFactory {
+            operation,
+            array_type,
+            element_type,
+            parameters,
+        } = &target
+        {
+            if dispatch_receiver.is_some() || extension_receiver.is_some() {
+                return Err(FirLoweringFailure::UnsupportedIntrinsicCall);
+            }
+            return self.checked_array_factory_reference(
+                *operation,
+                *array_type,
+                *element_type,
+                parameters,
+                binding,
+                adaptation,
+                reference_ty,
+                reflective,
             );
         }
         let crate::fir::FirCallableReferenceTarget::Module(target) = target else {
@@ -340,13 +358,24 @@ impl BodyLowering<'_> {
                         whole_array,
                     } => {
                         let array_type = signature_parameters[parameter as usize];
+                        let element_type = if *whole_array {
+                            array_type
+                        } else {
+                            array_type.array_elem().ok_or(
+                                FirLoweringFailure::UnsupportedCallableReference(callable.id),
+                            )?
+                        };
                         let mut elements = Vec::with_capacity(values.len());
                         for source in values.iter().copied() {
-                            let Some(_) = reference.params.get(source as usize) else {
+                            let Some(&source_type) = reference.params.get(source as usize) else {
                                 return Ok(None);
                             };
                             elements.push((
-                                self.ir.add_expr(IrExpr::GetValue(own_start + source)),
+                                self.adapted_reference_argument_read(
+                                    own_start + source,
+                                    source_type,
+                                    element_type,
+                                ),
                                 *whole_array,
                             ));
                         }
@@ -513,6 +542,7 @@ impl BodyLowering<'_> {
             .ir
             .add_expr(IrExpr::Checked(IrCheckedOperation::PropertyReference {
                 target: target.clone(),
+                delegated: false,
                 binding,
                 dispatch_receiver,
                 extension_receiver,
@@ -588,10 +618,14 @@ impl BodyLowering<'_> {
             }
             FirCallTarget::Super {
                 owner,
+                dispatch_owner,
+                enclosing_dispatch,
+                kind,
                 name,
                 parameters,
                 result,
                 interface,
+                realization,
                 descriptor,
                 physical_result,
                 source,
@@ -599,20 +633,22 @@ impl BodyLowering<'_> {
             } => {
                 let _ = result;
                 let checked = self.external_arguments(&call.arguments, parameters)?;
+                let parameter_types = parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
                 let (statements, receiver, arguments, defaults) = self
-                    .selected_semantic_operands(
-                        None,
-                        &parameters
-                            .iter()
-                            .map(|parameter| parameter.get())
-                            .collect::<Vec<_>>(),
-                        None,
-                        None,
-                        &checked,
-                        true,
-                        false,
-                        None,
-                    )
+                    .selected_semantic_operands(super::source_calls::SelectedOperandRequest {
+                        receiver_ty: None,
+                        parameter_types: &parameter_types,
+                        dispatch_receiver: None,
+                        extension_receiver: None,
+                        arguments: &checked,
+                        allow_defaults: true,
+                        preserve_inline_lambdas: false,
+                        extension_receiver_parameter: None,
+                        mode: super::source_calls::SelectedOperandMode::DirectWhenOrdered,
+                    })
                     .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall)?;
                 debug_assert!(receiver.is_none());
                 let dispatch_receiver =
@@ -623,10 +659,14 @@ impl BodyLowering<'_> {
                 // already have fixed its physical descriptor; source declarations leave it empty.
                 let callee = crate::ir::Callee::Super {
                     owner: *owner,
+                    dispatch_owner: *dispatch_owner,
+                    enclosing_dispatch: *enclosing_dispatch,
+                    kind: *kind,
                     name: name.clone(),
                     params: parameters.iter().map(|parameter| parameter.get()).collect(),
                     ret: physical_result.get(),
                     interface: *interface,
+                    realization: *realization,
                     descriptor: descriptor.clone(),
                     source: *source,
                     defaults,
@@ -645,6 +685,16 @@ impl BodyLowering<'_> {
                 parameters,
                 result,
             } => {
+                if let crate::fir::FirIntrinsic::Assert { mode } = operation {
+                    return self.assertion_call(
+                        *mode,
+                        dispatch_receiver,
+                        extension_receiver,
+                        &call.arguments,
+                        parameters,
+                        *result,
+                    );
+                }
                 if matches!(
                     operation,
                     crate::fir::FirIntrinsic::SuspendCoroutine
@@ -772,6 +822,7 @@ impl BodyLowering<'_> {
                 declaration,
                 classifier,
                 parameters,
+                annotation,
             } => {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
                 let outer_receiver = self.receiver(call.outer_receiver)?;
@@ -781,6 +832,7 @@ impl BodyLowering<'_> {
                     parameters,
                     outer_receiver,
                     &arguments,
+                    annotation.as_deref(),
                 )
                 .ok_or(FirLoweringFailure::UnsupportedExternalConstructor(
                     *declaration,
@@ -793,53 +845,115 @@ impl BodyLowering<'_> {
         &mut self,
         call: &FirConstructorCall,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let (target, arguments) = self.constructor_target_and_arguments(call)?;
+        let (target, parameter_types, mut arguments) =
+            self.constructor_target_and_arguments(call)?;
+        let reordered = arguments
+            .iter()
+            .map(|argument| match argument {
+                IrCheckedArgument::Expression { parameter, .. }
+                | IrCheckedArgument::Default { parameter }
+                | IrCheckedArgument::Vararg { parameter, .. } => *parameter,
+            })
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair[0] > pair[1]);
+        let mut prelude = Vec::new();
+        if reordered {
+            for argument in &mut arguments {
+                match argument {
+                    IrCheckedArgument::Expression { parameter, value } => {
+                        let ty = *parameter_types.get(*parameter as usize).ok_or(
+                            FirLoweringFailure::MissingExternalParameter {
+                                parameter: *parameter,
+                            },
+                        )?;
+                        *value = self.spill_call_operand(*value, ty, &mut prelude);
+                    }
+                    IrCheckedArgument::Vararg {
+                        array_type,
+                        elements,
+                        parameter,
+                    } => {
+                        let element_type = array_type.array_elem().ok_or(
+                            FirLoweringFailure::MissingExternalParameter {
+                                parameter: *parameter,
+                            },
+                        )?;
+                        for (value, spread) in elements {
+                            let ty = if *spread { *array_type } else { element_type };
+                            *value = self.spill_call_operand(*value, ty, &mut prelude);
+                        }
+                    }
+                    IrCheckedArgument::Default { .. } => {}
+                }
+            }
+        }
         let outer_receiver = self.receiver(call.outer_receiver)?;
-        Ok(self
-            .ir
-            .add_expr(IrExpr::Checked(IrCheckedOperation::ConstructorDelegation {
-                target,
-                outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
-                outer_receiver,
-                arguments,
-                substitutions: lower_substitutions(&call.substitutions),
-            })))
+        let delegation =
+            self.ir
+                .add_expr(IrExpr::Checked(IrCheckedOperation::ConstructorDelegation {
+                    target,
+                    outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
+                    outer_receiver,
+                    arguments,
+                    substitutions: lower_substitutions(&call.substitutions),
+                }));
+        Ok(if prelude.is_empty() {
+            delegation
+        } else {
+            self.ir.add_expr(IrExpr::Block {
+                stmts: prelude,
+                value: Some(delegation),
+            })
+        })
     }
 
     fn constructor_target_and_arguments(
         &mut self,
         call: &FirConstructorCall,
-    ) -> Result<(IrCheckedConstructorTarget, Vec<IrCheckedArgument>), FirLoweringFailure> {
+    ) -> Result<
+        (
+            IrCheckedConstructorTarget,
+            Vec<crate::types::Ty>,
+            Vec<IrCheckedArgument>,
+        ),
+        FirLoweringFailure,
+    > {
         match &call.target {
             FirConstructorTarget::Module(target) => {
                 self.index
                     .callable(*target)
                     .ok_or(FirLoweringFailure::MissingCallable(*target))?;
+                let parameter_types = call
+                    .parameter_types
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
+                let arguments = self.arguments(*target, &call.arguments, &parameter_types)?;
                 Ok((
                     IrCheckedConstructorTarget::Module(*target),
-                    self.arguments(
-                        *target,
-                        &call.arguments,
-                        &call
-                            .parameter_types
-                            .iter()
-                            .map(|parameter| parameter.get())
-                            .collect::<Vec<_>>(),
-                    )?,
+                    parameter_types,
+                    arguments,
                 ))
             }
             FirConstructorTarget::External {
                 declaration,
                 classifier,
                 parameters,
+                ..
             } => {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
+                let parameter_types = parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
                 Ok((
                     IrCheckedConstructorTarget::External {
                         declaration: *declaration,
                         classifier: *classifier,
-                        parameters: parameters.iter().map(|parameter| parameter.get()).collect(),
+                        parameters: parameter_types.clone(),
                     },
+                    parameter_types,
                     arguments,
                 ))
             }
@@ -1103,6 +1217,7 @@ pub(super) fn lower_substitutions(values: &[FirTypeSubstitution]) -> Vec<IrCheck
 
 pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate::ir::IrIntrinsic {
     match operation {
+        crate::fir::FirIntrinsic::Assert { mode } => crate::ir::IrIntrinsic::Assert { mode: *mode },
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,
         crate::fir::FirIntrinsic::ArraySize => crate::ir::IrIntrinsic::ArraySize,

@@ -32,6 +32,7 @@ pub(super) fn realize(
         }
         let IrExpr::Checked(IrCheckedOperation::PropertyReference {
             target,
+            delegated,
             binding,
             dispatch_receiver,
             extension_receiver,
@@ -45,6 +46,18 @@ pub(super) fn realize(
             return Err(PropertyReferenceRealizationTarget::Invalid);
         }
         let receiver = dispatch_receiver.or(extension_receiver);
+        let delegated_target = if delegated {
+            match &target {
+                FirPropertyReferenceTarget::Module(target) => Some(*target),
+                FirPropertyReferenceTarget::SpecializedModule { .. }
+                | FirPropertyReferenceTarget::Classifier { .. }
+                | FirPropertyReferenceTarget::External { .. } => {
+                    return Err(PropertyReferenceRealizationTarget::Invalid);
+                }
+            }
+        } else {
+            None
+        };
         let property = match target {
             FirPropertyReferenceTarget::Module(target) => module_property(
                 ir.referenced_module_properties
@@ -52,6 +65,7 @@ pub(super) fn realize(
                     .ok_or(PropertyReferenceRealizationTarget::Module(target))?,
                 stems,
                 target,
+                mutable,
             )?,
             FirPropertyReferenceTarget::SpecializedModule { property, .. } => module_property(
                 ir.referenced_module_properties
@@ -59,6 +73,7 @@ pub(super) fn realize(
                     .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
                 stems,
                 property,
+                mutable,
             )?,
             FirPropertyReferenceTarget::Classifier {
                 owner,
@@ -111,9 +126,84 @@ pub(super) fn realize(
             | FirCallableReferenceBinding::Unbound
             | FirCallableReferenceBinding::Static => {}
         }
-        ir.exprs[raw] = synthesize(ir, current_facade, property, receiver);
+        ir.exprs[raw] = if delegated {
+            let target = delegated_target.expect("delegated target was validated above");
+            let declaration = ir
+                .referenced_module_properties
+                .get(&target)
+                .cloned()
+                .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+            synthesize_delegated(ir, stems, target, &declaration, property)?
+        } else {
+            synthesize(ir, current_facade, property, receiver)
+        };
     }
     Ok(())
+}
+
+/// Realize the compiler-generated metadata value passed to a delegate convention. Unlike a
+/// source-written `::property`, this value needs no generated implementation class: Kotlin's JVM
+/// runtime provides concrete `PropertyReferenceNImpl` classes for precisely this declaration-only
+/// shape. The selected property, receiver arity, name, and signature all come from checked common
+/// IR; this function chooses only their JVM representation.
+fn synthesize_delegated(
+    ir: &mut IrFile,
+    stems: &[String],
+    target: PropertyId,
+    declaration: &IrModuleProperty,
+    property: PropRef,
+) -> Result<IrExpr, PropertyReferenceRealizationTarget> {
+    let failure = PropertyReferenceRealizationTarget::Module(target);
+    if !declaration.context_parameters.is_empty() {
+        return Err(failure);
+    }
+    let receiver_arity = if declaration.companion_associated {
+        0
+    } else {
+        usize::from(declaration.owner.is_some())
+            + usize::from(declaration.extension_receiver.is_some())
+    };
+    if receiver_arity > 2 {
+        return Err(failure);
+    }
+    let reflection_owner = property.owner_internal.ok_or(failure)?;
+    let owner = ir.add_expr(IrExpr::ClassConst {
+        internal: Some(reflection_owner),
+    });
+    let name = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+        declaration.name.clone().into(),
+    )));
+    let mut parameters = declaration.context_parameters.clone();
+    if !declaration.companion_associated {
+        parameters.extend(declaration.extension_receiver);
+    }
+    let descriptor = property
+        .getter_descriptor
+        .clone()
+        .unwrap_or_else(|| crate::jvm::names::method_descriptor(&parameters, declaration.ty));
+    let signature = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+        format!("{}{descriptor}", property.getter_name).into(),
+    )));
+    let flags = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(i32::from(
+        declaration.owner.is_none(),
+    ))));
+    let internal = type_name(&format!(
+        "kotlin/jvm/internal/PropertyReference{receiver_arity}Impl"
+    ));
+    // Resolve the facade while the module-source table is still available. A top-level declaration
+    // uses it as its reflection owner; member declarations already carry their classifier owner.
+    if declaration.owner.is_none()
+        && super::module_calls::facade_for(declaration.source, stems).is_none()
+    {
+        return Err(failure);
+    }
+    Ok(IrExpr::New {
+        internal,
+        args: vec![owner, name, signature, flags],
+        ctor_params: None,
+        ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string()),
+        external_target: None,
+    })
 }
 
 fn local_property_reference(ir: &mut IrFile, name: Box<str>, property_type: Ty) -> IrExpr {
@@ -286,9 +376,10 @@ fn module_property(
     property: &IrModuleProperty,
     stems: &[String],
     target: PropertyId,
+    reference_mutable: bool,
 ) -> Result<PropRef, PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
-    if !property.context_parameters.is_empty() {
+    if !property.context_parameters.is_empty() || reference_mutable && !property.mutable {
         return Err(failure);
     }
     let name = &property.name;
@@ -296,8 +387,8 @@ fn module_property(
         super::module_calls::facade_for(property.source, stems).ok_or(failure)?;
     let enclosing = property.owner;
     let companion_associated = property.companion_associated;
-    let access_bridge =
-        enclosing.is_some() && (property.visibility.is_private() || property.setter_is_private);
+    let access_bridge = enclosing.is_some()
+        && (property.visibility.is_private() || reference_mutable && property.setter_is_private);
     let owner = property
         .extension_receiver
         .and_then(Ty::kotlin_class_internal)
@@ -315,6 +406,28 @@ fn module_property(
         property.extension_receiver.map(|_| declaration_facade)
     }
     .map(Some);
+    let getter_descriptor = if access_bridge {
+        Some(crate::jvm::names::method_descriptor(
+            &[Ty::obj_name(owner)],
+            property.ty,
+        ))
+    } else {
+        property.extension_receiver.map(|receiver| {
+            crate::jvm::names::method_descriptor(std::slice::from_ref(&receiver), property.ty)
+        })
+    };
+    let setter_descriptor = if access_bridge && reference_mutable {
+        Some(crate::jvm::names::method_descriptor(
+            &[Ty::obj_name(owner), property.ty],
+            Ty::Unit,
+        ))
+    } else if reference_mutable {
+        property.extension_receiver.map(|receiver| {
+            crate::jvm::names::method_descriptor(&[receiver, property.ty], Ty::Unit)
+        })
+    } else {
+        None
+    };
     Ok(PropRef {
         owner_internal: Some(owner),
         call_owner_internal: Some(enclosing.unwrap_or(declaration_facade)),
@@ -324,24 +437,21 @@ fn module_property(
         } else {
             super::module_calls::property_getter_name(property)
         },
-        getter_descriptor: access_bridge
-            .then(|| crate::jvm::names::method_descriptor(&[Ty::obj_name(owner)], property.ty)),
-        setter_name: property.mutable.then(|| {
+        getter_descriptor,
+        setter_name: reference_mutable.then(|| {
             if access_bridge {
                 format!("access${}$p", crate::names::property_setter_name(name))
             } else {
                 crate::names::property_setter_name(name)
             }
         }),
-        setter_descriptor: (access_bridge && property.mutable).then(|| {
-            crate::jvm::names::method_descriptor(&[Ty::obj_name(owner), property.ty], Ty::Unit)
-        }),
+        setter_descriptor,
         boxed_value_class: None,
         owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
         prop_ty: property.ty,
         bound: false,
         static_dispatch,
-        mutable: property.mutable,
+        mutable: reference_mutable,
         ext_facade,
     })
 }

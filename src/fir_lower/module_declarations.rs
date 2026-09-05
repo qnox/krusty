@@ -57,12 +57,34 @@ fn publish_callable(
     let owner = index
         .enclosing_classifier(callable.declaration)
         .map(|classifier| classifier.classifier);
+    let signature =
+        index
+            .signature(callable.declaration)
+            .ok_or(FirFileLoweringFailure::MissingCallable(
+                callable.declaration,
+            ))?;
+    let mut parameters = signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.get())
+        .collect::<Vec<_>>();
+    if let Some(receiver) = callable.shape.extension_receiver {
+        let position = callable.shape.context_parameter_count as usize;
+        if position > parameters.len() {
+            return Err(FirFileLoweringFailure::MissingCallable(
+                callable.declaration,
+            ));
+        }
+        parameters.insert(position, receiver.get());
+    }
     ir.referenced_module_callables.insert(
         target,
         IrModuleCallable {
             source: declaration_source,
             owner,
             flags,
+            parameters: parameters.into_boxed_slice(),
+            result: signature.result.get(),
             annotations: index
                 .declaration_annotations(callable.declaration)
                 .iter()

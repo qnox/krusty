@@ -229,6 +229,36 @@ fn bound_extension_property_ref() {
 }
 
 #[test]
+fn unbound_array_extension_property_ref_keeps_the_checked_receiver_descriptor() {
+    const MAIN: &str = "val Array<String>.firstElement: String get() = get(0)\n\
+        fun box(): String {\n\
+        \x20 val first = Array<String>::firstElement\n\
+        \x20 return first.get(arrayOf(\"OK\", \"Fail\"))\n\
+        }\n";
+    assert_eq!(
+        run(MAIN).expect("unbound array extension property ref"),
+        "OK"
+    );
+}
+
+#[test]
+fn unbound_mutable_array_extension_property_ref_keeps_both_accessor_descriptors() {
+    const MAIN: &str = "var Array<String>.firstElement: String\n\
+        \x20 get() = get(0)\n\
+        \x20 set(value) { set(0, value) }\n\
+        fun box(): String {\n\
+        \x20 val first = Array<String>::firstElement\n\
+        \x20 val values = arrayOf(\"Fail\")\n\
+        \x20 first.set(values, \"OK\")\n\
+        \x20 return first.get(values)\n\
+        }\n";
+    assert_eq!(
+        run(MAIN).expect("unbound mutable array extension property ref"),
+        "OK"
+    );
+}
+
+#[test]
 fn bound_mutable_extension_property_ref() {
     const MAIN: &str = "class A(var v: Int)\n\
         var A.w: Int\n\

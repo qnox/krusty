@@ -943,14 +943,12 @@ pub fn build_class(
             m.type_params.iter().map(String::as_str),
             semantic_names.iter().map(String::as_str),
         );
+        for (key, own) in &own_type_parameters {
+            let id = captured_count + tail.type_params.len() + *own as usize;
+            function_type_parameters.insert(key.clone(), id as u64);
+        }
         for (index, name) in m.type_params.iter().enumerate() {
             let id = captured_count + tail.type_params.len() + index;
-            for key in own_type_parameters
-                .iter()
-                .filter_map(|(key, own)| (*own == index as u64).then_some(key))
-            {
-                function_type_parameters.insert(key.clone(), id as u64);
-            }
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,

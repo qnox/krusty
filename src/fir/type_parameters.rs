@@ -70,6 +70,46 @@ pub struct ResolvedTypeParameterHeader {
 }
 
 impl ResolvedModuleIndex {
+    /// Bound ordinals with the primary concrete-class constituent first and source order preserved
+    /// within the class/interface groups. Metadata and target erasure consume this finalized header
+    /// fact without rediscovering classifier kinds downstream.
+    pub fn type_parameter_bound_order(
+        &self,
+        declaration: DeclarationId,
+        ordinal: u32,
+    ) -> Vec<usize> {
+        let Some(parameter) = self.type_parameter(declaration, ordinal) else {
+            return Vec::new();
+        };
+        let Some(header) = self.type_parameter_header(parameter) else {
+            return Vec::new();
+        };
+        let mut order = (0..header.bounds.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&bound| header.bounds[bound].is_interface);
+        order
+    }
+
+    /// Declaration spellings permuted with [`Self::type_parameter_bound_order`]. The semantic type
+    /// and its type-alias spelling must remain parallel when a class bound moves ahead of interfaces.
+    pub fn declaration_spellings_primary_bound_first(
+        &self,
+        declaration: DeclarationId,
+    ) -> crate::spelling::DeclaredSpellings {
+        let mut spellings = self
+            .declaration_spellings(declaration)
+            .cloned()
+            .unwrap_or_default();
+        for ordinal in 0..spellings.type_param_bounds.len() {
+            let source = spellings.type_param_bounds[ordinal].clone();
+            spellings.type_param_bounds[ordinal] = self
+                .type_parameter_bound_order(declaration, ordinal as u32)
+                .into_iter()
+                .map(|bound| source.get(bound).cloned().unwrap_or_default())
+                .collect();
+        }
+        spellings
+    }
+
     pub fn publish_type_parameter(
         &mut self,
         declaration: DeclarationId,

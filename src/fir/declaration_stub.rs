@@ -69,6 +69,10 @@ impl DeclarationFlags {
     /// declaration such as `private set` has an accessor declaration but still uses default
     /// storage semantics.
     pub const SETTER_HAS_BODY: u64 = 1 << 34;
+    /// The property's public type is inferred from its initializer, delegate, or expression
+    /// getter. This is stable declaration shape used only for diagnostic recovery when that
+    /// signature fails; it retains neither the determining expression nor a source coordinate.
+    pub const INFERRED_PROPERTY_TYPE: u64 = 1 << 35;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

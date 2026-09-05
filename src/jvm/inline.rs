@@ -296,9 +296,9 @@ pub enum Insn {
     /// Opcode + verbatim operand bytes (the operands carry no branch offset).
     Plain { op: u8, operands: Vec<u8> },
     /// A 2-byte-offset conditional/`goto`/`jsr` branch to instruction `target`.
-    Branch { op: u8, target: usize },
+    Branch { op: u8, target: BranchTarget },
     /// A 4-byte-offset `goto_w`/`jsr_w`.
-    BranchW { op: u8, target: usize },
+    BranchW { op: u8, target: BranchTarget },
     TableSwitch {
         default: usize,
         low: i32,
@@ -308,6 +308,15 @@ pub enum Insn {
         default: usize,
         pairs: Vec<(i32, usize)>,
     },
+}
+
+/// A branch inside a decoded method normally targets another instruction in that method. A lambda
+/// body spliced into an inline host may instead transfer to an enclosing source loop; that target
+/// remains an owned [`Label`](super::classfile::Label) until the enclosing method is linked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchTarget {
+    Internal(usize),
+    External(super::classfile::Label),
 }
 
 /// Decode a method body into [`Insn`]s with branch targets as instruction indices. `None` on
@@ -325,14 +334,14 @@ pub fn disassemble(code: &[u8]) -> Option<Vec<Insn>> {
                 let off = i16::from_be_bytes([code[pc + 1], code[pc + 2]]) as isize;
                 Insn::Branch {
                     op,
-                    target: (pc as isize + off) as usize,
+                    target: BranchTarget::Internal((pc as isize + off) as usize),
                 }
             }
             0xc8 | 0xc9 => {
                 let off = i32::from_be_bytes(code.get(pc + 1..pc + 5)?.try_into().ok()?) as isize;
                 Insn::BranchW {
                     op,
-                    target: (pc as isize + off) as usize,
+                    target: BranchTarget::Internal((pc as isize + off) as usize),
                 }
             }
             0xaa => {
@@ -405,7 +414,10 @@ pub fn disassemble(code: &[u8]) -> Option<Vec<Insn>> {
     for insn in &mut insns {
         match insn {
             Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
-                *target = idx_of(*target)?
+                let BranchTarget::Internal(byte_target) = target else {
+                    return None;
+                };
+                *byte_target = idx_of(*byte_target)?
             }
             Insn::TableSwitch {
                 default, targets, ..
@@ -495,15 +507,19 @@ pub fn assemble_at(insns: &[Insn], base: usize) -> Vec<u8> {
             }
             Insn::Branch { op, target } => {
                 out.push(*op);
-                out.extend_from_slice(
-                    &((offs[*target] as isize - here as isize) as i16).to_be_bytes(),
-                );
+                let offset = match target {
+                    BranchTarget::Internal(target) => offs[*target] as isize - here as isize,
+                    BranchTarget::External(_) => 0,
+                };
+                out.extend_from_slice(&(offset as i16).to_be_bytes());
             }
             Insn::BranchW { op, target } => {
                 out.push(*op);
-                out.extend_from_slice(
-                    &((offs[*target] as isize - here as isize) as i32).to_be_bytes(),
-                );
+                let offset = match target {
+                    BranchTarget::Internal(target) => offs[*target] as isize - here as isize,
+                    BranchTarget::External(_) => 0,
+                };
+                out.extend_from_slice(&(offset as i32).to_be_bytes());
             }
             Insn::TableSwitch {
                 default,
@@ -981,7 +997,7 @@ pub fn redirect_returns(insns: &mut [Insn]) {
             if matches!(*op, 0xac..=0xb1) {
                 *insn = Insn::Branch {
                     op: 0xa7,
-                    target: end,
+                    target: BranchTarget::Internal(end),
                 };
             }
         }
@@ -1255,7 +1271,11 @@ fn old_offsets(code: &[u8]) -> Option<Vec<usize>> {
 fn shift_targets(insns: &mut [Insn], delta: usize) {
     for insn in insns {
         match insn {
-            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target += delta,
+            Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
+                if let BranchTarget::Internal(target) = target {
+                    *target += delta;
+                }
+            }
             Insn::TableSwitch {
                 default, targets, ..
             } => {
@@ -1320,27 +1340,25 @@ pub struct BranchySplice {
     /// trailing return dropped to fall through — which the caller can then append at ANY stack height
     /// (mid-expression), exactly like the former `splice_branchless`.
     pub join_required: bool,
-    /// ABSOLUTE byte offset where each lambda argument's spliced body begins (parallel to the `lambdas`
-    /// input). The caller relocates that lambda body's OWN `StackMapTable` frames relative to this (a
-    /// branchy predicate body has internal branch targets).
-    pub lambda_byte_starts: Vec<usize>,
-    /// The host's BODY locals live at each lambda's invoke point (slots `base..`, a spliced-away lambda
-    /// param → `Top`), parallel to `lambdas`. For a host with a LOOP this is the loop-body frame (the
-    /// iterator/accumulator are live there), not just the parameters — the context a branchy lambda
-    /// body's own frames need. Empty (the params are the only locals) for a host with no `StackMapTable`.
-    pub lambda_host_locals: Vec<Vec<VType>>,
-    /// The host OPERAND-STACK prefix sitting *below* each lambda's value when its body runs (parallel to
-    /// `lambdas`): what the host pushed before loading the lambda — e.g. the destination collection a
-    /// `map`/`filter` keeps under the lambda result, or empty for `forEach`/`fold`/`takeIf`. A branchy
-    /// lambda body's own frames are compiled against an empty base, so the caller must prepend this to
-    /// each of them. Computed by a typed forward simulation from the nearest host frame to the lambda
-    /// load; `None` for any lambda whose prefix couldn't be modeled (the caller then bails that splice).
-    pub lambda_stack_prefix: Vec<Option<Vec<VType>>>,
+    /// Every replaced lambda invocation. A single inline parameter can be invoked repeatedly; each
+    /// occurrence has its own byte position and host verifier state while referring back to the one
+    /// pre-built lambda body by `lambda_index`.
+    pub lambda_sites: Vec<RelocatedLambdaSite>,
     /// The body's exception table, relocated into the caller: `(start, end, handler, catch_type)` as
     /// ABSOLUTE byte offsets in the spliced output, with `catch_type` re-interned into `cw` (0 =
     /// catch-all/`finally`). The handler frames themselves are already in `frames` (a handler is a
     /// StackMapTable target). Empty for a body with no handlers.
     pub handlers: Vec<(usize, usize, usize, u16)>,
+    /// Branch operands (absolute positions in the enclosing builder) whose destinations live outside
+    /// this splice. The enclosing builder retains them until their owning loop label is bound.
+    pub external_branches: Vec<(usize, super::classfile::Label)>,
+}
+
+pub struct RelocatedLambdaSite {
+    pub lambda_index: usize,
+    pub byte_start: usize,
+    pub host_locals: Vec<VType>,
+    pub stack_prefix: Option<Vec<VType>>,
 }
 
 /// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
@@ -1351,6 +1369,27 @@ pub struct LambdaSplice {
     /// result boxed to `Object` on the stack — exactly what the replaced `invoke` produced. Branchless
     /// (no frames) in v1.
     pub body: Vec<Insn>,
+}
+
+/// Decode a temporary inline-lambda body and restore the branches whose targets belong to an
+/// enclosing bytecode builder. Their placeholder offsets intentionally decode as self-branches;
+/// the explicit operand-position table is the authoritative ownership edge.
+pub fn disassemble_lambda(
+    code: &[u8],
+    external_branches: &[(usize, super::classfile::Label)],
+) -> Option<Vec<Insn>> {
+    let offsets = old_offsets(code)?;
+    let mut instructions = disassemble(code)?;
+    for &(operand, label) in external_branches {
+        let opcode = operand.checked_sub(1)?;
+        let index = offsets.binary_search(&opcode).ok()?;
+        let target = match instructions.get_mut(index)? {
+            Insn::Branch { target, .. } => target,
+            _ => return None,
+        };
+        *target = BranchTarget::External(label);
+    }
+    Some(instructions)
 }
 
 /// A single field-type descriptor (`I`, `J`, `Lfoo/Bar;`, `[I`, …) → its operand-stack [`VType`].
@@ -2073,13 +2112,8 @@ pub fn splice_unified(
             }
         }
     }
-    // The body must contain exactly one `FunctionN.invoke` per SUBSTITUTED lambda argument — otherwise
-    // matching each lambda to its invoke site (and which `aload` feeds it) is ambiguous, and a
-    // mis-paired splice calls `.invoke` on the wrong object. Conservative: bail unless the counts line
-    // up (skips complex stdlib HOFs that call a lambda more than once or alongside other functional
-    // values). With NO literal lambdas to substitute (`t?.let(x)` — a passed `Function` value), the
-    // invoke sites are LEFT IN PLACE and dispatch on the argument bound to the param slot, so any count
-    // is fine.
+    // With NO literal lambdas to substitute (`t?.let(x)` — a passed `Function` value), invoke sites
+    // remain ordinary interface calls on the parameter object.
     let invoke_count = insns
         .iter()
         .filter(|insn| {
@@ -2088,45 +2122,52 @@ pub fn splice_unified(
                     .is_some_and(|(cls, n)| n == "invoke" && cls.starts_with("kotlin/jvm/functions/Function")))
         })
         .count();
-    if !lambdas.is_empty() && invoke_count != lambdas.len() {
-        return None;
-    }
     // Indices already consumed by a null-check deletion (its `aload <lambda>` doesn't count as a use).
     let deleted: std::collections::HashSet<usize> =
         edits.iter().flat_map(|e| e.at..e.at + e.len).collect();
-    let mut lambda_sites: Vec<usize> = Vec::with_capacity(lambdas.len()); // invoke index per lambda
-    let mut lambda_loads: Vec<usize> = Vec::with_capacity(lambdas.len()); // aload index per lambda
-    for lam in lambdas {
-        let orig_slot = *offsets_of_param.get(lam.param_index)?;
-        // The lambda parameter is loaded exactly once (the receiver of its `FunctionN.invoke`); for an
-        // N-ary lambda its `aload` is NOT adjacent to the invoke — the lambda's argument expressions sit
-        // between (`block.invoke(this)` = `aload block; aload this; invoke`). Locate that single load
-        // (ignoring the entry null-check's load, already slated for deletion) and the `FunctionN.invoke`
-        // site after it, then DELETE the load (the closure object is gone) and REPLACE the invoke with
-        // the lambda body (which consumes the on-stack arguments).
-        let load_idx = {
-            let mut found = None;
-            for (i, insn) in insns.iter().enumerate() {
-                if !deleted.contains(&i) && is_aload_of(insn, orig_slot) {
-                    if found.is_some() {
-                        return None; // loaded more than once — used in a way we don't model
-                    }
-                    found = Some(i);
-                }
-            }
-            found?
+    let lambda_slots = lambdas
+        .iter()
+        .enumerate()
+        .map(|(lambda, splice)| {
+            offsets_of_param
+                .get(splice.param_index)
+                .copied()
+                .map(|slot| (lambda, slot))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut lambda_sites = Vec::new(); // original invoke index per occurrence
+    let mut lambda_loads = Vec::new(); // original receiver-load index per occurrence
+    let mut site_lambdas = Vec::new(); // input lambda index per occurrence
+    for (load_idx, instruction) in insns.iter().enumerate() {
+        if deleted.contains(&load_idx) {
+            continue;
+        }
+        let Some(&(lambda, _)) = lambda_slots
+            .iter()
+            .find(|(_, slot)| is_aload_of(instruction, *slot))
+        else {
+            continue;
         };
+        // The receiver load owns the first FunctionN.invoke before another substituted-lambda load.
+        // Arguments may sit between the two (`action.invoke(element)`), so adjacency is not required.
         let site = insns
             .iter()
             .enumerate()
             .skip(load_idx + 1)
-            .find_map(|(i, insn)| {
-                let Insn::Plain { op: 0xb9, operands } = insn else {
+            .take_while(|(index, candidate)| {
+                deleted.contains(index)
+                    || !lambda_slots
+                        .iter()
+                        .any(|(_, slot)| is_aload_of(candidate, *slot))
+            })
+            .find_map(|(index, candidate)| {
+                let Insn::Plain { op: 0xb9, operands } = candidate else {
                     return None;
                 };
-                let idx = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
-                let (cls, name) = methodref_target(&body.source_cp, idx)?;
-                (name == "invoke" && cls.starts_with("kotlin/jvm/functions/Function")).then_some(i)
+                let pool = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                let (class, name) = methodref_target(&body.source_cp, pool)?;
+                (name == "invoke" && class.starts_with("kotlin/jvm/functions/Function"))
+                    .then_some(index)
             })?;
         edits.push(Edit {
             at: load_idx,
@@ -2136,10 +2177,17 @@ pub fn splice_unified(
         edits.push(Edit {
             at: site,
             len: 1,
-            repl: lam.body.clone(),
+            repl: lambdas[lambda].body.clone(),
         }); // replace the invoke with the lambda body
         lambda_sites.push(site);
         lambda_loads.push(load_idx);
+        site_lambdas.push(lambda);
+    }
+    if !lambdas.is_empty()
+        && (invoke_count != lambda_sites.len()
+            || (0..lambdas.len()).any(|lambda| !site_lambdas.contains(&lambda)))
+    {
+        return None;
     }
     // The host's live state (locals + operand-stack prefix) below each lambda, simulated on the ORIGINAL
     // source-pool insns/frames (before relocation rewrites indices/pool refs). `None` per lambda whose
@@ -2152,9 +2200,12 @@ pub fn splice_unified(
     // A BRANCHY lambda body has its own frames, compiled against an empty operand base; they must be
     // rebased onto the host state. If that state couldn't be modeled, bail (a BRANCHLESS body has no
     // frames, so its unmodeled state is irrelevant). The caller then falls back to a real call.
-    for (k, lam) in lambdas.iter().enumerate() {
-        let branchy = lam.body.iter().any(|i| !matches!(i, Insn::Plain { .. }));
-        if branchy && host_states[k].is_none() {
+    for (site, &lambda) in site_lambdas.iter().enumerate() {
+        let branchy = lambdas[lambda]
+            .body
+            .iter()
+            .any(|i| !matches!(i, Insn::Plain { .. }));
+        if branchy && host_states[site].is_none() {
             return None;
         }
     }
@@ -2185,7 +2236,7 @@ pub fn splice_unified(
             if matches!(*op, 0xac..=0xb1) && i != last_idx {
                 *insn = Insn::Branch {
                     op: 0xa7,
-                    target: join_pos,
+                    target: BranchTarget::Internal(join_pos),
                 };
                 made_goto = true;
             }
@@ -2243,7 +2294,11 @@ pub fn splice_unified(
                 let p0 = merged.len();
                 for mut insn in edits[e].repl.iter().cloned() {
                     match &mut insn {
-                        Insn::Branch { target, .. } | Insn::BranchW { target, .. } => *target += p0,
+                        Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
+                            if let BranchTarget::Internal(target) = target {
+                                *target += p0;
+                            }
+                        }
                         Insn::TableSwitch {
                             default, targets, ..
                         } => {
@@ -2268,7 +2323,10 @@ pub fn splice_unified(
                 let mut insn = insns[i].clone();
                 match &mut insn {
                     Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
-                        *target = old2new[*target]
+                        let BranchTarget::Internal(target) = target else {
+                            return None;
+                        };
+                        *target = old2new[*target];
                     }
                     Insn::TableSwitch {
                         default, targets, ..
@@ -2372,7 +2430,9 @@ pub fn splice_unified(
         for insn in &final_insns {
             match insn {
                 Insn::Branch { target, .. } | Insn::BranchW { target, .. } => {
-                    targets.insert(*target);
+                    if let BranchTarget::Internal(target) = target {
+                        targets.insert(*target);
+                    }
                 }
                 Insn::TableSwitch {
                     default,
@@ -2403,10 +2463,17 @@ pub fn splice_unified(
     // the verifier can't fall through the return, so it needs a stack-map frame there. Synthesize one from
     // the host state at the invoke plus the (dropped) `FunctionN.invoke` result, so the dead continuation
     // still verifies. (Without this the splice would emit a frameless target → `VerifyError`.)
-    for (k, lam) in lambdas.iter().enumerate() {
+    for (k, &lambda) in site_lambdas.iter().enumerate() {
+        let lam = &lambdas[lambda];
         let diverges = matches!(
             lam.body.last(),
             Some(Insn::Plain { op, .. }) if matches!(op, 0xac..=0xb1 | 0xbf)
+        ) || matches!(
+            lam.body.last(),
+            Some(Insn::Branch {
+                op: 0xa7,
+                target: BranchTarget::External(_),
+            })
         );
         if !diverges {
             continue;
@@ -2454,12 +2521,6 @@ pub fn splice_unified(
         };
         handlers.push((start, end, handler, catch_type));
     }
-    // Byte offset where each lambda's spliced body begins (= its replaced invoke's new position): the
-    // caller binds that lambda body's own (branchy) frames relative to this.
-    let lambda_byte_starts: Vec<usize> = lambda_sites
-        .iter()
-        .map(|&site| offs[p + old2new[site]])
-        .collect();
     // The host's live body locals at each lambda's invoke point — the host frame (decoded, before
     // relocation) with the largest old index ≤ the invoke. For a loop host that's the loop-body frame
     // (iterator/accumulator live), the context a branchy lambda body's frames need. Empty if no frame
@@ -2482,46 +2543,54 @@ pub fn splice_unified(
     // (`host_states`): the loop-body context a branchy lambda body's frames need. The locals are collapsed
     // to frame form, the spliced-away lambda slot blanked to `Top`, and both relocated into `cw`. A `None`
     // state only occurs for a BRANCHLESS lambda (its frames/prefix are unused) → the `param_ctx` filler.
-    let mut lambda_host_locals: Vec<Vec<VType>> = Vec::with_capacity(host_states.len());
-    let mut lambda_stack_prefix: Vec<Option<Vec<VType>>> = Vec::with_capacity(host_states.len());
-    for st in &host_states {
-        match st {
-            Some((slots, stack)) => {
-                lambda_host_locals.push(
-                    collapse_slots(slots)
-                        .iter()
-                        .enumerate()
-                        .map(|(k, v)| {
-                            if lambda_entry.contains(&k) {
-                                Some(VType::Top)
-                            } else {
-                                relocate_vtype(v, &body.source_cp, cw)
-                            }
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                );
-                lambda_stack_prefix.push(
-                    stack
-                        .iter()
-                        .map(|v| relocate_vtype(v, &body.source_cp, cw))
-                        .collect::<Option<Vec<_>>>(),
-                );
-            }
-            None => {
-                lambda_host_locals.push(param_ctx.clone());
-                lambda_stack_prefix.push(None);
-            }
-        }
+    let mut relocated_lambda_sites = Vec::with_capacity(host_states.len());
+    for (occurrence, state) in host_states.iter().enumerate() {
+        let (host_locals, stack_prefix) = match state {
+            Some((slots, stack)) => (
+                collapse_slots(slots)
+                    .iter()
+                    .enumerate()
+                    .map(|(k, v)| {
+                        if lambda_entry.contains(&k) {
+                            Some(VType::Top)
+                        } else {
+                            relocate_vtype(v, &body.source_cp, cw)
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+                stack
+                    .iter()
+                    .map(|v| relocate_vtype(v, &body.source_cp, cw))
+                    .collect::<Option<Vec<_>>>(),
+            ),
+            None => (param_ctx.clone(), None),
+        };
+        relocated_lambda_sites.push(RelocatedLambdaSite {
+            lambda_index: site_lambdas[occurrence],
+            byte_start: offs[p + old2new[lambda_sites[occurrence]]],
+            host_locals,
+            stack_prefix,
+        });
     }
+    let external_branches = final_insns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| match instruction {
+            Insn::Branch {
+                target: BranchTarget::External(label),
+                ..
+            } => Some((offs[index] + 1, *label)),
+            _ => None,
+        })
+        .collect();
     Some(BranchySplice {
         bytes: assemble_at(&final_insns, start_offset),
         frames,
         join_stack: ret.into_iter().collect(),
         join_required,
-        lambda_byte_starts,
-        lambda_host_locals,
-        lambda_stack_prefix,
+        lambda_sites: relocated_lambda_sites,
         handlers,
+        external_branches,
     })
 }
 
@@ -3055,7 +3124,7 @@ mod tests {
             .all(|i| !matches!(i, Insn::Plain { op, .. } if (0xac..=0xb1).contains(op))));
         let gotos = insns
             .iter()
-            .filter(|i| matches!(i, Insn::Branch { op: 0xa7, target } if *target == n))
+            .filter(|i| matches!(i, Insn::Branch { op: 0xa7, target: BranchTarget::Internal(target) } if *target == n))
             .count();
         assert_eq!(gotos, 2, "both returns became goto end");
         // Reassembles to valid bytecode of the right shape (goto is 3 bytes vs ireturn's 1).

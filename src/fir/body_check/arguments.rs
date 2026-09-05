@@ -4,6 +4,41 @@ use super::*;
 use crate::resolve::ResolvedContextArgument;
 
 impl BodyFirChecker<'_> {
+    /// Whether an exact-Unit expression is an effect that still needs the language-level singleton
+    /// at a value boundary. Stored reads and `Unit` itself already produce that value; direct source
+    /// and local calls use their statement-valued Unit convention. This decision is published as a
+    /// FIR conversion so common lowering never reconstructs it from call or storage identities.
+    pub(super) fn unit_effect_requires_value(&self, value: FirExprId) -> bool {
+        let Some(expression) = self.body.expr(value) else {
+            return false;
+        };
+        if expression.ty.get().canonical_semantic() != Ty::Unit {
+            return false;
+        }
+        match &expression.kind {
+            FirExprKind::Call(_) | FirExprKind::LocalCall { .. } => true,
+            FirExprKind::ClassStorageSharedWrite { .. }
+            | FirExprKind::ConstructorCaptureSharedWrite { .. }
+            | FirExprKind::CapturedClassStorageSharedWrite { .. }
+            | FirExprKind::CapturedValueWrite { .. }
+            | FirExprKind::ValueWrite { .. }
+            | FirExprKind::PropertyWrite { .. }
+            | FirExprKind::BackingFieldWrite { .. }
+            | FirExprKind::IndexedWrite { .. } => true,
+            FirExprKind::Block {
+                result: Some(result),
+                ..
+            } => self.unit_effect_requires_value(*result),
+            FirExprKind::Block { result: None, .. } => true,
+            FirExprKind::ImplicitConversion { conversion, .. }
+                if matches!(conversion.kind, FirConversionKind::CoerceToUnit) =>
+            {
+                false
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn published_parameter_types(
         &self,
         span: Option<crate::diag::Span>,
@@ -231,7 +266,7 @@ impl BodyFirChecker<'_> {
             return Ok(FirCallArgument::Expression {
                 parameter: parameter_id,
                 value,
-                conversion: self.selected_value_conversion(argument, target, cause)?,
+                conversion: self.selected_value_conversion(argument, value, target, cause)?,
             });
         }
         if self
@@ -248,7 +283,7 @@ impl BodyFirChecker<'_> {
             return Ok(FirCallArgument::Expression {
                 parameter: parameter_id,
                 value,
-                conversion: self.selected_value_conversion(argument, target, cause)?,
+                conversion: self.selected_value_conversion(argument, value, target, cause)?,
             });
         }
         let expected = if self.file.is_spread_arg(argument) {
@@ -273,7 +308,7 @@ impl BodyFirChecker<'_> {
             elements: vec![FirVarargElement {
                 value,
                 spread: self.file.is_spread_arg(argument),
-                conversion: self.selected_value_conversion(argument, target, cause)?,
+                conversion: self.selected_value_conversion(argument, value, target, cause)?,
             }]
             .into_boxed_slice(),
         })
@@ -328,9 +363,40 @@ impl BodyFirChecker<'_> {
     pub(super) fn selected_value_conversion(
         &mut self,
         expression: ExprId,
+        value: crate::fir::FirExprId,
         target: ResolvedTy,
         cause: OriginId,
     ) -> Result<Option<FirConversion>, BodyCheckFailure> {
+        let actual = self
+            .body
+            .expr(value)
+            .map(|expression| expression.ty)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
+        self.selected_value_conversion_from(expression, value, actual, target, cause)
+    }
+
+    pub(super) fn selected_value_conversion_from(
+        &mut self,
+        expression: ExprId,
+        value: crate::fir::FirExprId,
+        actual: ResolvedTy,
+        target: ResolvedTy,
+        cause: OriginId,
+    ) -> Result<Option<FirConversion>, BodyCheckFailure> {
+        if let Some(narrowing) = self.info.platform_narrowings.get(&expression).copied() {
+            if narrowing == PlatformNarrowing::Declaration
+                && matches!(
+                    self.file.expr(expression),
+                    Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. }
+                )
+            {
+                self.guard_platform_conditional(expression, value, target)?;
+            } else if let Some(conversion) =
+                self.platform_producer_conversion(expression, cause, target)
+            {
+                return Ok(Some(conversion));
+            }
+        }
         if self
             .info
             .selected_numeric_conversions
@@ -366,7 +432,6 @@ impl BodyFirChecker<'_> {
                 },
             }));
         }
-        let actual = self.expression_type(expression)?;
         if self
             .info
             .selected_value_smartcasts
@@ -379,7 +444,208 @@ impl BodyFirChecker<'_> {
                 kind: FirConversionKind::SmartCast { to: target },
             }));
         }
+        // An exact Unit-to-Unit boundary can still change representation: a Unit-returning
+        // function is effect-only, while an argument, local, field, or other stored value requires
+        // the language-level singleton. Record that semantic boundary in FIR instead of asking
+        // lowering to recognize a call shape and manufacture the value.
+        if actual.get().canonical_semantic() == Ty::Unit
+            && target.get().canonical_semantic() == Ty::Unit
+            && self.unit_effect_requires_value(value)
+        {
+            return Ok(Some(FirConversion {
+                origin: cause,
+                kind: FirConversionKind::CoerceToUnit,
+            }));
+        }
         Ok(self.selected_type_conversion(actual, target, cause))
+    }
+
+    /// Put a checked platform-type boundary on the producer selected by Kotlin's conditional
+    /// rules. A declared expected type reaches `if`/`when` branches and an Elvis fallback, while an
+    /// Elvis left operand remains the nullable probe. Blocks containing statements deliberately
+    /// stop the walk, matching Kotlin's rule that only a directly produced named value is guarded.
+    fn guard_platform_conditional(
+        &mut self,
+        source: ExprId,
+        value: crate::fir::FirExprId,
+        target: ResolvedTy,
+    ) -> Result<(), BodyCheckFailure> {
+        match self.file.expr(source).clone() {
+            Expr::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => {
+                let (then_value, else_value) = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::Conditional {
+                        then_branch,
+                        else_branch,
+                        ..
+                    } => (*then_branch, *else_branch),
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                let then_value = self.guard_platform_branch(then_branch, then_value, target)?;
+                let else_value = self.guard_platform_branch(else_branch, else_value, target)?;
+                let FirExprKind::Conditional {
+                    then_branch,
+                    else_branch,
+                    ..
+                } = &mut self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked conditional expression still exists")
+                    .kind
+                else {
+                    unreachable!("the checked conditional shape was validated above")
+                };
+                *then_branch = then_value;
+                *else_branch = else_value;
+            }
+            Expr::When { arms, .. } => {
+                let values = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::When { branches, .. } if branches.len() == arms.len() => branches
+                        .iter()
+                        .map(|branch| branch.result)
+                        .collect::<Vec<_>>(),
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                let guarded = arms
+                    .iter()
+                    .zip(values)
+                    .map(|(arm, value)| self.guard_platform_branch(arm.body, value, target))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let FirExprKind::When { branches, .. } = &mut self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked when expression still exists")
+                    .kind
+                else {
+                    unreachable!("the checked when shape was validated above")
+                };
+                for (branch, guarded) in branches.iter_mut().zip(guarded) {
+                    branch.result = guarded;
+                }
+            }
+            Expr::Elvis { rhs, .. } => {
+                let rhs_value = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::Elvis { rhs, .. } => *rhs,
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                let guarded = self.guard_platform_branch(rhs, rhs_value, target)?;
+                let FirExprKind::Elvis { rhs, .. } = &mut self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked Elvis expression still exists")
+                    .kind
+                else {
+                    unreachable!("the checked Elvis shape was validated above")
+                };
+                *rhs = guarded;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn guard_platform_branch(
+        &mut self,
+        source: ExprId,
+        value: crate::fir::FirExprId,
+        target: ResolvedTy,
+    ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
+        match self.file.expr(source).clone() {
+            Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => {
+                self.guard_platform_conditional(source, value, target)?;
+                Ok(value)
+            }
+            Expr::Block {
+                stmts,
+                trailing: Some(trailing),
+            } if stmts.is_empty() => {
+                let result = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::Block {
+                        statements,
+                        result: Some(result),
+                    } if statements.is_empty() => *result,
+                    _ => return Ok(value),
+                };
+                let guarded = self.guard_platform_branch(trailing, result, target)?;
+                if let FirExprKind::Block { result, .. } = &mut self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked block expression still exists")
+                    .kind
+                {
+                    *result = Some(guarded);
+                }
+                Ok(value)
+            }
+            Expr::Block { .. } => Ok(value),
+            _ => {
+                let cause = self.expression_origin(source)?;
+                let Some(conversion) = self.platform_producer_conversion(source, cause, target)
+                else {
+                    return Ok(value);
+                };
+                Ok(self.body.add_expr(crate::fir::FirExpr {
+                    origin: cause,
+                    ty: target,
+                    kind: FirExprKind::ImplicitConversion { value, conversion },
+                }))
+            }
+        }
+    }
+
+    fn platform_producer_conversion(
+        &mut self,
+        source: ExprId,
+        cause: OriginId,
+        target: ResolvedTy,
+    ) -> Option<FirConversion> {
+        let message = match self.file.expr(source) {
+            Expr::Call { callee, .. } => match self.file.expr(*callee) {
+                Expr::Name(name) | Expr::Member { name, .. } => format!("{name}(...)").into(),
+                _ => return None,
+            },
+            Expr::Member { name, .. } => name.clone().into_boxed_str(),
+            _ => return None,
+        };
+        let narrowing = self
+            .body
+            .add_platform_narrowing(FirPlatformNarrowing { message });
+        Some(FirConversion {
+            origin: cause,
+            kind: FirConversionKind::PlatformNarrowing {
+                narrowing,
+                to: target,
+            },
+        })
     }
 
     /// Materialize one frontend-committed value boundary. The target and any representation-changing
@@ -390,8 +656,14 @@ impl BodyFirChecker<'_> {
         target: ResolvedTy,
     ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
         let origin = self.expression_origin(expression)?;
-        let conversion = self.selected_value_conversion(expression, target, origin)?;
         let value = self.expression(expression)?;
+        let actual = self
+            .body
+            .expr(value)
+            .map(|expression| expression.ty)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
+        let conversion =
+            self.selected_value_conversion_from(expression, value, actual, target, origin)?;
         let Some(conversion) = conversion else {
             return Ok(value);
         };
@@ -408,11 +680,11 @@ impl BodyFirChecker<'_> {
         target: ResolvedTy,
         cause: OriginId,
     ) -> Option<FirConversion> {
-        if actual == target || matches!(actual.get(), Ty::Nothing | Ty::Null) {
+        let actual_ty = actual.get().canonical_semantic();
+        let target_ty = target.get().canonical_semantic();
+        if actual_ty == target_ty || matches!(actual_ty, Ty::Nothing | Ty::Null) {
             return None;
         }
-        let actual_ty = actual.get();
-        let target_ty = target.get();
         let kind = if target_ty == Ty::Unit {
             FirConversionKind::CoerceToUnit
         } else if target_ty.accepts_numeric(actual_ty) {
@@ -548,6 +820,18 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedCallShape,
                 )
             })?;
+            let value = self.expression(*argument)?;
+            let target = self.resolved_type(
+                self.file
+                    .expr_span(expression)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
+                *parameters.get(parameter).ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?,
+            )?;
             checked.push(FirCallArgument::Expression {
                 parameter: u32::try_from(parameter).map_err(|_| {
                     self.failure(
@@ -555,22 +839,8 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedCallShape,
                     )
                 })?,
-                value: self.expression(*argument)?,
-                conversion: self.selected_value_conversion(
-                    *argument,
-                    self.resolved_type(
-                        self.file.expr_span(expression).ok_or_else(|| {
-                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                        })?,
-                        *parameters.get(parameter).ok_or_else(|| {
-                            self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::UnsupportedCallShape,
-                            )
-                        })?,
-                    )?,
-                    cause,
-                )?,
+                value,
+                conversion: self.selected_value_conversion(*argument, value, target, cause)?,
             });
         }
         if let Some(parameter) = vararg_index.filter(|_| !saw_vararg) {
@@ -623,6 +893,17 @@ impl BodyFirChecker<'_> {
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
         let target = ResolvedTy::new(target)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        let actual_is_unit = actual.ty.get().canonical_semantic() == Ty::Unit
+            || actual.ty.get().non_null().kotlin_class_internal()
+                == Some(crate::types::type_name("kotlin/Unit"));
+        if actual_is_unit && target.get().is_reference() {
+            return Ok(self
+                .unit_effect_requires_value(receiver.value)
+                .then_some(FirConversion {
+                    origin: cause,
+                    kind: FirConversionKind::CoerceToUnit,
+                }));
+        }
         Ok(self.selected_type_conversion(actual.ty, target, cause))
     }
 }

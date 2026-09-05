@@ -7,8 +7,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::fir::{CallableId, FirTypeParameterRef, FirTypeSubstitution};
-use crate::ir::{ExprId, IrConst, IrExpr};
+use crate::fir::{
+    CallableId, FirCallableReferenceTarget, FirConstructorTarget, FirPropertyReferenceTarget,
+    FirPropertyTarget, FirReferenceAdaptation, FirTypeParameterRef, FirTypeSubstitution,
+    ResolvedTy,
+};
+use crate::ir::{
+    Callee, ExprId, IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrConst, IrExpr,
+    IrIntrinsic, IrSamTarget, IrValueClassSuspendResult,
+};
 use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
@@ -31,11 +38,26 @@ impl BodyLowering<'_> {
         if operands.len() != parameter_count as usize || inline_lambdas.len() != operands.len() {
             return None;
         }
+        let bindings = substitutions
+            .iter()
+            .filter_map(|substitution| match substitution.parameter {
+                FirTypeParameterRef::Module(parameter) => self
+                    .index
+                    .type_parameter_semantic_name(parameter)
+                    .map(|name| (name.to_owned(), substitution.value.get())),
+                FirTypeParameterRef::External { .. } => None,
+            })
+            .collect::<HashMap<_, _>>();
         let operand_types = function_shape
             .dispatch_receiver
             .map(Ty::obj_name)
             .into_iter()
             .chain(function_shape.params.iter().copied())
+            .map(|ty| ty_subst_keep_unbound(ty, &bindings))
+            .collect::<Vec<_>>();
+        let operands = operands
+            .iter()
+            .map(|operand| self.specialized_inline_operand(*operand, &bindings))
             .collect::<Vec<_>>();
         let mut operand_declarations = Vec::new();
         let operand_slots = operands
@@ -60,16 +82,6 @@ impl BodyLowering<'_> {
                 },
             )
             .collect::<Vec<_>>();
-        let bindings = substitutions
-            .iter()
-            .filter_map(|substitution| match substitution.parameter {
-                FirTypeParameterRef::Module(parameter) => self
-                    .index
-                    .type_parameter_semantic_name(parameter)
-                    .map(|name| (name.to_owned(), substitution.value.get())),
-                FirTypeParameterRef::External { .. } => None,
-            })
-            .collect::<HashMap<_, _>>();
         crate::trace_compiler!(
             "lower",
             "inline target={target:?} substitutions={substitutions:?} bindings={bindings:?}"
@@ -121,6 +133,38 @@ impl BodyLowering<'_> {
         let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
 
         for (&source, &copy) in &cloned {
+            let generated_zero = match self.ir.expr(source) {
+                IrExpr::Variable {
+                    ty,
+                    init: Some(initial),
+                    named: false,
+                    ..
+                } => match self.ir.expr(*initial) {
+                    IrExpr::Const(value) if *value == IrConst::zero_for_value_type(*ty) => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            // Reified/type-parameter substitutions are lexical: they apply inside nested lambda
+            // templates even though those templates own an independent value-numbering domain.
+            // Value rebasing and return rewriting remain protected below, but the checked type
+            // decision must cross the enclosing inline-call boundary with the lambda.
+            specialize_expression_facts(self.ir, copy, &bindings);
+            specialize_types(self.ir.exprs.get_mut(copy as usize)?, &bindings);
+            if let Some(previous_zero) = generated_zero {
+                let replacement = match self.ir.expr(copy) {
+                    IrExpr::Variable { ty, .. } => IrConst::zero_for_value_type(*ty),
+                    _ => continue,
+                };
+                if replacement != previous_zero {
+                    let initial = self.ir.add_expr(IrExpr::Const(replacement));
+                    if let IrExpr::Variable { init, .. } = self.ir.exprs.get_mut(copy as usize)? {
+                        *init = Some(initial);
+                    }
+                }
+            }
             if protected.contains(&source) {
                 continue;
             }
@@ -133,10 +177,6 @@ impl BodyLowering<'_> {
                     continue;
                 }
             }
-            if let Some(logical) = self.ir.logical_types.get_mut(&copy) {
-                *logical = ty_subst_keep_unbound(*logical, &bindings);
-            }
-            specialize_types(self.ir.exprs.get_mut(copy as usize)?, &bindings);
             rebase_values(
                 self.ir.exprs.get_mut(copy as usize)?,
                 parameter_count,
@@ -149,6 +189,11 @@ impl BodyLowering<'_> {
                 _ => None,
             };
             if let Some(value) = returned {
+                // This return has crossed its checked callable boundary and is now represented by
+                // the expression-local break below.  The sparse depth fact belongs to the old
+                // `Return` node shape; leaving it on the replacement block makes an enclosing
+                // inline-lambda template try to consume the same return a second time.
+                self.ir.checked_return_depths.remove(&copy);
                 let exit = self.ir.add_expr(IrExpr::Break {
                     label: Some(label.clone()),
                 });
@@ -220,6 +265,36 @@ impl BodyLowering<'_> {
             stmts: statements,
             value,
         }))
+    }
+
+    /// Specialize the call-boundary coercion that was retained for the generic declaration's
+    /// callable ABI. Once the checked body is spliced, that erased boundary no longer exists: the
+    /// operand and cloned parameter use the selected concrete type directly. Clone the wrapper so
+    /// another consumer of the original expression cannot observe this call's substitutions.
+    fn specialized_inline_operand(
+        &mut self,
+        operand: ExprId,
+        bindings: &HashMap<String, Ty>,
+    ) -> ExprId {
+        let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.ir.expr(operand).clone()
+        else {
+            return operand;
+        };
+        let specialized = ty_subst_keep_unbound(type_operand, bindings);
+        if specialized == type_operand {
+            return operand;
+        }
+        let expression = self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand: specialized,
+        });
+        self.ir.logical_types.insert(expression, specialized);
+        expression
     }
 
     pub(super) fn splice_inline_lambda_invocation(&mut self, invocation: ExprId) -> Option<()> {
@@ -346,13 +421,499 @@ fn rebase_values(
 
 fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
     match expression {
-        IrExpr::TypeOp { type_operand, .. } => {
-            *type_operand = ty_subst_keep_unbound(*type_operand, bindings)
+        IrExpr::Checked(operation) => specialize_checked_operation(operation, bindings),
+        IrExpr::KClassLiteral { classifier, .. } => specialize_optional_ty(classifier, bindings),
+        IrExpr::LocalPropertyReference { property_type, .. } => {
+            specialize_ty(property_type, bindings)
         }
-        IrExpr::KClassLiteral {
-            classifier: Some(classifier),
+        IrExpr::Call { callee, .. } => specialize_callee(callee, bindings),
+        IrExpr::TypeOp {
+            op, type_operand, ..
+        } => {
+            let declaration_generic_target = matches!(type_operand.non_null(), Ty::TyParam(..));
+            specialize_ty(type_operand, bindings);
+            // `as T` is checked against T's declaration bound, so an unconstrained T initially
+            // admits null. Once an inline call fixes T to a concrete non-null type, the checked
+            // operation has non-null cast semantics at that use site (and a primitive target must
+            // subsequently unbox). This is specialization of the selected type operation, not a
+            // new lookup or inference decision in lowering.
+            if declaration_generic_target
+                && *op == crate::ir::IrTypeOp::Cast
+                && !type_operand.is_nullable()
+            {
+                *op = crate::ir::IrTypeOp::CastNonNull;
+            }
+        }
+        IrExpr::Variable {
+            ty: type_operand, ..
+        }
+        | IrExpr::PrimitiveNeg {
+            ty: type_operand, ..
+        }
+        | IrExpr::PropertyRead {
+            ty: type_operand, ..
+        }
+        | IrExpr::PropertyWrite {
+            ty: type_operand, ..
+        }
+        | IrExpr::RefNew {
+            elem: type_operand, ..
+        }
+        | IrExpr::RefGet {
+            elem: type_operand, ..
+        }
+        | IrExpr::RefSet {
+            elem: type_operand, ..
+        }
+        | IrExpr::Vararg {
+            array_type: type_operand,
             ..
-        } => *classifier = ty_subst_keep_unbound(*classifier, bindings),
-        _ => {}
+        }
+        | IrExpr::NewArray {
+            array_type: type_operand,
+            ..
+        }
+        | IrExpr::Try {
+            result: type_operand,
+            ..
+        } => specialize_ty(type_operand, bindings),
+        IrExpr::New {
+            ctor_params: Some(parameters),
+            ..
+        } => specialize_tys(parameters, bindings),
+        IrExpr::InvokeFunction { params, ret, .. } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+        }
+        IrExpr::Lambda { sam: Some(sam), .. } => specialize_sam_target(sam, bindings),
+        IrExpr::Const(_)
+        | IrExpr::ClassConst { .. }
+        | IrExpr::SingletonValue { .. }
+        | IrExpr::GetValue(_)
+        | IrExpr::SetValue { .. }
+        | IrExpr::PluginPlaceholder { .. }
+        | IrExpr::Return(_)
+        | IrExpr::Block { .. }
+        | IrExpr::When { .. }
+        | IrExpr::While { .. }
+        | IrExpr::Break { .. }
+        | IrExpr::Continue { .. }
+        | IrExpr::PrimitiveBinOp { .. }
+        | IrExpr::StringConcat(_)
+        | IrExpr::EnclosingInstance { .. }
+        | IrExpr::GetField { .. }
+        | IrExpr::LateinitInitialized { .. }
+        | IrExpr::SetField { .. }
+        | IrExpr::GetStatic(_)
+        | IrExpr::SetStatic { .. }
+        | IrExpr::New {
+            ctor_params: None, ..
+        }
+        | IrExpr::MethodCall { .. }
+        | IrExpr::EnumEntry { .. }
+        | IrExpr::StaticInstance { .. }
+        | IrExpr::ExternalStaticField { .. }
+        | IrExpr::EnumValues { .. }
+        | IrExpr::EnumValueOf { .. }
+        | IrExpr::EnumEntries { .. }
+        | IrExpr::ReifiedClassMarker { .. }
+        | IrExpr::ReifiedTypeOp { .. }
+        | IrExpr::Lambda { sam: None, .. }
+        | IrExpr::UnitInstance
+        | IrExpr::CurrentContinuation
+        | IrExpr::NotNullAssert { .. }
+        | IrExpr::LateinitCheck { .. }
+        | IrExpr::ExternalStaticInstance { .. }
+        | IrExpr::Throw { .. } => {}
+    }
+}
+
+fn specialize_expression_facts(
+    ir: &mut crate::ir::IrFile,
+    expression: ExprId,
+    bindings: &HashMap<String, Ty>,
+) {
+    for ty in [
+        ir.logical_types.get_mut(&expression),
+        ir.exhaustive_whens.get_mut(&expression),
+        ir.physical_types.get_mut(&expression),
+        ir.ext_call_source_receiver.get_mut(&expression),
+        ir.call_declared_ret.get_mut(&expression),
+        ir.suspend_calls.get_mut(&expression),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        specialize_ty(ty, bindings);
+    }
+    if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
+        specialize_tys(parameters, bindings);
+    }
+    if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
+        for (_, ty) in substitutions {
+            specialize_ty(ty, bindings);
+        }
+    }
+    if let Some(construction) = ir.annotation_constructions.get_mut(&expression) {
+        for (_, ty) in &mut construction.members {
+            specialize_ty(ty, bindings);
+        }
+    }
+    if let Some(result) = ir.value_class_suspend_calls.get_mut(&expression) {
+        match result {
+            IrValueClassSuspendResult::Boxed { carrier, .. }
+            | IrValueClassSuspendResult::Carrier(carrier) => specialize_ty(carrier, bindings),
+        }
+    }
+    if let Some(point) = ir.intrinsic_suspension_points.get_mut(&expression) {
+        specialize_ty(&mut point.result, bindings);
+    }
+}
+
+fn specialize_ty(ty: &mut Ty, bindings: &HashMap<String, Ty>) {
+    *ty = ty_subst_keep_unbound(*ty, bindings);
+}
+
+fn specialize_optional_ty(ty: &mut Option<Ty>, bindings: &HashMap<String, Ty>) {
+    if let Some(ty) = ty {
+        specialize_ty(ty, bindings);
+    }
+}
+
+fn specialize_tys(types: &mut [Ty], bindings: &HashMap<String, Ty>) {
+    for ty in types {
+        specialize_ty(ty, bindings);
+    }
+}
+
+fn specialize_resolved_ty(ty: &mut ResolvedTy, bindings: &HashMap<String, Ty>) {
+    *ty = ResolvedTy::new(ty_subst_keep_unbound(ty.get(), bindings))
+        .expect("inline specialization preserves resolved types");
+}
+
+fn specialize_resolved_tys(types: &mut [ResolvedTy], bindings: &HashMap<String, Ty>) {
+    for ty in types {
+        specialize_resolved_ty(ty, bindings);
+    }
+}
+
+fn specialize_checked_substitution(
+    substitution: &mut IrCheckedSubstitution,
+    bindings: &HashMap<String, Ty>,
+) {
+    specialize_ty(&mut substitution.value, bindings);
+    specialize_tys(&mut substitution.additional_bounds, bindings);
+}
+
+fn specialize_checked_argument(argument: &mut IrCheckedArgument, bindings: &HashMap<String, Ty>) {
+    if let IrCheckedArgument::Vararg { array_type, .. } = argument {
+        specialize_ty(array_type, bindings);
+    }
+}
+
+fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, Ty>) {
+    match operation {
+        IrIntrinsic::PrimitiveCompare { operand }
+        | IrIntrinsic::UnsignedToString { source: operand }
+        | IrIntrinsic::PrimitiveArrayNew { element: operand }
+        | IrIntrinsic::EnumValueOf {
+            classifier: operand,
+        }
+        | IrIntrinsic::DataClassFieldEquals { ty: operand }
+        | IrIntrinsic::DataClassFieldHash { ty: operand }
+        | IrIntrinsic::DataClassArrayToString { ty: operand } => specialize_ty(operand, bindings),
+        IrIntrinsic::Assert { .. }
+        | IrIntrinsic::ArrayGet
+        | IrIntrinsic::ArraySet
+        | IrIntrinsic::ArraySize
+        | IrIntrinsic::StringGet
+        | IrIntrinsic::StringLength
+        | IrIntrinsic::StringPlus
+        | IrIntrinsic::NullableAnyToString
+        | IrIntrinsic::CoroutineContext => {}
+    }
+}
+
+fn specialize_callee(callee: &mut Callee, bindings: &HashMap<String, Ty>) {
+    match callee {
+        Callee::Intrinsic { operation, ret } => {
+            specialize_intrinsic(operation, bindings);
+            specialize_ty(ret, bindings);
+        }
+        Callee::CrossFile { params, ret, .. }
+        | Callee::Module { params, ret, .. }
+        | Callee::Super { params, ret, .. } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+        }
+        Callee::External {
+            params,
+            ret,
+            substitutions,
+            ..
+        } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
+        }
+        Callee::Virtual {
+            params: Some((params, ret)),
+            ..
+        } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+        }
+        Callee::Local(_)
+        | Callee::ClassStatic { .. }
+        | Callee::ClassStaticDefault { .. }
+        | Callee::LocalDefault(_)
+        | Callee::Static { .. }
+        | Callee::Virtual { params: None, .. }
+        | Callee::Special { .. } => {}
+    }
+}
+
+fn specialize_sam_target(target: &mut IrSamTarget, bindings: &HashMap<String, Ty>) {
+    specialize_tys(&mut target.parameters, bindings);
+    specialize_ty(&mut target.result, bindings);
+    specialize_tys(&mut target.declared_parameters, bindings);
+    specialize_ty(&mut target.declared_result, bindings);
+}
+
+fn specialize_reference_adaptation(
+    adaptation: &mut Option<Box<FirReferenceAdaptation>>,
+    bindings: &HashMap<String, Ty>,
+) {
+    let Some(adaptation) = adaptation else {
+        return;
+    };
+    specialize_resolved_tys(&mut adaptation.parameter_types, bindings);
+    specialize_resolved_ty(&mut adaptation.result_type, bindings);
+}
+
+fn specialize_constructor_target(
+    target: &mut FirConstructorTarget,
+    bindings: &HashMap<String, Ty>,
+) {
+    if let FirConstructorTarget::External {
+        parameters,
+        annotation,
+        ..
+    } = target
+    {
+        specialize_resolved_tys(parameters, bindings);
+        if let Some(annotation) = annotation {
+            for (_, ty) in &mut annotation.members {
+                specialize_resolved_ty(ty, bindings);
+            }
+        }
+    }
+}
+
+fn specialize_callable_reference_target(
+    target: &mut FirCallableReferenceTarget,
+    bindings: &HashMap<String, Ty>,
+) {
+    match target {
+        FirCallableReferenceTarget::Module(_) => {}
+        FirCallableReferenceTarget::ArrayFactory {
+            array_type,
+            element_type,
+            parameters,
+            ..
+        } => {
+            specialize_resolved_ty(array_type, bindings);
+            specialize_resolved_ty(element_type, bindings);
+            specialize_resolved_tys(parameters, bindings);
+        }
+        FirCallableReferenceTarget::Constructor {
+            target,
+            outer,
+            parameters,
+            result,
+            ..
+        } => {
+            specialize_constructor_target(target, bindings);
+            if let Some(outer) = outer {
+                specialize_resolved_ty(outer, bindings);
+            }
+            specialize_resolved_tys(parameters, bindings);
+            specialize_resolved_ty(result, bindings);
+        }
+        FirCallableReferenceTarget::External {
+            receiver,
+            parameters,
+            result,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                specialize_resolved_ty(receiver, bindings);
+            }
+            specialize_resolved_tys(parameters, bindings);
+            specialize_resolved_ty(result, bindings);
+        }
+        FirCallableReferenceTarget::Classifier {
+            parameters, result, ..
+        } => {
+            specialize_resolved_tys(parameters, bindings);
+            specialize_resolved_ty(result, bindings);
+        }
+    }
+}
+
+fn specialize_property_target(target: &mut FirPropertyTarget, bindings: &HashMap<String, Ty>) {
+    if let FirPropertyTarget::External {
+        receiver,
+        parameters,
+        result,
+        ..
+    } = target
+    {
+        if let Some(receiver) = receiver {
+            specialize_resolved_ty(receiver, bindings);
+        }
+        specialize_resolved_tys(parameters, bindings);
+        specialize_resolved_ty(result, bindings);
+    }
+}
+
+fn specialize_property_reference_target(
+    target: &mut FirPropertyReferenceTarget,
+    bindings: &HashMap<String, Ty>,
+) {
+    match target {
+        FirPropertyReferenceTarget::Module(_) => {}
+        FirPropertyReferenceTarget::SpecializedModule {
+            receiver,
+            property_type,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                specialize_resolved_ty(receiver, bindings);
+            }
+            specialize_resolved_ty(property_type, bindings);
+        }
+        FirPropertyReferenceTarget::Classifier { property_type, .. } => {
+            specialize_resolved_ty(property_type, bindings)
+        }
+        FirPropertyReferenceTarget::External {
+            reflection_owner,
+            getter,
+            setter,
+            property_type,
+            ..
+        } => {
+            if let Some(owner) = reflection_owner {
+                specialize_resolved_ty(owner, bindings);
+            }
+            specialize_property_target(getter, bindings);
+            if let Some(setter) = setter {
+                specialize_property_target(setter, bindings);
+            }
+            specialize_resolved_ty(property_type, bindings);
+        }
+    }
+}
+
+fn specialize_checked_operation(
+    operation: &mut IrCheckedOperation,
+    bindings: &HashMap<String, Ty>,
+) {
+    match operation {
+        IrCheckedOperation::Call {
+            arguments,
+            substitutions,
+            ..
+        } => {
+            for argument in arguments {
+                specialize_checked_argument(argument, bindings);
+            }
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
+        }
+        IrCheckedOperation::ConstructorDelegation {
+            target,
+            outer_parameter,
+            arguments,
+            substitutions,
+            ..
+        } => {
+            if let crate::ir::IrCheckedConstructorTarget::External { parameters, .. } = target {
+                specialize_tys(parameters, bindings);
+            }
+            specialize_optional_ty(outer_parameter, bindings);
+            for argument in arguments {
+                specialize_checked_argument(argument, bindings);
+            }
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
+        }
+        IrCheckedOperation::PropertyRead { substitutions, .. }
+        | IrCheckedOperation::PropertyWrite { substitutions, .. } => {
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
+        }
+        IrCheckedOperation::ExternalPropertyRead {
+            parameters,
+            result,
+            source_receiver,
+            ..
+        }
+        | IrCheckedOperation::ExternalPropertyWrite {
+            parameters,
+            result,
+            source_receiver,
+            ..
+        } => {
+            specialize_tys(parameters, bindings);
+            specialize_ty(result, bindings);
+            specialize_optional_ty(source_receiver, bindings);
+        }
+        IrCheckedOperation::RangeConstruction {
+            start_type,
+            end_type,
+            result,
+            ..
+        } => {
+            specialize_ty(start_type, bindings);
+            specialize_ty(end_type, bindings);
+            specialize_ty(result, bindings);
+        }
+        IrCheckedOperation::RangeContains { counter, .. }
+        | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
+        IrCheckedOperation::CallableReference {
+            target,
+            function_type,
+            substitutions,
+            adaptation,
+            ..
+        } => {
+            specialize_callable_reference_target(target, bindings);
+            specialize_ty(function_type, bindings);
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
+            specialize_reference_adaptation(adaptation, bindings);
+        }
+        IrCheckedOperation::PropertyReference {
+            target,
+            substitutions,
+            adaptation,
+            ..
+        } => {
+            specialize_property_reference_target(target, bindings);
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
+            specialize_reference_adaptation(adaptation, bindings);
+        }
+        IrCheckedOperation::LateinitFieldRead { .. }
+        | IrCheckedOperation::BackingFieldRead { .. }
+        | IrCheckedOperation::BackingFieldWrite { .. } => {}
     }
 }

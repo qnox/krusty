@@ -29,6 +29,7 @@ pub(super) fn declaration_type_parameters(
                 .map(|bound| (bound.ty.get(), bound.is_interface))
                 .collect(),
             variance: header.flags.variance(),
+            reified: header.flags.is_reified(),
         });
     }
     parameters
@@ -53,6 +54,7 @@ fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> Ir
             .map(|bound| (bound.ty.get(), bound.is_interface))
             .collect(),
         variance: header.flags.variance(),
+        reified: header.flags.is_reified(),
     }
 }
 

@@ -34,6 +34,37 @@ fn function_value_invoke_keeps_callee_identity_and_final_parameter_types() {
 }
 
 #[test]
+fn generic_extension_property_specializes_callable_value_before_invoke() {
+    let (body, _) = checked_function_body_with_platform(
+        "val <T : CharSequence> T.identity\n\
+         \x20 get() = { value: T -> value }\n\
+         fun box(): String = \"OK\".identity(\"OK\")\n",
+        "box",
+        jvm_stdlib_semantics(),
+    );
+    let invocation = body
+        .expr(root_expression(&body))
+        .expect("root function invocation");
+    let FirExprKind::FunctionInvoke {
+        callee,
+        parameter_types,
+        result,
+        ..
+    } = &invocation.kind
+    else {
+        panic!("callable-valued extension property must become a checked function invocation")
+    };
+    assert_eq!(invocation.ty.get(), Ty::String);
+    assert_eq!(
+        parameter_types.as_ref(),
+        [ResolvedTy::new(Ty::String).unwrap()]
+    );
+    assert_eq!(result.get(), Ty::String);
+    let property = body.expr(*callee).expect("extension property read");
+    assert_eq!(property.ty.get(), Ty::fun(vec![Ty::String], Ty::String));
+}
+
+#[test]
 fn generic_lower_bounds_preserve_the_common_function_shape() {
     let (body, _) = checked_function_body(
         "open class Result\n\

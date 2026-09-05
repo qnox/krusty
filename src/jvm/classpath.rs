@@ -2231,16 +2231,10 @@ impl Classpath {
     }
 
     fn catalog_complete(&self) -> bool {
-        // A complete package tree is retained in `pkg_tree` for the lifetime of this classpath.
-        // Most metadata/symbol-cache probes happen after source preparation, so avoid cloning the
-        // `Arc<PackageTree>` on every hot cache hit merely to re-read this immutable fact. An
-        // incomplete tree is deliberately not retained (an unreadable entry may recover), hence the
-        // slow path must still rebuild and recheck it rather than memoizing `false`.
-        if self.pkg_tree.borrow().is_some() {
-            true
-        } else {
-            self.package_tree().incomplete_entries.is_empty()
-        }
+        // The package tree is one immutable snapshot for this Classpath instance, complete or not.
+        // Incomplete snapshots cannot feed provider caches, but rebuilding a directory-bearing tree
+        // on every symbol probe is both nondeterministic and catastrophically expensive.
+        self.package_tree().incomplete_entries.is_empty()
     }
 
     /// Whether all entries still match the snapshot captured at construction.
@@ -2468,12 +2462,12 @@ impl Classpath {
             // only the small directory parts into a clone of it.
             std::sync::Arc::new(self.compose_with_dirs(&dir_ids))
         };
-        if tree.incomplete_entries.is_empty() {
-            // A dir-bearing key is unique per compile (that is the whole reason for the base
-            // cache), so publishing its full tree process-globally would only grow the map by one
-            // dead entry per test case; the per-instance slot below covers its actual reuse.
-            *self.pkg_tree.borrow_mut() = Some(tree.clone());
-        }
+        // A dir-bearing key is unique per compile (that is the whole reason for the base cache), so
+        // publishing its full tree process-globally would only grow the map by one dead entry per
+        // test case. Retain even an incomplete result per instance: the Classpath represents a fixed
+        // input snapshot, and repeated recovery attempts during one compile only rebuild the same
+        // large stable base on every lookup.
+        *self.pkg_tree.borrow_mut() = Some(tree.clone());
         tree
     }
 
@@ -3292,6 +3286,21 @@ impl Classpath {
                         result => result.scalar_value_repr(),
                     };
                     let realization = match (internal_id, m.name.as_str()) {
+                        (owner, name)
+                            if builtin_scalar(owner).is_some()
+                                && m.generic_sig.params.is_empty()
+                                && declared_result_scalar.is_some()
+                                && matches!(name, "unaryPlus" | "unaryMinus") =>
+                        {
+                            let operation = if name == "unaryPlus" {
+                                crate::libraries::PrimitiveUnaryIntrinsic::Identity
+                            } else {
+                                crate::libraries::PrimitiveUnaryIntrinsic::Negate
+                            };
+                            crate::libraries::MemberRealization::Intrinsic(
+                                crate::libraries::CompilerIntrinsic::PrimitiveUnary(operation),
+                            )
+                        }
                         (owner, name)
                             if builtin_scalar(owner).is_some()
                                 && m.generic_sig.params.is_empty()

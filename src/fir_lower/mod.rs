@@ -3,10 +3,13 @@
 //! This layer receives final semantic decisions. It never accepts parser arenas, resolver state,
 //! imports, or source spellings used for lookup.
 
+mod array_references;
 mod arrays;
+mod assertions;
 mod checked;
 mod checked_arguments;
 mod classifier_references;
+mod constant_folding;
 mod constructors;
 mod data_classes;
 mod error;
@@ -15,6 +18,7 @@ mod external_references;
 mod function_references;
 mod generics;
 mod initialization;
+mod inline_returns;
 mod inlining;
 mod interface_delegation;
 mod local_callables;
@@ -36,7 +40,7 @@ pub use error::*;
 pub use sink::*;
 
 use crate::fir::{BodyOwnerId, FirBody, FirExprId, FirStatementId, ResolvedModuleIndex};
-use crate::ir::{ExprId, IrFile, IrNodeOrigin};
+use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,10 +124,15 @@ pub(crate) fn lower_body_with_context(
     local_callables: &mut LocalCallableLoweringContext,
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
     let owner = body.owner();
+    ir.source_line_count = ir.source_line_count.max(body.source_line_count());
     #[cfg(feature = "trace")]
     trace_checked_body(&body, index);
     let declaration = crate::fir::DeclarationId::from_raw(owner.raw());
-    let has_dispatch_receiver = index.enclosing_classifier(declaration).is_some();
+    let enclosing_classifier = index
+        .enclosing_classifier(declaration)
+        .map(|classifier| classifier.classifier);
+    let has_dispatch_receiver = enclosing_classifier.is_some();
+    let first_expression = ir.exprs.len();
     let mut lowering = BodyLowering::new(
         &body,
         index,
@@ -138,11 +147,47 @@ pub(crate) fn lower_body_with_context(
     let defaults = body
         .default_values()
         .iter()
-        .map(|default| Ok((default.parameter, lowering.expression(default.value)?)))
+        .map(|default| {
+            let target = default.ty.get();
+            let source = body
+                .expr(default.value)
+                .ok_or(FirLoweringFailure::MissingExpression(default.value))?
+                .ty
+                .get();
+            let value = lowering.expression(default.value)?;
+            // A checked default is consumed at its declaration parameter boundary. Preserve that
+            // already-proven implicit conversion in common IR whenever the expression's own type
+            // is narrower or differently represented; target backends then realize the conversion
+            // without rediscovering assignability. In particular, a companion singleton whose
+            // class implements the parameter interface remains a singleton read followed by an
+            // ordinary conversion to the parameter type.
+            let value = if source != target {
+                let converted = lowering.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: value,
+                    type_operand: target,
+                });
+                lowering.ir.logical_types.insert(converted, target);
+                converted
+            } else {
+                value
+            };
+            Ok((default.parameter, value))
+        })
         .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
     let mut roots = Vec::new();
-    for root in body.roots().iter().copied() {
-        let lowered = lowering.statement(root)?;
+    for (root_index, root) in body.roots().iter().copied().enumerate() {
+        let is_implicit_result = body.has_implicit_return()
+            && root_index + 1 == body.roots().len()
+            && matches!(
+                body.statement(root).map(|statement| &statement.kind),
+                Some(crate::fir::FirStatementKind::Expression(_))
+            );
+        let lowered = if is_implicit_result {
+            lowering.statement(root)?
+        } else {
+            lowering.consumed_statement(root)?
+        };
         // A destructuring declaration lowers to several declarations in the surrounding lexical
         // scope. `IrExpr::Block` deliberately scopes its locals, so retaining the wrapper would
         // make the component locals disappear before the following source statement. Flatten only
@@ -160,6 +205,12 @@ pub(crate) fn lower_body_with_context(
                         .origin,
                 });
             };
+            let stmts = stmts.clone();
+            if let (Some(&first), Some(&line)) =
+                (stmts.first(), lowering.ir.expr_lines.get(&lowered))
+            {
+                lowering.ir.expr_lines.insert(first, line);
+            }
             roots.extend(stmts.iter().copied());
         } else {
             roots.push(lowered);
@@ -177,6 +228,14 @@ pub(crate) fn lower_body_with_context(
         property_delegate: body.property_delegate().cloned(),
     };
     local_callables.realizations = lowering.published_local_callables;
+    if let Some(classifier) = enclosing_classifier {
+        for raw in first_expression..lowering.ir.exprs.len() {
+            lowering
+                .ir
+                .expression_owners
+                .insert(raw as ExprId, classifier);
+        }
+    }
     Ok(lowered)
 }
 
@@ -207,6 +266,7 @@ struct BodyLowering<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct LocalCallableRealization {
     function: crate::ir::FunId,
+    suspend: bool,
     owner: Option<crate::types::TypeName>,
     source_name: Box<str>,
     captures: Vec<crate::fir::FirCapture>,
@@ -412,7 +472,7 @@ impl<'a> BodyLowering<'a> {
         let receivers = extension
             .into_iter()
             .chain(
-                (0..self.context_parameter_count)
+                (self.context_value_count..self.context_parameter_count)
                     .rev()
                     .map(|ordinal| context_start + ordinal),
             )
@@ -527,12 +587,16 @@ fn finish_callable_body(
     origin: crate::fir::OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     let first_generated = ir.exprs.len();
+    if unit_as_value {
+        inline_returns::materialize_unit_callable_returns(ir, &roots);
+    }
     let body = if !implicit_return {
         ir.add_expr(crate::ir::IrExpr::Block {
             stmts: roots,
             value: None,
         })
     } else if result == crate::types::Ty::Unit {
+        consume_trailing_unit_result(ir, &mut roots);
         let return_unit = if unit_as_value {
             let unit = ir.add_expr(crate::ir::IrExpr::UnitInstance);
             ir.add_expr(crate::ir::IrExpr::Return(Some(unit)))
@@ -566,6 +630,38 @@ fn finish_callable_body(
         );
     }
     Ok(body)
+}
+
+/// Consume the implicit result of a Unit body before adding the callable's one physical return.
+/// A checked `CoerceToUnit` is represented as `Block { effects, value: UnitInstance }`; retaining
+/// that value at statement position makes a value-returning lambda load and pop `Unit.INSTANCE`
+/// immediately before loading the same singleton for its return. Keep every effect and discard only
+/// the already-proven Unit value. This is common-IR normalization, independent of target storage.
+fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
+    let Some(&trailing) = roots.last() else {
+        return;
+    };
+    match ir.expr(trailing) {
+        crate::ir::IrExpr::UnitInstance => {
+            roots.pop();
+        }
+        crate::ir::IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } if matches!(ir.expr(*value), crate::ir::IrExpr::UnitInstance) => {
+            let effects = stmts.clone();
+            if effects.is_empty() {
+                roots.pop();
+            } else {
+                let effect = ir.add_expr(crate::ir::IrExpr::Block {
+                    stmts: effects,
+                    value: None,
+                });
+                *roots.last_mut().expect("a trailing Unit root exists") = effect;
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]

@@ -756,6 +756,9 @@ struct ParsedFunction {
     /// declaration is represented by an abstract interface method plus a static holder body.
     is_abstract: bool,
     is_final: bool,
+    /// `Function.flags.MEMBER_KIND == SYNTHESIZED`. The enclosing declaration may attach implicit
+    /// compiler semantics that kotlinc deliberately does not repeat on the value parameter.
+    is_synthesized: bool,
     is_operator: bool,
     is_infix: bool,
     visibility: crate::types::Visibility,
@@ -973,6 +976,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         is_suspend: flags & IS_SUSPEND_BIT != 0,
         is_abstract: (flags >> 4) & 0x3 == 2,
         is_final: (flags >> 4) & 0x3 == 0,
+        is_synthesized: (flags >> 6) & 0x3 == 3,
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
@@ -2395,11 +2399,15 @@ pub fn decode_metadata(
         }
         functions
     };
+    let data_equality_bound = class_flags
+        .is_some_and(|flags| flags & (1u64 << 10) != 0)
+        .then(|| Ty::obj(this_class));
     let class_functions = stamp_functions(decode_functions(
         &ctx,
         9,
         &class_tparams,
         &class_type_param_bounds,
+        data_equality_bound,
     ))
     .into();
     let mut constructors = ctor_params(&ctx);
@@ -2422,7 +2430,7 @@ pub fn decode_metadata(
         ),
         class_supertypes,
         class_functions,
-        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[])).into(),
+        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[], None)).into(),
         class_properties,
         package_properties: decode_properties(&ctx, 4, &[], &[]).into(),
         type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1)),
@@ -2698,6 +2706,7 @@ fn decode_functions(
     fn_field: u64,
     class_tparams: &[(u64, String)],
     class_tparam_bounds: &[Vec<Ty>],
+    data_equality_bound: Option<Ty>,
 ) -> Vec<MetaFn> {
     let declared_classifier = |ty: Ty| match ty.non_null() {
         Ty::Obj(internal, _) => Some(internal),
@@ -2840,12 +2849,22 @@ fn decode_functions(
                     };
                     let value_params: Vec<MetaValueParam> =
                         pf.value_params.iter().map(decode_parameter).collect();
-                    let equality_bound = pf.value_params.iter().find_map(|parameter| {
-                        decode_type(
-                            parameter.equality_bound_body.as_deref(),
-                            parameter.equality_bound_id,
-                        )
-                    });
+                    let equality_bound = pf
+                        .value_params
+                        .iter()
+                        .find_map(|parameter| {
+                            decode_type(
+                                parameter.equality_bound_body.as_deref(),
+                                parameter.equality_bound_id,
+                            )
+                        })
+                        .or_else(|| {
+                            (pf.is_synthesized
+                                && kotlin_name == "equals"
+                                && value_params.len() == 1)
+                                .then_some(data_equality_bound)
+                                .flatten()
+                        });
                     let context_params = if !pf.context_params.is_empty() {
                         Some(pf.context_params.iter().map(decode_parameter).collect())
                     } else {
@@ -5654,7 +5673,7 @@ mod module_reader_tests {
             records: &[],
             d2: &d2,
         };
-        let decoded = super::decode_functions(&ctx, 3, &[], &[]);
+        let decoded = super::decode_functions(&ctx, 3, &[], &[], None);
         assert_eq!(decoded.len(), 1);
         let function = &decoded[0];
         assert!(function.is_extension());

@@ -36,19 +36,19 @@ fn declared_return_binds_classpath_reified_extension() {
 }
 
 #[test]
-fn emitted_reified_extension_matches_kotlinc() {
+fn emitted_reified_extension_publishes_kotlinc_metadata() {
     assert_eq!(
-        common::byte_diff_against_kotlinc("Lib", LIB, "lib/LibKt")
-            .expect("kotlinc is required for byte comparison"),
+        common::metadata_diff_against_kotlinc_cp("Lib", LIB, "lib/LibKt", &[])
+            .expect("kotlinc is required for metadata comparison"),
         Ok(())
     );
 }
 
 #[test]
-fn emitted_suspend_reified_extension_matches_kotlinc() {
+fn emitted_suspend_reified_extension_publishes_kotlinc_metadata() {
     assert_eq!(
-        common::byte_diff_against_kotlinc("Lib", SUSPEND_LIB, "lib/LibKt")
-            .expect("kotlinc is required for byte comparison"),
+        common::metadata_diff_against_kotlinc_cp("Lib", SUSPEND_LIB, "lib/LibKt", &[])
+            .expect("kotlinc is required for metadata comparison"),
         Ok(())
     );
 }

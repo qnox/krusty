@@ -65,6 +65,13 @@ impl BodyLowering<'_> {
             Inline(crate::ir::ExprId),
         }
 
+        if initializer.is_none() {
+            return Ok(self.ir.add_expr(IrExpr::NewArray {
+                array_type: array_type.get(),
+                size,
+            }));
+        }
+
         let size_slot = self.allocate_temporary();
         let size_declaration = self.ir.add_expr(IrExpr::Variable {
             index: size_slot,

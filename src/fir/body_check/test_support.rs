@@ -127,6 +127,7 @@ fn checked_function_body_with_platform_and_features(
             ),
         },
         None,
+        matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
         &index,
         sources.origins_mut(),
         &mut session,

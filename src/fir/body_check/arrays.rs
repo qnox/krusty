@@ -8,7 +8,7 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         arguments: &[ExprId],
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        use crate::synthetics::SyntheticKind;
+        use crate::types::ArrayFactoryKind;
 
         let Some(ExprLowering::CompilerSynthetic(kind)) = self.info.expr_lowers.get(&expression)
         else {
@@ -37,9 +37,9 @@ impl BodyFirChecker<'_> {
         let cause = self.expression_origin(expression)?;
         match (*kind, arguments) {
             (
-                SyntheticKind::PrimitiveVararg(_)
-                | SyntheticKind::ReferenceVararg
-                | SyntheticKind::EmptyReference,
+                ArrayFactoryKind::PrimitiveVararg(_)
+                | ArrayFactoryKind::ReferenceVararg
+                | ArrayFactoryKind::EmptyReference,
                 arguments,
             ) => {
                 let elements = arguments
@@ -52,10 +52,12 @@ impl BodyFirChecker<'_> {
                                 .resolved_whole_array_vararg_args
                                 .contains(&argument);
                         let target = if spread { array_type } else { element_type };
+                        let value = self.expression(argument)?;
                         Ok(FirArrayElement {
-                            value: self.expression(argument)?,
+                            value,
                             spread,
-                            conversion: self.selected_value_conversion(argument, target, cause)?,
+                            conversion: self
+                                .selected_value_conversion(argument, value, target, cause)?,
                         })
                     })
                     .collect::<Result<Vec<_>, BodyCheckFailure>>()?
@@ -65,39 +67,37 @@ impl BodyFirChecker<'_> {
                     elements,
                 })
             }
-            (SyntheticKind::PrimitiveSize(_), [size])
-            | (SyntheticKind::NullableReference, [size]) => Ok(FirExprKind::ArrayConstruction {
-                array_type,
-                element_type,
-                size: self.expression(*size)?,
-                size_conversion: self.selected_value_conversion(
-                    *size,
-                    self.resolved_type(
-                        self.file.expr_span(*size).ok_or_else(|| {
-                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                        })?,
-                        Ty::Int,
-                    )?,
-                    cause,
-                )?,
-                initializer: None,
-            }),
-            (SyntheticKind::PrimitiveSize(_), [size, initializer])
-            | (SyntheticKind::ReferenceSize, [size, initializer]) => {
+            (ArrayFactoryKind::PrimitiveSize(_), [size])
+            | (ArrayFactoryKind::NullableReference, [size]) => {
+                let value = self.expression(*size)?;
+                let target = self.resolved_type(
+                    self.file.expr_span(*size).ok_or_else(|| {
+                        self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                    })?,
+                    Ty::Int,
+                )?;
                 Ok(FirExprKind::ArrayConstruction {
                     array_type,
                     element_type,
-                    size: self.expression(*size)?,
-                    size_conversion: self.selected_value_conversion(
-                        *size,
-                        self.resolved_type(
-                            self.file.expr_span(*size).ok_or_else(|| {
-                                self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                            })?,
-                            Ty::Int,
-                        )?,
-                        cause,
-                    )?,
+                    size: value,
+                    size_conversion: self.selected_value_conversion(*size, value, target, cause)?,
+                    initializer: None,
+                })
+            }
+            (ArrayFactoryKind::PrimitiveSize(_), [size, initializer])
+            | (ArrayFactoryKind::ReferenceSize, [size, initializer]) => {
+                let value = self.expression(*size)?;
+                let target = self.resolved_type(
+                    self.file.expr_span(*size).ok_or_else(|| {
+                        self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                    })?,
+                    Ty::Int,
+                )?;
+                Ok(FirExprKind::ArrayConstruction {
+                    array_type,
+                    element_type,
+                    size: value,
+                    size_conversion: self.selected_value_conversion(*size, value, target, cause)?,
                     initializer: Some(self.expression(*initializer)?),
                 })
             }

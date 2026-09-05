@@ -7,8 +7,8 @@ use crate::types::{Ty, TypeName};
 use super::body_work::BodyWorkItem;
 use super::header::{
     next_id, BodyOwnerId, CallableId, ControlTargetId, DeclarationId, DeclarationNameId, FirExprId,
-    FirSamConversionId, FirStatementId, LocalCallableId, LocalValueId, OriginId, PropertyId,
-    SourceFileId, TypeParameterId,
+    FirPlatformNarrowingId, FirSamConversionId, FirStatementId, LocalCallableId, LocalValueId,
+    OriginId, PropertyId, SourceFileId, TypeParameterId,
 };
 use super::identities::ExternalCallableId;
 use super::signature::ResolvedTy;
@@ -95,6 +95,13 @@ pub enum FirConversionKind {
         to: ResolvedTy,
     },
     Sam(FirSamConversionId),
+    /// A Java/platform value committed to Kotlin's non-null type. The checker records both the
+    /// boundary and the source expression text used by Kotlin's failure; common lowering merely
+    /// realizes the already-selected yields-or-throws operation.
+    PlatformNarrowing {
+        narrowing: FirPlatformNarrowingId,
+        to: ResolvedTy,
+    },
     /// Kotlin's one-way adaptation of an already-materialized regular function value to a suspend
     /// function value. Both complete callable shapes were selected by the frontend; lowering only
     /// synthesizes the forwarding closure.
@@ -124,6 +131,14 @@ pub struct FirSamConversion {
     pub nullable: bool,
 }
 
+/// Checked payload for one platform-type narrowing. This is language-level Java interop behavior,
+/// not a JVM linkage decision: every target either realizes the same yields-or-throws boundary or
+/// diagnoses that it cannot support Java platform values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirPlatformNarrowing {
+    pub message: Box<str>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirConversion {
     pub origin: OriginId,
@@ -132,6 +147,15 @@ pub struct FirConversion {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirReceiver {
+    pub value: FirExprId,
+    pub conversion: Option<FirConversion>,
+}
+
+/// One value whose consumer type and representation conversion were fixed by the checker. This is
+/// used where source order is positional but there is no callable parameter identity, such as a
+/// builtin array/String index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirConvertedValue {
     pub value: FirExprId,
     pub conversion: Option<FirConversion>,
 }
@@ -202,6 +226,11 @@ pub enum FirCallArgument {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirIntrinsic {
+    /// The exact `kotlin.assert` declaration selected by resolution. Its operands remain lazy until
+    /// target realization: a disabled assertion evaluates neither the condition nor its message.
+    Assert {
+        mode: crate::types::AssertionMode,
+    },
     ArrayGet,
     ArraySet,
     ArraySize,
@@ -242,12 +271,18 @@ pub enum FirClassifierCallable {
 /// Source-independent control flow decoded from the exact selected inline declaration. Parameter
 /// ordinals refer to the checked call's semantic parameter list; no callable spelling or backend
 /// linkage is retained here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirInlineValue {
+    Receiver,
+    Parameter(u32),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirInlineBodyPlan {
     InvokeLambda {
         lambda_parameter: u32,
-        argument_parameters: Box<[u32]>,
-        return_parameter: Option<u32>,
+        arguments: Box<[FirInlineValue]>,
+        result: Option<FirInlineValue>,
     },
     /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
     /// All three convention calls were selected by the checker at the call site; lowering only
@@ -259,6 +294,46 @@ pub enum FirInlineBodyPlan {
         has_next: Box<FirIteratorCall>,
         next: Box<FirIteratorCall>,
     },
+    /// Checked structural expansion of an exact collection inline declaration. Iterator convention
+    /// calls were selected in the declaration's lookup scope; factory/append are opaque provider
+    /// identities. Common lowering therefore performs no library lookup or target-ABI reasoning.
+    CollectionTransform {
+        lambda_parameter: u32,
+        flatten: bool,
+        iterator_ty: ResolvedTy,
+        iterator: Box<FirIteratorCall>,
+        has_next: Box<FirIteratorCall>,
+        next: Box<FirIteratorCall>,
+        factory: ExternalCallableId,
+        factory_classifier: crate::types::TypeName,
+        append: ExternalCallableId,
+        accumulator: ResolvedTy,
+        append_parameter: ResolvedTy,
+        append_result: ResolvedTy,
+    },
+    /// Inline a declaration whose checked body enters a suspending region, invokes a zero-argument
+    /// lambda, and leaves the region from `finally`. The selected member identities are opaque;
+    /// target-specific owners, descriptors, and invocation opcodes remain provider/backend data.
+    SuspendBeforeLambdaFinally {
+        lambda_parameter: u32,
+        state_parameter: u32,
+        state_default: FirInlineDefaultValue,
+        enter: FirInlineMemberCall,
+        cleanup: FirInlineMemberCall,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirInlineDefaultValue {
+    Null,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineMemberCall {
+    pub declaration: ExternalCallableId,
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
+    pub suspend: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -297,11 +372,23 @@ pub enum FirCallTarget {
     /// virtual target at every other call site.
     Super {
         owner: crate::types::TypeName,
+        /// Classifier whose instance supplies `this` for this selected super dispatch.
+        dispatch_owner: crate::types::TypeName,
+        /// The selected dispatch instance belongs to an enclosing lexical classifier rather than
+        /// the body currently containing the call. Targets such as the JVM must cross that physical
+        /// class boundary through an owner-local nonvirtual bridge.
+        enclosing_dispatch: bool,
+        kind: FirSuperCallKind,
         name: String,
         parameters: Box<[ResolvedTy]>,
         result: ResolvedTy,
         /// The selected owner is an interface, so the call reaches a default method.
         interface: bool,
+        /// Provider-owned realization of the already-selected declaration. This must survive FIR:
+        /// a dependency may expose a semantic interface member through a receiver-first static
+        /// holder, while a source declaration remains ordinary nonvirtual dispatch until its
+        /// target backend chooses an output mode.
+        realization: crate::libraries::MemberRealization,
         /// Provider-supplied physical descriptor, when the provider has one. A SOURCE declaration
         /// leaves it empty: its descriptor is a target ABI choice derived from `parameters` and
         /// `physical_result` at realization, not a semantic fact FIR may pin.
@@ -314,6 +401,13 @@ pub enum FirCallTarget {
         source: Option<CallableId>,
         source_member: Option<crate::libraries::SourceMember>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirSuperCallKind {
+    Function,
+    PropertyGetter,
+    PropertySetter,
 }
 
 impl From<CallableId> for FirCallTarget {
@@ -382,6 +476,7 @@ impl BodyLocalCallableDeclarationId {
 pub(crate) struct LocalBinding {
     pub(crate) value: LocalValueId,
     pub(crate) ty: ResolvedTy,
+    pub(crate) lateinit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -614,13 +709,31 @@ impl FirPropertyTarget {
 /// A constructor declaration identity after overload selection. Module constructors use their
 /// stable callable identity. Dependency constructors retain a backend-neutral classifier and
 /// semantic parameter signature; a backend maps that exact declaration to physical linkage.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Compact declaration default retained only for an annotation-construction plan. Ordinary source
+/// defaults remain checked retained bodies; dependency metadata contributes only these closed values.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FirAnnotationDefaultValue {
+    Constant(FirConstant),
+    Singleton(TypeName),
+}
+
+/// Complete checked declaration shape needed to realize an annotation value. This is Kotlin
+/// semantics rather than a platform implementation detail: a backend may allocate a concrete value,
+/// synthesize an implementation, or use a native annotation representation without new lookup.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FirAnnotationConstruction {
+    pub members: Box<[(Box<str>, ResolvedTy)]>,
+    pub defaults: Box<[Option<FirAnnotationDefaultValue>]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum FirConstructorTarget {
     Module(CallableId),
     External {
         declaration: ExternalCallableId,
         classifier: TypeName,
         parameters: Box<[ResolvedTy]>,
+        annotation: Option<Box<FirAnnotationConstruction>>,
     },
 }
 
@@ -628,14 +741,28 @@ impl FirConstructorTarget {
     fn storage_payload_bytes(&self) -> usize {
         match self {
             Self::Module(_) => 0,
-            Self::External { parameters, .. } => {
+            Self::External {
+                parameters,
+                annotation,
+                ..
+            } => {
                 parameters.len() * std::mem::size_of::<ResolvedTy>()
+                    + annotation.as_ref().map_or(0, |annotation| {
+                        annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
+                            + annotation
+                                .members
+                                .iter()
+                                .map(|(name, _)| name.len())
+                                .sum::<usize>()
+                            + annotation.defaults.len()
+                                * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
+                    })
             }
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FirConstructorCall {
     pub target: FirConstructorTarget,
     /// Semantic type of the compiler-supplied enclosing-instance parameter. This is separate from
@@ -658,13 +785,7 @@ pub struct FirPluginOperand {
 
 impl FirConstructorCall {
     fn storage_payload_bytes(&self) -> usize {
-        let external_parameters = match &self.target {
-            FirConstructorTarget::Module(_) => 0,
-            FirConstructorTarget::External { parameters, .. } => {
-                parameters.len() * std::mem::size_of::<ResolvedTy>()
-            }
-        };
-        external_parameters
+        self.target.storage_payload_bytes()
             + self.parameter_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.arguments.len() * std::mem::size_of::<FirCallArgument>()
             + self
@@ -788,6 +909,10 @@ pub struct FirValueParameter {
 pub struct FirDefaultValue {
     pub origin: OriginId,
     pub parameter: u32,
+    /// Checked declaration-boundary type of this default's parameter. Context type receivers are
+    /// not runtime value parameters, so their presence makes `parameter` unsuitable as an index
+    /// into [`FirBody::parameters`]. Lowering consumes this resolved type directly.
+    pub ty: ResolvedTy,
     pub value: FirExprId,
 }
 
@@ -1002,9 +1127,18 @@ pub enum FirCallableReferenceBinding {
     Unbound,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FirCallableReferenceTarget {
     Module(CallableId),
+    /// Reference to an exact compiler-supplied Kotlin array-factory declaration. The provider tag
+    /// proves the declaration identity; these checked semantic types are the complete construction
+    /// plan, so common lowering never reopens lookup or asks a backend for a nonexistent method.
+    ArrayFactory {
+        operation: crate::types::ArrayFactoryKind,
+        array_type: ResolvedTy,
+        element_type: ResolvedTy,
+        parameters: Box<[ResolvedTy]>,
+    },
     /// A reference to a selected CONSTRUCTOR (`::A`). It is not an ordinary callable reference: the
     /// adapter must construct rather than call, so both the operation and declaration provenance
     /// have to survive to lowering.
@@ -1042,13 +1176,19 @@ impl FirCallableReferenceTarget {
     pub const fn module(&self) -> Option<CallableId> {
         match self {
             Self::Module(target) => Some(*target),
-            Self::Constructor { .. } | Self::External { .. } | Self::Classifier { .. } => None,
+            Self::ArrayFactory { .. }
+            | Self::Constructor { .. }
+            | Self::External { .. }
+            | Self::Classifier { .. } => None,
         }
     }
 
     fn storage_payload_bytes(&self) -> usize {
         match self {
             Self::Module(_) => 0,
+            Self::ArrayFactory { parameters, .. } => {
+                (2 + parameters.len()) * std::mem::size_of::<ResolvedTy>()
+            }
             Self::Constructor {
                 target,
                 outer,
@@ -1167,6 +1307,13 @@ pub enum FirExprKind {
         enclosing_depth: u32,
         source: LocalValueId,
     },
+    /// A checked read of language-level `lateinit` local storage. The operand identifies the
+    /// already-selected lexical or captured value; the source name is retained only for the
+    /// required uninitialized-property exception, never for lookup.
+    LateinitRead {
+        value: FirExprId,
+        name: Box<str>,
+    },
     /// Read a checker-selected storage field of the current classifier-like declaration. Enum
     /// entries are stable owners here as well: their anonymous subclass is realized only after
     /// FIR, but lowering never has to reconstruct that ownership from the enclosing enum.
@@ -1271,12 +1418,15 @@ pub enum FirExprKind {
     /// initialization test must observe the raw `null`, not raise.
     LateinitFieldRead {
         target: PropertyId,
+        dispatch_receiver: Option<FirReceiver>,
     },
     BackingFieldRead {
         target: PropertyId,
+        dispatch_receiver: Option<FirReceiver>,
     },
     BackingFieldWrite {
         target: PropertyId,
+        dispatch_receiver: Option<FirReceiver>,
         value: FirExprId,
         conversion: Option<FirConversion>,
     },
@@ -1407,6 +1557,18 @@ pub enum FirExprKind {
         primitive: FirExprId,
         primitive_ty: ResolvedTy,
     },
+    /// Kotlin numeric equality between two nullable scalar values. Both operands are evaluated,
+    /// nulls compare structurally, and two present values are unboxed and promoted to `comparison`
+    /// before IEEE primitive equality. The checker fixes every type; lowering only expands control
+    /// flow and conversions.
+    NullableNumericComparison {
+        operation: FirBinaryOperation,
+        lhs: FirExprId,
+        rhs: FirExprId,
+        lhs_primitive: ResolvedTy,
+        rhs_primitive: ResolvedTy,
+        comparison: ResolvedTy,
+    },
     Range {
         operation: FirRangeOperation,
         start: FirExprId,
@@ -1427,11 +1589,11 @@ pub enum FirExprKind {
     IndexedRead {
         kind: FirIndexedAccessKind,
         receiver: FirExprId,
-        indices: Box<[FirExprId]>,
+        indices: Box<[FirConvertedValue]>,
     },
     IndexedWrite {
         receiver: FirExprId,
-        indices: Box<[FirExprId]>,
+        indices: Box<[FirConvertedValue]>,
         value: FirExprId,
         conversion: Option<FirConversion>,
     },
@@ -1514,6 +1676,7 @@ impl FirExprKind {
             | FirExprKind::Unary { .. }
             | FirExprKind::Binary { .. }
             | FirExprKind::NullablePrimitiveComparison { .. }
+            | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::Range { .. }
             | FirExprKind::InRange { .. }
             | FirExprKind::SafeCall { .. }
@@ -1521,6 +1684,7 @@ impl FirExprKind {
             | FirExprKind::Throw(_)
             | FirExprKind::Jump { .. }
             | FirExprKind::Conditional { .. } => 0,
+            FirExprKind::LateinitRead { name, .. } => name.len(),
             FirExprKind::EnclosingReceiver { path }
             | FirExprKind::CapturedImplicitReceiver { path, .. }
             | FirExprKind::CapturedClassStorageRead { path, .. }
@@ -1531,7 +1695,7 @@ impl FirExprKind {
             FirExprKind::LocalPropertyReference { name, .. } => name.len(),
             FirExprKind::IndexedRead { indices, .. }
             | FirExprKind::IndexedWrite { indices, .. } => {
-                indices.len() * std::mem::size_of::<FirExprId>()
+                indices.len() * std::mem::size_of::<FirConvertedValue>()
             }
             FirExprKind::AnnotationArray(expressions)
             | FirExprKind::StringTemplate(expressions) => {
@@ -1819,6 +1983,14 @@ pub struct FirStatement {
     pub kind: FirStatementKind,
 }
 
+/// Line-only source metadata carried through consuming FIR lowering. These values are output facts,
+/// not source locators: they cannot be used to recover text or reparse a body.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FirExpressionDebugLines {
+    pub source: u32,
+    pub end: u32,
+}
+
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;
 /// parser ids and unresolved types cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
@@ -1843,6 +2015,14 @@ pub struct FirBody {
     property_storage_type: Option<ResolvedTy>,
     property_delegate: Option<FirPropertyDelegatePlan>,
     debug_name: Option<Box<str>>,
+    source_lambda: bool,
+    debug_binding_name: Option<Box<str>>,
+    debug_value_names: HashMap<LocalValueId, Box<str>>,
+    /// Total physical source lines for debug metadata. This scalar output fact cannot locate or
+    /// reparse text and is discarded with ordinary FIR after its common-IR consumer runs.
+    source_line_count: u32,
+    expression_debug_lines: Vec<FirExpressionDebugLines>,
+    statement_debug_lines: Vec<u32>,
     context_receiver_types: Vec<ResolvedTy>,
     context_value_count: u32,
     parameters: Vec<FirValueParameter>,
@@ -1850,6 +2030,7 @@ pub struct FirBody {
     captures: Vec<FirCapture>,
     implicit_receiver_captures: Vec<FirImplicitReceiverCapture>,
     sam_conversions: Vec<FirSamConversion>,
+    platform_narrowings: Vec<FirPlatformNarrowing>,
     control_targets: Vec<FirControlTarget>,
     expressions: Vec<FirExpr>,
     statements: Vec<FirStatement>,
@@ -1890,6 +2071,12 @@ impl FirBody {
             property_storage_type: None,
             property_delegate: None,
             debug_name: None,
+            source_lambda: false,
+            debug_binding_name: None,
+            debug_value_names: HashMap::new(),
+            source_line_count: 0,
+            expression_debug_lines: Vec::new(),
+            statement_debug_lines: Vec::new(),
             context_receiver_types: Vec::new(),
             context_value_count: 0,
             parameters: Vec::new(),
@@ -1897,6 +2084,7 @@ impl FirBody {
             captures: Vec::new(),
             implicit_receiver_captures: Vec::new(),
             sam_conversions: Vec::new(),
+            platform_narrowings: Vec::new(),
             control_targets: Vec::new(),
             expressions: Vec::new(),
             statements: Vec::new(),
@@ -2047,6 +2235,122 @@ impl FirBody {
         self.debug_name.as_deref()
     }
 
+    pub fn mark_source_lambda(&mut self, binding_name: Option<impl Into<Box<str>>>) {
+        assert!(
+            !self.source_lambda,
+            "a FIR body may be marked as a source lambda only once"
+        );
+        self.source_lambda = true;
+        self.debug_binding_name = binding_name.map(Into::into);
+    }
+
+    pub const fn is_source_lambda(&self) -> bool {
+        self.source_lambda
+    }
+
+    pub fn debug_binding_name(&self) -> Option<&str> {
+        self.debug_binding_name.as_deref()
+    }
+
+    pub fn set_debug_value_name(&mut self, value: LocalValueId, name: impl Into<Box<str>>) {
+        let previous = self.debug_value_names.insert(value, name.into());
+        assert!(
+            previous.is_none(),
+            "a FIR value may publish its debug name only once"
+        );
+    }
+
+    pub fn debug_value_name(&self, value: LocalValueId) -> Option<&str> {
+        self.debug_value_names.get(&value).map(Box::as_ref)
+    }
+
+    pub fn expression_debug_lines(&self, expression: FirExprId) -> FirExpressionDebugLines {
+        self.expression_debug_lines
+            .get(expression.raw() as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn statement_debug_line(&self, statement: FirStatementId) -> u32 {
+        self.statement_debug_lines
+            .get(statement.raw() as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub const fn source_line_count(&self) -> u32 {
+        self.source_line_count
+    }
+
+    pub(crate) fn attach_debug_lines(
+        &mut self,
+        source: SourceFileId,
+        source_line_count: u32,
+        origins: &OriginStore,
+        expression_lines: &HashMap<Span, FirExpressionDebugLines>,
+        statement_lines: &HashMap<Span, u32>,
+    ) {
+        self.source_line_count = source_line_count;
+        let source_span = |origin| {
+            let mut current = origin;
+            loop {
+                match origins.get(current)? {
+                    Origin::Source { file, span } => return (file == source).then_some(span),
+                    Origin::Synthetic { cause, .. } => current = cause,
+                }
+            }
+        };
+        self.expression_debug_lines = self
+            .expressions
+            .iter()
+            .map(|expression| {
+                source_span(expression.origin)
+                    .and_then(|span| expression_lines.get(&span).copied())
+                    .unwrap_or_default()
+            })
+            .collect();
+        self.statement_debug_lines = self
+            .statements
+            .iter()
+            .map(|statement| {
+                source_span(statement.origin)
+                    .and_then(|span| statement_lines.get(&span).copied())
+                    .unwrap_or(0)
+            })
+            .collect();
+        for statement in &mut self.statements {
+            if let FirStatementKind::LocalFunction { body, .. } = &mut statement.kind {
+                body.attach_debug_lines(
+                    source,
+                    source_line_count,
+                    origins,
+                    expression_lines,
+                    statement_lines,
+                );
+            }
+        }
+        for expression in &mut self.expressions {
+            if let FirExprKind::Lambda { body, .. } = &mut expression.kind {
+                body.attach_debug_lines(
+                    source,
+                    source_line_count,
+                    origins,
+                    expression_lines,
+                    statement_lines,
+                );
+            }
+        }
+        for body in &mut self.inline_nested_declaration_bodies {
+            body.attach_debug_lines(
+                source,
+                source_line_count,
+                origins,
+                expression_lines,
+                statement_lines,
+            );
+        }
+    }
+
     pub fn set_context_receiver_types(&mut self, receivers: Vec<ResolvedTy>) {
         assert!(
             self.context_receiver_types.is_empty(),
@@ -2127,6 +2431,22 @@ impl FirBody {
         self.sam_conversions.get(id.raw() as usize)
     }
 
+    pub fn add_platform_narrowing(
+        &mut self,
+        narrowing: FirPlatformNarrowing,
+    ) -> FirPlatformNarrowingId {
+        let id = FirPlatformNarrowingId::from_raw(next_id(
+            self.platform_narrowings.len(),
+            "body-local platform narrowings",
+        ));
+        self.platform_narrowings.push(narrowing);
+        id
+    }
+
+    pub fn platform_narrowing(&self, id: FirPlatformNarrowingId) -> Option<&FirPlatformNarrowing> {
+        self.platform_narrowings.get(id.raw() as usize)
+    }
+
     /// Finalize the complete capture ABI of every nested callable. A body must forward both values
     /// read by a descendant and values required to invoke/reference a selected lexical callable.
     /// The latter is transitive (`lambda -> local A -> local B -> value`) and local functions may be
@@ -2141,10 +2461,10 @@ impl FirBody {
         self.normalize_shared_capture_cells();
     }
 
-    /// Give every closure over one lexical value the same storage ABI. A write in any sibling or
-    /// descendant closure makes that value a shared cell for all of them; otherwise one closure can
-    /// accept the holder while another declares the holder's payload type for the same runtime
-    /// capture slot.
+    /// Give every closure over one lexical value the same storage ABI. A captured `var`, or a write
+    /// in any sibling/descendant closure, makes that value a shared cell for all of them; otherwise
+    /// one closure can accept the holder while another declares the holder's payload type for the
+    /// same runtime capture slot.
     fn normalize_shared_capture_cells(&mut self) {
         for statement in &mut self.statements {
             if let FirStatementKind::LocalFunction { body, .. } = &mut statement.kind {
@@ -2158,6 +2478,18 @@ impl FirBody {
         }
 
         let mut shared = std::collections::HashSet::new();
+        shared.extend(
+            self.statements
+                .iter()
+                .filter_map(|statement| match &statement.kind {
+                    FirStatementKind::Local {
+                        target,
+                        mutable: true,
+                        ..
+                    } => Some(*target),
+                    _ => None,
+                }),
+        );
         for statement in &self.statements {
             if let FirStatementKind::LocalFunction { body, .. } = &statement.kind {
                 body.collect_shared_captures_targeting_ancestor(0, &mut shared);
@@ -2436,11 +2768,16 @@ impl FirBody {
     pub fn add_expr(&mut self, expression: FirExpr) -> FirExprId {
         let id = FirExprId::from_raw(next_id(self.expressions.len(), "FIR expressions"));
         self.expressions.push(expression);
+        self.expression_debug_lines.push(Default::default());
         id
     }
 
     pub fn expr(&self, id: FirExprId) -> Option<&FirExpr> {
         self.expressions.get(id.raw() as usize)
+    }
+
+    pub(crate) fn expr_mut(&mut self, id: FirExprId) -> Option<&mut FirExpr> {
+        self.expressions.get_mut(id.raw() as usize)
     }
 
     pub fn expression_count(&self) -> usize {
@@ -2450,6 +2787,7 @@ impl FirBody {
     pub fn add_statement(&mut self, statement: FirStatement) -> FirStatementId {
         let id = FirStatementId::from_raw(next_id(self.statements.len(), "FIR statements"));
         self.statements.push(statement);
+        self.statement_debug_lines.push(0);
         id
     }
 
@@ -2629,6 +2967,14 @@ impl FirBody {
                 .property_storage_type
                 .map_or(0, |_| std::mem::size_of::<ResolvedTy>())
             + self.debug_name.as_deref().map_or(0, str::len)
+            + self.debug_binding_name.as_deref().map_or(0, str::len)
+            + self
+                .debug_value_names
+                .values()
+                .map(|name| std::mem::size_of::<LocalValueId>() + name.len())
+                .sum::<usize>()
+            + self.expression_debug_lines.len() * std::mem::size_of::<FirExpressionDebugLines>()
+            + self.statement_debug_lines.len() * std::mem::size_of::<u32>()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
@@ -2648,6 +2994,12 @@ impl FirBody {
                         + conversion.parameters.len() * std::mem::size_of::<ResolvedTy>()
                         + conversion.declared_parameters.len() * std::mem::size_of::<ResolvedTy>()
                 })
+                .sum::<usize>()
+            + self.platform_narrowings.len() * std::mem::size_of::<FirPlatformNarrowing>()
+            + self
+                .platform_narrowings
+                .iter()
+                .map(|narrowing| narrowing.message.len())
                 .sum::<usize>()
             + self.control_targets.len() * std::mem::size_of::<FirControlTarget>()
             + self.expressions.len() * std::mem::size_of::<FirExpr>()

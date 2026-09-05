@@ -48,14 +48,24 @@ pub(crate) enum ScopeKind {
 #[derive(Clone, Debug)]
 pub(crate) struct ContextReceiver {
     pub(crate) ty: Ty,
+    /// Legacy `context(Type)` entries participate in the implicit-receiver tower. Named context
+    /// parameters are ordinary lexical values: they may satisfy another context parameter, but
+    /// their members are not available unqualified.
+    pub(crate) implicit_receiver: bool,
     pub(crate) name: String,
     pub(crate) label: Option<String>,
 }
 
 impl ContextReceiver {
-    pub(crate) fn new(ty: Ty, name: impl Into<String>, label: Option<String>) -> Self {
+    pub(crate) fn new(
+        ty: Ty,
+        name: impl Into<String>,
+        label: Option<String>,
+        implicit_receiver: bool,
+    ) -> Self {
         Self {
             ty,
+            implicit_receiver,
             name: name.into(),
             label,
         }
@@ -271,7 +281,7 @@ impl<'p, B> Scope<'p, B> {
     pub(crate) fn parameter_child(&'p self, context_receivers: &[ContextReceiver]) -> Scope<'p, B> {
         let mut child = Scope::with_parent(Some(self), ScopeKind::Block);
         for receiver in context_receivers {
-            if receiver.name != "_" {
+            if receiver.implicit_receiver && receiver.name != "_" {
                 *child
                     .parent_receiver_aliases
                     .entry(receiver.name.clone())
@@ -940,7 +950,7 @@ impl<'p, B> Scope<'p, B> {
                 *receiver_binding_counts.entry(name.clone()).or_default() += 1;
             }
             for receiver in scope.context_receivers.borrow().iter() {
-                if receiver.name != "_" {
+                if receiver.implicit_receiver && receiver.name != "_" {
                     *receiver_binding_counts
                         .entry(receiver.name.clone())
                         .or_default() += 1;
@@ -984,7 +994,14 @@ impl<'p, B> Scope<'p, B> {
                 _ => {}
             }
             if !scope.context_receivers.borrow().is_empty() {
-                for (index, receiver) in scope.context_receivers.borrow().iter().rev().enumerate() {
+                for (index, receiver) in scope
+                    .context_receivers
+                    .borrow()
+                    .iter()
+                    .filter(|receiver| receiver.implicit_receiver)
+                    .rev()
+                    .enumerate()
+                {
                     let context_name = (receiver.name != "_").then(|| receiver.name.clone());
                     push(
                         &mut out,
@@ -1114,20 +1131,15 @@ mod tests {
     #[test]
     fn named_context_parameter_binding_aliases_its_parent_receiver() {
         let root: Scope<'_, u32> = Scope::root();
-        let receiver = ContextReceiver::new(Ty::String, "value", None);
+        let receiver = ContextReceiver::new(Ty::String, "value", None, false);
         let function = root.function_child(None, None, std::slice::from_ref(&receiver));
         let parameters = function.parameter_child(std::slice::from_ref(&receiver));
         parameters.rebind("value", Ns::Value, 1);
 
-        let selected = parameters.find_context_value(|ty| ty == Ty::String, |_| false);
+        let selected = parameters.find_context_value(|ty| ty == Ty::String, |value| *value == 1);
         assert!(matches!(
             selected,
-            Some(ContextValue::ImplicitReceiver {
-                ty: Ty::String,
-                context_name: Some(name),
-                context_shadow_depth: 0,
-                ..
-            }) if name == "value"
+            Some(ContextValue::Binding { name, shadow_depth: 0 }) if name == "value"
         ));
     }
 
@@ -1200,13 +1212,13 @@ mod tests {
     }
 
     #[test]
-    fn class_receiver_identity_is_not_a_same_typed_context_receiver() {
+    fn class_receiver_identity_is_not_a_same_typed_legacy_context_receiver() {
         let root: Scope<'_, u32> = Scope::root();
         let class_scope = root.child(class("A", false));
         let function = class_scope.function_child(
             None,
             None,
-            &[ContextReceiver::new(obj("A"), "other", None)],
+            &[ContextReceiver::new(obj("A"), "_", None, true)],
         );
 
         let receivers = function.implicit_receivers_with_declarations();

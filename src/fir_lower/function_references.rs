@@ -439,7 +439,7 @@ impl BodyLowering<'_> {
         class.func_ref = Some(FuncRef {
             adapted: false,
             bound,
-            arity: u8::try_from(invoke_parameters.len())
+            arity: u8::try_from(reference.params.len())
                 .map_err(|_| FirLoweringFailure::UnsupportedCallableReference(callable.id))?,
             is_suspend: suspend,
             module_target: Some(callable.id),
@@ -567,7 +567,7 @@ impl BodyLowering<'_> {
         class.func_ref = Some(FuncRef {
             adapted: true,
             bound,
-            arity: u8::try_from(invoke_parameters.len())
+            arity: u8::try_from(reference.params.len())
                 .map_err(|_| FirLoweringFailure::UnsupportedCallableReference(callable.id))?,
             is_suspend: reference.suspend,
             module_target: None,

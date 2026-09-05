@@ -124,6 +124,15 @@ fn default_check_selection(
             return None;
         };
         selected_roots.insert(root_id);
+        if work.relation == crate::fir::DefaultArgumentRelation::ActualizedDeclaration {
+            // `bind_defaults` aliases the expect parser subtree to the surviving actual
+            // declaration chain. Reverse parser lookup can consequently name either stable
+            // identity for the same bounded syntax. Admit the target lexical root as well so an
+            // expect-owned constructor/member default is actually entered and checked; both IDs
+            // are transient Pass-1 selection facts and neither survives with the checked FIR.
+            let target_root = headers.lexical_root_for_default(index, work.target);
+            selected_roots.insert(target_root);
+        }
     }
     Some(DefaultCheckSelection { roots, bodies })
 }

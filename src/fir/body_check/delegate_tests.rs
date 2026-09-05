@@ -1,4 +1,4 @@
-use super::test_support::checked_function_body;
+use super::test_support::{checked_function_body, root_expression};
 use super::*;
 
 fn expressions(body: &FirBody) -> impl Iterator<Item = &FirExpr> {
@@ -113,6 +113,15 @@ fn local_delegate_read_keeps_selected_module_operator_and_semantic_property_refe
                 if name.as_ref() == "value" && property_type.get() == Ty::String
         )
     }));
+    let FirExprKind::Block { statements, .. } = &body.expr(root_expression(&body)).unwrap().kind
+    else {
+        panic!("function body must remain a checked block")
+    };
+    let FirStatementKind::Local { target, .. } = &body.statement(statements[0]).unwrap().kind
+    else {
+        panic!("local delegate storage must be a checked local")
+    };
+    assert_eq!(body.debug_value_name(*target), Some("value$delegate"));
 }
 
 #[test]

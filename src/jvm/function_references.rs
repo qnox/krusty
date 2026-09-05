@@ -27,22 +27,50 @@ fn intrinsic_member_adapter(
     ir: &mut IrFile,
     realization: MemberRealization,
     receiver: Ty,
+    parameters: &[Ty],
     result: Ty,
 ) -> Option<(crate::ir::FunId, String)> {
-    let value = match realization {
-        MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::BooleanNot)
-            if receiver.non_null() == Ty::Boolean && result == Ty::Boolean =>
-        {
-            let receiver = ir.add_expr(IrExpr::GetValue(0));
-            let false_value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(false)));
-            ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: receiver,
-                rhs: false_value,
-            })
-        }
-        _ => return None,
-    };
+    let receiver_value = ir.add_expr(IrExpr::GetValue(0));
+    let arguments = parameters
+        .iter()
+        .enumerate()
+        .map(|(parameter, _)| ir.add_expr(IrExpr::GetValue(parameter as u32 + 1)))
+        .collect::<Vec<_>>();
+    let value =
+        match realization {
+            MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::BooleanNot)
+                if parameters.is_empty()
+                    && receiver.non_null() == Ty::Boolean
+                    && result == Ty::Boolean =>
+            {
+                let false_value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(false)));
+                ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs: receiver_value,
+                    rhs: false_value,
+                })
+            }
+            MemberRealization::Intrinsic(
+                crate::libraries::CompilerIntrinsic::NumericConversion,
+            ) if parameters.is_empty() => ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg: receiver_value,
+                type_operand: result,
+            }),
+            MemberRealization::Intrinsic(crate::libraries::CompilerIntrinsic::StringPlus)
+                if arguments.len() == 1 =>
+            {
+                ir.add_expr(IrExpr::Call {
+                    callee: crate::ir::Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::StringPlus,
+                        ret: result,
+                    },
+                    dispatch_receiver: Some(receiver_value),
+                    args: arguments,
+                })
+            }
+            _ => return None,
+        };
     let returned = ir.add_expr(IrExpr::Return(Some(value)));
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
@@ -51,7 +79,9 @@ fn intrinsic_member_adapter(
     let name = format!("$fir$intrinsic$fnref${}", ir.functions.len());
     let function = ir.add_fun(IrFunction {
         name: name.clone(),
-        params: vec![receiver],
+        params: std::iter::once(receiver)
+            .chain(parameters.iter().copied())
+            .collect(),
         ret: result,
         body: Some(body),
         is_static: true,
@@ -107,6 +137,10 @@ pub(super) fn realize(
 
         let capture = dispatch_receiver.or(extension_receiver);
         let receiver_ty = receiver.map(crate::fir::ResolvedTy::get);
+        let semantic_parameters = parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
         let mut local_target = None;
         let mut call_owner = Some(callable.owner);
         let mut call_name = callable.name.clone();
@@ -146,7 +180,8 @@ pub(super) fn realize(
                             ir,
                             callable.member_realization,
                             receiver,
-                            callable.physical_ret,
+                            &semantic_parameters,
+                            result.get(),
                         )
                         .ok_or(FunctionReferenceRealizationTarget::Invalid)?;
                         local_target = Some(target);
@@ -158,7 +193,9 @@ pub(super) fn realize(
                             FrDispatch::StaticBound,
                             receiver.kotlin_class_internal(),
                             0,
-                            vec![receiver],
+                            std::iter::once(receiver)
+                                .chain(semantic_parameters.iter().copied())
+                                .collect(),
                             false,
                         )
                     }
@@ -186,7 +223,8 @@ pub(super) fn realize(
                             ir,
                             callable.member_realization,
                             receiver_ty,
-                            callable.physical_ret,
+                            &semantic_parameters,
+                            result.get(),
                         )
                         .ok_or(FunctionReferenceRealizationTarget::Invalid)?;
                         local_target = Some(target);
@@ -198,7 +236,9 @@ pub(super) fn realize(
                             FrDispatch::Static,
                             receiver_ty.kotlin_class_internal(),
                             0,
-                            vec![receiver_ty],
+                            std::iter::once(receiver_ty)
+                                .chain(semantic_parameters.iter().copied())
+                                .collect(),
                             true,
                         )
                     }
@@ -249,7 +289,7 @@ pub(super) fn realize(
             invoke_result = Ty::obj("kotlin/Any");
             target_result = Ty::obj("kotlin/Any");
         }
-        let arity = u8::try_from(invoke_parameters.len())
+        let arity = u8::try_from(reference.params.len())
             .map_err(|_| FunctionReferenceRealizationTarget::External(declaration))?;
         let internal = type_name(&format!(
             "{current_facade}$fir$function${}",
@@ -275,8 +315,12 @@ pub(super) fn realize(
             call_name,
             reflection_name: None,
             reflection_receiver_parameter: false,
-            reflection_target_ret_ty: None,
-            reflection_target_param_tys: None,
+            // The selected provider realization above supplies physical call parameters, while
+            // callable-reference reflection identifies the Kotlin declaration. Preserve its
+            // semantic signature separately so the value-class pass mangles the reflected JVM
+            // signature from `Marker`, not from its already-erased `String` carrier.
+            reflection_target_ret_ty: Some(result.get()),
+            reflection_target_param_tys: Some(semantic_parameters),
             call_interface,
             param_tys: invoke_parameters,
             ret_ty: invoke_result,

@@ -35,6 +35,20 @@ fun box(): String {\n\
     run_ok(src, "InlineLambdaLoopBreakContinue");
 }
 
+#[test]
+fn stdlib_inline_selector_is_spliced_at_every_invoke_site() {
+    let src = "fun box(): String {\n\
+        var invocations = 0\n\
+        val minimum = listOf(3, 1, 2).minByOrNull {\n\
+            invocations += 1\n\
+            it\n\
+        }\n\
+        return if (minimum == 1 && invocations == 3) \"OK\"\n\
+               else \"minimum=$minimum invocations=$invocations\"\n\
+    }\n";
+    run_ok(src, "RepeatedInlineSelectorSites");
+}
+
 // --- inline lambda body containing a try/catch (exception-table relocation) -----------------------
 
 #[test]

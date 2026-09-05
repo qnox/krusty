@@ -158,12 +158,14 @@ impl BodyFirChecker<'_> {
             loops: Vec::new(),
             local_callable_scopes: vec![HashMap::new()],
             expression_substitutions: HashMap::new(),
+            lambda_binding_name: None,
             outer_callables,
             streamed_outer_callables: self.streamed_outer_callables.clone(),
             nested_body_depth: self
                 .nested_body_depth
                 .checked_add(1)
                 .expect("too many nested bodies"),
+            expression_depth: 0,
             owned_receiver_count: u32::try_from(
                 context_count + usize::from(info.receiver.is_some()),
             )
@@ -180,7 +182,8 @@ impl BodyFirChecker<'_> {
             .enumerate()
         {
             if let Some(default) = parameter.default {
-                let value = nested.expression(default)?;
+                let target = nested.resolved_type(parameter.ty.span, info.sig.params[ordinal])?;
+                let value = nested.value_at_selected_boundary(default, target)?;
                 let default_origin = nested.expression_origin(default)?;
                 nested.body.add_default_value(FirDefaultValue {
                     origin: default_origin,
@@ -190,6 +193,7 @@ impl BodyFirChecker<'_> {
                             BodyCheckFailureKind::UnsupportedCallShape,
                         )
                     })?,
+                    ty: target,
                     value,
                 });
             }
@@ -228,7 +232,17 @@ impl BodyFirChecker<'_> {
                 return Err(nested.failure(Some(function.span), BodyCheckFailureKind::UnknownLocal));
             }
         }
-        let result = nested.expression(root)?;
+        let result = if implicit_return {
+            nested.value_at_selected_boundary(
+                root,
+                nested
+                    .body
+                    .result_type()
+                    .expect("local function result was installed before body checking"),
+            )?
+        } else {
+            nested.expression(root)?
+        };
         let result_origin = nested.expression_origin(root)?;
         let root_statement = nested.body.add_statement(FirStatement {
             origin: result_origin,
@@ -364,11 +378,12 @@ impl BodyFirChecker<'_> {
             let expected = ResolvedTy::new(selected.sig.params[parameter]).map_err(|error| {
                 self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
             })?;
+            let value = self.expression(operand)?;
             arguments.push(FirCallArgument::Expression {
                 parameter: u32::try_from(parameter)
                     .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
-                value: self.expression(operand)?,
-                conversion: self.selected_value_conversion(operand, expected, cause)?,
+                value,
+                conversion: self.selected_value_conversion(operand, value, expected, cause)?,
             });
         }
         let expected_receiver = ResolvedTy::new(

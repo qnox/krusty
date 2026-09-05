@@ -45,6 +45,9 @@ pub struct PluginExpressionPlan {
 #[derive(Clone, Debug)]
 pub struct FrontendSelectedCall {
     pub expression: crate::ast::ExprId,
+    /// Explicit source receiver and its final checked type. Plugins consume the parser coordinate
+    /// while the bounded AST is live; checked FIR retains only the resulting operand.
+    pub explicit_receiver: Option<(crate::ast::ExprId, Ty)>,
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,

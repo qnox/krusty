@@ -37,6 +37,19 @@ pub(crate) fn member_scope_receiver(receiver: Ty) -> Ty {
     match receiver {
         Ty::Nothing => Ty::obj_name(crate::types::wk::any()),
         Ty::TyParam(_, bound) => member_scope_receiver(*bound),
+        Ty::Byte => Ty::obj("kotlin/Byte"),
+        Ty::Short => Ty::obj("kotlin/Short"),
+        Ty::Int => Ty::obj("kotlin/Int"),
+        Ty::Long => Ty::obj("kotlin/Long"),
+        Ty::Float => Ty::obj("kotlin/Float"),
+        Ty::Double => Ty::obj("kotlin/Double"),
+        Ty::Boolean => Ty::obj("kotlin/Boolean"),
+        Ty::Char => Ty::obj("kotlin/Char"),
+        Ty::UByte => Ty::obj("kotlin/UByte"),
+        Ty::UShort => Ty::obj("kotlin/UShort"),
+        Ty::UInt => Ty::obj("kotlin/UInt"),
+        Ty::ULong => Ty::obj("kotlin/ULong"),
+        Ty::String => Ty::obj("kotlin/String"),
         _ => receiver,
     }
 }
@@ -996,7 +1009,22 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
         let inherited = declarations
             .iter()
             .filter(|candidate| {
-                candidate.receiver_rank > implementation.receiver_rank
+                let owner_override = implementation.callable.owner != candidate.callable.owner
+                    && resolution_subtype(
+                        source,
+                        Ty::obj_name(implementation.callable.owner),
+                        Ty::obj_name(candidate.callable.owner),
+                    );
+                // Unrelated inherited declarations can still contribute one fake-override slot.
+                // In particular, a concrete/delegated implementation from one interface inherits
+                // default availability declared by an abstract sibling interface.  Two unrelated
+                // concrete bodies remain a conflict and are deliberately not joined here.
+                let same_rank_fake_override = candidate.receiver_rank
+                    == implementation.receiver_rank
+                    && (candidate.flags.is_abstract || implementation.flags.is_abstract);
+                (candidate.receiver_rank > implementation.receiver_rank
+                    || owner_override
+                    || same_rank_fake_override)
                     && candidate.context_count == implementation.context_count
                     && candidate.semantic_params() == implementation_parameters
                     && resolution_subtype(
@@ -1009,7 +1037,15 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
         if inherited.is_empty() {
             continue;
         }
-        let parameter_count = implementation.call_sig.param_defaults.len();
+        // Providers compact an all-false default bitmap to an empty vector.  An overriding
+        // declaration loaded from metadata therefore commonly has no bitmap at all, even though
+        // an overridden declaration supplies a default for the same semantic slot.  Materialize
+        // the compact representation before merging the inherited availability; using the stored
+        // bitmap length here silently skipped every slot across a compiled-module boundary.
+        let parameter_count = implementation.semantic_params().len();
+        if implementation.call_sig.param_defaults.is_empty() {
+            implementation.call_sig.param_defaults = vec![false; parameter_count];
+        }
         for parameter in 0..parameter_count {
             if implementation.call_sig.param_defaults[parameter] {
                 continue;
@@ -1241,11 +1277,11 @@ pub(crate) fn imported_object_member_symbols(
     })
 }
 
-/// Collapse one inherited function slot when a diamond contributes covariant return declarations at
-/// the same receiver rung. Kotlin treats `iterator(): MutableIterator<T>` as the override of
-/// `iterator(): Iterator<T>` even when the two declarations arrive through sibling supertypes. They
-/// are not overloads: equal value-parameter lists identify the same slot, and the strict return
-/// subtype is its most-specific declaration. Incomparable returns remain separate so ordinary
+/// Collapse declarations that represent one inherited function slot. A declaration owned by a
+/// subtype overrides the matching slot owned by its supertype even when both owners are direct
+/// supertypes of the use-site classifier (`class B : A(), T` with `A.foo` overriding `T.foo`). For
+/// sibling owners at the same receiver rung, Kotlin's covariant-return fake override keeps the
+/// uniquely most-specific result. Incomparable owners/results remain separate so ordinary
 /// overload/ambiguity diagnostics can reject an invalid hierarchy.
 fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &mut FunctionSet) {
     let mut retained: Vec<FunctionInfo> = Vec::with_capacity(functions.overloads.len());
@@ -1254,8 +1290,7 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
         let mut candidate_is_shadowed = false;
         let mut shadowed = Vec::new();
         for (index, existing) in retained.iter().enumerate() {
-            if existing.receiver_rank != candidate.receiver_rank
-                || existing.context_count != candidate.context_count
+            if existing.context_count != candidate.context_count
                 || existing.semantic_params() != candidate.semantic_params()
             {
                 continue;
@@ -1263,9 +1298,45 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
             let existing_ret = existing.ret.apply(existing.callable.ret);
             let candidate_is_subtype = resolution_subtype(source, candidate_ret, existing_ret);
             let existing_is_subtype = resolution_subtype(source, existing_ret, candidate_ret);
-            if candidate_is_subtype && !existing_is_subtype {
+            let candidate_owner_overrides = candidate.callable.owner != existing.callable.owner
+                && resolution_subtype(
+                    source,
+                    Ty::obj_name(candidate.callable.owner),
+                    Ty::obj_name(existing.callable.owner),
+                );
+            let existing_owner_overrides = candidate.callable.owner != existing.callable.owner
+                && resolution_subtype(
+                    source,
+                    Ty::obj_name(existing.callable.owner),
+                    Ty::obj_name(candidate.callable.owner),
+                );
+            let same_result = candidate_is_subtype && existing_is_subtype;
+            let candidate_implements_abstract = same_result
+                && candidate.receiver_rank == existing.receiver_rank
+                && !candidate.flags.is_abstract
+                && existing.flags.is_abstract;
+            let existing_implements_abstract = same_result
+                && candidate.receiver_rank == existing.receiver_rank
+                && !existing.flags.is_abstract
+                && candidate.flags.is_abstract;
+            let both_abstract_fake_override = same_result
+                && candidate.flags.is_abstract
+                && existing.flags.is_abstract
+                && existing.receiver_rank == candidate.receiver_rank;
+            if candidate_implements_abstract
+                || (candidate_is_subtype
+                    && (candidate_owner_overrides
+                        || (existing.receiver_rank == candidate.receiver_rank
+                            && !existing_is_subtype)))
+            {
                 shadowed.push(index);
-            } else if existing_is_subtype && !candidate_is_subtype {
+            } else if existing_implements_abstract
+                || both_abstract_fake_override
+                || (existing_is_subtype
+                    && (existing_owner_overrides
+                        || (existing.receiver_rank == candidate.receiver_rank
+                            && !candidate_is_subtype)))
+            {
                 candidate_is_shadowed = true;
                 break;
             }
@@ -1575,36 +1646,91 @@ fn specialized_params(
 fn specialized_constructor_params(
     src: &dyn SymbolSource,
     member: &LibraryMember,
+    classifier: &crate::libraries::LibraryType,
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    let Some(signature) = member
+    let Some(mut signature) = member
         .generic_sig
-        .as_ref()
+        .clone()
         .filter(|signature| signature.params.len() == member.params.len())
     else {
         return member.params.clone();
     };
-    let mut bindings = seeded_gsig_binds(signature, type_args);
-    for (&parameter, argument) in signature.params.iter().zip(args) {
-        let materialized_lambda = argument.is_lambda_literal()
-            && !argument.ty().mentions_error()
-            && !argument.ty().mentions_pending();
-        if (!argument.is_lambda_literal() || materialized_lambda) && !argument.is_omitted_default()
-        {
-            // Constructor classifier parameters collect lower bounds from every occurrence. A
-            // first-wins equality binding turns `PairBox("x", null)` into two `String`
-            // parameters and then rejects the nullable argument; the ordinary inference merge
-            // correctly completes the shared `T` as `String?` before applicability is tested.
-            // A lambda contributes only after compact checking has replaced its `Error` probe with
-            // a complete function type. This lets sibling lambdas constrain one another without
-            // allowing an untyped lambda placeholder to decide constructor inference.
-            unify_inferred_ty_with_source(
-                src,
-                parameter,
-                argument.type_for(parameter),
-                &mut bindings,
-            );
+    // A constructor's JVM/Kotlin callable signature generally lists only constructor-owned
+    // formals; occurrences of the owning CLASS's parameters remain in its value-parameter types.
+    // Make those finalized classifier declarations explicit to the shared solver. Otherwise it
+    // correctly treats `T` as an enclosing, non-inferable variable and leaves `Box(1)` at `T`.
+    let mut formals = classifier.type_parameters.type_params.clone();
+    let mut formal_bounds = classifier.type_parameters.type_param_bounds.clone();
+    for (ordinal, formal) in signature.formals.iter().enumerate() {
+        if formals.contains(formal) {
+            continue;
+        }
+        formals.push(formal.clone());
+        formal_bounds.push(
+            signature
+                .formal_bounds
+                .get(ordinal)
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    signature.formals = formals;
+    signature.formal_bounds = formal_bounds;
+    let mut bindings = seeded_gsig_binds(&signature, type_args);
+    let inference_inputs = signature.params.iter().zip(args).enumerate().filter_map(
+        |(parameter_index, (&parameter, argument))| {
+            let materialized_lambda = argument.is_lambda_literal()
+                && !argument.ty().mentions_error()
+                && !argument.ty().mentions_pending();
+            let mapped_whole_vararg_array = member.call_sig.vararg_index == Some(parameter_index)
+                && argument.ty().array_elem().is_some()
+                && parameter.array_elem().is_some()
+                && !argument.is_spread();
+            ((!argument.is_lambda_literal() || materialized_lambda)
+                && !argument.is_omitted_default()
+                && !mapped_whole_vararg_array)
+                .then(|| {
+                    (
+                        parameter_index,
+                        argument.inference_type(src, parameter),
+                        argument.is_spread(),
+                    )
+                })
+        },
+    );
+    let inferred = infer_generic_call_bindings_from_symbols(
+        src,
+        &signature,
+        inference_inputs,
+        member.call_sig.vararg_index,
+    );
+    // Signature-graph constructor calls and Pass-2 body calls consume the same lower/upper
+    // constraint solution. A pairwise common-supertype join loses declaration bounds and variance:
+    // `C("x", StringBuilder())` under `T : CharSequence` became `C<Any>`, while a contravariant
+    // `(T) -> Unit` input incorrectly widened an independent covariant `T = String` constraint.
+    // Explicit arguments remain fixed through the shared merge operation.
+    merge_generic_bindings_from(Some(src), &signature, type_args, &mut bindings, inferred);
+    // A mapped named argument at a vararg slot is a whole-array input even without `*`. The compact
+    // mapper currently retains spread provenance but not the name bit, so preserve the established
+    // structural merge for that one ambiguous carrier until the mapper publishes the distinction.
+    if member.call_sig.vararg_index.is_some() {
+        for (&parameter, argument) in signature.params.iter().zip(args) {
+            if argument.is_omitted_default() || argument.is_lambda_literal() {
+                continue;
+            }
+            if argument.ty().array_elem().is_some()
+                && parameter.array_elem().is_some()
+                && !argument.is_spread()
+            {
+                unify_inferred_ty_with_source(
+                    src,
+                    parameter,
+                    argument.type_for(parameter),
+                    &mut bindings,
+                );
+            }
         }
     }
     signature
@@ -3097,11 +3223,21 @@ impl<'a> SymbolResolver<'a> {
     /// postponed lambdas until those lambdas have been checked.
     pub(crate) fn specialized_constructor_parameter_types(
         &self,
+        internal: TypeName,
         constructor: &LibraryMember,
         arguments: &[CallArgKind],
         type_arguments: &[Ty],
     ) -> Vec<Ty> {
-        specialized_constructor_params(&self.src, constructor, arguments, type_arguments)
+        let Some(classifier) = self.src.classifier(internal) else {
+            return constructor.params.clone();
+        };
+        specialized_constructor_params(
+            &self.src,
+            constructor,
+            &classifier,
+            arguments,
+            type_arguments,
+        )
     }
 
     /// Select a constructor declaration without coupling it to a platform invocation. Frontend
@@ -3361,13 +3497,12 @@ impl<'a> SymbolResolver<'a> {
             .module
             .is_some_and(|module| module.classifier(internal).is_some())
         {
-            let rendered = internal.render();
-            if self.lexical_classes.iter().copied().any(|owner| {
-                let owner = owner.render();
-                rendered == owner
-                    || rendered
-                        .strip_prefix(&owner)
-                        .is_some_and(|suffix| suffix.starts_with('$'))
+            let declaring_owner = internal.nested_owner();
+            if declaring_owner.is_some_and(|declaring_owner| {
+                self.lexical_classes
+                    .iter()
+                    .copied()
+                    .any(|lexical| lexical.same_or_nested_within(declaring_owner))
             }) {
                 return true;
             }
@@ -3458,6 +3593,12 @@ impl<'a> SymbolResolver<'a> {
             .unwrap_or_default()
     }
 
+    fn tagged_symbol_levels_in_scope(&self, name: &str) -> Vec<FunctionScopeLevel> {
+        self.fn_scope
+            .map(|scope| tagged_symbol_levels_in_function_scope(&self.src, name, scope))
+            .unwrap_or_default()
+    }
+
     /// Collect the declarations denoted by `receiver.name` exactly once. Member declarations and
     /// imported extension declarations use the same [`Callables`] shape; overload selection is a
     /// separate operation over this family.
@@ -3489,7 +3630,7 @@ impl<'a> SymbolResolver<'a> {
             .cloned()
             .collect::<Vec<_>>();
         if self.fn_scope.is_some() {
-            let levels = self.symbol_levels_in_scope(name);
+            let levels = self.tagged_symbol_levels_in_scope(name);
             // `@kotlin.internal.HidesMembers` declarations are NOT part of the tower: they resolve
             // above all of it. The nearest-level rule below stops at the first level holding an
             // applicable extension, which would hide the default-imported `kotlin.collections`
@@ -3499,7 +3640,7 @@ impl<'a> SymbolResolver<'a> {
             // tiers in `select_overload_tracking_with_functions`); an annotated declaration that
             // does not fit falls through to the ordinary candidates collected below.
             for level in &levels {
-                let scoped = callables_from_symbols(level);
+                let scoped = callables_from_symbols(&level.symbols);
                 functions.extend(
                     ranked_extension_candidates(&self.src, receiver, scoped.functions().iter())
                         .into_iter()
@@ -3511,13 +3652,14 @@ impl<'a> SymbolResolver<'a> {
                         .map(|(rank, _, function)| {
                             let mut function = function.clone();
                             function.receiver_rank = rank;
+                            function.scope_rung = level.kind.callable_scope_rung();
                             function
                         }),
                 );
             }
             let mut extension_property_level_found = false;
             for (scope_rank, level) in levels.into_iter().enumerate() {
-                let scoped = callables_from_symbols(&level);
+                let scoped = callables_from_symbols(&level.symbols);
                 crate::trace_compiler!(
                     "resolve",
                     "receiver scope level name={name} receiver={receiver:?} functions={:?}",
@@ -3569,6 +3711,7 @@ impl<'a> SymbolResolver<'a> {
                     let mut function = function.clone();
                     function.receiver_rank = rank;
                     function.scope_rank = u32::try_from(scope_rank).unwrap_or(u32::MAX);
+                    function.scope_rung = level.kind.callable_scope_rung();
                     function
                 }));
                 extension_property_level_found |= !extension_properties.is_empty();
@@ -4325,7 +4468,7 @@ impl<'a> SymbolResolver<'a> {
                 .filter_map(|property| {
                     property_applicable(&property).map(|priority| (priority, property))
                 })
-                .max_by_key(|(priority, _)| *priority);
+                .max_by_key(|(priority, property)| (*priority, !property.accessor_derived));
             if let Some(((accessible, _), mut property)) = local_property {
                 crate::trace_compiler!(
                     "resolve",
@@ -6104,7 +6247,8 @@ pub(crate) fn select_constructor_declaration_from_type_with_type_arguments(
         .iter()
         .map(|constructor| {
             let mut declaration = constructor.clone();
-            declaration.params = specialized_constructor_params(src, constructor, args, type_args);
+            declaration.params =
+                specialized_constructor_params(src, constructor, classifier, args, type_args);
             if !classifier_bindings.is_empty() {
                 declaration.params = declaration
                     .params
@@ -6408,7 +6552,10 @@ impl ResolvedMember {
         member.set_is_interface(callable.owner_is_interface);
         member.set_is_abstract(callable.is_abstract);
         member.set_suspend(callable.suspend);
-        member.realization = callable.member_realization;
+        member.realization = callable
+            .compiler_intrinsic
+            .map(crate::libraries::MemberRealization::Intrinsic)
+            .unwrap_or(callable.member_realization);
         member.context_count = callable.context_count;
         member.inline = callable.inline;
         member.inline_body_plan = callable.inline_body_plan;
@@ -6864,6 +7011,15 @@ enum FunctionScopeLevelKind {
 impl FunctionScopeLevelKind {
     fn ambiguity_checks(self) -> bool {
         matches!(self, Self::Import)
+    }
+
+    fn callable_scope_rung(self) -> crate::libraries::CallableScopeRung {
+        match self {
+            Self::Flat => crate::libraries::CallableScopeRung::Unscoped,
+            Self::Explicit => crate::libraries::CallableScopeRung::ExplicitImport,
+            Self::CurrentPackage => crate::libraries::CallableScopeRung::CurrentPackage,
+            Self::Import => crate::libraries::CallableScopeRung::Import,
+        }
     }
 }
 
@@ -7824,6 +7980,12 @@ fn indexed_call_shape(
 /// class passed where a library member expects its (library) supertype — `class V : Thread()` into
 /// `take(Thread)` — is invisible to the platform oracle, which only walks classpath supertypes.
 fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool {
+    // Preserve a lexical type parameter's identity before consulting its upper bound. In
+    // particular, `T?` is always assignable to the same `T?`; reducing the target to `Any?` first
+    // loses that proof for nullable value-class applications inside a generic SAM result.
+    if param == arg {
+        return true;
+    }
     if let Ty::TyParam(_, bound) = param.non_null() {
         if *arg == Ty::Null {
             return param.admits_null();
@@ -7849,7 +8011,14 @@ fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool
 }
 
 fn distinct_source_declarations(left: &FunctionInfo, right: &FunctionInfo) -> bool {
-    left.source_key.is_some() && right.source_key.is_some() && left.source_key != right.source_key
+    match (left.stable_declaration, right.stable_declaration) {
+        (Some(left), Some(right)) => left != right,
+        _ => {
+            left.source_key.is_some()
+                && right.source_key.is_some()
+                && left.source_key != right.source_key
+        }
+    }
 }
 
 fn source_aware_most_specific<'a, I>(
@@ -8182,6 +8351,46 @@ mod tests {
     impl SymbolSource for EmptySource {}
     impl SemanticPlatform for EmptySource {}
     const EMPTY_SOURCE: EmptySource = EmptySource;
+
+    #[test]
+    fn function_shaped_generic_parameter_beats_a_bare_type_parameter_for_lambda() {
+        let any = Ty::obj("kotlin/Any");
+        let lambda = Ty::fun(Vec::new(), Ty::String);
+        let candidate = |formal: &str, parameter: Ty, source_key| {
+            let variable = Ty::ty_param(formal, any);
+            let mut info = FunctionInfo::plain(
+                FnKind::TopLevel,
+                None,
+                LibraryCallable::library("demo/TestKt", "choose", vec![parameter], any, any, ""),
+            );
+            info.generic_sig = Some(GenericSig {
+                formals: vec![formal.to_string()],
+                formal_bounds: vec![vec![any]],
+                receiver: None,
+                params: vec![parameter],
+                ret: variable,
+                return_policy: GenericReturnPolicy::Exact,
+            });
+            info.source_key = Some(source_key);
+            info
+        };
+        let bare_variable = Ty::ty_param("T", any);
+        let function_variable = Ty::ty_param("R", any);
+        let bare = candidate("T", bare_variable, (0, 0));
+        let functional = candidate("R", Ty::fun(Vec::new(), function_variable), (0, 1));
+        let candidates = [(&bare, vec![lambda]), (&functional, vec![lambda])];
+
+        let selected = best_by_args(
+            &EMPTY_SOURCE,
+            &EMPTY_SOURCE,
+            &candidates,
+            &[CallArgKind::LambdaLiteral(lambda)],
+        );
+        assert!(matches!(
+            selected,
+            CandidateSelection::Selected(candidate) if std::ptr::eq(candidate, &functional)
+        ));
+    }
 
     #[test]
     fn classifier_bindings_reconstruct_recursive_star_bound_from_declaration() {

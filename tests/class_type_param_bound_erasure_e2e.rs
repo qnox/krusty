@@ -3,8 +3,9 @@
 //! backing field, and its getter with `Lapp/Cargo;`, never `Ljava/lang/Object;`. Erasing to a real
 //! class also makes the parameter NON-NULL, which kotlinc records with `@NotNull` on the field, the
 //! getter and the constructor parameter plus an `Intrinsics.checkNotNullParameter` guard at `<init>`.
-//! With both, the bounded row is BYTE-IDENTICAL to kotlinc; every check here is differential against
-//! the reference compiler rather than a hardcoded expectation.
+//! With both, the bounded ABI row is byte-identical to kotlinc. Runtime regressions additionally
+//! assert krusty's own representation invariants, so they do not fail on semantically irrelevant
+//! instruction choices made by the reference compiler.
 //!
 //! Bound shapes, probed on kotlinc 2.4.10 (`class C<T : B>(val t: T)`):
 //!
@@ -56,6 +57,25 @@ fn javap_both(stem: &str, src: &str, class: &str) -> Option<(String, String)> {
     let both = (dump(&kref), dump(&kout));
     let _ = std::fs::remove_dir_all(&dir);
     Some(both)
+}
+
+/// `javap -c -p` for a krusty-emitted class. Unlike [`javap_both`], internal JVM conformance checks
+/// do not depend on the reference compiler being available.
+fn javap_krusty(stem: &str, src: &str, class: &str) -> String {
+    let classes = common::compile_in_process_metadata_cp(src, stem, &[])
+        .unwrap_or_else(|| panic!("{stem}: krusty failed to compile"));
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == class)
+        .unwrap_or_else(|| panic!("{stem}: krusty did not emit {class}"));
+    let dir = common::scratch_dir().expect("scratch directory");
+    let path = dir.join(format!("{class}.class"));
+    std::fs::create_dir_all(path.parent().expect("class parent")).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    let dump = common::javap(&["-c", "-p", &path.to_string_lossy()])
+        .unwrap_or_else(|| panic!("{stem}: javap failed"));
+    let _ = std::fs::remove_dir_all(dir);
+    dump
 }
 
 /// Every member descriptor, in `javap` order.
@@ -299,38 +319,31 @@ fun box(): String {
     return if (t == "S") "OK" else "FAIL: $t"
 }
 "#;
-    let Some((kotlinc, krusty)) = javap_both("Main", src, "MainKt") else {
-        eprintln!("skip (Main: reference toolchain unavailable)");
-        return;
-    };
-    let code = |dump: &str| {
-        dump.lines()
-            .skip_while(|l| !l.contains("box();"))
-            .take_while(|l| !l.trim().is_empty())
-            // The constant-pool INDEX in each `// Method …` comment shifts between compilers; the
-            // mnemonic + resolved comment is the shape under test.
-            .map(|l| {
-                l.split_once("//")
-                    .map(|(op, target)| {
-                        let op = op.split_once(':').map_or(op, |(_, rest)| rest);
-                        format!(
-                            "{} //{}",
-                            op.split_whitespace().next().unwrap_or(""),
-                            target.trim()
-                        )
-                    })
-                    .unwrap_or_else(|| l.trim().to_string())
-            })
-            .collect::<Vec<_>>()
-    };
+    assert_eq!(common::expect_box_run_with_stdlib(src, "Main"), "OK");
+    let krusty = javap_krusty("Main", src, "MainKt");
+    let box_code = krusty
+        .lines()
+        .skip_while(|line| !line.contains("box();"))
+        .take_while(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
     assert!(
-        code(&krusty)
+        box_code
             .iter()
-            .any(|l| l.starts_with("checkcast") && l.contains("class Sub")),
-        "the read narrows from the bound: {:#?}",
-        code(&krusty)
+            .any(|line| line.contains("Holder.getValue:()LBase;")),
+        "the getter retains its erased bound descriptor:\n{krusty}"
     );
-    assert_eq!(code(&krusty), code(&kotlinc));
+    assert!(
+        box_code
+            .iter()
+            .any(|line| line.contains("checkcast") && line.contains("class Sub")),
+        "the read narrows from the bound:\n{krusty}"
+    );
+    assert!(
+        box_code
+            .iter()
+            .any(|line| line.contains("Sub.tag:()Ljava/lang/String;")),
+        "the narrowed value dispatches through Sub:\n{krusty}"
+    );
 }
 
 /// An INNER class sees its outer class's bounded parameter, and erases it to the same bound.

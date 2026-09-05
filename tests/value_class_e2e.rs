@@ -173,6 +173,67 @@ fun box(): String = Wrapped(42.0).value
 }
 
 #[test]
+fn value_class_secondary_constructor_does_not_reframe_a_nested_lambda() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+// LANGUAGE: +ValueClassesSecondaryConstructorWithBody
+val seen = mutableListOf<Double>()
+
+@JvmInline
+value class Wrapped(val value: Int) {
+    constructor(value: Double) : this(value.toInt()) {
+        seen.add(value.let(fun(item: Double) = item - 1.0))
+    }
+}
+
+fun box(): String {
+    Wrapped(3.0)
+    return if (seen == listOf(2.0)) "OK" else seen.toString()
+}
+"#,
+        "ValueClassSecondaryNestedLambda",
+    );
+}
+
+#[test]
+fn value_class_member_calls_in_retained_inline_lambda_use_the_static_carrier_abi() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+// LANGUAGE: +JvmInlineMultiFieldValueClasses
+@JvmInline
+value class Item(val value: Int)
+
+@JvmInline
+value class Items(val storage: IntArray) {
+    fun contains(element: Item): Boolean = storage.contains(element.value)
+    fun containsAll(elements: Collection<Item>): Boolean =
+        elements.all { contains(it) }
+}
+
+fun box(): String =
+    if (Items(intArrayOf(1, 2)).containsAll(listOf(Item(1), Item(2)))) "OK" else "Fail"
+"#,
+        "ValueClassRetainedInlineLambdaMemberCall",
+    );
+}
+
+#[test]
+fn value_class_member_default_call_uses_the_static_impl_stub() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+@JvmInline
+value class Wrapped(val value: Int) {
+    fun plus(other: Int = 42): Int = value + other
+}
+
+fun box(): String =
+    if (Wrapped(800).plus() == 842 && Wrapped(400).plus(32) == 432) "OK" else "fail"
+"#,
+        "ValueClassMemberDefaultStub",
+    );
+}
+
+#[test]
 fn nullable_reference_underlying_value_class_extension_to_string_is_null_safe() {
     let stdlib = common::stdlib_jar();
     let java_home = common::java_home();
@@ -369,6 +430,92 @@ fn generic_interface_delegation_publishes_the_forwarders_type_parameter() {
          class Delegating : Consumer<S<String>> by Impl\n\
          fun box(): String = Delegating().consume(S(\"O\"), \"K\")\n",
         "GenericValueClassInterfaceDelegation",
+    );
+}
+
+#[test]
+fn generic_value_class_member_result_is_unboxed_before_underlying_property_read() {
+    common::expect_box_ok_with_stdlib(
+        "@JvmInline\n\
+         value class InlinedBase<T : Int>(val x: T) : Base<InlinedBase<T>> {\n\
+             override fun Base<InlinedBase<T>>.foo(\n\
+                 a: Base<InlinedBase<T>>,\n\
+                 b: InlinedBase<T>,\n\
+             ): Base<InlinedBase<T>> =\n\
+                 if (a is InlinedBase<*>) InlinedBase((a.x + b.x) as T) else this\n\
+             fun double(): InlinedBase<T> = this.foo(this, this) as InlinedBase<T>\n\
+         }\n\
+         interface Base<T> {\n\
+             fun Base<T>.foo(a: Base<T>, b: T): Base<T>\n\
+         }\n\
+         fun box(): String {\n\
+             val b = InlinedBase(3)\n\
+             return if (b.double().x == 6) \"OK\" else \"Fail\"\n\
+         }\n",
+        "GenericValueClassMemberResultProperty",
+    );
+}
+
+#[test]
+fn value_class_override_bridge_invokes_the_static_carrier_member() {
+    common::expect_box_ok_with_stdlib(
+        "@JvmInline\n\
+         value class ComparableValue(val value: Int) : Comparable<ComparableValue> {\n\
+             override fun compareTo(other: ComparableValue): Int = value - other.value\n\
+         }\n\
+         fun <T> compare(left: Comparable<T>, right: T): Int = left.compareTo(right)\n\
+         fun box(): String =\n\
+             if (compare(ComparableValue(4), ComparableValue(3)) == 1) \"OK\" else \"Fail\"\n",
+        "ValueClassStaticCarrierBridge",
+    );
+}
+
+#[test]
+fn non_value_class_override_returns_the_unboxed_value_class_carrier() {
+    common::expect_box_ok_with_stdlib(
+        "@JvmInline\n\
+         value class Wrap(val s: String)\n\
+         interface Base { fun get(): Wrap }\n\
+         class Impl(val w: Wrap) : Base { override fun get(): Wrap = w }\n\
+         fun box(): String {\n\
+             val base: Base = Impl(Wrap(\"OK\"))\n\
+             return base.get().s\n\
+         }\n",
+        "NonValueClassOverrideCarrierReturn",
+    );
+}
+
+#[test]
+fn value_class_computed_property_override_has_one_carrier_implementation() {
+    common::expect_box_ok_with_stdlib(
+        "interface Base { val id: Int }\n\
+         @JvmInline\n\
+         value class Child(val stored: Int) : Base {\n\
+             override val id: Int get() = stored\n\
+         }\n\
+         fun box(): String {\n\
+             val base: Base = Child(5)\n\
+             return if (base.id == 5) \"OK\" else \"Fail\"\n\
+         }\n",
+        "ValueClassComputedPropertyOverride",
+    );
+}
+
+#[test]
+fn value_class_member_safe_cast_observes_the_boxed_interface_argument() {
+    common::expect_box_ok_with_stdlib(
+        "interface Marker\n\
+         var sink: Any? = null\n\
+         @JvmInline\n\
+         value class Wrapped(val value: Int) : Marker {\n\
+             fun save(other: Marker) { sink = (other as? Wrapped)?.value }\n\
+         }\n\
+         fun box(): String {\n\
+             val value = Wrapped(5)\n\
+             value.save(value)\n\
+             return if (sink == 5) \"OK\" else \"Fail:$sink\"\n\
+         }\n",
+        "ValueClassMemberSafeCast",
     );
 }
 

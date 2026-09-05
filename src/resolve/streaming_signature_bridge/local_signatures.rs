@@ -288,29 +288,6 @@ fn publish_checked_local_signatures_selected(
             .map_or(signature.ret, |generic| generic.ret)
     }
 
-    fn indexed_classifier_self(
-        index: &crate::fir::ResolvedModuleIndex,
-        declaration: DeclarationId,
-    ) -> Option<Ty> {
-        let classifier = index.classifier_header(declaration)?.classifier;
-        let arguments = index
-            .classifier_type_arguments(declaration)
-            .unwrap_or_default()
-            .iter()
-            .map(|parameter| {
-                let header = index.type_parameter_header(*parameter)?;
-                let semantic_name = index.type_parameter_semantic_name(*parameter)?;
-                let bound = header
-                    .bounds
-                    .first()
-                    .map(|bound| bound.ty.get())
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                Some(Ty::ty_param(semantic_name, bound))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Ty::obj_args_name(classifier, &arguments))
-    }
-
     fn enclosing_class<'a>(
         file: &'a File,
         index: &crate::fir::ResolvedModuleIndex,
@@ -609,7 +586,7 @@ fn publish_checked_local_signatures_selected(
         if index.classifier_hierarchy(declaration).is_some() {
             return true;
         }
-        let Some(root) = indexed_classifier_self(index, declaration) else {
+        let Some(root) = index.classifier_self_type(declaration) else {
             return false;
         };
         let hierarchy = {
@@ -1467,7 +1444,7 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     }
-                    let Some(result) = indexed_classifier_self(index, owner_stable) else {
+                    let Some(result) = index.classifier_self_type(owner_stable) else {
                         failed.push(declaration);
                         continue;
                     };

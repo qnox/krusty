@@ -49,6 +49,44 @@ fun inferred() = transform<String>(
 }
 
 #[test]
+fn compact_binary_arguments_retain_integer_literal_leaves_until_semantic_evaluation() {
+    let text = "fun inferred() = consume(1_700_000_000 + 1)\n";
+    let sources = [SourceInput::kotlin(text).with_file_stem("IntegerConstant")];
+    let mut diagnostics = DiagSink::new();
+    let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
+    let headers = inventory_parsed_source_headers(&sources, std::slice::from_ref(&file));
+    let mut origins = OriginStore::default();
+    let mut extractor = SignatureConstraintExtractor::default();
+    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
+        origins.source(SourceFileId::from_raw(0), span)
+    });
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    assert_eq!(extractor.failures(), []);
+    let graph = extractor.finish().unwrap();
+    let SigExpr::Call { arguments, .. } = graph.expr(graph.constraints()[0].result).unwrap() else {
+        panic!("inferred signature root must remain a deferred call")
+    };
+    let [argument] = graph.call_arguments(arguments) else {
+        panic!("call must retain its single compact argument")
+    };
+    let SigExpr::Binary {
+        operator: SigBinaryOperator::Add,
+        lhs,
+        rhs,
+        ..
+    } = graph.expr(argument.value).unwrap()
+    else {
+        panic!("constant expression must retain its binary semantic selection")
+    };
+    assert_eq!(
+        graph.expr(lhs),
+        Some(SigExpr::IntegerLiteral(1_700_000_000))
+    );
+    assert_eq!(graph.expr(rhs), Some(SigExpr::IntegerLiteral(1)));
+}
+
+#[test]
 fn compact_call_chain_keeps_classifier_qualified_base_call() {
     let text = r#"
 fun cmp(d: JDerived) =
@@ -104,6 +142,58 @@ fun bar1(bar: IBar<Int>) = bar.bar(1)
         graph.expr(constraint.result),
         Some(SigExpr::MemberCall { .. })
     )));
+}
+
+#[test]
+fn contextual_lambda_does_not_force_an_unused_receiver_into_local_member_signature() {
+    let text = r#"
+interface I { fun result(): String }
+inline fun <T> run(block: () -> T): T = block()
+inline fun inferred() = run {
+    object : I {
+        override fun result() = "OK"
+    }
+}
+"#;
+    let sources = [SourceInput::kotlin(text).with_file_stem("AnonymousInLambda")];
+    let mut diagnostics = DiagSink::new();
+    let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
+    let headers = inventory_parsed_source_headers(&sources, std::slice::from_ref(&file));
+    let anonymous = file
+        .anonymous_object_classes
+        .values()
+        .copied()
+        .next()
+        .expect("anonymous classifier");
+    let crate::ast::Decl::Class(anonymous) = file.decl(anonymous) else {
+        panic!("anonymous declaration must be a classifier")
+    };
+    let method = anonymous.methods.first().expect("anonymous member");
+    let declaration = headers
+        .stubs
+        .iter()
+        .find(|stub| stub.kind == DeclarationKind::Function && stub.range == method.span)
+        .expect("anonymous member stub")
+        .id;
+    let mut origins = OriginStore::default();
+    let mut extractor = SignatureConstraintExtractor::default();
+    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
+        origins.source(SourceFileId::from_raw(0), span)
+    });
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    assert_eq!(extractor.failures(), []);
+    let graph = extractor.finish().unwrap();
+    let constraint = graph
+        .constraint(declaration)
+        .expect("inferred member constraint");
+    let SigExpr::ScopedReceiver { receiver, .. } = graph.expr(constraint.result).unwrap() else {
+        panic!("local member result must retain its dispatch receiver")
+    };
+    assert!(matches!(
+        graph.expr(receiver),
+        Some(SigExpr::ClassifierType { declaration: owner, .. }) if owner != declaration
+    ));
 }
 
 #[test]

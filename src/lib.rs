@@ -18,6 +18,7 @@ pub mod backend;
 pub mod compiler;
 pub mod conformance;
 pub mod contracts;
+mod declaration_validation;
 pub mod diag;
 pub mod dump;
 pub mod features;

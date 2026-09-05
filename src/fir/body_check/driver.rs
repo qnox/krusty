@@ -702,6 +702,31 @@ fn check_and_dispatch_property_body(
         (work.kind == BodyKind::Initializer)
             .then_some(property_storage_type)
             .flatten(),
+        match work.kind {
+            BodyKind::Initializer => Some(property_storage_type.unwrap_or(signature.result)),
+            BodyKind::Getter if matches!(property.getter, Some(FunBody::Expr(_))) => {
+                Some(signature.result)
+            }
+            BodyKind::Setter
+                if property
+                    .setter
+                    .as_ref()
+                    .and_then(|setter| setter.body.as_ref())
+                    .is_some_and(|body| matches!(body, FunBody::Expr(_))) =>
+            {
+                Some(
+                    crate::fir::ResolvedTy::new(crate::types::Ty::Unit)
+                        .expect("Unit is a publishable FIR type"),
+                )
+            }
+            BodyKind::Delegate
+            | BodyKind::Getter
+            | BodyKind::Setter
+            | BodyKind::Function
+            | BodyKind::EnumEntry
+            | BodyKind::Constructor
+            | BodyKind::Script => None,
+        },
         index,
         origins,
         session,
@@ -916,6 +941,7 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
             ),
         },
         None,
+        matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
         index,
         origins,
         session,
@@ -1027,6 +1053,7 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
                 callable.shape.extension_receiver,
             ),
         },
+        None,
         None,
         index,
         origins,

@@ -1025,6 +1025,59 @@ impl HeaderSyntaxArena {
         spellings: &std::collections::HashMap<Span, TypeRef>,
         names: &mut LookupNames,
     ) {
+        fn capture_descendants(
+            arena: &mut HeaderSyntaxArena,
+            root: HeaderTypeId,
+            spellings: &std::collections::HashMap<Span, TypeRef>,
+            names: &mut LookupNames,
+        ) {
+            let children = match arena
+                .ty(root)
+                .expect("newly inserted compact type must exist")
+                .kind
+            {
+                HeaderTypeKind::Classifier {
+                    detail,
+                    abbreviated_argument,
+                } => {
+                    let detail = arena
+                        .classifier_type(detail)
+                        .expect("compact classifier detail must exist");
+                    arena
+                        .type_operands(detail.arguments)
+                        .iter()
+                        .copied()
+                        .chain(abbreviated_argument)
+                        .collect::<Vec<_>>()
+                }
+                HeaderTypeKind::Function {
+                    parameters, result, ..
+                } => arena
+                    .type_operands(parameters)
+                    .iter()
+                    .copied()
+                    .chain(result)
+                    .collect::<Vec<_>>(),
+            };
+            for child in children {
+                let source = arena
+                    .ty(child)
+                    .and_then(|ty| spellings.get(&ty.span))
+                    .cloned();
+                if let Some(source) = source {
+                    let source = arena.add_type(&source, names);
+                    arena.source_spellings.insert(child, source);
+                    // The parser expands inner aliases before saving an outer alias's spelling.
+                    // Therefore its saved tree can contain an expanded child whose own source
+                    // spelling exists only in the span sidecar. Attach that spelling to the
+                    // compact SOURCE tree now, while the parser sidecar is still available.
+                    capture_descendants(arena, source, spellings, names);
+                } else {
+                    capture_descendants(arena, child, spellings, names);
+                }
+            }
+        }
+
         let rewritten = self.types[first_type..]
             .iter()
             .enumerate()
@@ -1042,6 +1095,7 @@ impl HeaderSyntaxArena {
         for (expanded, spelling) in rewritten {
             let spelling = self.add_type(&spelling, names);
             self.source_spellings.insert(expanded, spelling);
+            capture_descendants(self, spelling, spellings, names);
         }
     }
 
@@ -1246,6 +1300,10 @@ impl HeaderSyntaxArena {
             let ty = arena.ty(id)?;
             if let Some(spelling) = arena.source_spellings.get(&id).copied() {
                 out.insert(ty.span, arena.transient_type_ref(spelling, names)?);
+                // Source spelling trees can themselves contain parser-expanded aliases. They are
+                // compactly linked by identity during header capture, so include those nested
+                // substitutions as well as substitutions in the semantic expansion tree.
+                visit(arena, spelling, names, out)?;
             }
             match ty.kind {
                 HeaderTypeKind::Classifier {
@@ -1366,16 +1424,22 @@ impl HeaderSyntaxArena {
     }
 }
 
+struct ExtractedFileStubs {
+    stubs: Vec<DeclarationStub>,
+    /// Stable identity parallel to every entry of the transient parser's `File::decls` array.
+    source_declarations: Vec<DeclarationId>,
+}
+
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
 /// stubs contain no parser arena ids or owned spellings; an optional temporary lookup-name id is not
 /// semantic identity. Stubs remain valid after `file` is dropped. This is the stable-identity portion
 /// of pass 1; signature syntax and constraints are attached by the resolver-facing extraction pass.
-pub fn extract_file_stubs(
+fn extract_file_stub_inventory(
     file: &File,
     source: SourceFileId,
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
-) -> Vec<DeclarationStub> {
+) -> ExtractedFileStubs {
     fn body_range(file: &File, body: &FunBody) -> Option<TextRange> {
         let expression = match body {
             FunBody::Expr(expression) | FunBody::Block(expression) => *expression,
@@ -1558,6 +1622,12 @@ pub fn extract_file_stubs(
                 .with(DeclarationFlags::MUTABLE, property.is_var)
                 .with(DeclarationFlags::LATEINIT, property.is_lateinit)
                 .with(DeclarationFlags::DELEGATED, property.delegate.is_some())
+                .with(
+                    DeclarationFlags::INFERRED_PROPERTY_TYPE,
+                    inferred_expression.is_some_and(|(_, _, kind)| {
+                        kind != InferredSignatureKind::BackingFieldInitializer
+                    }),
+                )
                 .with(
                     DeclarationFlags::EXPLICIT_BACKING_FIELD,
                     property.explicit_backing_field.is_some(),
@@ -2021,6 +2091,7 @@ pub fn extract_file_stubs(
     let nested_owners = nested_classifier_owners(file, source, ids);
     let companion_declarations = companion_declarations(file);
     let mut stubs = Vec::new();
+    let mut source_declarations = vec![None; file.decls.len()];
     let mut declaration_blocks = Vec::new();
     for (index, declaration) in file.decls.iter().enumerate() {
         if companion_declarations.contains(declaration) {
@@ -2060,6 +2131,7 @@ pub fn extract_file_stubs(
                 &mut stubs,
             ),
         }
+        source_declarations[index] = Some(stubs[first_stub].id);
         if file.is_local_declaration(*declaration) {
             for stub in &mut stubs[first_stub..] {
                 stub.flags = stub.flags.with(DeclarationFlags::LOCAL_CLASS, true);
@@ -2081,6 +2153,14 @@ pub fn extract_file_stubs(
             stubs[first_stub].flags = stubs[first_stub].flags.with(DeclarationFlags::EXPECT, true);
         }
         declaration_blocks.push((*declaration, first_stub..stubs.len()));
+    }
+    // A companion classifier is emitted recursively with its owning class rather than as a second
+    // file-root block. Its stable anchor is nevertheless exact and occupies its parser declaration
+    // slot, so later signature publication does not need to rediscover it from names or ranges.
+    for (index, declaration) in file.decls.iter().copied().enumerate() {
+        if companion_declarations.contains(&declaration) {
+            source_declarations[index] = classifier_identity(file, source, ids, declaration);
+        }
     }
     if !file.local_class_enclosing_declarations.is_empty() {
         let blocks = declaration_blocks
@@ -2195,7 +2275,74 @@ pub fn extract_file_stubs(
             break;
         }
     }
-    stubs
+    ExtractedFileStubs {
+        stubs,
+        source_declarations: source_declarations
+            .into_iter()
+            .map(|declaration| {
+                declaration.expect("every parser declaration has a stable header identity")
+            })
+            .collect(),
+    }
+}
+
+pub fn extract_file_stubs(
+    file: &File,
+    source: SourceFileId,
+    ids: &mut DeclarationIds,
+    names: &mut LookupNames,
+) -> Vec<DeclarationStub> {
+    extract_file_stub_inventory(file, source, ids, names).stubs
+}
+
+/// Put one file's declarations into the stable stream shared by Pass 1 and a fresh Pass-2 parse.
+///
+/// Parser-owned member families are stored separately, so source declarations are interleaved by
+/// their live hierarchical source order. Each top-level subtree must remain contiguous because Pass
+/// 2 reparses one such bounded unit at a time. Within an owner, compiler-generated data-class members
+/// have no source position and follow every written sibling in stable synthesis order. Only the
+/// resulting declaration-id stream survives the parse; the ranges and temporary hierarchy do not.
+pub(super) fn order_file_stubs(stubs: &mut [DeclarationStub], ids: &DeclarationIds) {
+    let ordering = stubs
+        .iter()
+        .enumerate()
+        .map(|(position, stub)| {
+            (
+                stub.id,
+                (
+                    stub.flags.has(DeclarationFlags::COMPILER_GENERATED),
+                    stub.range.lo,
+                    position,
+                ),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    stubs.sort_by_cached_key(|stub| {
+        let mut path = Vec::new();
+        let mut current = Some(stub.id);
+        let mut remaining = ids.len().saturating_add(1);
+        while let Some(declaration) = current {
+            if remaining == 0 {
+                panic!("stable declaration ownership graph contains a cycle");
+            }
+            remaining -= 1;
+            // A hoisted local classifier can be owned by a stable lexical-function or accessor
+            // identity which deliberately has no declaration stub: the executable is represented
+            // by its enclosing checked body, not published as a module declaration. Skip that
+            // ordering-only rung while retaining its owner edge. Published ancestors still group
+            // the complete top-level subtree, and the classifier's own source order distinguishes
+            // sibling local declarations.
+            if let Some(order) = ordering.get(&declaration).copied() {
+                path.push(order);
+            }
+            current = ids
+                .anchor(declaration)
+                .unwrap_or_else(|| panic!("declaration {declaration:?} has no stable anchor"))
+                .owner;
+        }
+        path.reverse();
+        path
+    });
 }
 
 /// Copy every non-local declaration type from one transient file into packed header storage. This
@@ -2898,6 +3045,10 @@ pub struct StreamedHeaderModule {
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
+    /// File-declaration roots in parser order, partitioned by source. Members/accessors remain
+    /// reachable through their stable owner edges and therefore do not appear here. Signature
+    /// publication iterates this structure instead of retaining `File::decls` as scaffolding.
+    source_declarations: Vec<Vec<DeclarationId>>,
     /// Pass-1-only semantic containment for parser-hoisted local classifiers. Both sides are stable
     /// declaration identities derived while the AST is live; no source coordinate or parser arena
     /// identity is retained. Inline/default preparation consumes this before Pass 2.
@@ -2919,6 +3070,14 @@ impl StreamedHeaderModule {
     /// order from text offsets or parser arena coordinates.
     pub(crate) fn declaration_inventory(&self) -> &[DeclarationId] {
         &self.inventory
+    }
+
+    /// Stable file-declaration roots for one source, in source order.
+    pub(crate) fn source_declarations(&self, source: SourceFileId) -> &[DeclarationId] {
+        self.source_declarations
+            .get(source.raw() as usize)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Whether `source` contributed compact declaration headers. Semantic consumers that iterate a
@@ -3010,6 +3169,10 @@ impl StreamedHeaderModule {
             .collect::<Vec<_>>();
         self.excluded.extend(excluded);
         self.stubs.retain(|stub| !self.excluded.contains(&stub.id));
+        // `source_declarations` is positional with the transient parser's `File::decls` array.
+        // Keep excluded identities in that positional map; consumers cross-check `stubs`, where
+        // exclusion is authoritative. Removing an element here would shift every later source
+        // declaration onto the preceding parser sibling during compact signature publication.
     }
 
     /// Persistent payload controlled by this header inventory. Source text and transient AST arenas
@@ -3027,6 +3190,11 @@ impl StreamedHeaderModule {
             + self.visibility_suppressions.storage_payload_bytes()
             + self.stubs.len() * std::mem::size_of::<DeclarationStub>()
             + self.inventory.len() * std::mem::size_of::<DeclarationId>()
+            + self
+                .source_declarations
+                .iter()
+                .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
+                .sum::<usize>()
             + self.excluded.len() * std::mem::size_of::<DeclarationId>()
     }
 
@@ -3149,6 +3317,7 @@ pub(crate) struct HeaderVisibilitySuppressionApplication {
     pub annotation: Span,
     pub invisible_reference: bool,
     pub invisible_member: bool,
+    pub optional_declaration_usage: bool,
 }
 
 /// Compact `@Suppress` argument facts needed while signatures are solved after ordinary expression
@@ -3174,6 +3343,7 @@ impl HeaderVisibilitySuppressionArena {
             .filter_map(|(annotation, arguments)| {
                 let mut invisible_reference = false;
                 let mut invisible_member = false;
+                let mut optional_declaration_usage = false;
                 for argument in arguments {
                     let Some(value) = file.const_string_value(*argument) else {
                         continue;
@@ -3181,14 +3351,18 @@ impl HeaderVisibilitySuppressionArena {
                     match value.as_str() {
                         Some("INVISIBLE_REFERENCE") => invisible_reference = true,
                         Some("INVISIBLE_MEMBER") => invisible_member = true,
+                        Some("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE") => {
+                            optional_declaration_usage = true
+                        }
                         _ => {}
                     }
                 }
-                (invisible_reference || invisible_member).then_some(
+                (invisible_reference || invisible_member || optional_declaration_usage).then_some(
                     HeaderVisibilitySuppressionApplication {
                         annotation: annotation.span,
                         invisible_reference,
                         invisible_member,
+                        optional_declaration_usage,
                     },
                 )
             })
@@ -3476,6 +3650,7 @@ pub struct HeaderInventoryBuilder {
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
+    source_declarations: Vec<Vec<DeclarationId>>,
     local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
 }
@@ -3507,6 +3682,9 @@ impl HeaderInventoryBuilder {
         if self.inventoried.len() <= raw {
             self.inventoried.resize(raw + 1, false);
         }
+        if self.source_declarations.len() <= raw {
+            self.source_declarations.resize_with(raw + 1, Vec::new);
+        }
         if source.kind == SourceKind::Java {
             assert!(file.is_none(), "Java input has no Kotlin AST header");
             return None;
@@ -3530,8 +3708,15 @@ impl HeaderInventoryBuilder {
             let ty = self.syntax.add_type(ty, &mut self.lookup_names);
             self.detached_types.push((source, ty));
         }
-        let stubs =
-            extract_file_stubs(file, source, &mut self.declarations, &mut self.lookup_names);
+        let extracted = extract_file_stub_inventory(
+            file,
+            source,
+            &mut self.declarations,
+            &mut self.lookup_names,
+        );
+        let mut stubs = extracted.stubs;
+        order_file_stubs(&mut stubs, &self.declarations);
+        self.source_declarations[source.raw() as usize] = extracted.source_declarations;
         self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
@@ -3642,6 +3827,7 @@ impl HeaderInventoryBuilder {
             visibility_suppressions: self.visibility_suppressions,
             stubs: self.stubs,
             inventory: self.inventory,
+            source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,
             inventoried: self.inventoried,
             excluded: std::collections::HashSet::new(),

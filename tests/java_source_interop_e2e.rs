@@ -864,7 +864,10 @@ fn inherited_classifier_does_not_expose_its_protected_constructor() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    assert_eq!(diagnostics, ["unresolved reference 'Category'."]);
+    assert_eq!(
+        diagnostics,
+        ["cannot access 'constructor(): Parent.Category': it is protected in 'fixtures.Parent.Category'."]
+    );
 }
 
 #[test]
@@ -916,29 +919,40 @@ fn package_nested_classifier_does_not_shadow_cross_package_source_type() {
 }
 
 #[test]
-fn peer_inherited_nested_ambiguity_does_not_fall_back_to_source_type() {
-    let Some(diagnostics) = mixed_diagnostics(
-        &[
-            (
-                "fixtures/Left.java",
-                "package fixtures; public interface Left { class Category {} }",
-            ),
-            (
-                "fixtures/Right.java",
-                "package fixtures; public interface Right { class Category {} }",
-            ),
-        ],
-        r#"
+fn primary_constructor_parameter_precedes_peer_inherited_nested_classifiers() {
+    let java = [
+        (
+            "fixtures/Left.java",
+            "package fixtures; public interface Left { class Category {} }",
+        ),
+        (
+            "fixtures/Right.java",
+            "package fixtures; public interface Right { class Category {} }",
+        ),
+    ];
+    let kotlin = r#"
             package fixtures
-            class Category
-            class Child(category: Category) : Left, Right
-        "#,
-    ) else {
+            class Category(val value: String)
+            class Child(val category: Category) : Left, Right
+            fun box(): String = Child(Category("OK")).category.value
+        "#;
+    let Some((javadir, _)) = compile_java(&java) else {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-
-    assert_eq!(diagnostics, ["unresolved reference 'Category'."]);
+    let differential = common::compiler_diagnostics(
+        &[("PrimaryConstructorHeaderScope.kt", kotlin)],
+        std::slice::from_ref(&javadir),
+    );
+    cleanup(&javadir);
+    assert_eq!(
+        (differential.krusty_code, differential.reference_code),
+        (0, 0),
+        "primary-constructor header scope differs: krusty={} kotlinc={}",
+        differential.krusty_stderr,
+        differential.reference_stderr,
+    );
+    run_mixed(&java, kotlin);
 }
 
 #[test]

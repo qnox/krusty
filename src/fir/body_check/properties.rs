@@ -11,6 +11,15 @@ struct ExternalPropertyTarget {
     extension_receiver_parameter: Option<u32>,
 }
 
+type SelectedPropertyRead = (
+    Option<DeclarationId>,
+    Option<ExternalPropertyTarget>,
+    Option<FirReceiver>,
+    Option<FirReceiver>,
+    Vec<crate::resolve::ResolvedContextArgument>,
+    Box<[FirTypeSubstitution]>,
+);
+
 impl BodyFirChecker<'_> {
     /// Preserve an already-selected dependency property reached through `super` as a PROPERTY
     /// operation. The provider identity remains opaque; only the non-virtual dispatch fact crosses
@@ -22,7 +31,16 @@ impl BodyFirChecker<'_> {
         target: &crate::resolve::ResolvedSuperCall,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let Some(property) = target.external_property else {
-            return self.selected_super_call(expression, &[], target);
+            let span = self.file.expr_span(expression);
+            let cause = self.expression_origin(expression)?;
+            return self.selected_super_call_at(
+                span,
+                cause,
+                Some(expression),
+                &[],
+                target,
+                crate::fir::FirSuperCallKind::PropertyGetter,
+            );
         };
         let span = self.file.expr_span(expression);
         let cause = self.expression_origin(expression)?;
@@ -70,6 +88,7 @@ impl BodyFirChecker<'_> {
                 None,
                 std::slice::from_ref(&value),
                 target,
+                crate::fir::FirSuperCallKind::PropertySetter,
             );
         };
         let [value_type] = target.params.as_slice() else {
@@ -78,6 +97,7 @@ impl BodyFirChecker<'_> {
         let dispatch_receiver = self
             .materialize_implicit_receiver(cause, span, &target.receiver)?
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+        let checked_value = self.expression(value)?;
         let resolved = |ty| {
             ResolvedTy::new(ty)
                 .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
@@ -98,8 +118,8 @@ impl BodyFirChecker<'_> {
             dispatch_receiver: Some(dispatch_receiver),
             extension_receiver: None,
             context_arguments: Box::new([]),
-            value: self.expression(value)?,
-            conversion: self.selected_value_conversion(value, value_type, cause)?,
+            value: checked_value,
+            conversion: self.selected_value_conversion(value, checked_value, value_type, cause)?,
             substitutions: Box::new([]),
         })
     }
@@ -240,6 +260,126 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::MissingStablePropertyTarget,
             )
         })
+    }
+
+    /// Materialize the instance that owns one already-selected backing field. The stable property
+    /// owner fixes the receiver identity; this only translates that identity through the current
+    /// callable/class capture frame. Top-level storage has no receiver.
+    pub(super) fn backing_field_dispatch_receiver(
+        &mut self,
+        target: PropertyId,
+        origin: OriginId,
+        span: Option<Span>,
+    ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        let declaration = self
+            .index
+            .property_declaration(target)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let Some(owner) = self
+            .index
+            .declaration_anchor(declaration)
+            .and_then(|anchor| anchor.owner)
+        else {
+            return Ok(None);
+        };
+        let classifier = self
+            .index
+            .classifier_header(owner)
+            .or_else(|| self.index.enclosing_classifier(declaration))
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
+        let ty = ResolvedTy::new(Ty::obj_name(classifier.classifier))
+            .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+
+        self.materialize_classifier_dispatch_receiver(owner, ty, origin, span)?
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
+            .map(Some)
+    }
+
+    /// Translate one resolver-selected stable class-receiver identity through the current FIR
+    /// body's exact receiver/capture frames. Returning `None` lets callers with a genuinely
+    /// coordinate-only receiver use the ordinary depth path; callers such as backing fields require
+    /// this identity to be materializable.
+    fn materialize_classifier_dispatch_receiver(
+        &mut self,
+        owner: DeclarationId,
+        ty: ResolvedTy,
+        origin: OriginId,
+        span: Option<Span>,
+    ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        let classifier = self
+            .index
+            .classifier_header(owner)
+            .or_else(|| self.index.enclosing_classifier(owner))
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
+        let current_storage_owner = self.current_storage_owner();
+        let current_storage_is_owner = current_storage_owner.is_some_and(|current| {
+            current == owner
+                || self
+                    .index
+                    .classifier_hierarchy(current)
+                    .is_some_and(|hierarchy| {
+                        hierarchy
+                            .iter()
+                            .any(|entry| entry.classifier == classifier.classifier)
+                    })
+        });
+        if current_storage_is_owner && self.body.local_callable().is_none() {
+            let depth = self
+                .receiver_frame()
+                .dispatch_depth
+                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
+            let value = self.body.add_expr(FirExpr {
+                origin,
+                ty,
+                kind: FirExprKind::ImplicitReceiver {
+                    current: depth == 0,
+                    depth,
+                },
+            });
+            return Ok(Some(FirReceiver {
+                value,
+                conversion: None,
+            }));
+        }
+
+        if let Some(binding) = self.class_receivers.iter().copied().find(|binding| {
+            binding.ty.get().non_null().kotlin_class_internal() == Some(classifier.classifier)
+        }) {
+            let kind = self.class_storage_read_kind(binding, origin)?;
+            let value = self.body.add_expr(FirExpr { origin, ty, kind });
+            return Ok(Some(FirReceiver {
+                value,
+                conversion: None,
+            }));
+        }
+
+        if let Some(source) = self.enclosing_storage_receiver_source(owner) {
+            self.body
+                .add_implicit_receiver_capture(FirImplicitReceiverCapture {
+                    origin,
+                    enclosing_depth: source.enclosing_depth,
+                    current: source.current,
+                    depth: source.depth,
+                    path: Box::new([]),
+                    ty,
+                });
+            let value = self.body.add_expr(FirExpr {
+                origin,
+                ty,
+                kind: FirExprKind::CapturedImplicitReceiver {
+                    enclosing_depth: source.enclosing_depth,
+                    current: source.current,
+                    depth: source.depth,
+                    path: Box::new([]),
+                },
+            });
+            return Ok(Some(FirReceiver {
+                value,
+                conversion: None,
+            }));
+        }
+
+        Ok(None)
     }
 
     /// The stable property of the ENCLOSING classifier with this source name. An `init` block that
@@ -405,6 +545,13 @@ impl BodyFirChecker<'_> {
                 conversion: None,
             }));
         }
+        if let Some(owner) = selected.classifier {
+            if let Some(receiver) =
+                self.materialize_classifier_dispatch_receiver(owner, selected_ty, origin, span)?
+            {
+                return Ok(Some(receiver));
+            }
+        }
         if !selected.current {
             if let Some(receiver) = self.local_class_enclosing_receiver(origin, selected)? {
                 return Ok(Some(receiver));
@@ -545,323 +692,230 @@ impl BodyFirChecker<'_> {
                 substitutions: Box::new([]),
             }));
         }
-        let (declaration, external, dispatch_receiver, mut extension_receiver, context_args) =
-            match selected {
-                Some(ExprLowering::TopLevelPropertyGet(access)) => {
-                    if access.property.getter.compiler_intrinsic
-                        == Some(crate::libraries::CompilerIntrinsic::CoroutineContext)
-                    {
-                        let result = ResolvedTy::new(access.property.ty).map_err(|error| {
-                            self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::UnpublishableType(error),
-                            )
-                        })?;
-                        return Ok(Some(FirExprKind::Call(FirCall {
-                            target: FirCallTarget::Intrinsic {
-                                operation: FirIntrinsic::CoroutineContext,
-                                receiver: None,
-                                parameters: Box::new([]),
-                                result,
-                            },
-                            dispatch_receiver: None,
-                            extension_receiver: None,
-                            parameter_types: Box::new([]),
-                            arguments: Box::new([]),
-                            substitutions: Box::new([]),
-                        })));
-                    }
-                    let external =
-                        access
-                            .property
-                            .getter
-                            .external_property_identity
-                            .map(|property| ExternalPropertyTarget {
-                                property,
-                                receiver: None,
-                                parameters: access.property.getter.params.clone(),
-                                result: access.property.ty,
-                                extension_receiver_parameter: None,
-                            });
-                    (
-                        access.property.stable_declaration,
-                        external,
-                        None,
-                        None,
-                        access.context_args,
-                    )
+        let (
+            declaration,
+            external,
+            dispatch_receiver,
+            mut extension_receiver,
+            context_args,
+            substitutions,
+        ): SelectedPropertyRead = match selected {
+            Some(ExprLowering::TopLevelPropertyGet(access)) => {
+                if access.property.getter.compiler_intrinsic
+                    == Some(crate::libraries::CompilerIntrinsic::CoroutineContext)
+                {
+                    let result = ResolvedTy::new(access.property.ty).map_err(|error| {
+                        self.failure(
+                            self.file.expr_span(expression),
+                            BodyCheckFailureKind::UnpublishableType(error),
+                        )
+                    })?;
+                    return Ok(Some(FirExprKind::Call(FirCall {
+                        target: FirCallTarget::Intrinsic {
+                            operation: FirIntrinsic::CoroutineContext,
+                            receiver: None,
+                            parameters: Box::new([]),
+                            result,
+                        },
+                        dispatch_receiver: None,
+                        extension_receiver: None,
+                        parameter_types: Box::new([]),
+                        arguments: Box::new([]),
+                        substitutions: Box::new([]),
+                    })));
                 }
-                Some(ExprLowering::MemberPropertyRead {
-                    mut stable_declaration,
-                    source_member,
-                    accessor,
-                    declaration_ty,
-                    context_access,
-                    compiler_intrinsic,
-                    ..
-                }) => {
-                    // A classifier-qualified companion property has a syntactic qualifier but no
-                    // runtime value receiver there. Resolution records the exact companion
-                    // singleton as an implicit receiver on the whole access; consume that semantic
-                    // selection before considering the source receiver expression.
-                    let selected_implicit = self
-                        .info
-                        .implicit_receiver_selections
-                        .contains_key(&expression);
-                    let dispatch_receiver = if selected_implicit {
-                        self.implicit_receiver(expression)?
-                    } else {
-                        receiver
-                            .map(|receiver| {
-                                self.expression(receiver).map(|value| FirReceiver {
-                                    value,
-                                    conversion: None,
-                                })
-                            })
-                            .transpose()?
-                    };
-                    let Some(dispatch_receiver) = dispatch_receiver else {
-                        return Ok(None);
-                    };
-                    let intrinsic = match compiler_intrinsic {
-                        Some(crate::libraries::CompilerIntrinsic::ArraySize) => {
-                            Some(FirIntrinsic::ArraySize)
-                        }
-                        Some(crate::libraries::CompilerIntrinsic::StringLength) => {
-                            Some(FirIntrinsic::StringLength)
-                        }
-                        Some(_) | None => None,
-                    };
-                    if let Some(operation) = intrinsic {
-                        let receiver_ty = resolved_member
-                            .as_ref()
-                            .map(|selected| selected.receiver)
-                            .or_else(|| {
-                                self.info
-                                    .implicit_receiver_selections
-                                    .get(&expression)
-                                    .map(|receiver| receiver.ty)
-                            })
-                            .or_else(|| receiver.map(|receiver| self.info.semantic_ty(receiver)))
-                            .ok_or_else(|| {
-                                self.failure(
-                                    self.file.expr_span(expression),
-                                    BodyCheckFailureKind::MissingStablePropertyTarget,
-                                )
-                            })?;
-                        return Ok(Some(FirExprKind::Call(FirCall {
-                            target: FirCallTarget::Intrinsic {
-                                operation,
-                                receiver: Some(ResolvedTy::new(receiver_ty).map_err(|error| {
-                                    self.failure(
-                                        self.file.expr_span(expression),
-                                        BodyCheckFailureKind::UnpublishableType(error),
-                                    )
-                                })?),
-                                parameters: Box::new([]),
-                                result: ResolvedTy::new(declaration_ty).map_err(|error| {
-                                    self.failure(
-                                        self.file.expr_span(expression),
-                                        BodyCheckFailureKind::UnpublishableType(error),
-                                    )
-                                })?,
-                            },
-                            dispatch_receiver: Some(dispatch_receiver),
-                            extension_receiver: None,
-                            parameter_types: Box::new([]),
-                            arguments: Box::new([]),
-                            substitutions: Box::new([]),
-                        })));
-                    }
-                    if stable_declaration.is_none() {
-                        stable_declaration = source_member.and_then(|source| {
-                            self.session
-                                .active_source
-                                .as_ref()?
-                                .source_member_declaration(self.file, self.index, source)
-                        });
-                    }
-                    let external = resolved_member
-                        .as_ref()
-                        .and_then(|selected| {
-                            selected.member.external_property_identity.map(|property| {
-                                ExternalPropertyTarget {
-                                    property,
-                                    receiver: Some(selected.receiver),
-                                    parameters: selected.member.params.clone(),
-                                    result: selected.ret,
-                                    extension_receiver_parameter: None,
-                                }
+                let singleton_dispatch = access.property.getter.singleton_dispatch.as_deref();
+                let external = access
+                    .property
+                    .getter
+                    .external_property_identity
+                    .map(|property| ExternalPropertyTarget {
+                        property,
+                        receiver: singleton_dispatch.map(|singleton| singleton.ty()),
+                        parameters: access.property.getter.params.clone(),
+                        result: access.property.ty,
+                        extension_receiver_parameter: None,
+                    });
+                let dispatch_receiver = singleton_dispatch
+                    .map(|singleton| self.singleton_call_receiver(expression, singleton))
+                    .transpose()?;
+                (
+                    access.property.stable_declaration,
+                    external,
+                    dispatch_receiver,
+                    None,
+                    access.context_args,
+                    Box::new([]),
+                )
+            }
+            Some(ExprLowering::MemberPropertyRead {
+                mut stable_declaration,
+                source_member,
+                accessor,
+                declaration_ty,
+                context_access,
+                compiler_intrinsic,
+                ..
+            }) => {
+                // A classifier-qualified companion property has a syntactic qualifier but no
+                // runtime value receiver there. Resolution records the exact companion
+                // singleton as an implicit receiver on the whole access; consume that semantic
+                // selection before considering the source receiver expression.
+                let selected_implicit = self
+                    .info
+                    .implicit_receiver_selections
+                    .contains_key(&expression);
+                let dispatch_receiver = if selected_implicit {
+                    self.implicit_receiver(expression)?
+                } else {
+                    receiver
+                        .map(|receiver| {
+                            self.expression(receiver).map(|value| FirReceiver {
+                                value,
+                                conversion: None,
                             })
                         })
+                        .transpose()?
+                };
+                let Some(dispatch_receiver) = dispatch_receiver else {
+                    return Ok(None);
+                };
+                let intrinsic = match compiler_intrinsic {
+                    Some(crate::libraries::CompilerIntrinsic::ArraySize) => {
+                        Some(FirIntrinsic::ArraySize)
+                    }
+                    Some(crate::libraries::CompilerIntrinsic::StringLength) => {
+                        Some(FirIntrinsic::StringLength)
+                    }
+                    Some(_) | None => None,
+                };
+                if let Some(operation) = intrinsic {
+                    let receiver_ty = resolved_member
+                        .as_ref()
+                        .map(|selected| selected.receiver)
                         .or_else(|| {
-                            let accessor = accessor.as_ref()?;
-                            let identity = accessor.external_property_identity?;
-                            let receiver_ty = self
-                                .info
+                            self.info
                                 .implicit_receiver_selections
                                 .get(&expression)
                                 .map(|receiver| receiver.ty)
-                                .or_else(|| {
-                                    receiver.map(|receiver| self.info.semantic_ty(receiver))
-                                })?;
-                            Some(ExternalPropertyTarget {
-                                property: identity,
-                                receiver: Some(receiver_ty),
-                                parameters: accessor.params.clone(),
-                                result: declaration_ty,
-                                extension_receiver_parameter: None,
-                            })
-                        });
-                    if stable_declaration.is_none() && external.is_none() {
-                        let mut getter = resolved_member.clone().ok_or_else(|| {
+                        })
+                        .or_else(|| receiver.map(|receiver| self.info.semantic_ty(receiver)))
+                        .ok_or_else(|| {
                             self.failure(
                                 self.file.expr_span(expression),
-                                BodyCheckFailureKind::MissingStableCallTarget,
+                                BodyCheckFailureKind::MissingStablePropertyTarget,
                             )
                         })?;
-                        getter.context_args = context_access
-                            .as_ref()
-                            .map(|access| {
-                                access
-                                    .context_args
-                                    .iter()
-                                    .cloned()
-                                    .map(Some)
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        return self
-                            .selected_member_call_with_receiver(
-                                expression,
-                                &[],
-                                &getter,
-                                dispatch_receiver,
-                            )
-                            .map(Some);
-                    }
-                    (
-                        stable_declaration,
-                        external,
-                        Some(dispatch_receiver),
-                        None,
-                        context_access.map_or_else(Vec::new, |access| access.context_args),
-                    )
+                    return Ok(Some(FirExprKind::Call(FirCall {
+                        target: FirCallTarget::Intrinsic {
+                            operation,
+                            receiver: Some(ResolvedTy::new(receiver_ty).map_err(|error| {
+                                self.failure(
+                                    self.file.expr_span(expression),
+                                    BodyCheckFailureKind::UnpublishableType(error),
+                                )
+                            })?),
+                            parameters: Box::new([]),
+                            result: ResolvedTy::new(declaration_ty).map_err(|error| {
+                                self.failure(
+                                    self.file.expr_span(expression),
+                                    BodyCheckFailureKind::UnpublishableType(error),
+                                )
+                            })?,
+                        },
+                        dispatch_receiver: Some(dispatch_receiver),
+                        extension_receiver: None,
+                        parameter_types: Box::new([]),
+                        arguments: Box::new([]),
+                        substitutions: Box::new([]),
+                    })));
                 }
-                Some(ExprLowering::ExtensionPropertyGet { access }) => {
-                    let companion_extension = access
-                        .property
-                        .stable_declaration
-                        .and_then(|declaration| self.index.declaration_header(declaration))
-                        .is_some_and(|header| {
-                            header.flags.has(crate::fir::DeclarationFlags::COMPANION)
-                        });
-                    let extension_receiver = if companion_extension {
-                        None
-                    } else {
-                        Some(match receiver {
-                            Some(receiver) => FirReceiver {
-                                value: self.expression(receiver)?,
-                                conversion: None,
-                            },
-                            None => {
-                                let Some(receiver) = self.implicit_receiver(expression)? else {
-                                    return Ok(None);
-                                };
-                                receiver
+                if stable_declaration.is_none() {
+                    stable_declaration = source_member.and_then(|source| {
+                        self.session
+                            .active_source
+                            .as_ref()?
+                            .source_member_declaration(self.file, self.index, source)
+                    });
+                }
+                let external = resolved_member
+                    .as_ref()
+                    .and_then(|selected| {
+                        selected.member.external_property_identity.map(|property| {
+                            ExternalPropertyTarget {
+                                property,
+                                receiver: Some(selected.receiver),
+                                parameters: selected.member.params.clone(),
+                                result: selected.ret,
+                                extension_receiver_parameter: None,
                             }
                         })
-                    };
-                    if access.property.getter.compiler_intrinsic
-                        == Some(crate::libraries::CompilerIntrinsic::CharCode)
-                    {
-                        let extension_receiver = extension_receiver
-                            .expect("the Char.code intrinsic has a runtime extension receiver");
-                        let cause = self.expression_origin(expression)?;
-                        let target = ResolvedTy::new(access.property.ty).map_err(|error| {
-                            self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::UnpublishableType(error),
-                            )
-                        })?;
-                        return Ok(Some(FirExprKind::ImplicitConversion {
-                            value: extension_receiver.value,
-                            conversion: FirConversion {
-                                origin: cause,
-                                kind: FirConversionKind::NumericConversion { to: target },
-                            },
-                        }));
-                    }
-                    let context_count = access
-                        .property
-                        .context_count
-                        .min(access.property.getter.params.len());
-                    let singleton_dispatch = access.property.getter.singleton_dispatch.as_deref();
-                    let mut parameters = access.property.getter.params.clone();
-                    let extension_receiver_parameter =
-                        singleton_dispatch.and_then(|_| u32::try_from(context_count).ok());
-                    if singleton_dispatch.is_none() && context_count < parameters.len() {
-                        parameters.remove(context_count);
-                    }
-                    let external =
-                        access
-                            .property
-                            .getter
-                            .external_property_identity
-                            .map(|property| ExternalPropertyTarget {
-                                property,
-                                receiver: singleton_dispatch.map_or_else(
-                                    || {
-                                        (!companion_extension)
-                                            .then_some(access.property.receiver)
-                                            .flatten()
-                                    },
-                                    |singleton| Some(singleton.ty()),
-                                ),
-                                parameters,
-                                result: access.property.ty,
-                                extension_receiver_parameter,
-                            });
-                    // An extension imported from an object is still a MEMBER extension: the
-                    // selected getter carries its exact singleton dispatch declaration. Preserve
-                    // that receiver in FIR just as selected extension calls do. Companion-marked
-                    // source extensions are intentionally realized as receiverless declarations.
-                    let dispatch_receiver = if companion_extension {
-                        None
-                    } else {
-                        access
-                            .property
-                            .getter
-                            .singleton_dispatch
-                            .as_deref()
-                            .map(|singleton| self.singleton_call_receiver(expression, singleton))
-                            .transpose()?
-                    };
-                    (
-                        access.property.stable_declaration,
-                        external,
-                        dispatch_receiver,
-                        extension_receiver,
-                        access.context_args,
-                    )
+                    })
+                    .or_else(|| {
+                        let accessor = accessor.as_ref()?;
+                        let identity = accessor.external_property_identity?;
+                        let receiver_ty = self
+                            .info
+                            .implicit_receiver_selections
+                            .get(&expression)
+                            .map(|receiver| receiver.ty)
+                            .or_else(|| receiver.map(|receiver| self.info.semantic_ty(receiver)))?;
+                        Some(ExternalPropertyTarget {
+                            property: identity,
+                            receiver: Some(receiver_ty),
+                            parameters: accessor.params.clone(),
+                            result: declaration_ty,
+                            extension_receiver_parameter: None,
+                        })
+                    });
+                if stable_declaration.is_none() && external.is_none() {
+                    let mut getter = resolved_member.clone().ok_or_else(|| {
+                        self.failure(
+                            self.file.expr_span(expression),
+                            BodyCheckFailureKind::MissingStableCallTarget,
+                        )
+                    })?;
+                    getter.context_args = context_access
+                        .as_ref()
+                        .map(|access| {
+                            access
+                                .context_args
+                                .iter()
+                                .cloned()
+                                .map(Some)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    return self
+                        .selected_member_call_with_receiver(
+                            expression,
+                            &[],
+                            &getter,
+                            dispatch_receiver,
+                        )
+                        .map(Some);
                 }
-                Some(ExprLowering::MemberExtensionPropertyRead {
+                (
                     stable_declaration,
-                    getter,
-                    dispatch_receiver,
-                    context_args,
-                    ..
-                }) => {
-                    let cause = self.expression_origin(expression)?;
-                    let Some(dispatch_receiver) = self.materialize_implicit_receiver(
-                        cause,
-                        self.file.expr_span(expression),
-                        &dispatch_receiver,
-                    )?
-                    else {
-                        return Ok(None);
-                    };
-                    let extension_receiver = match receiver {
+                    external,
+                    Some(dispatch_receiver),
+                    None,
+                    context_access.map_or_else(Vec::new, |access| access.context_args),
+                    Box::new([]),
+                )
+            }
+            Some(ExprLowering::ExtensionPropertyGet { access }) => {
+                let companion_extension = access
+                    .property
+                    .stable_declaration
+                    .and_then(|declaration| self.index.declaration_header(declaration))
+                    .is_some_and(|header| {
+                        header.flags.has(crate::fir::DeclarationFlags::COMPANION)
+                    });
+                let extension_receiver = if companion_extension {
+                    None
+                } else {
+                    Some(match receiver {
                         Some(receiver) => FirReceiver {
                             value: self.expression(receiver)?,
                             conversion: None,
@@ -872,117 +926,236 @@ impl BodyFirChecker<'_> {
                             };
                             receiver
                         }
-                    };
-                    let external = getter.and_then(|getter| {
-                        getter
-                            .external_property_identity
-                            .map(|property| ExternalPropertyTarget {
-                                property,
-                                receiver: Some(Ty::obj_name(getter.owner)),
-                                parameters: getter.params.clone(),
-                                result: getter.ret,
-                                extension_receiver_parameter: Some(
-                                    u32::try_from(context_args.len())
-                                        .expect("FIR parameter ordinals fit in u32"),
-                                ),
-                            })
+                    })
+                };
+                if access.property.getter.compiler_intrinsic
+                    == Some(crate::libraries::CompilerIntrinsic::CharCode)
+                {
+                    let extension_receiver = extension_receiver
+                        .expect("the Char.code intrinsic has a runtime extension receiver");
+                    let cause = self.expression_origin(expression)?;
+                    let target = ResolvedTy::new(access.property.ty).map_err(|error| {
+                        self.failure(
+                            self.file.expr_span(expression),
+                            BodyCheckFailureKind::UnpublishableType(error),
+                        )
+                    })?;
+                    return Ok(Some(FirExprKind::ImplicitConversion {
+                        value: extension_receiver.value,
+                        conversion: FirConversion {
+                            origin: cause,
+                            kind: FirConversionKind::NumericConversion { to: target },
+                        },
+                    }));
+                }
+                let context_count = access
+                    .property
+                    .context_count
+                    .min(access.property.getter.params.len());
+                let singleton_dispatch = access.property.getter.singleton_dispatch.as_deref();
+                let mut parameters = access.property.getter.params.clone();
+                let extension_receiver_parameter =
+                    singleton_dispatch.and_then(|_| u32::try_from(context_count).ok());
+                if singleton_dispatch.is_none() && context_count < parameters.len() {
+                    parameters.remove(context_count);
+                }
+                let external = access
+                    .property
+                    .getter
+                    .external_property_identity
+                    .map(|property| ExternalPropertyTarget {
+                        property,
+                        receiver: singleton_dispatch.map_or_else(
+                            || {
+                                (!companion_extension)
+                                    .then_some(access.property.receiver)
+                                    .flatten()
+                            },
+                            |singleton| Some(singleton.ty()),
+                        ),
+                        parameters,
+                        result: access.property.ty,
+                        extension_receiver_parameter,
                     });
-                    (
-                        stable_declaration,
-                        external,
-                        Some(dispatch_receiver),
-                        Some(extension_receiver),
-                        context_args,
-                    )
-                }
-                Some(ExprLowering::AssociatedPropertyRead {
-                    stable_declaration,
-                    external_identity,
-                    singleton_dispatch,
-                    ..
-                }) => {
-                    let ty = self.info.semantic_ty(expression);
-                    let dispatch_receiver = singleton_dispatch
-                        .as_ref()
-                        .map(|singleton| {
-                            self.singleton_call_receiver(
-                                expression,
-                                &crate::libraries::SingletonDispatch {
-                                    classifier: singleton.classifier,
-                                },
-                            )
-                        })
-                        .transpose()?;
-                    (
-                        stable_declaration,
-                        external_identity.map(|property| ExternalPropertyTarget {
+                // An extension imported from an object is still a MEMBER extension: the
+                // selected getter carries its exact singleton dispatch declaration. Preserve
+                // that receiver in FIR just as selected extension calls do. Companion-marked
+                // source extensions are intentionally realized as receiverless declarations.
+                let dispatch_receiver = if companion_extension {
+                    None
+                } else {
+                    access
+                        .property
+                        .getter
+                        .singleton_dispatch
+                        .as_deref()
+                        .map(|singleton| self.singleton_call_receiver(expression, singleton))
+                        .transpose()?
+                };
+                let declaration = access.property.stable_declaration;
+                let substitutions = declaration.map_or_else(
+                    || {
+                        Ok::<_, BodyCheckFailure>(
+                            Vec::<FirTypeSubstitution>::new().into_boxed_slice(),
+                        )
+                    },
+                    |declaration| {
+                        self.selected_property_substitutions(
+                            expression,
+                            declaration,
+                            &access.property,
+                        )
+                    },
+                )?;
+                (
+                    declaration,
+                    external,
+                    dispatch_receiver,
+                    extension_receiver,
+                    access.context_args,
+                    substitutions,
+                )
+            }
+            Some(ExprLowering::MemberExtensionPropertyRead {
+                stable_declaration,
+                getter,
+                dispatch_receiver,
+                context_args,
+                ..
+            }) => {
+                let cause = self.expression_origin(expression)?;
+                let Some(dispatch_receiver) = self.materialize_implicit_receiver(
+                    cause,
+                    self.file.expr_span(expression),
+                    &dispatch_receiver,
+                )?
+                else {
+                    return Ok(None);
+                };
+                let extension_receiver = match receiver {
+                    Some(receiver) => FirReceiver {
+                        value: self.expression(receiver)?,
+                        conversion: None,
+                    },
+                    None => {
+                        let Some(receiver) = self.implicit_receiver(expression)? else {
+                            return Ok(None);
+                        };
+                        receiver
+                    }
+                };
+                let external = getter.and_then(|getter| {
+                    getter
+                        .external_property_identity
+                        .map(|property| ExternalPropertyTarget {
                             property,
-                            receiver: singleton_dispatch
-                                .as_ref()
-                                .map(|singleton| Ty::obj_name(singleton.classifier)),
-                            parameters: Vec::new(),
-                            result: ty,
-                            extension_receiver_parameter: None,
-                        }),
-                        dispatch_receiver,
-                        None,
-                        Vec::new(),
-                    )
-                }
-                None => {
-                    crate::trace_compiler!(
-                        "fir",
-                        "property read at {:?} has no selected lowering",
-                        self.file.expr_span(expression),
-                    );
-                    return Ok(None);
-                }
-                Some(
-                    ExprLowering::BuiltinUnaryCall { .. }
-                    | ExprLowering::RuntimeTypeOperand(_)
-                    | ExprLowering::ExtensionFunctionBinding { .. }
-                    | ExprLowering::PluginExpression(_)
-                    | ExprLowering::ClassStorageRead { .. }
-                    | ExprLowering::EnumEntryPropertyRead { .. }
-                    | ExprLowering::BackingFieldRead
-                    | ExprLowering::ImplicitPropertyIncDec(_)
-                    | ExprLowering::TopLevelPropertyIncDec(_)
-                    | ExprLowering::LateinitInitialized { .. }
-                    | ExprLowering::LocalFunction { .. }
-                    | ExprLowering::AdaptedLocalFunctionRef { .. }
-                    | ExprLowering::ConstructorRef { .. }
-                    | ExprLowering::TopLevelFunctionRef(_)
-                    | ExprLowering::CallableReference { .. }
-                    | ExprLowering::AdaptedCallableReference { .. }
-                    | ExprLowering::FunctionInvokeReference { .. }
-                    | ExprLowering::AdaptedRef { .. }
-                    | ExprLowering::SamConstructorReference { .. }
-                    | ExprLowering::UnavailableCallableReference { .. }
-                    | ExprLowering::Unavailable { .. }
-                    | ExprLowering::Erased
-                    | ExprLowering::IncDecAccessOperands(_)
-                    | ExprLowering::CompilerSynthetic(_)
-                    | ExprLowering::SamConstructor { .. }
-                    | ExprLowering::Lambda(_)
-                    | ExprLowering::SingletonValue(_)
-                    | ExprLowering::ClassifierPropertyRead { .. }
-                    | ExprLowering::LabeledThisInner
-                    | ExprLowering::LabeledThisDispatch
-                    | ExprLowering::IntrinsicProperty(_)
-                    | ExprLowering::Invoke { .. }
-                    | ExprLowering::SafePropertyInvoke { .. }
-                    | ExprLowering::ClassLiteral { .. }
-                    | ExprLowering::ReceiverFnInvoke { .. },
-                ) => {
-                    crate::trace_compiler!(
-                        "fir",
-                        "property read at {:?} selected {:?}, which has no checked FIR form",
-                        self.file.expr_span(expression),
-                        self.info.expr_lowers.get(&expression),
-                    );
-                    return Ok(None);
-                }
-            };
+                            receiver: Some(Ty::obj_name(getter.owner)),
+                            parameters: getter.params.clone(),
+                            result: getter.ret,
+                            extension_receiver_parameter: Some(
+                                u32::try_from(context_args.len())
+                                    .expect("FIR parameter ordinals fit in u32"),
+                            ),
+                        })
+                });
+                (
+                    stable_declaration,
+                    external,
+                    Some(dispatch_receiver),
+                    Some(extension_receiver),
+                    context_args,
+                    Box::new([]),
+                )
+            }
+            Some(ExprLowering::AssociatedPropertyRead {
+                stable_declaration,
+                external_identity,
+                singleton_dispatch,
+                ..
+            }) => {
+                let ty = self.info.semantic_ty(expression);
+                let dispatch_receiver = singleton_dispatch
+                    .as_ref()
+                    .map(|singleton| {
+                        self.singleton_call_receiver(
+                            expression,
+                            &crate::libraries::SingletonDispatch {
+                                classifier: singleton.classifier,
+                            },
+                        )
+                    })
+                    .transpose()?;
+                (
+                    stable_declaration,
+                    external_identity.map(|property| ExternalPropertyTarget {
+                        property,
+                        receiver: singleton_dispatch
+                            .as_ref()
+                            .map(|singleton| Ty::obj_name(singleton.classifier)),
+                        parameters: Vec::new(),
+                        result: ty,
+                        extension_receiver_parameter: None,
+                    }),
+                    dispatch_receiver,
+                    None,
+                    Vec::new(),
+                    Box::new([]),
+                )
+            }
+            None => {
+                crate::trace_compiler!(
+                    "fir",
+                    "property read at {:?} has no selected lowering",
+                    self.file.expr_span(expression),
+                );
+                return Ok(None);
+            }
+            Some(
+                ExprLowering::BuiltinUnaryCall { .. }
+                | ExprLowering::RuntimeTypeOperand(_)
+                | ExprLowering::ExtensionFunctionBinding { .. }
+                | ExprLowering::PluginExpression(_)
+                | ExprLowering::ClassStorageRead { .. }
+                | ExprLowering::EnumEntryPropertyRead { .. }
+                | ExprLowering::BackingFieldRead
+                | ExprLowering::ImplicitPropertyIncDec(_)
+                | ExprLowering::TopLevelPropertyIncDec(_)
+                | ExprLowering::LateinitInitialized { .. }
+                | ExprLowering::LocalFunction { .. }
+                | ExprLowering::AdaptedLocalFunctionRef { .. }
+                | ExprLowering::ConstructorRef { .. }
+                | ExprLowering::TopLevelFunctionRef(_)
+                | ExprLowering::CallableReference { .. }
+                | ExprLowering::AdaptedCallableReference { .. }
+                | ExprLowering::FunctionInvokeReference { .. }
+                | ExprLowering::AdaptedRef { .. }
+                | ExprLowering::SamConstructorReference { .. }
+                | ExprLowering::UnavailableCallableReference { .. }
+                | ExprLowering::Unavailable { .. }
+                | ExprLowering::Erased
+                | ExprLowering::IncDecAccessOperands(_)
+                | ExprLowering::CompilerSynthetic(_)
+                | ExprLowering::SamConstructor { .. }
+                | ExprLowering::Lambda(_)
+                | ExprLowering::SingletonValue(_)
+                | ExprLowering::ClassifierPropertyRead { .. }
+                | ExprLowering::LabeledThisInner
+                | ExprLowering::LabeledThisDispatch
+                | ExprLowering::IntrinsicProperty(_)
+                | ExprLowering::Invoke { .. }
+                | ExprLowering::SafePropertyInvoke { .. }
+                | ExprLowering::ClassLiteral { .. }
+                | ExprLowering::ReceiverFnInvoke { .. },
+            ) => {
+                crate::trace_compiler!(
+                    "fir",
+                    "property read at {:?} selected {:?}, which has no checked FIR form",
+                    self.file.expr_span(expression),
+                    self.info.expr_lowers.get(&expression),
+                );
+                return Ok(None);
+            }
+        };
         let cause = self.expression_origin(expression)?;
         let declared_extension_receiver = declaration
             .and_then(|declaration| self.index.property_for_declaration(declaration))
@@ -1010,8 +1183,64 @@ impl BodyFirChecker<'_> {
             dispatch_receiver,
             extension_receiver,
             context_arguments,
-            substitutions: Box::new([]),
+            substitutions,
         }))
+    }
+
+    /// Publish the declaration type arguments already fixed by extension-property selection.
+    /// The selected property carries its specialized receiver/result while its generic signature
+    /// retains the declaration templates; matching those shapes only serializes the resolver's
+    /// decision into stable FIR and performs no new candidate selection.
+    fn selected_property_substitutions(
+        &self,
+        expression: ExprId,
+        declaration: DeclarationId,
+        selected: &crate::libraries::PropertyInfo,
+    ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
+        let Some(generic) = selected.getter.generic_sig.as_deref() else {
+            return Ok(Box::new([]));
+        };
+        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        if let (Some(declared), Some(actual)) = (generic.receiver, selected.receiver) {
+            crate::symbol_resolver::unify_inferred_ty(declared, actual, &mut bindings);
+        }
+        crate::symbol_resolver::unify_inferred_ty(generic.ret, selected.ty, &mut bindings);
+        generic
+            .formals
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, formal)| {
+                bindings.get(formal).copied().map(|value| (ordinal, value))
+            })
+            .map(|(ordinal, value)| {
+                let ordinal = u32::try_from(ordinal).map_err(|_| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?;
+                let parameter =
+                    self.index
+                        .type_parameter(declaration, ordinal)
+                        .ok_or_else(|| {
+                            self.failure(
+                                self.file.expr_span(expression),
+                                BodyCheckFailureKind::MissingStablePropertyTarget,
+                            )
+                        })?;
+                Ok(FirTypeSubstitution {
+                    parameter: parameter.into(),
+                    value: self.resolved_type(
+                        self.file.expr_span(expression).ok_or_else(|| {
+                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                        })?,
+                        value,
+                    )?,
+                    additional_bounds: Box::new([]),
+                })
+            })
+            .collect::<Result<Vec<_>, BodyCheckFailure>>()
+            .map(Vec::into_boxed_slice)
     }
 
     fn property_target(
@@ -1306,10 +1535,15 @@ impl BodyFirChecker<'_> {
                 })?;
             let read_ty = self.resolved_type(span, resolution.receiver_ty)?;
             let updated_ty = self.resolved_type(span, resolution.updated_ty)?;
+            let dispatch_receiver =
+                self.backing_field_dispatch_receiver(property, cause, Some(span))?;
             let read = self.body.add_expr(FirExpr {
                 origin: cause,
                 ty: read_ty,
-                kind: FirExprKind::BackingFieldRead { target: property },
+                kind: FirExprKind::BackingFieldRead {
+                    target: property,
+                    dispatch_receiver,
+                },
             });
             let temporary = self.allocate_local();
             let (bound, bound_ty) = if prefix {
@@ -1360,6 +1594,7 @@ impl BodyFirChecker<'_> {
                 ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
                 kind: FirExprKind::BackingFieldWrite {
                     target: property,
+                    dispatch_receiver,
                     value,
                     conversion: None,
                 },
@@ -1608,6 +1843,11 @@ impl BodyFirChecker<'_> {
                     let Some(receiver) = receiver else {
                         return Ok(None);
                     };
+                    let receiver_ty = self.info.semantic_ty(receiver);
+                    let dispatch_receiver = FirReceiver {
+                        value: self.expression(receiver)?,
+                        conversion: None,
+                    };
                     if backing_field {
                         let declaration = stable_declaration.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
@@ -1623,15 +1863,11 @@ impl BodyFirChecker<'_> {
                             })?;
                         return Ok(Some(FirExprKind::BackingFieldWrite {
                             target,
+                            dispatch_receiver: Some(dispatch_receiver),
                             value: self.expression(value)?,
                             conversion: None,
                         }));
                     }
-                    let receiver_ty = self.info.semantic_ty(receiver);
-                    let dispatch_receiver = FirReceiver {
-                        value: self.expression(receiver)?,
-                        conversion: None,
-                    };
                     let external = setter
                         .as_deref()
                         .or_else(|| {
@@ -1879,7 +2115,7 @@ impl BodyFirChecker<'_> {
                 Some(
                     StmtLowering::LocalFunction(_)
                     | StmtLowering::PlusAssign(_)
-                    | StmtLowering::BackingFieldWrite
+                    | StmtLowering::BackingFieldWrite { .. }
                     | StmtLowering::DeferredPropertyWrite { .. }
                     | StmtLowering::SuperPropertyWrite { .. }
                     | StmtLowering::Erased,
@@ -1915,14 +2151,16 @@ impl BodyFirChecker<'_> {
                     .and_then(|ty| ResolvedTy::new(ty).ok())
             })
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
-        let conversion = self.selected_value_conversion(value, value_target, cause)?;
+        let checked_value = self.expression(value)?;
+        let conversion =
+            self.selected_value_conversion(value, checked_value, value_target, cause)?;
         let target = self.property_target(value, declaration, external)?;
         Ok(Some(FirExprKind::PropertyWrite {
             target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
-            value: self.expression(value)?,
+            value: checked_value,
             conversion,
             substitutions: Box::new([]),
         }))
@@ -1979,11 +2217,15 @@ impl BodyFirChecker<'_> {
                     self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
                 })?;
             let cause = self.expression_origin(expression)?;
+            let dispatch_receiver = self.backing_field_dispatch_receiver(target, cause, span)?;
             let field = self.body.add_expr(FirExpr {
                 origin: cause,
                 ty: ResolvedTy::new(Ty::nullable(Ty::obj("kotlin/Any")))
                     .expect("a nullable Any is a publishable FIR type"),
-                kind: FirExprKind::LateinitFieldRead { target },
+                kind: FirExprKind::LateinitFieldRead {
+                    target,
+                    dispatch_receiver,
+                },
             });
             let null = self.body.add_expr(FirExpr {
                 origin: cause,

@@ -42,10 +42,12 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         IrIntrinsic::PrimitiveCompare { operand } => reject("intrinsic operand", *operand),
         IrIntrinsic::UnsignedToString { source } => reject("intrinsic source", *source),
         IrIntrinsic::PrimitiveArrayNew { element } => reject("intrinsic array element", *element),
+        IrIntrinsic::EnumValueOf { classifier } => reject("enum valueOf classifier", *classifier),
         IrIntrinsic::DataClassFieldEquals { ty }
         | IrIntrinsic::DataClassFieldHash { ty }
         | IrIntrinsic::DataClassArrayToString { ty } => reject("intrinsic property", *ty),
-        IrIntrinsic::ArrayGet
+        IrIntrinsic::Assert { .. }
+        | IrIntrinsic::ArrayGet
         | IrIntrinsic::ArraySet
         | IrIntrinsic::ArraySize
         | IrIntrinsic::StringGet
@@ -712,6 +714,8 @@ mod tests {
                 name: "broken".to_owned(),
                 params: vec![Ty::String],
                 ret: Ty::Error,
+                module_target: None,
+                module_default_call: false,
             },
             dispatch_receiver: None,
             args: Vec::new(),

@@ -34,6 +34,34 @@ fun box(): String = r { it + \"K\" }\n";
 }
 
 #[test]
+fn contravariant_sam_consumes_nested_projection_capture() {
+    const SRC: &str = r#"
+        abstract class Base
+        interface Marker
+        class Left : Base(), Marker
+        class Right : Base(), Marker
+
+        fun interface Consumer<T> { fun accept(value: T) }
+
+        class Holder<T> {
+            fun consume(consumer: Consumer<in T>) {
+                consumer.accept(object : Base() {} as T)
+            }
+        }
+
+        fun acceptAny(value: Any) {}
+
+        fun box(): String {
+            val holder = if ("".length == 0) Holder<Left>() else Holder<Right>()
+            holder.consume {}
+            holder.consume(::acceptAny)
+            return "OK"
+        }
+    "#;
+    assert_eq!(run(SRC).expect("nested projected SAM conversion"), "OK");
+}
+
+#[test]
 fn actual_interface_instance_still_passes() {
     // A real implementing class passed where the fun interface is expected must NOT be SAM-converted.
     const SRC: &str = "fun interface Foo { fun get(): String }\n\

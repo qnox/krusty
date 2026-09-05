@@ -9,6 +9,7 @@ use super::*;
 /// erase only their inline bounds while comparing parameter positions, then compare the complete
 /// canonical bound sets by ordinal.
 pub(crate) fn generic_signature_strictly_more_constrained(
+    source: &dyn SymbolSource,
     left: &GenericSig,
     right: &GenericSig,
 ) -> bool {
@@ -65,12 +66,25 @@ pub(crate) fn generic_signature_strictly_more_constrained(
     for ordinal in 0..left.formals.len() {
         let left_bounds = canonical_bounds(left, ordinal);
         let right_bounds = canonical_bounds(right, ordinal);
-        if !right_bounds.iter().all(|bound| left_bounds.contains(bound)) {
+        let implies = |specific: Ty, general: Ty| {
+            specific == general || resolution_subtype(source, specific, general)
+        };
+        if !right_bounds
+            .iter()
+            .all(|&bound| left_bounds.iter().any(|&left| implies(left, bound)))
+        {
             return false;
         }
-        strict |= left_bounds
-            .iter()
-            .any(|bound| !right_bounds.contains(bound));
+        // A nominally narrower bound is a stricter constraint even when it replaces rather than
+        // literally supplements the wider bound (`<T : B>` is stricter than `<T : A>` for B : A).
+        // An additional independent bound is strict when the right-hand set does not already imply
+        // it. Alpha-canonicalized dependent bounds follow the same relation.
+        strict |= left_bounds.iter().any(|&left| {
+            !right_bounds.iter().any(|&right| implies(right, left))
+                || right_bounds
+                    .iter()
+                    .any(|&right| implies(left, right) && !implies(right, left))
+        });
     }
     strict
 }
@@ -186,6 +200,26 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
     let Some(expected) = expected.filter(|expected| *expected != Ty::Error) else {
         return;
     };
+    // The expected type may name the constructed classifier directly while carrying type
+    // variables owned by the enclosing declaration. Generic return inference deliberately avoids
+    // treating same-shaped symbolic identities as ordinary lower-bound evidence, but constructor
+    // result inference crosses declaration ownership and must retain them exactly. Use the direct
+    // classifier constraint first, committing it only when it completes every still-unbound slot;
+    // the hierarchy walk below remains responsible for expected supertypes.
+    let mut direct = bindings.clone();
+    constrain_constructor_result(owner, type_params, Some(expected), &mut direct);
+    crate::trace_compiler!(
+        "expected_call",
+        "constructor result seed owner={owner:?} formals={type_params:?} expected={expected:?} existing={bindings:?} direct={direct:?}",
+    );
+    if type_params.iter().all(|formal| direct.contains_key(formal)) {
+        for formal in type_params {
+            if let Some(&seed) = direct.get(formal) {
+                bindings.entry(formal.clone()).or_insert(seed);
+            }
+        }
+        return;
+    }
     let symbolic_arguments = type_params
         .iter()
         .enumerate()
@@ -206,6 +240,56 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
         ret: Ty::obj_args_name(owner, &symbolic_arguments),
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
+    // Ordinary unification deliberately does not bind one declaration's inference variable to a
+    // different declaration's still-symbolic variable: argument inference must remain free to find
+    // concrete evidence later. An expected constructor result is different—it is a fixed contextual
+    // constraint, and its applied supertype may carry exactly such an enclosing variable
+    // (`Yield<T> : Values<T>` expected as `Values<TItem>`). Project the constructed type to the
+    // expected owner, then preserve those cross-declaration identities before checking the ordinary
+    // concrete-return path below.
+    if let Some(projected) = return_shape_at_expected_owner(source, signature.ret, expected) {
+        let symbolic = infer_generic_symbolic_return_constraints(projected, expected, type_params);
+        crate::trace_compiler!(
+            "expected_call",
+            "constructor symbolic result owner={owner:?} projected={projected:?} expected={expected:?} bindings={:?} constrained={:?} conflicts={:?}",
+            symbolic.bindings,
+            symbolic.constrained_formals,
+            symbolic.conflicting_formals,
+        );
+        if symbolic.conflicting_formals.is_empty() {
+            let mut trial = bindings.clone();
+            for (formal, seed) in symbolic.bindings {
+                trial.entry(formal).or_insert(seed);
+            }
+            let complete = type_params.iter().all(|formal| trial.contains_key(formal));
+            let valid = complete
+                && generic_bindings_satisfy_bounds(&signature, &trial, |actual, bound| {
+                    let mut actual = actual.projection_inner().unwrap_or(actual);
+                    let mut seen = std::collections::HashSet::new();
+                    while let Ty::TyParam(name, upper) = actual {
+                        if !seen.insert(name) {
+                            break;
+                        }
+                        actual = upper.projection_inner().unwrap_or(*upper);
+                    }
+                    crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        &SourceOracle(source),
+                        actual,
+                        bound,
+                    )
+                });
+            crate::trace_compiler!(
+                "expected_call",
+                "constructor symbolic trial={trial:?} bounds={:?} complete={complete} valid={valid}",
+                signature.formal_bounds,
+            );
+            if valid {
+                *bindings = trial;
+                return;
+            }
+        }
+    }
     let Some(seeds) = infer_generic_return_bindings_from_symbols(
         source,
         &signature,
@@ -267,6 +351,10 @@ pub(crate) fn constrain_constructor_result(
         // even while the outer callable's `T` is unresolved). The outer solver subsequently binds
         // its own variable from this concrete constructor result.
         if binds.contains_key(formal) && actual.mentions_ty_param() {
+            continue;
+        }
+        if matches!(actual.non_null(), Ty::TyParam(actual_formal, _) if actual_formal == formal) {
+            binds.insert(formal.clone(), actual.projection_inner().unwrap_or(actual));
             continue;
         }
         unify_inferred_ty(
@@ -550,6 +638,29 @@ mod tests {
     }
 
     #[test]
+    fn constructor_result_seed_preserves_enclosing_declaration_type_variables() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let owner = crate::types::type_name("sample/State");
+        let formals = vec!["class:S".to_string(), "class:A".to_string()];
+        let caller_s = Ty::ty_param("class:S", any);
+        let method_b = Ty::ty_param("method:B", any);
+        let expected = Ty::obj_args_name(owner, &[caller_s, method_b]);
+        let mut bindings = GSigBinds::new();
+
+        seed_unbound_constructor_result_from_symbols(
+            &crate::libraries::EmptySymbolSource,
+            owner,
+            &formals,
+            &[vec![any], vec![any]],
+            Some(expected),
+            &mut bindings,
+        );
+
+        assert_eq!(bindings.get("class:S"), Some(&caller_s));
+        assert_eq!(bindings.get("class:A"), Some(&method_b));
+    }
+
+    #[test]
     fn null_argument_materializes_the_bottom_of_a_nullable_generic_parameter() {
         let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let mut bindings = GSigBinds::new();
@@ -781,6 +892,54 @@ mod tests {
                 "test/Entity",
                 &[data, Ty::star_projection(nullable_any)],
             ))
+        );
+    }
+
+    #[test]
+    fn expected_result_cannot_replace_a_recursive_declared_bound() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let bound_formal = Ty::ty_param("T", any);
+        let comparable = Ty::obj_args("kotlin/Comparable", &[bound_formal]);
+        let formal = Ty::ty_param("T", comparable);
+        let signature = GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![comparable]],
+            receiver: None,
+            params: vec![],
+            ret: Ty::nullable(formal),
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        };
+
+        assert_eq!(
+            infer_generic_return_bindings(
+                &signature,
+                Ty::nullable(Ty::obj("test/Unrelated")),
+                |actual, bound| actual == bound,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn expected_result_can_intersect_an_independent_declared_bound() {
+        let bound = Ty::obj("test/Bound");
+        let formal = Ty::ty_param("T", bound);
+        let signature = GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![bound]],
+            receiver: None,
+            params: vec![],
+            ret: Ty::nullable(formal),
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        };
+        let expected = Ty::nullable(Ty::obj("test/Expected"));
+
+        assert_eq!(
+            infer_generic_return_bindings(&signature, expected, |actual, bound| actual == bound),
+            Some(GSigBinds::from([(
+                "T".to_string(),
+                Ty::obj("test/Expected")
+            )]))
         );
     }
 }
@@ -2860,7 +3019,8 @@ pub(crate) fn generic_bindings_admit_expected_return_intersection(
             };
             let actual = actual.projection_inner().unwrap_or(actual);
             bounds.iter().all(|bound| {
-                let bound = ty_subst(*bound, bindings);
+                let declared_bound = *bound;
+                let bound = ty_subst(declared_bound, bindings);
                 if admits(actual, bound) {
                     return true;
                 }
@@ -2868,6 +3028,7 @@ pub(crate) fn generic_bindings_admit_expected_return_intersection(
                 expected_bindings
                     .and_then(|expected| expected.get(formal))
                     .is_some_and(|expected| expected.non_null() == actual.non_null())
+                    && !crate::types::ty_mentions_param(declared_bound, formal_slice)
                     && crate::types::ty_mentions_param(generic_sig.ret, formal_slice)
                     && generic_sig.receiver.is_none_or(|receiver| {
                         !crate::types::ty_mentions_param(receiver, formal_slice)
@@ -2982,6 +3143,14 @@ pub(crate) fn infer_generic_return_bindings(
             return None;
         }
         for bound in bounds {
+            // A self-referential bound is an incorporated constraint on the inferred result, not
+            // an independent upper constituent. Kotlin rejects `Unrelated` for
+            // `<T : Comparable<T>> make(): T?` instead of approximating it to the hypothetical
+            // intersection `Unrelated & Comparable<Unrelated>`. Non-recursive upper bounds retain
+            // the ordinary expected-result intersection behavior below.
+            if crate::types::ty_mentions_param(*bound, formal_slice) {
+                return None;
+            }
             let bound = ty_subst(*bound, &bindings);
             if !bound.is_reference() {
                 return None;

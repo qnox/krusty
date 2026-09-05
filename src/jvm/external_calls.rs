@@ -55,15 +55,56 @@ pub(super) fn realize(
                     pass_receiver: false
                 }
             ) && callable.name != "<init>"
-                && defaults.is_empty()
             {
-                let descriptor = if callable.descriptor.is_empty() {
-                    crate::jvm::names::method_descriptor(
-                        &callable.physical_params,
-                        callable.physical_ret,
+                let (owner, name, descriptor, replacements, suffix) = if defaults.is_empty() {
+                    (
+                        callable.owner,
+                        callable.name,
+                        if callable.descriptor.is_empty() {
+                            crate::jvm::names::method_descriptor(
+                                &callable.physical_params,
+                                callable.physical_ret,
+                            )
+                        } else {
+                            callable.descriptor
+                        },
+                        Vec::new(),
+                        Vec::new(),
                     )
                 } else {
-                    callable.descriptor.clone()
+                    let default = callable.default_realization.as_deref().ok_or(target)?;
+                    if default.name == "<init>" || default.mask_count == 0 {
+                        return Err(target.into());
+                    }
+                    let replacements = defaults
+                        .iter()
+                        .map(|parameter| {
+                            let parameter = *parameter as usize;
+                            let ty = *default.real_params.get(parameter).ok_or(target)?;
+                            let value = ir.add_expr(IrExpr::Const(
+                                crate::ir::IrConst::zero_for_value_type(ty.canonical_semantic()),
+                            ));
+                            Ok((parameter, value))
+                        })
+                        .collect::<Result<Vec<_>, ExternalCallableId>>()?;
+                    let mut masks = vec![0i32; default.mask_count];
+                    for parameter in &defaults {
+                        let parameter = *parameter as usize;
+                        let mask = masks.get_mut(parameter / 32).ok_or(target)?;
+                        *mask |= 1i32 << (parameter % 32);
+                    }
+                    let mut suffix = masks
+                        .into_iter()
+                        .map(|mask| ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(mask))))
+                        .collect::<Vec<_>>();
+                    suffix.push(ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
+                    (
+                        default.owner,
+                        default.name.clone(),
+                        default.descriptor.clone(),
+                        replacements,
+                        suffix,
+                    )
                 };
                 let IrExpr::New {
                     args,
@@ -73,12 +114,16 @@ pub(super) fn realize(
                 else {
                     unreachable!()
                 };
+                for (parameter, value) in replacements {
+                    *args.get_mut(parameter).ok_or(target)? = value;
+                }
+                args.extend(suffix);
                 let args = std::mem::take(args);
                 *external_target = None;
                 ir.exprs[index] = IrExpr::Call {
                     callee: Callee::Static {
-                        owner: callable.owner,
-                        name: callable.name,
+                        owner,
+                        name,
                         descriptor,
                         inline: callable.inline,
                     },
@@ -217,6 +262,7 @@ pub(super) fn realize(
                     ret: result,
                     substitutions: Vec::new(),
                     defaults: Vec::new(),
+                    extension_receiver_parameter: None,
                 },
                 dispatch_receiver: receiver,
                 args: arguments,
@@ -226,27 +272,35 @@ pub(super) fn realize(
                     .insert(expression, source_receiver);
             }
         }
-        let (target, semantic_params, semantic_ret, substitutions, defaults) =
-            match &ir.exprs[index] {
-                IrExpr::Call {
-                    callee:
-                        Callee::External {
-                            target,
-                            params,
-                            ret,
-                            substitutions,
-                            defaults,
-                        },
-                    ..
-                } => (
-                    *target,
-                    params.clone(),
-                    *ret,
-                    substitutions.clone(),
-                    defaults.clone(),
-                ),
-                _ => continue,
-            };
+        let (
+            target,
+            semantic_params,
+            semantic_ret,
+            substitutions,
+            defaults,
+            extension_receiver_parameter,
+        ) = match &ir.exprs[index] {
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        ret,
+                        substitutions,
+                        defaults,
+                        extension_receiver_parameter,
+                    },
+                ..
+            } => (
+                *target,
+                params.clone(),
+                *ret,
+                substitutions.clone(),
+                defaults.clone(),
+                *extension_receiver_parameter,
+            ),
+            _ => continue,
+        };
         let realization = classpath.external_callable(target).ok_or_else(|| {
             crate::trace_compiler!(
                 "fir",
@@ -401,13 +455,16 @@ pub(super) fn realize(
             // value class such as `Duration` is a reference semantically but a primitive `long` in
             // this descriptor; leaving the semantic `null` placeholder makes the bridge unbox null
             // before its mask can substitute the default.
-            let extension_receiver = matches!(
-                kind,
-                ExternalCallableKind::Extension | ExternalCallableKind::Member
-            )
-            .then_some(callable.source_receiver)
-            .flatten()
-            .map(|_| callable.context_count);
+            let extension_receiver = extension_receiver_parameter
+                .map(|parameter| parameter as usize)
+                .or_else(|| {
+                    (kind == ExternalCallableKind::Extension)
+                        .then_some(callable.source_receiver)
+                        .flatten()
+                        .map(|_| callable.context_count)
+                });
+            let member_extension =
+                kind == ExternalCallableKind::Member && extension_receiver_parameter.is_some();
             let replacements = defaults
                 .iter()
                 .map(|default_parameter| {
@@ -420,7 +477,20 @@ pub(super) fn realize(
                     let value = ir.add_expr(IrExpr::Const(
                         crate::ir::IrConst::zero_for_value_type(ty.canonical_semantic()),
                     ));
-                    Ok((source_parameter, value))
+                    // A member extension's common-IR argument vector already contains the
+                    // extension receiver at its checked parameter position; only the dispatch
+                    // receiver is inserted below. Its default mask excludes the extension slot,
+                    // so translate the mask ordinal back before replacing the placeholder. A
+                    // top-level extension still keeps its receiver in `dispatch_receiver` here and
+                    // therefore writes by the unshifted source ordinal.
+                    Ok((
+                        if member_extension {
+                            physical_parameter
+                        } else {
+                            source_parameter
+                        },
+                        value,
+                    ))
                 })
                 .collect::<Result<Vec<_>, ExternalCallableId>>()?;
             {
@@ -507,8 +577,14 @@ pub(super) fn realize(
             Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) => {
                 Some(crate::ir::IrIntrinsic::NullableAnyToString)
             }
+            Some(crate::libraries::CompilerIntrinsic::EnumValueOf) => {
+                Some(crate::ir::IrIntrinsic::EnumValueOf {
+                    classifier: semantic_ret,
+                })
+            }
             Some(
                 crate::libraries::CompilerIntrinsic::ArraySize
+                | crate::libraries::CompilerIntrinsic::ArrayFactory(_)
                 | crate::libraries::CompilerIntrinsic::CharCode
                 | crate::libraries::CompilerIntrinsic::StringLength
                 | crate::libraries::CompilerIntrinsic::Assert
@@ -521,7 +597,6 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
                 | crate::libraries::CompilerIntrinsic::EnumValues
-                | crate::libraries::CompilerIntrinsic::EnumValueOf
                 | crate::libraries::CompilerIntrinsic::ForEach
                 | crate::libraries::CompilerIntrinsic::ForEachIndexed
                 | crate::libraries::CompilerIntrinsic::Map
@@ -532,6 +607,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::TrimIndent
                 | crate::libraries::CompilerIntrinsic::TrimMargin
                 | crate::libraries::CompilerIntrinsic::NumericConversion
+                | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                 | crate::libraries::CompilerIntrinsic::PrimitiveCompare
                 | crate::libraries::CompilerIntrinsic::PrimitiveBitAnd
                 | crate::libraries::CompilerIntrinsic::PrimitiveBitOr
@@ -591,6 +667,7 @@ pub(super) fn realize(
                             descriptor,
                             interface,
                             source_member: None,
+                            source: None,
                         };
                     } else if callable.inline.must_inline() {
                         *callee = Callee::Static {
@@ -812,7 +889,12 @@ fn copy_call_facts(ir: &mut IrFile, source: crate::ir::ExprId, target: crate::ir
     if let Some(value) = ir.call_declared_params.get(&source).cloned() {
         ir.call_declared_params.insert(target, value);
     }
-    if let Some(value) = ir.suspend_calls.get(&source).copied() {
+    // A suspension point identifies the selected call operation, not the semantic result wrapper.
+    // Keeping the identity on both nodes makes later representation rewrites ambiguous: value-class
+    // lowering can move the inner operation again while coroutine lowering still mistakes the outer
+    // coercion for the call and appends no continuation. Move this single-owner fact with the call,
+    // just like `clone_expr_with_type_facts` does for value-class wrappers.
+    if let Some(value) = ir.suspend_calls.remove(&source) {
         ir.suspend_calls.insert(target, value);
     }
     if let Some(value) = ir.reified_call_subst.get(&source).cloned() {

@@ -1,6 +1,9 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
-use crate::fir::{CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, ResolvedTy};
+use crate::fir::{
+    CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
+    FirAnnotationDefaultValue, FirConstant, ResolvedTy,
+};
 use crate::ir::{Callee, ExprId, IrCheckedArgument, IrConst, IrExpr, IrTypeOp};
 use crate::types::Ty;
 
@@ -13,7 +16,7 @@ use super::BodyLowering;
 enum CheckedArgumentPolicy<'a> {
     Selected {
         allow_defaults: bool,
-        preserve_captureless_lambdas: bool,
+        preserve_inline_lambdas: bool,
     },
     SameFileInline {
         declared_parameters: &'a [Ty],
@@ -28,7 +31,125 @@ struct NormalizedCheckedArguments {
     defaults: Vec<u32>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum SelectedOperandMode {
+    DirectWhenOrdered,
+    Materialized,
+}
+
+pub(super) struct SelectedOperandRequest<'a> {
+    pub(super) receiver_ty: Option<ResolvedTy>,
+    pub(super) parameter_types: &'a [Ty],
+    pub(super) dispatch_receiver: Option<ExprId>,
+    pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) allow_defaults: bool,
+    pub(super) preserve_inline_lambdas: bool,
+    pub(super) extension_receiver_parameter: Option<u32>,
+    pub(super) mode: SelectedOperandMode,
+}
+
+struct ExternalInlineCallRequest<'a> {
+    plan: &'a crate::fir::FirInlineBodyPlan,
+    receiver_ty: Option<ResolvedTy>,
+    parameter_types: &'a [Ty],
+    result: ResolvedTy,
+    dispatch_receiver: Option<ExprId>,
+    extension_receiver: Option<ExprId>,
+    arguments: &'a [IrCheckedArgument],
+}
+
+/// Whether the checked source-order operand stream is already in selected parameter order. Missing
+/// defaults have no evaluation and therefore do not disturb the order; repeated vararg fragments
+/// remain adjacent at one parameter and are grouped without reordering their elements.
+fn arguments_follow_parameter_order(
+    arguments: &[IrCheckedArgument],
+    preceding_parameter: Option<u32>,
+) -> bool {
+    let mut previous = preceding_parameter;
+    for argument in arguments {
+        let parameter = match argument {
+            IrCheckedArgument::Expression { parameter, .. } => *parameter,
+            IrCheckedArgument::Vararg {
+                parameter,
+                elements,
+                ..
+            } if !elements.is_empty() => *parameter,
+            IrCheckedArgument::Default { .. } | IrCheckedArgument::Vararg { .. } => continue,
+        };
+        if previous.is_some_and(|previous| parameter < previous) {
+            return false;
+        }
+        previous = Some(parameter);
+    }
+    true
+}
+
 impl BodyLowering<'_> {
+    /// Whether a checked common-IR operand contains a suspension that belongs to the current body.
+    /// The checker/lowering maps are authoritative; this performs no callable lookup. A lambda body
+    /// remains a separate semantic body, while evaluating its captures still belongs to the caller.
+    fn operand_suspends(&self, expression: ExprId) -> bool {
+        if self.ir.suspend_calls.contains_key(&expression) {
+            return true;
+        }
+        match self.ir.expr(expression) {
+            IrExpr::Call {
+                callee: Callee::Local(function),
+                ..
+            }
+            | IrExpr::Call {
+                callee: Callee::ClassStatic { function, .. },
+                ..
+            } => {
+                if self.ir.suspend_funs.contains(function) {
+                    return true;
+                }
+            }
+            IrExpr::MethodCall { class, index, .. } => {
+                if self.ir.classes[*class as usize]
+                    .methods
+                    .get(*index as usize)
+                    .is_some_and(|function| self.ir.suspend_funs.contains(function))
+                {
+                    return true;
+                }
+            }
+            IrExpr::Lambda { captures, .. } => {
+                return captures
+                    .iter()
+                    .any(|capture| self.operand_suspends(*capture));
+            }
+            _ => {}
+        }
+        let mut suspends = false;
+        crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+            if !suspends && self.operand_suspends(child) {
+                suspends = true;
+            }
+        });
+        suspends
+    }
+
+    fn checked_operands_suspend(
+        &self,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        arguments: &[IrCheckedArgument],
+    ) -> bool {
+        dispatch_receiver
+            .into_iter()
+            .chain(extension_receiver)
+            .any(|operand| self.operand_suspends(operand))
+            || arguments.iter().any(|argument| match argument {
+                IrCheckedArgument::Expression { value, .. } => self.operand_suspends(*value),
+                IrCheckedArgument::Vararg { elements, .. } => elements
+                    .iter()
+                    .any(|(value, _)| self.operand_suspends(*value)),
+                IrCheckedArgument::Default { .. } => false,
+            })
+    }
+
     /// Inline the already-checked block passed to one of Kotlin's coroutine primitives.
     ///
     /// FIR has selected the intrinsic declaration and its sole lambda argument. Common lowering
@@ -125,16 +246,18 @@ impl BodyLowering<'_> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let (statements, receiver, arguments, defaults) = self.selected_semantic_operands(
-            receiver_ty,
-            &parameter_types,
-            dispatch_receiver,
-            extension_receiver,
-            arguments,
-            false,
-            false,
-            extension_receiver_parameter,
-        )?;
+        let (statements, receiver, arguments, defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty,
+                parameter_types: &parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                allow_defaults: false,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter,
+                mode: SelectedOperandMode::DirectWhenOrdered,
+            })?;
         debug_assert!(defaults.is_empty());
         let operation = if write {
             crate::ir::IrCheckedOperation::ExternalPropertyWrite {
@@ -207,27 +330,31 @@ impl BodyLowering<'_> {
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
         if let Some(plan) = inline_plan {
-            if let Some(expanded) = self.external_inline_call(
+            if let Some(expanded) = self.external_inline_call(ExternalInlineCallRequest {
                 plan,
                 receiver_ty,
-                &parameter_types,
+                parameter_types: &parameter_types,
+                result,
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-            ) {
+            }) {
+                self.ir.inline_regions.insert(expanded);
                 return Some(expanded);
             }
         }
-        let (statements, receiver, args, mut defaults) = self.selected_semantic_operands(
-            receiver_ty,
-            &parameter_types,
-            dispatch_receiver,
-            extension_receiver,
-            arguments,
-            true,
-            can_inline,
-            extension_receiver_parameter,
-        )?;
+        let (statements, receiver, args, mut defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty,
+                parameter_types: &parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                allow_defaults: true,
+                preserve_inline_lambdas: can_inline,
+                extension_receiver_parameter,
+                mode: SelectedOperandMode::DirectWhenOrdered,
+            })?;
         // The external FIR target temporarily inserts a MEMBER EXTENSION receiver into its parameter
         // vector so every operand has one checked slot. It is still a receiver, not a source value
         // parameter, and Kotlin default-mask ordinals count only value parameters. Publish the
@@ -249,6 +376,7 @@ impl BodyLowering<'_> {
                 ret: result.get(),
                 substitutions: super::checked::lower_substitutions(substitutions),
                 defaults,
+                extension_receiver_parameter,
             },
             dispatch_receiver: receiver,
             args,
@@ -261,6 +389,9 @@ impl BodyLowering<'_> {
         if let Some(result) = declared_result {
             self.ir.call_declared_ret.insert(call, result.get());
         }
+        if can_inline {
+            self.ir.inline_call_sites.insert(call);
+        }
         if suspend {
             self.ir.suspend_calls.insert(call, result.get());
             crate::trace_compiler!(
@@ -269,65 +400,311 @@ impl BodyLowering<'_> {
                 result.get(),
             );
         }
-        Some(self.wrap_call_statements(statements, call))
+        let region = self.wrap_call_statements(statements, call);
+        if can_inline {
+            self.ir.inline_regions.insert(region);
+        }
+        Some(region)
     }
 
-    fn external_inline_call(
-        &mut self,
-        plan: &crate::fir::FirInlineBodyPlan,
-        receiver_ty: Option<ResolvedTy>,
-        parameter_types: &[Ty],
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> Option<ExprId> {
-        if let crate::fir::FirInlineBodyPlan::ForEach {
-            lambda_parameter,
-            iterator_ty,
-            iterator,
-            has_next,
-            next,
-        } = plan
-        {
-            return self.external_inline_for_each(
-                *lambda_parameter,
-                *iterator_ty,
+    fn external_inline_call(&mut self, request: ExternalInlineCallRequest<'_>) -> Option<ExprId> {
+        let ExternalInlineCallRequest {
+            plan,
+            receiver_ty,
+            parameter_types,
+            result,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+        } = request;
+        let (lambda_parameter, invocation_arguments, returned_value) = match plan {
+            crate::fir::FirInlineBodyPlan::ForEach {
+                lambda_parameter,
+                iterator_ty,
                 iterator,
                 has_next,
                 next,
+            } => {
+                return self.external_inline_for_each(
+                    *lambda_parameter,
+                    *iterator_ty,
+                    iterator,
+                    has_next,
+                    next,
+                    receiver_ty,
+                    parameter_types,
+                    dispatch_receiver,
+                    extension_receiver,
+                    arguments,
+                );
+            }
+            crate::fir::FirInlineBodyPlan::CollectionTransform {
+                lambda_parameter,
+                flatten,
+                iterator_ty,
+                iterator,
+                has_next,
+                next,
+                factory,
+                factory_classifier,
+                append,
+                accumulator,
+                append_parameter,
+                append_result,
+            } => {
+                return self.external_inline_collection_transform(
+                    *lambda_parameter,
+                    *flatten,
+                    *iterator_ty,
+                    iterator,
+                    has_next,
+                    next,
+                    *factory,
+                    *factory_classifier,
+                    *append,
+                    *accumulator,
+                    *append_parameter,
+                    *append_result,
+                    receiver_ty,
+                    parameter_types,
+                    dispatch_receiver,
+                    extension_receiver,
+                    arguments,
+                );
+            }
+            crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
+                lambda_parameter,
+                state_parameter,
+                state_default,
+                enter,
+                cleanup,
+            } => {
+                return self.external_suspend_finally_inline_call(
+                    *lambda_parameter,
+                    *state_parameter,
+                    *state_default,
+                    enter,
+                    cleanup,
+                    receiver_ty,
+                    parameter_types,
+                    result,
+                    dispatch_receiver,
+                    extension_receiver,
+                    arguments,
+                );
+            }
+            crate::fir::FirInlineBodyPlan::InvokeLambda {
+                lambda_parameter,
+                arguments,
+                result,
+            } => (*lambda_parameter, arguments, *result),
+        };
+        let lambda_parameter = lambda_parameter as usize;
+        let (mut statements, receiver, args, defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty,
                 parameter_types,
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-            );
+                allow_defaults: false,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter: None,
+                mode: SelectedOperandMode::Materialized,
+            })?;
+        debug_assert!(defaults.is_empty());
+        let invocation_operands = invocation_arguments
+            .iter()
+            .map(|operand| {
+                Some(match operand {
+                    crate::fir::FirInlineValue::Receiver => (receiver?, receiver_ty?.get()),
+                    crate::fir::FirInlineValue::Parameter(parameter) => (
+                        *args.get(*parameter as usize)?,
+                        *parameter_types.get(*parameter as usize)?,
+                    ),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let inline_body = self.materialize_external_inline_lambda(
+            &mut statements,
+            &args,
+            lambda_parameter,
+            &invocation_operands,
+        )?;
+
+        if let Some(returned_value) = returned_value {
+            statements.push(inline_body);
+            let value = match returned_value {
+                crate::fir::FirInlineValue::Receiver => receiver?,
+                crate::fir::FirInlineValue::Parameter(parameter) => {
+                    *args.get(parameter as usize)?
+                }
+            };
+            return Some(self.ir.add_expr(IrExpr::Block {
+                stmts: statements,
+                value: Some(value),
+            }));
         }
-        // Receiver-bearing plans require a distinct semantic receiver parameter in the FIR plan.
-        // Do not reinterpret the provider's physical parameter numbering here.
-        if receiver_ty.is_some() || dispatch_receiver.is_some() || extension_receiver.is_some() {
+        Some(if statements.is_empty() {
+            inline_body
+        } else {
+            self.ir.add_expr(IrExpr::Block {
+                stmts: statements,
+                value: Some(inline_body),
+            })
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn external_suspend_finally_inline_call(
+        &mut self,
+        lambda_parameter: u32,
+        state_parameter: u32,
+        state_default: crate::fir::FirInlineDefaultValue,
+        enter: &crate::fir::FirInlineMemberCall,
+        cleanup: &crate::fir::FirInlineMemberCall,
+        receiver_ty: Option<ResolvedTy>,
+        parameter_types: &[Ty],
+        result: ResolvedTy,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        arguments: &[IrCheckedArgument],
+    ) -> Option<ExprId> {
+        let receiver_ty = receiver_ty?.get();
+        let (mut statements, receiver, args, defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty: ResolvedTy::new(receiver_ty).ok(),
+                parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                allow_defaults: true,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter: None,
+                mode: SelectedOperandMode::Materialized,
+            })?;
+        let receiver = receiver?;
+        let state_parameter = state_parameter as usize;
+        if defaults
+            .iter()
+            .any(|default| *default as usize != state_parameter)
+        {
             return None;
         }
-        let crate::fir::FirInlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            argument_parameters,
-            return_parameter,
-        } = plan
-        else {
-            unreachable!("forEach plans return before direct-lambda expansion")
+        let state_ty = *parameter_types.get(state_parameter)?;
+        let state_value = if defaults
+            .iter()
+            .any(|default| *default as usize == state_parameter)
+        {
+            match state_default {
+                crate::fir::FirInlineDefaultValue::Null => {
+                    self.ir.add_expr(IrExpr::Const(IrConst::Null))
+                }
+            }
+        } else {
+            *args.get(state_parameter)?
         };
-        let lambda_parameter = *lambda_parameter as usize;
-        let (mut statements, receiver, args, defaults) = self.selected_semantic_operands(
-            None,
-            parameter_types,
-            None,
-            None,
-            arguments,
-            false,
-            false,
-            None,
+        let state_slot = self.allocate_temporary();
+        statements.push(self.ir.add_expr(IrExpr::Variable {
+            index: state_slot,
+            ty: state_ty,
+            init: Some(state_value),
+            named: false,
+        }));
+        let inline_body = self.materialize_external_inline_lambda(
+            &mut statements,
+            &args,
+            lambda_parameter as usize,
+            &[],
         )?;
-        debug_assert!(receiver.is_none());
-        debug_assert!(defaults.is_empty());
+
+        let enter_state = self.ir.add_expr(IrExpr::GetValue(state_slot));
+        let enter_call =
+            self.external_inline_member_call(enter, receiver, receiver_ty, vec![enter_state])?;
+        statements.push(enter_call);
+
+        let result_ty = result.get();
+        let result_slot = self.allocate_temporary();
+        let initial = self
+            .ir
+            .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
+        statements.push(self.ir.add_expr(IrExpr::Variable {
+            index: result_slot,
+            ty: result_ty,
+            init: Some(initial),
+            named: false,
+        }));
+        let store_result = self.ir.add_expr(IrExpr::SetValue {
+            var: result_slot,
+            value: inline_body,
+        });
+        let try_body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![store_result],
+            value: None,
+        });
+        let cleanup_state = self.ir.add_expr(IrExpr::GetValue(state_slot));
+        let cleanup_call =
+            self.external_inline_member_call(cleanup, receiver, receiver_ty, vec![cleanup_state])?;
+        let finally = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![cleanup_call],
+            value: None,
+        });
+        statements.push(self.ir.add_expr(IrExpr::Try {
+            body: try_body,
+            catches: Vec::new(),
+            finally: Some(finally),
+            result: Ty::Unit,
+        }));
+        let value = self.ir.add_expr(IrExpr::GetValue(result_slot));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: statements,
+            value: Some(value),
+        }))
+    }
+
+    fn external_inline_member_call(
+        &mut self,
+        plan: &crate::fir::FirInlineMemberCall,
+        receiver: ExprId,
+        receiver_ty: Ty,
+        args: Vec<ExprId>,
+    ) -> Option<ExprId> {
+        if plan.parameters.len() != args.len() {
+            return None;
+        }
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External {
+                target: plan.declaration,
+                params: plan
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                ret: plan.result.get(),
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: None,
+            },
+            dispatch_receiver: Some(receiver),
+            args,
+        });
+        self.ir.ext_call_source_receiver.insert(call, receiver_ty);
+        if plan.suspend {
+            self.ir.suspend_calls.insert(call, plan.result.get());
+        }
+        Some(call)
+    }
+
+    /// Replace one already-evaluated lambda operand with its checked inline-body template. Capture
+    /// evaluation stays at the lambda's source position, and every external inline shape shares this
+    /// single local-slot rebasing path.
+    fn materialize_external_inline_lambda(
+        &mut self,
+        statements: &mut Vec<ExprId>,
+        args: &[ExprId],
+        lambda_parameter: usize,
+        invocation_operands: &[(ExprId, Ty)],
+    ) -> Option<ExprId> {
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter)?) {
             IrExpr::GetValue(slot) => *slot,
             _ => return None,
@@ -354,12 +731,10 @@ impl BodyLowering<'_> {
             } => (impl_fn, captures, inline_body, arity as usize),
             _ => return None,
         };
-        if argument_parameters.len() != arity {
+        if invocation_operands.len() != arity {
             return None;
         }
 
-        // A lambda literal evaluates its captures at the lambda argument's source position. Replace
-        // the now-unneeded closure allocation with explicit bindings at that exact position.
         statements.remove(declaration_position);
         let mut capture_declarations = Vec::with_capacity(captures.len());
         let mut formal_slots = Vec::with_capacity(captures.len() + arity);
@@ -393,15 +768,14 @@ impl BodyLowering<'_> {
             declaration_position..declaration_position,
             capture_declarations,
         );
-        for parameter in argument_parameters {
-            let value = *args.get(*parameter as usize)?;
+        for &(value, ty) in invocation_operands {
             let slot = match self.ir.expr(value) {
                 IrExpr::GetValue(slot) => *slot,
                 _ => {
                     let slot = self.allocate_temporary();
                     statements.push(self.ir.add_expr(IrExpr::Variable {
                         index: slot,
-                        ty: *parameter_types.get(*parameter as usize)?,
+                        ty,
                         init: Some(value),
                         named: false,
                     }));
@@ -415,40 +789,225 @@ impl BodyLowering<'_> {
         let local_count =
             rehome_inline_body_values(self.ir, inline_body, &formal_slots, local_base)?;
         self.next_temporary = local_base.checked_add(local_count)?;
-        let lambda_result = self.ir.functions.get(implementation as usize)?.ret;
+        self.ir.functions[implementation as usize].body = None;
+        self.ir.inline_only_fns.insert(implementation);
+        Some(inline_body)
+    }
+
+    /// Expand the checked structural body of an exact collection `map`/`flatMap` declaration only
+    /// when its inline lambda contains a suspension. Ordinary calls retain the library invocation;
+    /// a suspending body must join the enclosing function before target coroutine lowering.
+    #[allow(clippy::too_many_arguments)]
+    fn external_inline_collection_transform(
+        &mut self,
+        lambda_parameter: u32,
+        flatten: bool,
+        iterator_ty: ResolvedTy,
+        iterator: &crate::fir::FirIteratorCall,
+        has_next: &crate::fir::FirIteratorCall,
+        next: &crate::fir::FirIteratorCall,
+        factory: ExternalCallableId,
+        factory_classifier: crate::types::TypeName,
+        append: ExternalCallableId,
+        accumulator_ty: ResolvedTy,
+        append_parameter: ResolvedTy,
+        append_result: ResolvedTy,
+        receiver_ty: Option<ResolvedTy>,
+        parameter_types: &[Ty],
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        arguments: &[IrCheckedArgument],
+    ) -> Option<ExprId> {
+        let (mut statements, receiver, args, defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty,
+                parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                allow_defaults: false,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter: None,
+                mode: SelectedOperandMode::Materialized,
+            })?;
+        debug_assert!(defaults.is_empty());
+        let iterable = receiver?;
+        let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
+            IrExpr::GetValue(slot) => *slot,
+            _ => return None,
+        };
+        let declaration_position = statements.iter().position(|statement| {
+            matches!(
+                self.ir.expr(*statement),
+                IrExpr::Variable { index, .. } if *index == lambda_slot
+            )
+        })?;
+        let lambda = match self.ir.expr(statements[declaration_position]).clone() {
+            IrExpr::Variable {
+                init: Some(lambda), ..
+            } => lambda,
+            _ => return None,
+        };
+        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                inline_body: Some(inline_body),
+                arity,
+                ..
+            } => (impl_fn, captures, inline_body, arity as usize),
+            _ => return None,
+        };
+        if arity != 1 || !self.operand_suspends(inline_body) {
+            return None;
+        }
+
+        statements.remove(declaration_position);
+        let mut capture_declarations = Vec::with_capacity(captures.len());
+        let mut formal_slots = Vec::with_capacity(captures.len() + 1);
+        for (capture_ordinal, capture) in captures.into_iter().enumerate() {
+            if self.ir.shared_capture_parameters.contains_key(&(
+                implementation,
+                u32::try_from(capture_ordinal).expect("too many inline captures"),
+            )) {
+                let IrExpr::GetValue(slot) = self.ir.expr(capture) else {
+                    return None;
+                };
+                formal_slots.push(*slot);
+                continue;
+            }
+            let slot = self.allocate_temporary();
+            let ty = *self
+                .ir
+                .functions
+                .get(implementation as usize)?
+                .params
+                .get(capture_ordinal)?;
+            capture_declarations.push(self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty,
+                init: Some(capture),
+                named: false,
+            }));
+            formal_slots.push(slot);
+        }
+        statements.splice(
+            declaration_position..declaration_position,
+            capture_declarations,
+        );
+
+        let element_ty = *self
+            .ir
+            .functions
+            .get(implementation as usize)?
+            .params
+            .get(formal_slots.len())?;
+        let part_ty = self.ir.functions.get(implementation as usize)?.ret;
+        let element_slot = self.allocate_temporary();
+        formal_slots.push(element_slot);
+        let local_base = self.next_temporary;
+        let local_count =
+            rehome_inline_body_values(self.ir, inline_body, &formal_slots, local_base)?;
+        self.next_temporary = local_base.checked_add(local_count)?;
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
 
-        if let Some(return_parameter) = return_parameter {
-            let inline_body = frame_inline_returns(
-                self.ir,
-                inline_body,
-                lambda_result,
-                false,
-                &mut self.next_temporary,
-            )?;
-            statements.push(inline_body);
-            let value = *args.get(*return_parameter as usize)?;
-            return Some(self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
+        let factory_call = self.ir.add_expr(IrExpr::New {
+            internal: factory_classifier,
+            args: Vec::new(),
+            ctor_params: Some(Vec::new()),
+            ctor_desc: None,
+            external_target: Some(factory),
+        });
+        let accumulator_slot = self.allocate_temporary();
+        statements.push(self.ir.add_expr(IrExpr::Variable {
+            index: accumulator_slot,
+            ty: accumulator_ty.get(),
+            init: Some(factory_call),
+            named: true,
+        }));
+
+        let iterator_value = self.iterator_call(iterator, iterable).ok()?;
+        let iterator_slot = self.allocate_temporary();
+        statements.push(self.ir.add_expr(IrExpr::Variable {
+            index: iterator_slot,
+            ty: iterator_ty.get(),
+            init: Some(iterator_value),
+            named: true,
+        }));
+        let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
+        let condition = self.iterator_call(has_next, iterator_read).ok()?;
+        let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
+        let element = self.iterator_call(next, iterator_read).ok()?;
+        let element_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: element_slot,
+            ty: element_ty,
+            init: Some(element),
+            named: true,
+        });
+
+        let (mut body_statements, body_value) = match self.ir.expr(inline_body).clone() {
+            IrExpr::Block {
+                stmts,
                 value: Some(value),
-            }));
-        }
-        let inline_body = frame_inline_returns(
-            self.ir,
-            inline_body,
-            lambda_result,
-            true,
-            &mut self.next_temporary,
-        )?;
-        Some(if statements.is_empty() {
-            inline_body
+            } => (stmts, value),
+            IrExpr::Block { value: None, .. } => return None,
+            _ => (Vec::new(), inline_body),
+        };
+        let part_slot = self.allocate_temporary();
+        body_statements.push(self.ir.add_expr(IrExpr::Variable {
+            index: part_slot,
+            ty: part_ty,
+            init: Some(body_value),
+            named: false,
+        }));
+        let part = self.ir.add_expr(IrExpr::GetValue(part_slot));
+        let append_argument = if flatten {
+            part
         } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(inline_body),
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: part,
+                type_operand: append_parameter.get(),
             })
-        })
+        };
+        let accumulator = self.ir.add_expr(IrExpr::GetValue(accumulator_slot));
+        let append_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External {
+                target: append,
+                params: vec![append_parameter.get()],
+                ret: append_result.get(),
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: None,
+            },
+            dispatch_receiver: Some(accumulator),
+            args: vec![append_argument],
+        });
+        self.ir
+            .ext_call_source_receiver
+            .insert(append_call, accumulator_ty.get());
+        body_statements.push(append_call);
+        let mut loop_statements = Vec::with_capacity(body_statements.len() + 1);
+        loop_statements.push(element_declaration);
+        loop_statements.extend(body_statements);
+        let loop_body = self.ir.add_expr(IrExpr::Block {
+            stmts: loop_statements,
+            value: None,
+        });
+        let loop_label = format!("$fir_inline_collect_{iterator_slot}");
+        statements.push(self.ir.add_expr(IrExpr::While {
+            cond: condition,
+            body: loop_body,
+            update: None,
+            post_test: false,
+            label: Some(loop_label),
+        }));
+        let result = self.ir.add_expr(IrExpr::GetValue(accumulator_slot));
+        Some(self.ir.add_expr(IrExpr::Block {
+            stmts: statements,
+            value: Some(result),
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -465,16 +1024,18 @@ impl BodyLowering<'_> {
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
-        let (mut statements, receiver, args, defaults) = self.selected_semantic_operands(
-            receiver_ty,
-            parameter_types,
-            dispatch_receiver,
-            extension_receiver,
-            arguments,
-            false,
-            false,
-            None,
-        )?;
+        let (mut statements, receiver, args, defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty,
+                parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                allow_defaults: false,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter: None,
+                mode: SelectedOperandMode::Materialized,
+            })?;
         debug_assert!(defaults.is_empty());
         let iterable = receiver?;
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
@@ -558,7 +1119,6 @@ impl BodyLowering<'_> {
         let iterator_value = self.iterator_call(iterator, iterable).ok()?;
         let iterator_slot = self.allocate_temporary();
         let loop_label = format!("$fir_inline_foreach_{iterator_slot}");
-        rewrite_for_each_returns(self.ir, inline_body, &loop_label)?;
         statements.push(self.ir.add_expr(IrExpr::Variable {
             index: iterator_slot,
             ty: iterator_ty.get(),
@@ -630,16 +1190,18 @@ impl BodyLowering<'_> {
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
-        let (statements, receiver, args, defaults) = self.selected_semantic_operands(
-            receiver_ty,
-            &parameter_types,
-            dispatch_receiver,
-            extension_receiver,
-            arguments,
-            false,
-            false,
-            None,
-        )?;
+        let (statements, receiver, args, defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty,
+                parameter_types: &parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                allow_defaults: false,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter: None,
+                mode: SelectedOperandMode::DirectWhenOrdered,
+            })?;
         debug_assert!(defaults.is_empty());
         let call = self.ir.add_expr(IrExpr::Call {
             callee,
@@ -651,19 +1213,33 @@ impl BodyLowering<'_> {
 
     pub(super) fn selected_semantic_operands(
         &mut self,
-        receiver_ty: Option<ResolvedTy>,
-        parameter_types: &[Ty],
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-        allow_defaults: bool,
-        preserve_captureless_lambdas: bool,
-        extension_receiver_parameter: Option<u32>,
+        request: SelectedOperandRequest<'_>,
     ) -> Option<(Vec<ExprId>, Option<ExprId>, Vec<ExprId>, Vec<u32>)> {
+        let SelectedOperandRequest {
+            receiver_ty,
+            parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            allow_defaults,
+            preserve_inline_lambdas,
+            extension_receiver_parameter,
+            mode,
+        } = request;
         let member_extension = dispatch_receiver.is_some() && extension_receiver.is_some();
         if member_extension != extension_receiver_parameter.is_some() {
             return None;
         }
+        // A dependency inline call is still expanded by the target from retained bytecode. Keep its
+        // non-lambda operands in source-order locals: captured lambda operands then reference those
+        // locals, which is the explicit contract consumed by the JVM splicer. Inline lambda literals
+        // remain substitution nodes through `preserve_inline_lambdas` below. Ordinary
+        // calls have no such retained-body boundary and may keep an already ordered operand stream
+        // direct.
+        let direct = matches!(mode, SelectedOperandMode::DirectWhenOrdered)
+            && !preserve_inline_lambdas
+            && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
+            && arguments_follow_parameter_order(arguments, extension_receiver_parameter);
         let mut statements = Vec::new();
         let receiver = if member_extension {
             dispatch_receiver
@@ -671,6 +1247,9 @@ impl BodyLowering<'_> {
             dispatch_receiver.or(extension_receiver)
         };
         let receiver = match (receiver, receiver_ty) {
+            (Some(receiver), Some(receiver_ty)) if direct => {
+                Some(self.direct_call_operand(receiver, receiver_ty.get()))
+            }
             (Some(receiver), Some(receiver_ty)) => {
                 Some(self.spill_call_operand(receiver, receiver_ty.get(), &mut statements))
             }
@@ -683,7 +1262,11 @@ impl BodyLowering<'_> {
             let extension_receiver = extension_receiver?;
             Some((
                 parameter,
-                self.spill_call_operand(extension_receiver, parameter_ty, &mut statements),
+                if direct {
+                    self.direct_call_operand(extension_receiver, parameter_ty)
+                } else {
+                    self.spill_call_operand(extension_receiver, parameter_ty, &mut statements)
+                },
             ))
         } else {
             None
@@ -693,8 +1276,9 @@ impl BodyLowering<'_> {
             arguments,
             CheckedArgumentPolicy::Selected {
                 allow_defaults,
-                preserve_captureless_lambdas,
+                preserve_inline_lambdas,
             },
+            direct,
         )?;
         statements.extend(normalized.statements);
         let mut slots = normalized.slots;
@@ -726,21 +1310,24 @@ impl BodyLowering<'_> {
         parameters: &[ResolvedTy],
         outer_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
+        annotation: Option<&FirAnnotationConstruction>,
     ) -> Option<ExprId> {
         let parameter_types = parameters
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let (statements, receiver, mut args, defaults) = self.selected_semantic_operands(
-            None,
-            &parameter_types,
-            None,
-            None,
-            arguments,
-            true,
-            false,
-            None,
-        )?;
+        let (statements, receiver, mut args, defaults) =
+            self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty: None,
+                parameter_types: &parameter_types,
+                dispatch_receiver: None,
+                extension_receiver: None,
+                arguments,
+                allow_defaults: true,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter: None,
+                mode: SelectedOperandMode::DirectWhenOrdered,
+            })?;
         debug_assert!(receiver.is_none());
         // An `inner` constructor's enclosing instance is an explicit checked FIR receiver, but is
         // not one of its source value parameters. Put it before those arguments, matching the JVM
@@ -758,7 +1345,70 @@ impl BodyLowering<'_> {
         });
         self.ir
             .insert_constructor_default_arguments(construction, defaults);
+        self.record_external_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
+    }
+
+    fn record_external_annotation_construction(
+        &mut self,
+        construction: ExprId,
+        classifier: crate::types::TypeName,
+        annotation: Option<&FirAnnotationConstruction>,
+    ) -> Option<()> {
+        let Some(annotation) = annotation else {
+            return Some(());
+        };
+        if annotation.members.len() != annotation.defaults.len() {
+            return None;
+        }
+        let members = annotation
+            .members
+            .iter()
+            .map(|(name, ty)| (name.to_string(), ty.get()))
+            .collect::<Vec<_>>();
+        let defaults = annotation
+            .defaults
+            .iter()
+            .map(|default| match default {
+                Some(default) => self.lower_annotation_default(default).map(Some),
+                None => Some(None),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let enclosing_class = self
+            .body
+            .lexical_class_owner()
+            .and_then(|owner| self.index.classifier_header(owner))
+            .map(|owner| owner.classifier);
+        self.ir.annotation_constructions.insert(
+            construction,
+            crate::ir::IrAnnotationConstruction {
+                interface: classifier,
+                members,
+                defaults,
+                enclosing_class,
+            },
+        );
+        Some(())
+    }
+
+    fn lower_annotation_default(&mut self, default: &FirAnnotationDefaultValue) -> Option<ExprId> {
+        let expression = match default {
+            FirAnnotationDefaultValue::Singleton(classifier) => IrExpr::SingletonValue {
+                classifier: *classifier,
+            },
+            FirAnnotationDefaultValue::Constant(constant) => IrExpr::Const(match constant {
+                FirConstant::Int(value) => IrConst::Int(i32::try_from(*value).ok()?),
+                FirConstant::Long(value) | FirConstant::ULong(value) => IrConst::Long(*value),
+                FirConstant::UInt(value) => IrConst::Int(u32::try_from(*value).ok()? as i32),
+                FirConstant::Double(value) => IrConst::Double(*value),
+                FirConstant::Float(value) => IrConst::Float(*value),
+                FirConstant::Boolean(value) => IrConst::Boolean(*value),
+                FirConstant::String(value) => IrConst::String(value.clone()),
+                FirConstant::Char(value) => IrConst::Char(*value),
+                FirConstant::Null => IrConst::Null,
+            }),
+        };
+        Some(self.ir.add_expr(expression))
     }
 
     pub(super) fn module_constructor_call(
@@ -772,16 +1422,17 @@ impl BodyLowering<'_> {
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
         let mut declaration_parameter_types = declaration_parameter_types.to_vec();
-        let selected = self.selected_semantic_operands(
-            None,
-            argument_parameter_types,
-            None,
-            None,
+        let selected = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty: None,
+            parameter_types: argument_parameter_types,
+            dispatch_receiver: None,
+            extension_receiver: None,
             arguments,
-            true,
-            false,
-            None,
-        );
+            allow_defaults: true,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        });
         crate::trace_compiler!(
             "lower",
             "module constructor classifier={classifier} parameters={argument_parameter_types:?} arguments={arguments:?} selected={}",
@@ -875,10 +1526,10 @@ impl BodyLowering<'_> {
         Some(())
     }
 
-    /// Normalize source-order checked arguments into physical parameter order. Every evaluated
-    /// receiver and argument is first moved to a body-local temporary, so named argument reordering
-    /// cannot reorder user effects. Default and vararg decisions are consumed here rather than
-    /// reconstructed by the backend.
+    /// Normalize source-order checked arguments into physical parameter order. An already ordered
+    /// operand stream stays direct; a reordered stream is first moved to body-local temporaries so
+    /// named arguments cannot reorder user effects. Default and vararg decisions are consumed here
+    /// rather than reconstructed by the backend.
     pub(super) fn same_file_call(
         &mut self,
         target: CallableId,
@@ -908,6 +1559,13 @@ impl BodyLowering<'_> {
             .owner
             .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
         let mut statements = Vec::new();
+        // An extension receiver is inserted among context/value parameters below. Keep that rarer
+        // shape on the general spill path; an ordinary receiver plus already ordered value arguments
+        // maps directly to the JVM operand order without any temporary.
+        let direct = extension_receiver.is_none()
+            && !declaration_flags.has(crate::fir::DeclarationFlags::TAILREC)
+            && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
+            && arguments_follow_parameter_order(arguments, None);
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {
@@ -920,6 +1578,10 @@ impl BodyLowering<'_> {
             .collect::<std::collections::HashMap<_, _>>();
 
         let dispatch_receiver = match dispatch_receiver {
+            Some(receiver) if direct => {
+                let classifier = self.index.enclosing_classifier(callable.declaration)?;
+                Some(self.direct_call_operand(receiver, Ty::obj_name(classifier.classifier)))
+            }
             Some(receiver) => {
                 let classifier = self.index.enclosing_classifier(callable.declaration)?;
                 let semantic_receiver = Ty::obj_name(classifier.classifier);
@@ -963,6 +1625,7 @@ impl BodyLowering<'_> {
                 declared_parameters: &declared_parameters,
                 inline: callable.is_inline(),
             },
+            direct,
         )?;
         statements.extend(normalized.statements);
         let mut slots = normalized.slots;
@@ -976,6 +1639,16 @@ impl BodyLowering<'_> {
             slots.insert(extension_position, Some(receiver));
             inline_lambdas.insert(extension_position, None);
         }
+        let default_argument_positions = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(position, argument)| {
+                argument
+                    .is_none()
+                    .then(|| u32::try_from(position).ok())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
         let has_defaults = slots.iter().any(Option::is_none);
         let mut parameter_types = declared_parameters;
         if let Some(receiver) = declared_extension_receiver {
@@ -993,6 +1666,7 @@ impl BodyLowering<'_> {
         if let Some(receiver) = declared_extension_receiver {
             declaration_parameter_types.insert(extension_position, receiver.get());
         }
+        let selected_declaration_parameter_types = declaration_parameter_types.clone();
         let declaration_result = signature.result.get();
         // A member called from the same lexical classifier needs no target access bridge: cloning its
         // retained checked template preserves the exact `this` operand and lets literal lambda
@@ -1025,9 +1699,7 @@ impl BodyLowering<'_> {
             else {
                 return false;
             };
-            reachable_checked_returns(self.ir, *body)
-                .iter()
-                .any(|(_, depth)| *depth > 0)
+            !super::inline_returns::reachable_checked_returns(self.ir, *body).is_empty()
         });
         crate::trace_compiler!(
             "lower",
@@ -1057,14 +1729,16 @@ impl BodyLowering<'_> {
                     &inlined_lambda_operands,
                     substitutions,
                 ) {
-                    return Some(if statements.is_empty() {
+                    let expanded = if statements.is_empty() {
                         inlined
                     } else {
                         self.ir.add_expr(IrExpr::Block {
                             stmts: statements,
                             value: Some(inlined),
                         })
-                    });
+                    };
+                    self.ir.inline_regions.insert(expanded);
+                    return Some(expanded);
                 }
             }
         }
@@ -1236,11 +1910,27 @@ impl BodyLowering<'_> {
             }),
             None => return None,
         };
+        if matches!(self.ir.expr(call), IrExpr::Call { .. }) {
+            let receiver_prefix = u32::from(dispatch_receiver.is_some());
+            self.ir.insert_default_call_argument_positions(
+                call,
+                default_argument_positions
+                    .into_iter()
+                    .map(|position| position + receiver_prefix)
+                    .collect(),
+            );
+        }
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.
         // External/library calls publish the same fact in their respective constructors.
         self.ir.call_declared_ret.insert(call, declaration_result);
+        if !has_defaults {
+            self.ir.call_declared_params.insert(
+                call,
+                selected_declaration_parameter_types.into_boxed_slice(),
+            );
+        }
         // A sibling-source callable is realized into `CrossFile` only after common lowering. Keep
         // its checked suspend behavior on the concrete expression now, while the stable module
         // declaration is still available; JVM coroutine lowering must append the continuation and
@@ -1267,6 +1957,7 @@ impl BodyLowering<'_> {
         parameter_types: &[Ty],
         arguments: &[IrCheckedArgument],
         policy: CheckedArgumentPolicy<'_>,
+        direct: bool,
     ) -> Option<NormalizedCheckedArguments> {
         let mut statements = Vec::new();
         let mut inline_lambdas = vec![None; parameter_types.len()];
@@ -1281,17 +1972,16 @@ impl BodyLowering<'_> {
                     CheckedArgumentValue::Expression(value) => {
                         let preserve = match policy {
                             CheckedArgumentPolicy::Selected {
-                                preserve_captureless_lambdas,
+                                preserve_inline_lambdas,
                                 ..
                             } => {
-                                preserve_captureless_lambdas
+                                preserve_inline_lambdas
                                     && matches!(
-                                            self.ir.expr(value),
+                                        self.ir.expr(value),
                                         IrExpr::Lambda {
-                                            captures,
                                             inline_body: Some(_),
                                             ..
-                                        } if captures.is_empty()
+                                        }
                                     )
                             }
                             CheckedArgumentPolicy::SameFileInline { inline, .. } => {
@@ -1312,6 +2002,8 @@ impl BodyLowering<'_> {
                         }
                         let value = if preserve {
                             value
+                        } else if direct {
+                            self.direct_call_operand(value, parameter_ty)
                         } else {
                             self.spill_call_operand(value, parameter_ty, &mut statements)
                         };
@@ -1340,11 +2032,18 @@ impl BodyLowering<'_> {
                         spread,
                     } => {
                         let element_ty = array_type.array_elem()?;
-                        Some(self.spill_call_operand(
-                            value,
-                            if spread { array_type } else { element_ty },
-                            &mut statements,
-                        ))
+                        Some(if direct {
+                            self.direct_call_operand(
+                                value,
+                                if spread { array_type } else { element_ty },
+                            )
+                        } else {
+                            self.spill_call_operand(
+                                value,
+                                if spread { array_type } else { element_ty },
+                                &mut statements,
+                            )
+                        })
                     }
                 }
             },
@@ -1391,7 +2090,7 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn spill_call_operand(
+    pub(super) fn spill_call_operand(
         &mut self,
         value: ExprId,
         ty: Ty,
@@ -1412,165 +2111,15 @@ impl BodyLowering<'_> {
         self.ir.logical_types.insert(read, ty);
         read
     }
-}
 
-/// Return nodes remain ordinary common IR so a materialized lambda method has normal callable
-/// semantics. This sparse checked fact is consumed only when that lambda is actually spliced: a
-/// depth-zero return exits this invocation, while a deeper return crosses one lexical lambda frame.
-fn reachable_checked_returns(ir: &crate::ir::IrFile, root: ExprId) -> Vec<(ExprId, u32)> {
-    fn visit(
-        ir: &crate::ir::IrFile,
-        expression: ExprId,
-        seen: &mut std::collections::HashSet<ExprId>,
-        out: &mut Vec<(ExprId, u32)>,
-    ) {
-        if !seen.insert(expression) {
-            return;
-        }
-        if let Some(depth) = ir.checked_return_depths.get(&expression).copied() {
-            out.push((expression, depth));
-        }
-        if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
-            for &capture in captures {
-                visit(ir, capture, seen, out);
-            }
-            return;
-        }
-        let mut children = Vec::new();
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-        for child in children {
-            visit(ir, child, seen, out);
-        }
+    /// Preserve the checker-selected logical operand type on the allocation-free ordered path.
+    /// Any representation-changing conversion is already explicit on the checked FIR receiver or
+    /// argument and was lowered before this point. The consumer's selected parameter is already on
+    /// the call node; writing it onto `value` would mutate the producer's semantic type (`Char - Int`
+    /// consumed by `compareTo(Int)` must remain `Char`).
+    fn direct_call_operand(&mut self, value: ExprId, _target: Ty) -> ExprId {
+        value
     }
-
-    let mut out = Vec::new();
-    visit(ir, root, &mut std::collections::HashSet::new(), &mut out);
-    out
-}
-
-fn rewrite_for_each_returns(
-    ir: &mut crate::ir::IrFile,
-    root: ExprId,
-    loop_label: &str,
-) -> Option<()> {
-    for (returned, depth) in reachable_checked_returns(ir, root) {
-        if depth > 0 {
-            ir.checked_return_depths.insert(returned, depth - 1);
-            continue;
-        }
-        ir.checked_return_depths.remove(&returned);
-        let IrExpr::Return(value) = ir.expr(returned).clone() else {
-            return None;
-        };
-        let continue_expression = ir.add_expr(IrExpr::Continue {
-            label: Some(loop_label.to_string()),
-        });
-        ir.exprs[returned as usize] = match value {
-            Some(value) => IrExpr::Block {
-                stmts: vec![value, continue_expression],
-                value: None,
-            },
-            None => IrExpr::Continue {
-                label: Some(loop_label.to_string()),
-            },
-        };
-    }
-    Some(())
-}
-
-fn frame_inline_returns(
-    ir: &mut crate::ir::IrFile,
-    root: ExprId,
-    result: Ty,
-    value_needed: bool,
-    next_temporary: &mut u32,
-) -> Option<ExprId> {
-    let returns = reachable_checked_returns(ir, root);
-    let owns_returns = returns.iter().any(|(_, depth)| *depth == 0);
-    for &(returned, depth) in &returns {
-        if depth > 0 {
-            ir.checked_return_depths.insert(returned, depth - 1);
-        }
-    }
-    if !owns_returns {
-        return Some(root);
-    }
-
-    let label = format!("$fir_inline_return_{root}");
-    let result_slot = (value_needed && result != Ty::Unit).then(|| {
-        let slot = *next_temporary;
-        *next_temporary = (*next_temporary)
-            .checked_add(1)
-            .expect("too many FIR temporaries");
-        slot
-    });
-    for (returned, depth) in returns {
-        if depth != 0 {
-            continue;
-        }
-        ir.checked_return_depths.remove(&returned);
-        let IrExpr::Return(value) = ir.expr(returned).clone() else {
-            return None;
-        };
-        let mut statements = Vec::new();
-        if let Some(value) = value {
-            if let Some(slot) = result_slot {
-                statements.push(ir.add_expr(IrExpr::SetValue { var: slot, value }));
-            } else {
-                statements.push(value);
-            }
-        }
-        statements.push(ir.add_expr(IrExpr::Break {
-            label: Some(label.clone()),
-        }));
-        ir.exprs[returned as usize] = IrExpr::Block {
-            stmts: statements,
-            value: None,
-        };
-    }
-
-    let mut frame_statements = Vec::new();
-    if let Some(slot) = result_slot {
-        let initial = ir.add_expr(IrExpr::Const(IrConst::zero_for_value_type(result)));
-        frame_statements.push(ir.add_expr(IrExpr::Variable {
-            index: slot,
-            ty: result,
-            init: Some(initial),
-            named: false,
-        }));
-    }
-    let mut body_statements = if let Some(slot) = result_slot {
-        vec![ir.add_expr(IrExpr::SetValue {
-            var: slot,
-            value: root,
-        })]
-    } else {
-        vec![root]
-    };
-    body_statements.push(ir.add_expr(IrExpr::Break {
-        label: Some(label.clone()),
-    }));
-    let body = ir.add_expr(IrExpr::Block {
-        stmts: body_statements,
-        value: None,
-    });
-    let true_value = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-    frame_statements.push(ir.add_expr(IrExpr::While {
-        cond: true_value,
-        body,
-        update: None,
-        post_test: false,
-        label: Some(label),
-    }));
-    let value = match result_slot {
-        Some(slot) => Some(ir.add_expr(IrExpr::GetValue(slot))),
-        None if value_needed => Some(ir.add_expr(IrExpr::UnitInstance)),
-        None => None,
-    };
-    Some(ir.add_expr(IrExpr::Block {
-        stmts: frame_statements,
-        value,
-    }))
 }
 
 /// Move a lambda's independently numbered value-producing body into its enclosing callable.

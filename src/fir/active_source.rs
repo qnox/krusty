@@ -11,8 +11,8 @@ use crate::ast::{
 use crate::diag::Span;
 
 use super::{
-    extract_file_stubs, DeclarationFlags, DeclarationId, DeclarationIds, DeclarationKind,
-    LookupNames, ResolvedModuleIndex, SourceFileId,
+    extract_file_stubs, order_file_stubs, DeclarationFlags, DeclarationId, DeclarationIds,
+    DeclarationKind, LookupNames, ResolvedModuleIndex, SourceFileId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -380,13 +380,13 @@ impl ActiveSourceDeclarations {
         // compact header environment separately. It therefore participates in neither active AST
         // binding nor body-group cardinality.
         parser_stubs.retain(|stub| stub.kind != DeclarationKind::TypeAlias);
-        // Both sides expose the same semantic declaration stream. Join those streams directly;
-        // parser-arena insertion ids and source ranges are deliberately irrelevant. In particular,
-        // releasing an ordinary accessor body may change only its diagnostic fallback span, never
-        // its getter/setter position in this stream.
+        // Re-form exactly the stream Pass 1 captured from this bounded parse. The shared ordering
+        // operation consumes only live syntax coordinates; none survive as a Pass-2 locator.
+        order_file_stubs(&mut parser_stubs, &parser_ids);
         let mut stable = stable.to_vec();
         stable.sort_by_key(|declaration| index.source_order(*declaration).unwrap_or(u32::MAX));
-        if stable.len() != parser_stubs.len() {
+        let retained_fragment = unit_roots.is_none();
+        if !retained_fragment && stable.len() != parser_stubs.len() {
             crate::trace_compiler!(
                 "fir",
                 "active inventory length mismatch source={source:?} stable={} parser={} stable_ids={stable:?} parser_stubs={parser_stubs:?}",
@@ -396,35 +396,43 @@ impl ActiveSourceDeclarations {
             return Err(ActiveSourceBindingError::InventoryLength);
         }
 
-        let mut parser_to_stable = vec![None; parser_ids.len()];
-        for (&stable, parser) in stable.iter().zip(&parser_stubs) {
-            if selected.is_some_and(|selected| !selected.contains(&stable)) {
-                continue;
+        let mut parser_to_stable = if retained_fragment {
+            bind_retained_parser_declarations(
+                source,
+                index,
+                &stable,
+                &parser_ids,
+                &parser_names,
+                &parser_stubs,
+                selected.expect("retained fragment binding has an explicit stable selection"),
+            )?
+        } else {
+            let mut parser_to_stable = vec![None; parser_ids.len()];
+            for (&stable, parser) in stable.iter().zip(&parser_stubs) {
+                let slot = parser_to_stable
+                    .get_mut(parser.id.raw() as usize)
+                    .ok_or_else(|| {
+                        crate::trace_compiler!(
+                            "fir",
+                            "active parser id outside declaration arena stable={stable:?} parser={:?} parser_ids={} stubs={parser_stubs:?}",
+                            parser.id,
+                            parser_ids.len(),
+                        );
+                        ActiveSourceBindingError::InventoryShape(stable)
+                    })?;
+                *slot = Some(stable);
             }
-            let slot = parser_to_stable
-                .get_mut(parser.id.raw() as usize)
-                .ok_or_else(|| {
-                    crate::trace_compiler!(
-                        "fir",
-                        "active parser id outside declaration arena stable={stable:?} parser={:?} parser_ids={} stubs={parser_stubs:?}",
-                        parser.id,
-                        parser_ids.len(),
-                    );
-                    ActiveSourceBindingError::InventoryShape(stable)
-                })?;
-            if slot.is_some_and(|prior| prior != stable) {
-                crate::trace_compiler!(
-                    "fir",
-                    "active parser declaration bound twice stable={stable:?} prior={slot:?} parser={:?} stubs={parser_stubs:?}",
-                    parser.id,
-                );
-                return Err(ActiveSourceBindingError::InventoryShape(stable));
-            }
-            *slot = Some(stable);
-        }
+            parser_to_stable
+        };
         bind_auxiliary_parser_declarations(source, index, &parser_ids, &mut parser_to_stable);
 
-        for (&stable, parser) in stable.iter().zip(&parser_stubs) {
+        for parser in &parser_stubs {
+            let Some(stable) = parser_to_stable
+                .get(parser.id.raw() as usize)
+                .and_then(|stable| *stable)
+            else {
+                continue;
+            };
             if selected.is_some_and(|selected| !selected.contains(&stable)) {
                 continue;
             }
@@ -770,6 +778,50 @@ impl ActiveSourceDeclarations {
             })
     }
 
+    pub(crate) fn constructor_property_declaration(
+        &self,
+        class: DeclId,
+        index: u32,
+    ) -> Option<DeclarationId> {
+        self.declarations
+            .iter()
+            .enumerate()
+            .find_map(|(raw, binding)| {
+                (*binding
+                    == Some(ActiveDeclarationRef::Property(
+                        ActivePropertyRef::ConstructorParameter { class, index },
+                    )))
+                .then(|| {
+                    DeclarationId::from_raw(
+                        u32::try_from(raw)
+                            .expect("active declaration table exceeds packed identity"),
+                    )
+                })
+            })
+    }
+
+    pub(crate) fn class_body_property_declaration(
+        &self,
+        class: DeclId,
+        index: u32,
+    ) -> Option<DeclarationId> {
+        self.declarations
+            .iter()
+            .enumerate()
+            .find_map(|(raw, binding)| {
+                (*binding
+                    == Some(ActiveDeclarationRef::Property(
+                        ActivePropertyRef::ClassBody { class, index },
+                    )))
+                .then(|| {
+                    DeclarationId::from_raw(
+                        u32::try_from(raw)
+                            .expect("active declaration table exceeds packed identity"),
+                    )
+                })
+            })
+    }
+
     pub(crate) fn enum_entry_method_declaration(
         &self,
         class: DeclId,
@@ -1025,6 +1077,114 @@ impl ActiveSourceDeclarations {
 /// Bind parser-only ancestry nodes (notably anonymous/local classifier owners) by their stable
 /// owner-local structure. These declarations are absent from the public header inventory, but an
 /// inventoried child can still name one as its owner. No source range participates in the match.
+/// Join a compacted same-parse fragment to stable declarations by semantic structure.
+///
+/// Retained Pass-1 syntax may have released an ordinary accessor body or anonymous-object
+/// expression. Re-extracting that fragment can therefore change diagnostic spans and recover a
+/// wider owner for a hoisted local classifier. Neither fact changes declaration identity. Match
+/// owner/kind/sibling/name instead of zipping a range-sorted stream; bounded Pass 2 still uses the
+/// stricter complete-unit zip above.
+fn bind_retained_parser_declarations(
+    source: SourceFileId,
+    index: &ResolvedModuleIndex,
+    stable: &[DeclarationId],
+    parser_ids: &DeclarationIds,
+    parser_names: &LookupNames,
+    parser_stubs: &[super::DeclarationStub],
+    selected: &std::collections::HashSet<DeclarationId>,
+) -> Result<Vec<Option<DeclarationId>>, ActiveSourceBindingError> {
+    let mut parser_to_stable = vec![None; parser_ids.len()];
+    loop {
+        let before = parser_to_stable.iter().flatten().count();
+        for parser in parser_stubs {
+            let raw = parser.id.raw() as usize;
+            if parser_to_stable.get(raw).is_some_and(Option::is_some) {
+                continue;
+            }
+            let Some(parser_anchor) = parser_ids.anchor(parser.id) else {
+                continue;
+            };
+            let mapped_owner = match parser_anchor.owner {
+                None => Some(None),
+                Some(owner) => parser_to_stable
+                    .get(owner.raw() as usize)
+                    .and_then(|owner| owner.map(Some)),
+            };
+            let parser_name = parser.lookup_name.and_then(|name| parser_names.get(name));
+            let mut matches = stable.iter().copied().filter(|candidate| {
+                if !selected.contains(candidate)
+                    || parser_to_stable
+                        .iter()
+                        .flatten()
+                        .any(|bound| bound == candidate)
+                {
+                    return false;
+                }
+                let Some(anchor) = index.declaration_anchor(*candidate) else {
+                    return false;
+                };
+                if anchor.source != source
+                    || anchor.kind != parser_anchor.kind
+                    || anchor.sibling != parser_anchor.sibling
+                {
+                    return false;
+                }
+                let header = index.declaration_header(*candidate);
+                let local_classifier = header.is_some_and(|header| {
+                    header.kind == DeclarationKind::Classifier
+                        && header.flags.has(DeclarationFlags::LOCAL_CLASS)
+                });
+                if !local_classifier && mapped_owner != Some(anchor.owner) {
+                    return false;
+                }
+                if let Some(header) = header {
+                    for flag in [
+                        DeclarationFlags::COMPANION,
+                        DeclarationFlags::COMPILER_GENERATED,
+                        DeclarationFlags::PROPERTY_PARAMETER,
+                    ] {
+                        if header.flags.has(flag) != parser.flags.has(flag) {
+                            return false;
+                        }
+                    }
+                    if !local_classifier && index.declaration_name(*candidate) != parser_name {
+                        return false;
+                    }
+                }
+                true
+            });
+            let Some(candidate) = matches.next() else {
+                continue;
+            };
+            if matches.next().is_some() {
+                continue;
+            }
+            parser_to_stable[raw] = Some(candidate);
+        }
+        bind_auxiliary_parser_declarations(source, index, parser_ids, &mut parser_to_stable);
+        if parser_to_stable.iter().flatten().count() == before {
+            break;
+        }
+    }
+
+    if let Some(missing) = stable.iter().copied().find(|candidate| {
+        selected.contains(candidate)
+            && !parser_to_stable
+                .iter()
+                .flatten()
+                .any(|bound| bound == candidate)
+    }) {
+        crate::trace_compiler!(
+            "fir",
+            "retained fragment has no structural parser declaration stable={missing:?} anchor={:?} name={:?}",
+            index.declaration_anchor(missing),
+            index.declaration_name(missing),
+        );
+        return Err(ActiveSourceBindingError::MissingParserDeclaration(missing));
+    }
+    Ok(parser_to_stable)
+}
+
 fn bind_auxiliary_parser_declarations(
     source: SourceFileId,
     index: &ResolvedModuleIndex,

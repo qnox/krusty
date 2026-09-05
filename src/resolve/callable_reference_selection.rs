@@ -373,19 +373,25 @@ pub(super) fn realize_expected_shape(
     target_ret: Ty,
     plan: &[AdaptedRefArgument],
 ) -> Ty {
-    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+    // Each occurrence of an outer inference variable is a separate constraint. Sharing one eager
+    // substitution map across input and result positions turns a contradictory target such as
+    // `String -> Int` under `(T) -> T` into one widened placeholder and hides the contradiction
+    // from the enclosing call solver. Materialize every occurrence independently; the ordinary
+    // variance-aware call constraints then combine the resulting input uppers and result lowers.
+    let specialize_occurrence = |shape: Ty, actual: Ty| {
+        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        crate::symbol_resolver::unify_inferred_ty(shape, actual, &mut bindings);
+        crate::symbol_resolver::ty_subst_keep_unbound(shape, &bindings)
+    };
+    let mut parameters = expected.params.clone();
     for (target, argument) in plan.iter().enumerate() {
         let Some(target_parameter) = target_params.get(target).copied() else {
             continue;
         };
         match argument {
             AdaptedRefArgument::Value(value) => {
-                if let Some(expected_parameter) = expected.params.get(*value).copied() {
-                    crate::symbol_resolver::unify_inferred_ty(
-                        expected_parameter,
-                        target_parameter,
-                        &mut bindings,
-                    );
+                if let Some(parameter) = parameters.get_mut(*value) {
+                    *parameter = specialize_occurrence(*parameter, target_parameter);
                 }
             }
             AdaptedRefArgument::Vararg {
@@ -400,25 +406,15 @@ pub(super) fn realize_expected_shape(
                         .unwrap_or(target_parameter)
                 };
                 for value in values {
-                    if let Some(expected_parameter) = expected.params.get(*value).copied() {
-                        crate::symbol_resolver::unify_inferred_ty(
-                            expected_parameter,
-                            parameter,
-                            &mut bindings,
-                        );
+                    if let Some(expected_parameter) = parameters.get_mut(*value) {
+                        *expected_parameter = specialize_occurrence(*expected_parameter, parameter);
                     }
                 }
             }
             AdaptedRefArgument::Default => {}
         }
     }
-    crate::symbol_resolver::unify_inferred_ty(expected.ret, target_ret, &mut bindings);
-    let parameters = expected
-        .params
-        .iter()
-        .map(|parameter| crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings))
-        .collect();
-    let result = crate::symbol_resolver::ty_subst_keep_unbound(expected.ret, &bindings);
+    let result = specialize_occurrence(expected.ret, target_ret);
     Ty::fun_with_shape(
         parameters,
         result,
@@ -808,5 +804,27 @@ pub(super) fn shift_plan_values_from(
             }
             AdaptedRefArgument::Value(_) | AdaptedRefArgument::Default => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_outer_formal_preserves_distinct_reference_constraints() {
+        let formal = Ty::ty_param("outer:T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let Ty::Fun(expected) = Ty::fun(vec![formal], formal) else {
+            unreachable!()
+        };
+
+        let realized = realize_expected_shape(
+            expected,
+            &[Ty::String],
+            Ty::Int,
+            &[AdaptedRefArgument::Value(0)],
+        );
+
+        assert_eq!(realized, Ty::fun(vec![Ty::String], Ty::Int));
     }
 }

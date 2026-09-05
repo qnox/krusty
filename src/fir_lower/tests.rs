@@ -1,14 +1,16 @@
 use crate::fir::{
-    BodyOwnerId, CallableId, DeclarationId, ExternalCallableId, FirBinaryOperation, FirBody,
-    FirCall, FirCallArgument, FirCallableReferenceBinding, FirCallableReferenceTarget, FirCapture,
-    FirConstant, FirConstructorCall, FirConstructorTarget, FirConversion, FirConversionKind,
-    FirExpr, FirExprKind, FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget,
+    BodyOwnerId, CallableId, DeclarationId, ExternalCallableId, FirAnnotationConstruction,
+    FirBinaryOperation, FirBody, FirCall, FirCallArgument, FirCallTarget,
+    FirCallableReferenceBinding, FirCallableReferenceTarget, FirCapture, FirCatch, FirConstant,
+    FirConstructorCall, FirConstructorTarget, FirConversion, FirConversionKind, FirExpr,
+    FirExprKind, FirIntrinsic, FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget,
     FirPropertyTarget, FirRangeOperation, FirReceiver, FirStatement, FirStatementKind,
     FirTypeParameterRef, FirTypeSubstitution, FirUnaryOperation, FirVarargElement, OriginId,
     ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::{
-    IrBinOp, IrCheckedArgument, IrCheckedOperation, IrConst, IrExpr, IrFile, IrNodeOrigin, IrTypeOp,
+    Callee, IrBinOp, IrCheckedArgument, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
+    IrNodeOrigin, IrTypeOp,
 };
 use crate::types::Ty;
 
@@ -80,6 +82,475 @@ fn consuming_lowering_materializes_common_ir_roots() {
 }
 
 #[test]
+fn char_arithmetic_result_type_survives_nested_common_lowering() {
+    let ir = lower_single_source(
+        "fun compare(value: Char): Boolean = (value - 1) <= value\n",
+        "CharNestedArithmetic",
+    );
+    let subtraction = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(expression, node)| {
+            matches!(
+                node,
+                IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Sub,
+                    ..
+                }
+            )
+            .then_some(expression as u32)
+        })
+        .expect("lowered Char subtraction");
+    assert_eq!(ir.logical_types.get(&subtraction), Some(&Ty::Char));
+}
+
+#[test]
+fn catch_parameter_name_survives_checked_fir_lowering() {
+    let origin = OriginId::from_raw(0);
+    let mut body = FirBody::new(BodyOwnerId::from_raw(7));
+    let parameter = body.allocate_local_value();
+    body.set_debug_value_name(parameter, "failure");
+    let one = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::Int),
+        kind: FirExprKind::Constant(FirConstant::Int(1)),
+    });
+    let two = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::Int),
+        kind: FirExprKind::Constant(FirConstant::Int(2)),
+    });
+    let attempt = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::Int),
+        kind: FirExprKind::Try {
+            body: one,
+            catches: Box::new([FirCatch {
+                origin,
+                parameter,
+                parameter_ty: resolved(Ty::obj("java/lang/Exception")),
+                body: two,
+            }]),
+            finally: None,
+        },
+    });
+    let root = body.add_statement(FirStatement {
+        origin,
+        kind: FirStatementKind::Expression(attempt),
+    });
+    body.push_root(root);
+    let mut ir = IrFile::default();
+    lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
+    let catch = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Try { catches, .. } => catches.first(),
+            _ => None,
+        })
+        .expect("checked try expression must retain its catch clause");
+    assert_eq!(catch.name.as_deref(), Some("failure"));
+}
+
+#[test]
+fn local_delegate_storage_name_survives_checked_fir_lowering() {
+    let ir = lower_single_source(
+        "class Delegate { operator fun getValue(owner: Any?, property: Any?): Int = 1 }\n\
+         fun read(): Int { val value: Int by Delegate(); return value }\n",
+        "LocalDelegateName",
+    );
+    assert!(
+        ir.value_names.values().any(|name| name == "value$delegate"),
+        "common IR must retain the checked delegate-storage debug identity: {:?}",
+        ir.value_names
+    );
+}
+
+#[test]
+fn generic_member_delegate_result_keeps_its_erased_call_boundary() {
+    let ir = lower_single_source(
+        "class Delegate<T>(val value: T) {\n\
+             operator fun getValue(owner: Any?, property: Any?): T = value\n\
+         }\n\
+         class Owner { val number: Int by Delegate(1) }\n",
+        "GenericDelegateResult",
+    );
+    let getter = ir
+        .functions
+        .iter()
+        .find(|function| function.name == "getNumber")
+        .expect("generated delegated-property getter");
+    let IrExpr::Block { stmts, value: None } = ir.expr(getter.body.expect("concrete getter body"))
+    else {
+        panic!("getter body must be a statement block");
+    };
+    let [returned] = stmts.as_slice() else {
+        panic!("getter body must contain one return");
+    };
+    let IrExpr::Return(Some(converted)) = ir.expr(*returned) else {
+        panic!("getter must return its delegated call");
+    };
+    let IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: call,
+        type_operand: Ty::Int,
+    } = ir.expr(*converted)
+    else {
+        panic!("generic getValue result must cross an explicit Int coercion");
+    };
+    assert!(matches!(ir.expr(*call), IrExpr::MethodCall { .. }));
+    assert_eq!(
+        ir.physical_types.get(call),
+        Some(&Ty::obj("kotlin/Any")),
+        "the declaration returns its erased T slot before the selected Int result"
+    );
+}
+
+#[test]
+fn lateinit_local_materializes_null_storage_before_checked_reads() {
+    let ir = lower_single_source(
+        "fun read(): String { lateinit var value: String; return value }\n",
+        "LateinitLocalStorage",
+    );
+    let declaration = ir
+        .value_names
+        .iter()
+        .find_map(|(&expression, name)| (name == "value").then_some(expression))
+        .expect("lateinit local declaration");
+    assert!(matches!(
+        ir.expr(declaration),
+        IrExpr::Variable {
+            ty: Ty::String,
+            init: Some(initializer),
+            ..
+        } if matches!(ir.expr(*initializer), IrExpr::Const(IrConst::Null))
+    ));
+    assert!(ir.exprs.iter().any(
+        |expression| matches!(expression, IrExpr::LateinitCheck { name, .. } if name == "value")
+    ));
+}
+
+#[test]
+fn uninitialized_array_construction_is_a_direct_common_ir_value() {
+    let ir = lower_single_source(
+        "fun make(): IntArray = IntArray(5)\n",
+        "DirectArrayConstruction",
+    );
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(expression, IrExpr::NewArray { .. }))
+            .count(),
+        1
+    );
+    assert!(!ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::Variable {
+                ty: Ty::Obj(name, _),
+                init: Some(value),
+                named: false,
+                ..
+            } if name.render() == "kotlin/IntArray"
+                && matches!(ir.expr(*value), IrExpr::NewArray { .. })
+        )
+    }));
+}
+
+#[test]
+fn immutable_local_array_loop_reads_the_source_value_slot() {
+    let ir = lower_single_source(
+        "fun sum(): Int { val values = IntArray(5); var sum = 0; for (value in values) sum += value; return sum }\n",
+        "StableArrayLoop",
+    );
+    let declaration = ir
+        .value_names
+        .iter()
+        .find_map(|(expression, name)| (name == "values").then_some(*expression))
+        .expect("named source array declaration");
+    let IrExpr::Variable {
+        index: source_slot, ..
+    } = ir.expr(declaration)
+    else {
+        panic!("source array must lower to a variable")
+    };
+    let size_receiver = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Call {
+                callee:
+                    Callee::Intrinsic {
+                        operation: IrIntrinsic::ArraySize,
+                        ..
+                    },
+                dispatch_receiver: Some(receiver),
+                ..
+            } => Some(*receiver),
+            _ => None,
+        })
+        .expect("array-size operation");
+    assert!(matches!(ir.expr(size_receiver), IrExpr::GetValue(slot) if slot == source_slot));
+    assert!(!ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::Variable {
+                init: Some(value),
+                named: false,
+                ..
+            } if matches!(ir.expr(*value), IrExpr::GetValue(slot) if slot == source_slot)
+        )
+    }));
+}
+
+#[test]
+fn literal_until_bound_and_int_update_need_no_common_ir_temporaries() {
+    let ir = lower_single_source(
+        "fun sum(): Int { var sum = 0; for (value in 0 until 10) sum += value; return sum }\n",
+        "LiteralUntilLoop",
+    );
+    let update = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::While {
+                update: Some(update),
+                ..
+            } => Some(*update),
+            _ => None,
+        })
+        .expect("counted-loop update");
+    let IrExpr::SetValue { value, .. } = ir.expr(update) else {
+        panic!("exclusive counted loop must have a direct update")
+    };
+    assert!(matches!(
+        ir.expr(*value),
+        IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Add,
+            ..
+        }
+    ));
+    assert!(!ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::Variable {
+                init: Some(value),
+                named: false,
+                ..
+            } if matches!(
+                ir.expr(*value),
+                IrExpr::TypeOp { arg, .. }
+                    if matches!(ir.expr(*arg), IrExpr::Const(IrConst::Int(10)))
+            )
+        )
+    }));
+}
+
+#[test]
+fn nonnull_safe_call_selector_flows_directly_into_elvis_result() {
+    let ir = lower_single_source(
+        "fun length(value: String?): Int = value?.length ?: -1\n",
+        "SafeCallElvis",
+    );
+    assert!(ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::Call {
+                callee: Callee::Intrinsic {
+                    operation: IrIntrinsic::StringLength,
+                    ..
+                },
+                ..
+            }
+        )
+    }));
+    assert!(!ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::Variable {
+                ty,
+                named: false,
+                ..
+            } if *ty == Ty::nullable(Ty::Int)
+        ) || matches!(
+            expression,
+            IrExpr::TypeOp {
+                type_operand,
+                ..
+            } if *type_operand == Ty::nullable(Ty::Int)
+        )
+    }));
+}
+
+#[test]
+fn sibling_member_properties_keep_checked_identities_until_backend_realization() {
+    let ir = lower_source_from_set(
+        &[
+            (
+                "class Label(val text: String)\n\
+                 class Counter(var value: Int, val label: Label)\n\
+                 class GenericBox<T>(val item: T)\n",
+                "Declarations",
+            ),
+            (
+                "fun update(counter: Counter): Int {\n\
+                 \x20 val before = counter.value\n\
+                 \x20 counter.value = before + 1\n\
+                 \x20 return counter.value\n\
+                 }\n\
+                 fun label(counter: Counter): String = counter.label.text\n\
+                 fun item(box: GenericBox<String>): String = box.item\n",
+                "Uses",
+            ),
+        ],
+        1,
+    );
+
+    let property = |target: &crate::fir::PropertyId| {
+        ir.referenced_module_properties
+            .get(target)
+            .expect("referenced sibling property declaration")
+    };
+    let value_reads = ir
+        .exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
+                    if property(target).owner.is_some_and(|owner| owner.matches("Counter"))
+                        && property(target).name == "value"
+            )
+        })
+        .count();
+    let value_writes = ir
+        .exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::Checked(IrCheckedOperation::PropertyWrite { target, .. })
+                    if property(target).owner.is_some_and(|owner| owner.matches("Counter"))
+                        && property(target).name == "value"
+            )
+        })
+        .count();
+    assert_eq!(value_reads, 2);
+    assert_eq!(value_writes, 1);
+
+    for (owner, name) in [("Counter", "label"), ("Label", "text")] {
+        assert!(ir.exprs.iter().any(|expression| {
+            matches!(
+                expression,
+                IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
+                    if property(target).owner.is_some_and(|candidate| candidate.matches(owner))
+                        && property(target).name == name
+            )
+        }));
+    }
+    let generic_operation = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(operation, expression)| match expression {
+            IrExpr::Checked(IrCheckedOperation::PropertyRead {
+                target,
+                substitutions,
+                ..
+            }) if property(target)
+                .owner
+                .is_some_and(|owner| owner.matches("GenericBox"))
+                && property(target).name == "item" =>
+            {
+                Some((operation as u32, target, substitutions))
+            }
+            _ => None,
+        });
+    let (generic_operation, generic_target, generic_substitutions) =
+        generic_operation.expect("generic sibling property read");
+    assert!(property(generic_target).ty.mentions_ty_param());
+    assert!(generic_substitutions.is_empty());
+    assert!(ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::TypeOp {
+                arg,
+                type_operand: Ty::String,
+                ..
+            } if *arg == generic_operation
+        )
+    }));
+    assert!(!ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::PropertyRead { .. } | IrExpr::PropertyWrite { .. }
+        )
+    }));
+    assert!(ir.property_accessor_jvm_realizations.is_empty());
+}
+
+#[test]
+fn disabled_assertion_drops_its_unlowered_operand_graph() {
+    let origin = OriginId::from_raw(0);
+    let mut body = FirBody::new(BodyOwnerId::from_raw(7));
+    let condition = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::Boolean),
+        kind: FirExprKind::Constant(FirConstant::Boolean(false)),
+    });
+    let assertion = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::Unit),
+        kind: FirExprKind::Call(FirCall {
+            target: FirCallTarget::Intrinsic {
+                operation: FirIntrinsic::Assert {
+                    mode: crate::types::AssertionMode::AlwaysDisabled,
+                },
+                receiver: None,
+                parameters: Box::new([resolved(Ty::Boolean)]),
+                result: resolved(Ty::Unit),
+            },
+            dispatch_receiver: None,
+            extension_receiver: None,
+            parameter_types: Box::new([resolved(Ty::Boolean)]),
+            arguments: Box::new([FirCallArgument::Expression {
+                parameter: 0,
+                value: condition,
+                conversion: None,
+            }]),
+            substitutions: Box::new([]),
+        }),
+    });
+    let root = body.add_statement(FirStatement {
+        origin,
+        kind: FirStatementKind::Expression(assertion),
+    });
+    body.push_root(root);
+
+    let mut ir = IrFile::default();
+    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
+    assert_eq!(
+        ir.exprs.len(),
+        1,
+        "the disabled condition must not be lowered"
+    );
+    assert!(matches!(
+        ir.expr(lowered.roots[0]),
+        IrExpr::Call {
+            callee: Callee::Intrinsic {
+                operation: IrIntrinsic::Assert {
+                    mode: crate::types::AssertionMode::AlwaysDisabled,
+                },
+                ret: Ty::Unit,
+            },
+            dispatch_receiver: None,
+            args,
+        } if args.is_empty()
+    ));
+}
+
+#[test]
 fn common_ir_receives_the_complete_applied_classifier_hierarchy() {
     let ir = lower_single_source(
         "interface Root<T>\n\
@@ -111,6 +582,22 @@ fn common_ir_receives_the_complete_applied_classifier_hierarchy() {
 }
 
 #[test]
+fn annotation_class_retention_crosses_the_consuming_fir_boundary() {
+    let ir = lower_single_source("annotation class Mark\n", "AnnotationPolicy");
+    let mark = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name.matches("Mark"))
+        .expect("annotation class skeleton");
+
+    assert!(mark.is_annotation);
+    assert_eq!(
+        mark.annotation_retention,
+        Some(crate::types::AnnotationRetention::Default)
+    );
+}
+
+#[test]
 fn generic_cast_null_check_follows_the_checked_type_parameter_bound() {
     let ir = lower_single_source(
         "fun <E> nullableBound(value: Any?): E = value as E\n\
@@ -137,6 +624,45 @@ fn generic_cast_null_check_follows_the_checked_type_parameter_bound() {
             (IrTypeOp::CastNonNull, Ty::obj("kotlin/Any")),
         ]
     );
+}
+
+#[test]
+fn nullable_type_test_expands_from_its_checked_target() {
+    let ir = lower_single_source(
+        "fun acceptsNull(value: Any?): Boolean = value is String?\n",
+        "NullableTypeTest",
+    );
+
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            type_operand: Ty::String | Ty::Obj(_, _),
+            ..
+        }
+    )));
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::PrimitiveBinOp {
+            op: IrBinOp::RefEq,
+            ..
+        }
+    )));
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Or,
+            ..
+        }
+    )));
+    assert!(!ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            type_operand,
+            ..
+        } if type_operand.is_nullable()
+    )));
 }
 
 #[test]
@@ -624,6 +1150,71 @@ fn consuming_sink_realizes_positional_same_file_member_calls() {
 }
 
 #[test]
+fn positional_member_call_keeps_its_receiver_direct() {
+    let ir = lower_single_source(
+        "class C {\n    val value = \"x\"\n    fun length(): Int = value.length\n}\n",
+        "DirectReceiver",
+    );
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::Checked(IrCheckedOperation::PropertyRead { .. })
+    )));
+    assert!(
+        !ir.exprs
+            .iter()
+            .any(|expression| matches!(expression, IrExpr::Variable { named: false, .. })),
+        "an already ordered receiver-only call must not manufacture a temporary"
+    );
+}
+
+#[test]
+fn suspending_call_operand_is_materialized_before_outer_construction() {
+    let ir = lower_single_source(
+        "class Pair(val first: Int, val second: Int)\n\
+         suspend fun next(): Int = 2\n\
+         suspend fun make(): Pair = Pair(1, next())\n",
+        "SuspendingOperand",
+    );
+    let next = ir
+        .functions
+        .iter()
+        .position(|function| function.name == "next")
+        .expect("suspend callee") as u32;
+    let call = ir
+        .exprs
+        .iter()
+        .position(|expression| {
+            matches!(
+                expression,
+                IrExpr::Call {
+                    callee: crate::ir::Callee::Local(function),
+                    ..
+                } if *function == next
+            )
+        })
+        .expect("checked suspend call") as u32;
+    let slot = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Variable {
+                index,
+                init: Some(initializer),
+                named: false,
+                ..
+            } if *initializer == call => Some(*index),
+            _ => None,
+        })
+        .expect("suspending operand must be materialized before its outer construction");
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::New { internal, args, .. }
+            if internal.render() == "Pair"
+                && args.iter().any(|argument| matches!(ir.expr(*argument), IrExpr::GetValue(value) if *value == slot))
+    )));
+}
+
+#[test]
 fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
     let ir = lower_single_source(
         "fun selected(left: Int, right: Int): Int = left\n\
@@ -1005,6 +1596,37 @@ fn consuming_sink_preserves_mutable_capture_as_shared_cell_operations() {
             .collect::<Vec<_>>(),
         [Ty::Int]
     );
+}
+
+#[test]
+fn consuming_sink_boxes_a_mutable_destructure_capture() {
+    let ir = lower_single_source(
+        r#"
+            class Box {
+                operator fun component1(): Int = 1
+            }
+            fun outer(): Int {
+                var (value) = Box()
+                val bump = { value = value + 1 }
+                bump()
+                return value
+            }
+        "#,
+        "MutableDestructureCapture",
+    );
+
+    assert!(ir
+        .exprs
+        .iter()
+        .any(|expression| matches!(expression, IrExpr::RefNew { elem: Ty::Int, .. })));
+    assert!(ir
+        .exprs
+        .iter()
+        .any(|expression| matches!(expression, IrExpr::RefGet { elem: Ty::Int, .. })));
+    assert!(ir
+        .exprs
+        .iter()
+        .any(|expression| matches!(expression, IrExpr::RefSet { elem: Ty::Int, .. })));
 }
 
 #[test]
@@ -1582,6 +2204,58 @@ fn source_callable_references_become_structural_values_or_adapters() {
 }
 
 #[test]
+fn adapted_reference_arguments_keep_checked_target_coercions() {
+    let ir = lower_single_source(
+        r#"
+            fun collect(vararg values: Any) {}
+            fun consume(value: Any, tail: Int = 0) {}
+            fun references() {
+                val packed: (Int, Int) -> Unit = ::collect
+                val widened: (Int) -> Unit = ::consume
+            }
+        "#,
+        "AdaptedReferenceCoercions",
+    );
+
+    let packed = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Vararg {
+                array_type,
+                elements,
+                ..
+            } if array_type.array_elem() == Some(Ty::obj("kotlin/Any")) => Some(elements),
+            _ => None,
+        })
+        .expect("collected Any vararg");
+    assert_eq!(packed.len(), 2);
+    assert!(packed.iter().all(|element| matches!(
+        ir.expr(*element),
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            type_operand,
+            ..
+        } if *type_operand == Ty::obj("kotlin/Any")
+    )));
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(
+                expression,
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    type_operand,
+                    ..
+                } if *type_operand == Ty::obj("kotlin/Any")
+            ))
+            .count(),
+        3,
+        "two collected values and one ordinary adapted parameter cross the checked Any boundary"
+    );
+}
+
+#[test]
 fn adapted_generic_extension_reference_consumes_published_substitution() {
     let ir = lower_single_source(
         r#"
@@ -1672,6 +2346,60 @@ fn inline_array_initializer_is_spliced_before_common_ir_escapes() {
 }
 
 #[test]
+fn suspending_collection_map_is_structural_before_common_ir_escapes() {
+    let platform: Box<dyn crate::libraries::SemanticPlatform> =
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+            )),
+        ));
+    let ir = lower_single_source_with_platform(
+        "suspend fun render(value: Int): Int = value + 1\n\
+         suspend fun collect(values: List<Int>): List<Int> =\n\
+             values.map { render(it) }\n",
+        "SuspendCollectionMap",
+        platform,
+    );
+    let collect = ir
+        .functions
+        .iter()
+        .enumerate()
+        .find_map(|(function, declaration)| {
+            (declaration.name == "collect").then_some(function as u32)
+        })
+        .expect("collect common-IR function");
+    let body = ir.functions[collect as usize]
+        .body
+        .expect("collect body must be streamed");
+    let mut pending = vec![body];
+    let mut seen = std::collections::HashSet::new();
+    let mut has_loop = false;
+    let mut has_suspend_call = false;
+    let mut has_lambda = false;
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        has_loop |= matches!(ir.expr(expression), IrExpr::While { .. });
+        has_suspend_call |= ir.suspend_calls.contains_key(&expression);
+        has_lambda |= matches!(ir.expr(expression), IrExpr::Lambda { .. });
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    assert!(
+        has_loop,
+        "selected map body must already be an ordinary IR loop"
+    );
+    assert!(
+        has_suspend_call,
+        "the lambda's checked suspend call must belong to collect before target lowering"
+    );
+    assert!(
+        !has_lambda,
+        "a suspending inline map body cannot escape as a non-suspend Function1"
+    );
+}
+
+#[test]
 fn super_call_preserves_checked_default_ordinals_and_source_identity() {
     let ir = lower_single_source(
         "open class Base {\n\
@@ -1688,6 +2416,7 @@ fn super_call_preserves_checked_default_ordinals_and_source_identity() {
         IrExpr::Call {
             callee: crate::ir::Callee::Super {
                 source: Some(_),
+                realization: crate::libraries::MemberRealization::Dispatch,
                 defaults,
                 ..
             },
@@ -1695,6 +2424,44 @@ fn super_call_preserves_checked_default_ordinals_and_source_identity() {
             ..
         } if defaults == &[0] && args.len() == 2
     )));
+}
+
+#[test]
+fn interface_property_accessors_share_source_order_with_functions() {
+    let ir = lower_single_source(
+        "interface PropFirstI {\n\
+             val answer: Int get() = 42\n\
+             fun echo(value: String): String = value\n\
+             val tail: Int get() = 7\n\
+         }\n",
+        "PropFirst",
+    );
+    let class = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name_matches("PropFirstI"))
+        .expect("checked interface class");
+    let published = class
+        .methods
+        .iter()
+        .map(|function| {
+            (
+                ir.functions[*function as usize].name.as_str(),
+                ir.fn_source_order
+                    .get(function)
+                    .copied()
+                    .expect("every declared member must retain source order"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let order = |name| {
+        published
+            .iter()
+            .find_map(|(candidate, order)| (*candidate == name).then_some(*order))
+            .unwrap_or_else(|| panic!("missing {name}: {published:?}"))
+    };
+    assert!(order("getAnswer") < order("echo"), "{published:?}");
+    assert!(order("echo") < order("getTail"), "{published:?}");
 }
 
 #[test]
@@ -1750,6 +2517,65 @@ fn sibling_suspend_call_retains_its_checked_coroutine_behavior() {
         })
         .expect("sibling suspend call");
     assert_eq!(ir.suspend_calls.get(&(expression as u32)), Some(&Ty::Int));
+}
+
+#[test]
+fn suspend_inline_call_keeps_source_extent_and_semantic_inline_region() {
+    let source = "// WITH_STDLIB\n\
+                  suspend fun values(): List<Int> = listOf(1)\n\
+                  suspend fun work(): List<Int> =\n\
+                  \x20 values().filter { it > 0 }\n";
+    let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_REFLECT");
+    if let Some(jdk) = crate::toolchain::jdk_modules() {
+        classpath.push(jdk);
+    }
+    let ir = lower_single_source_with_platform(
+        source,
+        "SuspendInlineRegion",
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
+        )),
+    );
+
+    assert_eq!(
+        ir.source_line_count,
+        source.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1
+    );
+    assert_eq!(ir.suspend_calls.len(), 1);
+    let suspension = *ir.suspend_calls.keys().next().unwrap();
+    assert_eq!(ir.expr_source_lines.get(&suspension), Some(&4));
+    assert!(!ir.inline_call_sites.is_empty());
+    assert!(!ir.inline_regions.is_empty());
+}
+
+#[test]
+fn block_trailing_expression_keeps_its_checked_statement_line() {
+    let ir = lower_single_source(
+        "fun cond(): Boolean = false\n\
+         fun act() {}\n\
+         fun loop() {\n\
+             while (cond()) {\n\
+                 act()\n\
+             }\n\
+         }\n",
+        "BlockTrailingLine",
+    );
+    let call = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(expression, node)| {
+            let IrExpr::Call {
+                callee: Callee::Local(function),
+                ..
+            } = node
+            else {
+                return None;
+            };
+            (ir.functions[*function as usize].name == "act").then_some(expression as u32)
+        })
+        .expect("act call");
+    assert_eq!(ir.expr_lines.get(&call), Some(&5));
 }
 
 #[test]
@@ -1890,6 +2716,44 @@ fn ordinary_inner_constructor_keeps_source_property_after_physical_outer_prefix(
 }
 
 #[test]
+fn inner_property_initializer_offsets_source_parameters_after_enclosing_prefix() {
+    let ir = lower_single_source(
+        r#"
+            class Outer(val prefix: String) {
+                inner class Inner(val suffix: String) {
+                    val value = prefix + suffix
+                }
+            }
+        "#,
+        "InnerInitializerParameter",
+    );
+
+    let inner = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name.matches("Outer$Inner"))
+        .expect("inner class");
+    let body = inner.init_body.expect("property initializer");
+    let mut pending = vec![body];
+    let mut seen = std::collections::HashSet::new();
+    let mut reads_source_suffix = false;
+    let mut reads_enclosing_prefix_as_source = false;
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        match ir.expr(expression) {
+            IrExpr::GetValue(2) => reads_source_suffix = true,
+            IrExpr::GetValue(1) => reads_enclosing_prefix_as_source = true,
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    assert!(reads_source_suffix);
+    assert!(!reads_enclosing_prefix_as_source);
+}
+
+#[test]
 fn structural_nested_constructor_reference_retains_its_adapter_identity() {
     let ir = lower_single_source(
         r#"
@@ -1963,6 +2827,7 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
                 declaration,
                 classifier: crate::types::type_name("dependency/Outer$Inner"),
                 parameters: Box::new([]),
+                annotation: None,
             },
             outer_parameter: Some(resolved(Ty::obj("dependency/Outer"))),
             outer_receiver: Some(FirReceiver {
@@ -1995,6 +2860,67 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
             && parameters.is_empty()
             && *target == declaration
     ));
+}
+
+#[test]
+fn external_annotation_construction_reaches_common_ir_without_provider_lookup() {
+    let origin = OriginId::from_raw(0);
+    let declaration = ExternalCallableId::from_raw(19);
+    let interface = crate::types::type_name("dependency/Holder$Marker");
+    let mut body = FirBody::new(BodyOwnerId::from_raw(4));
+    let value = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::String),
+        kind: FirExprKind::Constant(FirConstant::String("OK".into())),
+    });
+    let construction = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::obj_name(interface)),
+        kind: FirExprKind::ConstructorCall(FirConstructorCall {
+            target: FirConstructorTarget::External {
+                declaration,
+                classifier: interface,
+                parameters: Box::new([resolved(Ty::String)]),
+                annotation: Some(Box::new(FirAnnotationConstruction {
+                    members: Box::new([("name".into(), resolved(Ty::String))]),
+                    defaults: Box::new([None]),
+                })),
+            },
+            outer_parameter: None,
+            outer_receiver: None,
+            parameter_types: Box::new([resolved(Ty::String)]),
+            arguments: Box::new([FirCallArgument::Expression {
+                parameter: 0,
+                value,
+                conversion: None,
+            }]),
+            substitutions: Box::new([]),
+        }),
+    });
+    let statement = body.add_statement(FirStatement {
+        origin,
+        kind: FirStatementKind::Expression(construction),
+    });
+    body.push_root(statement);
+
+    let mut ir = IrFile::default();
+    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
+    let construction = lowered.roots[0];
+    assert!(matches!(
+        ir.expr(construction),
+        IrExpr::New {
+            internal,
+            external_target: Some(target),
+            ..
+        } if *internal == interface && *target == declaration
+    ));
+    let annotation = ir
+        .annotation_constructions
+        .get(&construction)
+        .expect("checked annotation plan");
+    assert_eq!(annotation.interface, interface);
+    assert_eq!(annotation.members, vec![("name".to_string(), Ty::String)]);
+    assert_eq!(annotation.defaults, vec![None]);
 }
 
 #[test]
@@ -2323,6 +3249,73 @@ fn same_file_inline_call_specializes_reified_types_fixed_by_callable_argument() 
 }
 
 #[test]
+fn same_file_inline_call_specializes_reified_type_inside_nested_inline_lambda() {
+    let platform: Box<dyn crate::libraries::SemanticPlatform> =
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+            )),
+        ));
+    let ir = lower_single_source_with_platform(
+        "inline fun <reified T> countOfType(values: List<Any>): Int =\n\
+             values.count { it is T }\n\
+         fun use(values: List<Any>): Int = countOfType<String>(values)\n",
+        "NestedReifiedLambda",
+        platform,
+    );
+
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            type_operand: Ty::String,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn same_file_inline_call_specializes_sized_array_allocation_type() {
+    let platform: Box<dyn crate::libraries::SemanticPlatform> =
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+            )),
+        ));
+    let ir = lower_single_source_with_platform(
+        "inline fun <reified T> pair(first: T, second: T): Array<T> =\n\
+             Array<T>(2) { if (it == 0) first else second }\n\
+         fun use(): Array<String> = pair<String>(\"p\", \"q\")\n",
+        "ReifiedSizedArray",
+        platform,
+    );
+
+    let body = ir
+        .functions
+        .iter()
+        .find(|function| function.name == "use")
+        .and_then(|function| function.body)
+        .expect("ordinary caller body");
+    let string_array = Ty::obj_args("kotlin/Array", &[Ty::String]);
+    assert!(expression_subtree_contains(
+        &ir,
+        body,
+        &|_, expression| matches!(
+            expression,
+            IrExpr::NewArray { array_type, .. } if *array_type == string_array
+        )
+    ));
+    assert!(!expression_subtree_contains(
+        &ir,
+        body,
+        &|_, expression| matches!(
+            expression,
+            IrExpr::NewArray { array_type, .. } if array_type.mentions_ty_param()
+        )
+    ));
+}
+
+#[test]
 fn cross_source_inline_call_consumes_retained_fir_as_a_non_emitted_template() {
     let ir = lower_source_from_set(
         &[
@@ -2346,7 +3339,7 @@ fn cross_source_inline_call_consumes_retained_fir_as_a_non_emitted_template() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
+            op: IrTypeOp::CastNonNull,
             type_operand: Ty::String,
             ..
         }
@@ -2358,6 +3351,44 @@ fn cross_source_inline_call_consumes_retained_fir_as_a_non_emitted_template() {
             ..
         } if name == "checkedCast"
     )));
+}
+
+#[test]
+fn nested_generic_inline_expansion_specializes_its_result_storage() {
+    let ir = lower_source_from_set(
+        &[
+            (
+                "inline fun <T, R> T.mapValue(f: (T) -> R): R = f(this)\n\
+                 inline fun <T, R> T.forwardMap(f: (T) -> R): R = mapValue(f)",
+                "Library",
+            ),
+            ("fun use(): Int = 1.forwardMap { it + 1 }", "Consumer"),
+        ],
+        1,
+    );
+    let body = ir
+        .functions
+        .iter()
+        .find(|function| function.name == "use")
+        .and_then(|function| function.body)
+        .expect("consumer body");
+
+    assert!(!expression_subtree_contains(&ir, body, &|expression, _| {
+        ir.inline_regions.contains(&expression) && ir.physical_types.contains_key(&expression)
+    }));
+    assert!(!expression_subtree_contains(&ir, body, &|_, expression| {
+        let IrExpr::Variable {
+            ty,
+            init: Some(initial),
+            named: false,
+            ..
+        } = expression
+        else {
+            return false;
+        };
+        ty.canonical_semantic() == Ty::Int
+            && matches!(ir.expr(*initial), IrExpr::Const(IrConst::Null))
+    }));
 }
 
 #[test]
@@ -2625,13 +3656,22 @@ fn consuming_sink_keeps_primary_and_secondary_constructor_semantics() {
     assert!(class.ctor_args[1].is_field);
     assert!(!class.ctor_args[0].has_default);
     assert!(class.ctor_args[1].has_default);
+    assert_eq!(class.fields[0].default, None);
+    assert_eq!(
+        class.fields[1].default,
+        Some(IrConst::String("default".into()))
+    );
     let secondary = constructors[1];
     assert_eq!(secondary.ordinal, 1);
     assert_eq!(secondary.parameters, [("flag".to_owned(), Ty::Boolean)]);
     assert!(secondary.defaults[0].is_some());
     assert!(matches!(
         ir.expr(secondary.delegation.expect("selected this-delegation")),
-        IrExpr::Block { stmts, value: None } if stmts.is_empty()
+        IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } if stmts.len() == 2
+            && matches!(ir.expr(*value), IrExpr::Block { stmts, value: None } if stmts.is_empty())
     ));
     assert_eq!(class.secondary_ctors.len(), 1);
     assert_eq!(class.secondary_ctors[0].delegate_args.len(), 2);
@@ -3049,6 +4089,178 @@ fn block_bodied_local_function_keeps_its_explicit_return() {
     );
 }
 
+fn expression_subtree_contains(
+    ir: &IrFile,
+    root: crate::ir::ExprId,
+    predicate: &impl Fn(crate::ir::ExprId, &IrExpr) -> bool,
+) -> bool {
+    fn visit(
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+        predicate: &impl Fn(crate::ir::ExprId, &IrExpr) -> bool,
+        seen: &mut std::collections::HashSet<crate::ir::ExprId>,
+    ) -> bool {
+        if !seen.insert(expression) {
+            return false;
+        }
+        if predicate(expression, ir.expr(expression)) {
+            return true;
+        }
+        let mut found = false;
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+            if !found && visit(ir, child, predicate, seen) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    visit(ir, root, predicate, &mut std::collections::HashSet::new())
+}
+
+#[test]
+fn lambda_callable_and_inline_template_own_distinct_return_control_flow() {
+    let ir = lower_single_source(
+        "fun make(): () -> Int = fun(): Int { return 1 }\n",
+        "DistinctLambdaReturnBodies",
+    );
+    let (implementation, inline) = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Lambda {
+                impl_fn,
+                inline_body: Some(inline),
+                ..
+            } => Some((*impl_fn, *inline)),
+            _ => None,
+        })
+        .expect("anonymous function value");
+    let callable = ir.functions[implementation as usize]
+        .body
+        .expect("materialized callable body");
+
+    assert!(expression_subtree_contains(
+        &ir,
+        callable,
+        &|_, expression| { matches!(expression, IrExpr::Return(Some(_))) }
+    ));
+    assert!(!expression_subtree_contains(
+        &ir,
+        inline,
+        &|expression, node| {
+            matches!(node, IrExpr::Return(_)) || ir.checked_return_depths.contains_key(&expression)
+        }
+    ));
+    assert!(expression_subtree_contains(
+        &ir,
+        inline,
+        &|_, expression| { matches!(expression, IrExpr::While { .. }) }
+    ));
+}
+
+#[test]
+fn inline_expansion_inside_lambda_consumes_its_return_depth_once() {
+    let ir = lower_single_source(
+        "inline fun apply(value: Int, block: (Int) -> Int): Int { return block(value) }\n\
+         fun make(): () -> Int = { apply(1) { it + 1 } }\n",
+        "NestedInlineReturnOwnership",
+    );
+    let outer_inline = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda {
+                inline_body: Some(inline),
+                ..
+            } => Some(*inline),
+            _ => None,
+        })
+        .next_back()
+        .expect("outer lambda inline template");
+
+    assert!(!expression_subtree_contains(
+        &ir,
+        outer_inline,
+        &|expression, node| {
+            !matches!(node, IrExpr::Return(_)) && ir.checked_return_depths.contains_key(&expression)
+        }
+    ));
+}
+
+#[test]
+fn lambda_with_non_local_return_has_no_standalone_callable_realization() {
+    let ir = lower_single_source(
+        "inline fun outer(block: () -> Unit) { inner { block() } }\n\
+         inline fun inner(block: () -> Unit) { block() }\n\
+         fun probe(hit: Boolean): Int {\n\
+             outer { if (hit) return 7 }\n\
+             return -1\n\
+         }\n",
+        "NonLocalReturnRealization",
+    );
+    let implementations = ir
+        .lambda_origins
+        .iter()
+        .filter_map(|(function, origin)| {
+            (origin.implementation_name == "probe").then_some(*function)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(implementations.len(), 1, "probe lambda implementations");
+    assert!(
+        ir.inline_only_fns.contains(&implementations[0]),
+        "a non-local return cannot be emitted in the lambda's own callable descriptor"
+    );
+    let probe = ir
+        .functions
+        .iter()
+        .find(|function| function.name == "probe")
+        .and_then(|function| function.body)
+        .expect("probe body");
+    assert!(!expression_subtree_contains(
+        &ir,
+        probe,
+        &|_, expression| matches!(
+            expression,
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementations[0]
+        )
+    ));
+}
+
+#[test]
+fn unit_lambda_callable_materializes_unit_on_an_explicit_bare_return() {
+    let ir = lower_single_source(
+        "fun make(): () -> Unit = fun() { return }\n",
+        "UnitLambdaBareReturn",
+    );
+    let implementation = ir
+        .exprs
+        .iter()
+        .find_map(|expression| match expression {
+            IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+            _ => None,
+        })
+        .expect("anonymous Unit function value");
+    let callable = ir.functions[implementation as usize]
+        .body
+        .expect("materialized callable body");
+
+    assert_eq!(
+        ir.functions[implementation as usize].ret,
+        Ty::obj("kotlin/Unit")
+    );
+    assert!(expression_subtree_contains(
+        &ir,
+        callable,
+        &|_, expression| {
+            let IrExpr::Return(Some(value)) = expression else {
+                return false;
+            };
+            matches!(ir.expr(*value), IrExpr::UnitInstance)
+        }
+    ));
+}
+
 #[test]
 fn default_expressions_are_lowered_but_not_inserted_into_body_roots() {
     let origin = OriginId::from_raw(0);
@@ -3061,6 +4273,7 @@ fn default_expressions_are_lowered_but_not_inserted_into_body_roots() {
     body.add_default_value(crate::fir::FirDefaultValue {
         origin,
         parameter: 1,
+        ty: resolved(Ty::Int),
         value: default,
     });
 

@@ -28,6 +28,7 @@ fn source_iterator_loop_keeps_all_selected_convention_targets() {
                 next,
                 iterator_ty,
                 variable_ty,
+                variable,
                 ..
             },
         ..
@@ -42,6 +43,7 @@ fn source_iterator_loop_keeps_all_selected_convention_targets() {
         assert!(index.callable(target).is_some());
     }
     assert_eq!(variable_ty.get(), crate::types::Ty::String);
+    assert_eq!(body.debug_value_name(*variable), Some("word"));
     assert_eq!(
         iterator_ty
             .get()
