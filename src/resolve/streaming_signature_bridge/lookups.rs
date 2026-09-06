@@ -160,9 +160,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         let associated_receiver = self
             .headers
-            .stubs
-            .iter()
-            .find(|stub| stub.id == scope.owner)
+            .stub(scope.owner)
             .is_some_and(|stub| stub.flags.has(crate::fir::DeclarationFlags::COMPANION))
             && self
                 .headers
@@ -1176,11 +1174,9 @@ impl ProductionSignatureSemantics<'_> {
             self.headers.declarations.anchor(scope.owner)?.owner
         };
         while let Some(declaration) = owner {
-            if let Some(classifier) = self.headers.stubs.iter().find_map(|stub| {
-                let anchor = self.headers.declarations.anchor(stub.id)?;
+            if let Some(classifier) = self.headers.owned_stubs(declaration).find_map(|stub| {
                 let classifier = self.classifier_types.get(&stub.id).copied()?;
                 (stub.kind == crate::fir::DeclarationKind::Classifier
-                    && anchor.owner == Some(declaration)
                     && classifier.nested_segment_ref() == spelling)
                     .then_some(classifier)
             }) {

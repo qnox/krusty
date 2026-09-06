@@ -37,7 +37,7 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
     let context = local_contexts.and_then(|contexts| contexts.get(source.raw() as usize));
 
     for (_, owner, alias, formals, target) in &aliases {
-        let Some(owner_stub) = headers.stubs.iter().find(|stub| stub.id == *owner) else {
+        let Some(owner_stub) = headers.stub(*owner) else {
             continue;
         };
         let Some((_, owner_identity)) = compact_classifier_identity(headers, owner_stub) else {

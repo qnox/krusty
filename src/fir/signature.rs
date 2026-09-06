@@ -1534,6 +1534,10 @@ pub struct ResolvedModuleIndex {
     /// class initialization (which has its own semantic ordinal in the declaration header).
     source_orders: HashMap<DeclarationId, u32>,
     declaration_headers: HashMap<DeclarationId, ResolvedDeclarationHeader>,
+    /// Declarations whose header carries `LOCAL_CLASS`, in declaration-id order. Local-signature
+    /// publication selects from these once per checked body group; asking the whole inventory
+    /// each time was linear in the module per body, i.e. quadratic.
+    local_class_declarations: Vec<DeclarationId>,
     /// Semantic lexical owner for parser-hoisted local classifiers. Both identities are stable
     /// declaration headers; no parser node or source coordinate crosses into Pass 2.
     local_classifier_lexical_roots: HashMap<DeclarationId, DeclarationId>,
@@ -1953,16 +1957,39 @@ impl ResolvedModuleIndex {
         kind: DeclarationKind,
         sibling: u32,
     ) -> Option<DeclarationId> {
-        (0..self.declaration_count()).find_map(|raw| {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
-            self.declaration_anchor(declaration)
-                .filter(|anchor| {
-                    anchor.owner == Some(owner) && anchor.kind == kind && anchor.sibling == sibling
+        self.owned_declarations(owner)
+            .iter()
+            .copied()
+            .find(|declaration| {
+                self.declaration_anchor(*declaration)
+                    .is_some_and(|anchor| anchor.kind == kind && anchor.sibling == sibling)
+            })
+    }
+
+    /// Declarations owned by `owner`, in declaration-id order. Ownership is an identity fact —
+    /// a header's `owner` is always its anchor's — so this reads the declaration inventory's
+    /// table; a declaration without a published header (an excluded subtree) is still listed,
+    /// and header-driven readers skip it by asking for the header.
+    pub fn owned_declarations(&self, owner: DeclarationId) -> &[DeclarationId] {
+        self.declarations.owned(owner)
+    }
+
+    /// Every declaration whose header carries `LOCAL_CLASS`, in declaration-id order.
+    pub fn local_class_declarations(&self) -> &[DeclarationId] {
+        &self.local_class_declarations
+    }
+
+    /// The companion classifier declared inside `owner`, if any.
+    pub fn companion_declaration(&self, owner: DeclarationId) -> Option<DeclarationId> {
+        self.owned_declarations(owner)
+            .iter()
+            .copied()
+            .find(|declaration| {
+                self.declaration_header(*declaration).is_some_and(|header| {
+                    header.kind == DeclarationKind::Classifier
+                        && header.flags.has(DeclarationFlags::COMPANION)
                 })
-                .map(|_| declaration)
-        })
+            })
     }
 
     pub fn declaration_count(&self) -> usize {
@@ -2581,6 +2608,12 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a stable declaration may publish only one semantic header"
         );
+        if header.flags.has(DeclarationFlags::LOCAL_CLASS) {
+            let at = self
+                .local_class_declarations
+                .partition_point(|published| *published < declaration);
+            self.local_class_declarations.insert(at, declaration);
+        }
         if let Some(name) = header.name {
             self.declarations_by_name
                 .entry(name)
@@ -3232,6 +3265,7 @@ impl ResolvedModuleIndex {
             + self.declaration_headers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedDeclarationHeader>())
+            + self.local_class_declarations.len() * std::mem::size_of::<DeclarationId>()
             + self.local_classifier_lexical_roots.len() * (std::mem::size_of::<DeclarationId>() * 2)
             + self.declaration_annotations.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())

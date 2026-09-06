@@ -82,7 +82,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
 ) -> Option<StreamedCallableHeader> {
-    let stub = headers.stubs.iter().find(|stub| stub.id == declaration)?;
+    let stub = headers.stub(declaration)?;
     let name = headers.lookup_names.get(stub.lookup_name?)?.to_owned();
     let syntax_declaration = headers.syntax.declaration(declaration)?;
     let crate::fir::HeaderDeclarationKind::Callable {
@@ -339,7 +339,7 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
 ) -> Option<StreamedPropertyHeader> {
-    let property_stub = headers.stubs.iter().find(|stub| stub.id == declaration)?;
+    let property_stub = headers.stub(declaration)?;
     let setter_visibility = headers
         .stubs
         .iter()
@@ -351,12 +351,12 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
                     .is_some_and(|anchor| anchor.owner == Some(declaration) && anchor.sibling == 1)
         })
         .map_or(property_stub.visibility, |setter| setter.visibility);
-    let getter_declared = headers.stubs.iter().any(|stub| {
+    let getter_declared = headers.owned_stubs(declaration).any(|stub| {
         stub.kind == crate::fir::DeclarationKind::Accessor
             && headers
                 .declarations
                 .anchor(stub.id)
-                .is_some_and(|anchor| anchor.owner == Some(declaration) && anchor.sibling == 0)
+                .is_some_and(|anchor| anchor.sibling == 0)
     });
     let name = headers
         .lookup_names
@@ -587,7 +587,7 @@ pub(in crate::resolve) fn streamed_type_alias_header_by_declaration(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
 ) -> Option<(String, Vec<String>, TypeRef)> {
-    let stub = headers.stubs.iter().find(|stub| stub.id == declaration)?;
+    let stub = headers.stub(declaration)?;
     let name = headers.lookup_names.get(stub.lookup_name?)?.to_owned();
     let header = headers.syntax.declaration(declaration)?;
     let crate::fir::HeaderDeclarationKind::TypeAlias {
@@ -714,12 +714,12 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
         .map(|(ordinal, parameter)| {
             let property = if parameter.flags.is_property() {
                 let ordinal = u32::try_from(ordinal).ok()?;
-                Some(headers.stubs.iter().find(|stub| {
+                Some(headers.owned_stubs(declaration.declaration).find(|stub| {
                     stub.kind == crate::fir::DeclarationKind::Property
-                        && headers.declarations.anchor(stub.id).is_some_and(|anchor| {
-                            anchor.owner == Some(declaration.declaration)
-                                && anchor.sibling == ordinal
-                        })
+                        && headers
+                            .declarations
+                            .anchor(stub.id)
+                            .is_some_and(|anchor| anchor.sibling == ordinal)
                 })?)
             } else {
                 None
@@ -847,12 +847,12 @@ pub(in crate::resolve) fn streamed_secondary_constructor_parameters(
     owner: crate::fir::DeclarationId,
     sibling: u32,
 ) -> Option<Vec<StreamedCallableParameter>> {
-    let stub = headers.stubs.iter().find(|stub| {
+    let stub = headers.owned_stubs(owner).find(|stub| {
         stub.kind == crate::fir::DeclarationKind::Constructor
             && headers
                 .declarations
                 .stable_anchor(stub.id)
-                .is_some_and(|anchor| anchor.owner == Some(owner) && anchor.sibling == sibling)
+                .is_some_and(|anchor| anchor.sibling == sibling)
     })?;
     streamed_constructor_parameters_by_declaration(headers, stub.id)
 }
