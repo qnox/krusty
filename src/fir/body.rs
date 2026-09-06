@@ -780,7 +780,7 @@ pub struct FirConstructorCall {
     /// Compiler capture operands that must cross a separately streamed body boundary. `None`
     /// means the construction is in the FIR body that declares the local classifier, whose
     /// checked `LocalDeclaration` supplies the same capture prefix.
-    pub external_capture_arguments: Option<Box<[FirExprId]>>,
+    pub external_capture_arguments: Option<Box<[FirConstructorCaptureArgument]>>,
     /// Final call-site-applied source value-parameter types. Constructor lowering consumes these
     /// directly; the stable declaration signature remains available separately for target ABI.
     pub parameter_types: Box<[ResolvedTy]>,
@@ -803,7 +803,7 @@ impl FirConstructorCall {
                 .external_capture_arguments
                 .as_ref()
                 .map_or(0, |arguments| {
-                    arguments.len() * std::mem::size_of::<FirExprId>()
+                    arguments.len() * std::mem::size_of::<FirConstructorCaptureArgument>()
                 })
             + self
                 .arguments
@@ -812,6 +812,15 @@ impl FirConstructorCall {
                 .sum::<usize>()
             + self.substitutions.len() * std::mem::size_of::<FirTypeSubstitution>()
     }
+}
+
+/// One checked compiler-capture operand for a local-class construction outside the FIR body that
+/// declares the class. `shared_cell_holder` distinguishes the invisible physical cell operand from
+/// an ordinary Kotlin value read without exposing any backend storage type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirConstructorCaptureArgument {
+    pub value: FirExprId,
+    pub shared_cell_holder: bool,
 }
 
 impl FirCall {
@@ -2948,6 +2957,10 @@ impl FirBody {
             .entry(declaration)
             .or_default()
             .merge(context);
+    }
+
+    pub(crate) fn owns_class_body_context(&self, declaration: DeclarationId) -> bool {
+        self.class_body_contexts.contains_key(&declaration)
     }
 
     pub(crate) fn collect_class_body_contexts(

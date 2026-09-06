@@ -77,49 +77,50 @@ impl BodyFirChecker<'_> {
             origin,
             kind: FirControlTargetKind::Body(self.body.owner()),
         });
-        let mut visible = info
-            .captures
+        // Preserve the complete lexical environment while checking the independently streamed
+        // local body. Ordinary reads still add captures on demand; the wider transient view also
+        // lets a checked local-class constructor operand publish a capture dependency that the
+        // legacy name-based resolver inventory could not see through the constructor boundary.
+        let mut visible = self
+            .outer_values
             .iter()
-            .filter_map(|capture| {
-                self.local_binding(&capture.name)
-                    .map(|binding| (capture.name.clone(), (0, binding)))
-                    .or_else(|| {
-                        self.outer_values
-                            .get(&capture.name)
-                            .copied()
-                            .map(|(depth, binding)| {
-                                (
-                                    capture.name.clone(),
-                                    (
-                                        depth.checked_add(1).expect("too many nested bodies"),
-                                        binding,
-                                    ),
-                                )
-                            })
-                    })
+            .map(|(name, (depth, binding))| {
+                (
+                    name.clone(),
+                    (
+                        depth.checked_add(1).expect("too many nested bodies"),
+                        *binding,
+                    ),
+                )
             })
             .collect::<HashMap<_, _>>();
-        let visible_delegates =
-            info.captures
-                .iter()
-                .filter_map(|capture| {
-                    self.local_delegate(&capture.name)
-                        .map(|binding| (capture.name.clone(), (0, binding)))
-                        .or_else(|| {
-                            self.outer_delegates.get(&capture.name).cloned().map(
-                                |(depth, binding)| {
-                                    (
-                                        capture.name.clone(),
-                                        (
-                                            depth.checked_add(1).expect("too many nested bodies"),
-                                            binding,
-                                        ),
-                                    )
-                                },
-                            )
-                        })
-                })
-                .collect::<HashMap<_, _>>();
+        for scope in &self.scopes {
+            visible.extend(
+                scope
+                    .iter()
+                    .map(|(name, binding)| (name.clone(), (0, *binding))),
+            );
+        }
+        let mut visible_delegates = self
+            .outer_delegates
+            .iter()
+            .map(|(name, (depth, binding))| {
+                (
+                    name.clone(),
+                    (
+                        depth.checked_add(1).expect("too many nested bodies"),
+                        binding.clone(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for scope in &self.delegate_scopes {
+            visible_delegates.extend(
+                scope
+                    .iter()
+                    .map(|(name, binding)| (name.clone(), (0, binding.clone()))),
+            );
+        }
         visible.extend(
             visible_delegates
                 .iter()

@@ -4780,7 +4780,7 @@ impl<'a> SymbolResolver<'a> {
         let functions = self
             .symbol_levels_in_scope(name)
             .into_iter()
-            .map(function_set_from_symbols)
+            .map(|symbols| function_set_from_symbols(&symbols))
             .find(|functions| !functions.overloads.is_empty())
             .unwrap_or_default();
         crate::trace_compiler!(
@@ -5092,7 +5092,7 @@ impl<'a> SymbolResolver<'a> {
                 let levels = self.symbol_levels_in_scope(name);
                 let fs = levels
                     .iter()
-                    .map(|symbols| function_set_from_symbols(symbols.clone()))
+                    .map(|symbols| function_set_from_symbols(symbols))
                     .find(|functions| !functions.overloads.is_empty())
                     .unwrap_or_default();
                 crate::trace_compiler!(
@@ -7141,18 +7141,17 @@ fn tagged_symbol_levels_in_function_scope(
 }
 
 fn function_set_from_symbols(
-    symbols: impl IntoIterator<Item = std::rc::Rc<crate::libraries::ResolvedSymbols>>,
+    symbols: &[std::rc::Rc<crate::libraries::ResolvedSymbols>],
 ) -> FunctionSet {
-    FunctionSet {
-        overloads: symbols
-            .into_iter()
-            .flat_map(|r| match &r.callables {
-                crate::libraries::Callables::Functions(f) => f.overloads.clone(),
-                crate::libraries::Callables::Both { functions, .. } => functions.overloads.clone(),
-                _ => Vec::new(),
-            })
-            .collect(),
+    let capacity = symbols
+        .iter()
+        .map(|record| record.callables.functions().len())
+        .sum();
+    let mut overloads = Vec::with_capacity(capacity);
+    for record in symbols {
+        overloads.extend(record.callables.functions().iter().cloned());
     }
+    FunctionSet { overloads }
 }
 
 fn callables_from_symbols(symbols: &[std::rc::Rc<crate::libraries::ResolvedSymbols>]) -> Callables {

@@ -128,6 +128,28 @@ impl BodyLowering<'_> {
         }
     }
 
+    pub(super) fn captured_value_holder(
+        &mut self,
+        enclosing_depth: u32,
+        source: crate::fir::LocalValueId,
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let capture = self
+            .capture_slots
+            .get(&(enclosing_depth, source))
+            .copied()
+            .ok_or(FirLoweringFailure::MissingCapture {
+                enclosing_depth,
+                source,
+            })?;
+        if !capture.shared_cell {
+            return Err(FirLoweringFailure::MissingCapture {
+                enclosing_depth,
+                source,
+            });
+        }
+        Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)))
+    }
+
     pub(super) fn checked_local_call(
         &mut self,
         target: FirLocalCallableRef,

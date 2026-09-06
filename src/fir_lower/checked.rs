@@ -1,7 +1,7 @@
 use crate::fir::{
-    CallableId, FirCall, FirCallArgument, FirCallTarget, FirConstructorCall, FirConstructorTarget,
-    FirPropertyReferenceTarget, FirPropertyTarget, FirReceiver, FirTypeParameterRef,
-    FirTypeSubstitution,
+    CallableId, FirCall, FirCallArgument, FirCallTarget, FirConstructorCall,
+    FirConstructorCaptureArgument, FirConstructorTarget, FirExprKind, FirPropertyReferenceTarget,
+    FirPropertyTarget, FirReceiver, FirTypeParameterRef, FirTypeSubstitution,
 };
 use crate::ir::{
     ExprId, IrCheckedArgument, IrCheckedConstructorTarget, IrCheckedOperation,
@@ -12,6 +12,40 @@ use super::source_calls::ModuleConstructorRequest;
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
+    fn constructor_capture_argument(
+        &mut self,
+        argument: FirConstructorCaptureArgument,
+    ) -> Result<(ExprId, crate::types::Ty), FirLoweringFailure> {
+        let expression = self
+            .body
+            .expr(argument.value)
+            .ok_or(FirLoweringFailure::MissingExpression(argument.value))?;
+        let ty = expression.ty.get();
+        if !argument.shared_cell_holder {
+            return Ok((self.expression(argument.value)?, ty));
+        }
+        let holder = match expression.kind {
+            FirExprKind::ValueRead(value) => {
+                if self.shared_local_type(value).is_none() {
+                    return Err(FirLoweringFailure::InvalidConstructorCaptureArgument(
+                        argument.value,
+                    ));
+                }
+                self.ir.add_expr(IrExpr::GetValue(self.value_slot(value)))
+            }
+            FirExprKind::CapturedValueRead {
+                enclosing_depth,
+                source,
+            } => self.captured_value_holder(enclosing_depth, source)?,
+            _ => {
+                return Err(FirLoweringFailure::InvalidConstructorCaptureArgument(
+                    argument.value,
+                ));
+            }
+        };
+        Ok((holder, ty))
+    }
+
     pub(super) fn shared_cell_new(
         &mut self,
         element: crate::fir::ResolvedTy,
@@ -810,15 +844,8 @@ impl BodyLowering<'_> {
                     .map(|arguments| {
                         arguments
                             .iter()
-                            .map(|argument| {
-                                let ty = self
-                                    .body
-                                    .expr(*argument)
-                                    .ok_or(FirLoweringFailure::MissingExpression(*argument))?
-                                    .ty
-                                    .get();
-                                Ok((self.expression(*argument)?, ty))
-                            })
+                            .copied()
+                            .map(|argument| self.constructor_capture_argument(argument))
                             .collect::<Result<Vec<_>, FirLoweringFailure>>()
                     })
                     .transpose()?;

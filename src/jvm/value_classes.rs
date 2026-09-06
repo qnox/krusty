@@ -122,6 +122,24 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
         for a in &c.ctor_args {
             collect_obj_names(a.ty, &mut out);
         }
+        for constructor in &c.secondary_ctors {
+            constructor
+                .prefix_params
+                .iter()
+                .chain(&constructor.params)
+                .for_each(|ty| collect_obj_names(*ty, &mut out));
+        }
+        for entry in &c.enum_entries {
+            entry
+                .constructor_parameter_types
+                .iter()
+                .for_each(|ty| collect_obj_names(*ty, &mut out));
+        }
+        if let Some(parameters) = &c.enum_entry_of {
+            parameters
+                .iter()
+                .for_each(|ty| collect_obj_names(*ty, &mut out));
+        }
         // A dependency callable reference may be the only place a classpath value class occurs.
         // Its synthetic carrier owns both the logical FunctionN signature and the already-selected
         // declaration signature; include those types so this JVM representation pass can realize
@@ -2097,6 +2115,20 @@ pub fn lower_value_classes(
                 a.check = None;
             }
             a.ty = erase(&a.ty, &under);
+        }
+        // Common IR keeps the exact semantic constructor selected for each enum entry. The entry
+        // arguments have now been rewritten to their JVM carriers, so realize the parallel
+        // descriptor types here as part of the same backend-owned value-class erasure. Bodied
+        // entries carry the identical selected signature on their synthesized subclass.
+        for entry in &mut c.enum_entries {
+            for parameter in &mut entry.constructor_parameter_types {
+                *parameter = erase(parameter, &under);
+            }
+        }
+        if let Some(parameters) = &mut c.enum_entry_of {
+            for parameter in parameters {
+                *parameter = erase(parameter, &under);
+            }
         }
         // A regular class's secondary-`<init>` value-class params erase too (`Test(x: String, s: S)` →
         // `(String, String)`); a value class's own secondary ctors were already consumed into static

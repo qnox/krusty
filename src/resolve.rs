@@ -57001,11 +57001,15 @@ impl<'a> Checker<'a> {
     fn implicit_constructor_outer_for_classifier(
         &self,
         scope: &CheckerScope<'_>,
-        name: &str,
+        _name: &str,
         classifier: TypeName,
     ) -> Option<ImplicitReceiver> {
         let outer = self.resolved_type_name(classifier)?.outer_instance?;
-        let receivers = self.implicit_receivers_before_value_binding(scope, name);
+        // This helper runs only after the classifier call candidate has won the lexical tower.
+        // Value shadowing was therefore decided already; filtering the receiver tower again by the
+        // classifier's source spelling can hide the enclosing instance needed by a constructor
+        // default. Select the physical outer from the surviving semantic receiver rungs directly.
+        let receivers = self.implicit_receivers(scope);
         let enum_parent = self.resolved_index.and_then(|index| {
             let declaration = index.classifier_declaration(classifier)?;
             let entry = index
