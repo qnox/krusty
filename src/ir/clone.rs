@@ -293,7 +293,6 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(fir_origins);
     copy_map!(checked_return_depths);
     copy_map!(annotation_constructions);
-    copy_map!(constructor_default_arguments);
     copy_map!(expr_lines);
     copy_map!(expr_source_lines);
     copy_map!(expr_end_lines);

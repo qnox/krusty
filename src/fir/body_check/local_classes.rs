@@ -4,6 +4,99 @@ use super::*;
 use crate::resolve::AnonymousObjectCaptureSource;
 
 impl BodyFirChecker<'_> {
+    /// Publish the capture prefix for a local-class construction that crosses a streamed body
+    /// boundary. Inside the declaring body the checked `LocalDeclaration` already owns the
+    /// capture sources. A member of that class (or a nested class) instead sees the same captures
+    /// through stable `(owner, field)` identities and must carry those reads on the call itself.
+    pub(super) fn external_constructor_capture_arguments(
+        &mut self,
+        constructor: DeclarationId,
+        origin: OriginId,
+    ) -> Result<Option<Box<[FirExprId]>>, BodyCheckFailure> {
+        let Some(classifier) = self.index.enclosing_classifier(constructor) else {
+            return Ok(None);
+        };
+        let Some(context) = self
+            .session
+            .class_bodies
+            .get(&classifier.declaration)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let mut required = context.values.values().copied().collect::<Vec<_>>();
+        required.extend(context.delegates.values().filter_map(|delegate| {
+            if let DelegateStorage::ClassField(binding) = delegate.storage {
+                Some(binding)
+            } else {
+                None
+            }
+        }));
+        required.extend(context.receivers.iter().copied());
+        required.sort_unstable_by_key(|binding| binding.field);
+        required.dedup_by(|right, left| {
+            left.owner == right.owner
+                && left.field == right.field
+                && left.ty == right.ty
+                && left.shared_cell == right.shared_cell
+        });
+        if required.is_empty() {
+            return Ok(None);
+        }
+
+        let available = required
+            .iter()
+            .map(|required| {
+                self.class_values
+                    .values()
+                    .copied()
+                    .chain(self.class_delegates.values().filter_map(|delegate| {
+                        if let DelegateStorage::ClassField(binding) = delegate.storage {
+                            Some(binding)
+                        } else {
+                            None
+                        }
+                    }))
+                    .chain(self.class_receivers.iter().copied())
+                    .find(|binding| {
+                        binding.owner == required.owner && binding.field == required.field
+                    })
+            })
+            .collect::<Vec<_>>();
+        if available.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        if available.iter().any(Option::is_none) {
+            return Err(self.failure(None, BodyCheckFailureKind::MissingStableCallTarget));
+        }
+
+        required
+            .into_iter()
+            .zip(available)
+            .map(|(required, available)| {
+                let available = available.expect("complete checked capture identity set");
+                if available.ty != required.ty || available.shared_cell != required.shared_cell {
+                    return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                }
+                // A shared capture constructor parameter carries the holder itself. Suppressing
+                // the semantic dereference here matches declaration-side capture materialization.
+                let kind = self.class_storage_read_kind(
+                    ClassCaptureBinding {
+                        shared_cell: false,
+                        ..available
+                    },
+                    origin,
+                )?;
+                Ok(self.body.add_expr(FirExpr {
+                    origin,
+                    ty: required.ty,
+                    kind,
+                }))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|arguments| Some(arguments.into_boxed_slice()))
+    }
+
     /// Receiver captured into the current local classifier at this checked receiver-tower depth.
     /// Direct callable receivers occupy the prefix; captured class fields follow in the exact order
     /// published by `ClassBodyContext`. This is an identity coordinate, not a type search.

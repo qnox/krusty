@@ -331,6 +331,8 @@ impl BodyLowering<'_> {
                     ctor_params: Some(parameter_types),
                     ctor_desc: None,
                     external_target: None,
+                    defaults: Box::new([]),
+                    default_prefix_count: 0,
                 })
             }
             FirExprKind::ComparisonCall { operation, call } => {

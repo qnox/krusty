@@ -30343,7 +30343,11 @@ impl<'a> Checker<'a> {
                                 // precedence from qualified-expression resolution.
                                 match self.select_classifier(scope, &fname) {
                                     InheritedNestedClassifier::Found(internal) => {
-                                        (Some(internal), false, None)
+                                        let receiver = self
+                                            .implicit_constructor_outer_for_classifier(
+                                                scope, &fname, internal,
+                                            );
+                                        (Some(internal), false, receiver)
                                     }
                                     InheritedNestedClassifier::Ambiguous => (None, true, None),
                                     InheritedNestedClassifier::NotFound => (None, false, None),
@@ -56982,6 +56986,46 @@ impl<'a> Checker<'a> {
             }
         }
         (InheritedNestedClassifier::NotFound, None)
+    }
+
+    /// Select the implicit enclosing instance required by an already-selected `inner`
+    /// classifier. Usually [`Self::implicit_nested_classifier`] selects the classifier and this
+    /// receiver together. A classifier declared in an enum-entry body is different: its stable
+    /// lexical binding is owned by the enum entry, while its source-level enclosing-instance type
+    /// is the parent enum. It therefore reaches classifier lookup through the lexical rung rather
+    /// than through the enum receiver's ordinary nested-classifier namespace.
+    ///
+    /// The classifier header remains authoritative for whether an outer value is required and for
+    /// its type. This operation merely pairs that requirement with the first applicable receiver
+    /// coordinate from the same scope tower; lowering never repeats the lookup.
+    fn implicit_constructor_outer_for_classifier(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        classifier: TypeName,
+    ) -> Option<ImplicitReceiver> {
+        let outer = self.resolved_type_name(classifier)?.outer_instance?;
+        let receivers = self.implicit_receivers_before_value_binding(scope, name);
+        let enum_parent = self.resolved_index.and_then(|index| {
+            let declaration = index.classifier_declaration(classifier)?;
+            let entry = index
+                .declaration_anchor(declaration)?
+                .owner
+                .filter(|owner| {
+                    index
+                        .declaration_anchor(*owner)
+                        .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::EnumEntry)
+                })?;
+            index
+                .enclosing_classifier(entry)
+                .map(|parent| parent.classifier)
+        });
+        receivers.into_iter().find(|receiver| {
+            self.receiver_is_assignable(receiver.ty, Ty::obj_name(outer))
+                || enum_parent.is_some_and(|parent| {
+                    self.receiver_is_assignable(receiver.ty, Ty::obj_name(parent))
+                })
+        })
     }
 
     fn implicit_member_receiver_types(&self, scope: &CheckerScope<'_>) -> Vec<Ty> {

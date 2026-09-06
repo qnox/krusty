@@ -184,6 +184,8 @@ mod tests {
             ctor_params: Some(vec![Ty::String]),
             ctor_desc: None,
             external_target: Some(ExternalCallableId::from_raw(7)),
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
         ir.annotation_constructions.insert(
             construction,

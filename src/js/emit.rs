@@ -21,6 +21,16 @@ pub fn emit_file(ir: &IrFile) -> String {
         let params: Vec<String> = (1..=n_params).map(|i| format!("v{i}")).collect();
         out.push_str(&format!("class {} {{\n", class_simple(&c.fq_name())));
         out.push_str(&format!("  constructor({}) {{\n", params.join(", ")));
+        if let Some(defaults) = ir.class_ctor_defaults_name(c.fq_name_id()) {
+            for (parameter, default) in defaults.iter().enumerate() {
+                let Some(default) = default else { continue };
+                let value = parameter + 1;
+                out.push_str(&format!(
+                    "    if (v{value} === undefined) v{value} = {};\n",
+                    emit_expr(ir, *default, true)
+                ));
+            }
+        }
         for (i, f) in c.fields.iter().take(n_params).enumerate() {
             let n = &f.name;
             out.push_str(&format!("    this.{n} = v{};\n", i + 1));
@@ -306,6 +316,33 @@ fn emit_args_with_defaults(
         .join(", ")
 }
 
+fn emit_constructor_args_with_defaults(
+    ir: &IrFile,
+    args: &[u32],
+    defaults: &[u32],
+    parameter_count: usize,
+    prefix_count: u32,
+    inst: bool,
+) -> String {
+    let prefix_count = prefix_count as usize;
+    let mut supplied = args.iter().copied();
+    (0..parameter_count)
+        .map(|parameter| {
+            let omitted = parameter >= prefix_count
+                && defaults.contains(&u32::try_from(parameter - prefix_count).unwrap());
+            if omitted {
+                "undefined".to_owned()
+            } else {
+                supplied
+                    .next()
+                    .map(|argument| emit_expr(ir, argument, inst))
+                    .unwrap_or_else(|| "undefined".to_owned())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
     match node {
         IrExpr::Const(c) => match c {
@@ -356,10 +393,36 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 None => format!("{receiver}.{name}"),
             }
         }
-        IrExpr::New { internal, args, .. } => {
+        IrExpr::New {
+            internal,
+            args,
+            ctor_params,
+            defaults,
+            default_prefix_count,
+            ..
+        } => {
             let fq = internal.render();
             let name = class_simple(&fq);
-            format!("new {}({})", name, emit_args(ir, args, inst))
+            let parameter_count = ctor_params.as_ref().map_or_else(
+                || {
+                    ir.class_id_by_name(*internal)
+                        .map(|class| ir.classes[class as usize].ctor_args.len())
+                        .unwrap_or(args.len())
+                },
+                Vec::len,
+            );
+            format!(
+                "new {}({})",
+                name,
+                emit_constructor_args_with_defaults(
+                    ir,
+                    args,
+                    defaults,
+                    parameter_count,
+                    *default_prefix_count,
+                    inst,
+                )
+            )
         }
         IrExpr::NewArray { array_type, size } => {
             let size = emit_expr(ir, *size, inst);
