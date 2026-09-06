@@ -945,11 +945,12 @@ impl ProductionSignatureSemantics<'_> {
                 let callables = crate::libraries::Callables::from_parts(functions, properties);
                 let (kinds, slots) =
                     Self::probe_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-                let projected = self.project_postponed_callables(scope, callables, &kinds);
+                let projected =
+                    self.project_postponed_callables(scope, receiver, callables, &kinds);
                 let selected_parameters = match resolver.select_receiver_function_with_params(
                     receiver,
                     spelling,
-                    &kinds,
+                    projected.arguments(),
                     type_arguments,
                     projected.callables(),
                 ) {
@@ -959,7 +960,7 @@ impl ProductionSignatureSemantics<'_> {
                         arguments,
                         resolver.receiver_function_parameter_shapes(
                             receiver,
-                            &kinds,
+                            projected.arguments(),
                             type_arguments,
                             projected.callables(),
                         ),
