@@ -94,6 +94,7 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         Ty::TyParam(name, _) => name.to_string(),
         Ty::InProjection(inner) => format!("in {}", render_ty(*inner)),
         Ty::OutProjection(inner) => format!("out {}", render_ty(*inner)),
+        Ty::StarProjection(_) => "*".to_string(),
         // Editor surface: a declaration the resolution engine has not resolved yet has no type to
         // show. It reaches here only while analysis is mid-flight.
         Ty::Pending => "…".to_string(),

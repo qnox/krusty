@@ -6,6 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+mod reference_jvm;
+
+pub use reference_jvm::{reference_jvm_acceptance, ReferenceJvmAcceptance};
+
 /// Recursively collect Kotlin sources in deterministic path order. A source file is also accepted as
 /// the root, which keeps focused survey/debug invocations on the same discovery path as corpus runs.
 pub fn kotlin_files(root: &Path) -> Vec<PathBuf> {
@@ -62,6 +66,25 @@ pub fn evenly_sample<T>(items: Vec<T>, limit: usize) -> Vec<T> {
 /// Backend tokens krusty identifies as — it emits the JVM (IR) backend's bytecode.
 pub const BACKENDS: &[&str] = &["JVM", "JVM_IR"];
 
+fn mentions_backend(payload: &str, names: &[&str]) -> bool {
+    payload
+        .split(',')
+        .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+}
+
+/// Whether the corpus explicitly declines the selected exact backend.
+///
+/// This fact can select a backend/applicability path, but it is not itself evidence that the source
+/// is invalid for the JVM frontend. The frontend census asks the reference JVM compiler for that
+/// verdict when krusty rejects such a case.
+pub fn dont_targets_exact_backend(src: &str, names: &[&str]) -> bool {
+    src.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("// DONT_TARGET_EXACT_BACKEND:")
+            .is_some_and(|payload| mentions_backend(payload.trim(), names))
+    })
+}
+
 /// Whether the source declares the line directive `// <name>` (e.g. `WITH_REFLECT`). Matches the first
 /// `//`-comment whose first token (split on space/colon) is exactly `name`.
 pub fn directive(src: &str, name: &str) -> bool {
@@ -92,7 +115,9 @@ private fun <T> checkTypeEquality(
 /// ordinary Kotlin declarations, not compiler intrinsics; keeping the expansion here makes the gate,
 /// focused corpus helpers, and survey compile the same source program.
 pub fn prepare_test_source(src: &str) -> String {
-    let mut prepared = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+    let mut prepared = src
+        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline")
+        .replace("BACKEND_UNDER_TEST", "\"JVM_IR\"");
     if directive(src, "CHECK_TYPE_WITH_EXACT") {
         prepared.push_str(EXACT_TYPE_HELPER);
     }
@@ -107,6 +132,130 @@ pub fn prepare_test_source(src: &str) -> String {
 /// - `// DONT_TARGET_EXACT_BACKEND:` the test doesn't target that backend → exclude.
 /// - `// IGNORE_BACKEND_K1:` mutes it under the OLD K1 frontend ONLY → krusty is NOT K1, so this must
 ///   NOT exclude (excluding it under-counts: the test is valid for krusty's K2 semantics).
+/// Whether a box test's SOURCE targets a backend krusty's front end can even read. Unlike the
+/// `IGNORE_BACKEND` family — which mutes a test because of a BACKEND defect and therefore says
+/// nothing about the front end — `// TARGET_BACKEND: JS_IR` / `NATIVE` marks a test whose source
+/// uses declarations that exist only on that platform (`dynamic`, `js("…")`, `@JsName`,
+/// `asDynamic`). kotlinc's own JVM front end rejects those too, so scoring them as JVM frontend
+/// failures measures the wrong thing.
+pub fn target_backend_applicable(src: &str, names: &[&str]) -> bool {
+    if let Some(line) = src
+        .lines()
+        .find(|line| line.starts_with("// TARGET_BACKEND:"))
+    {
+        if !mentions_backend(line.trim_start_matches("// TARGET_BACKEND:").trim(), names) {
+            return false;
+        }
+    }
+    !dont_targets_exact_backend(src, names)
+}
+
+/// Whether a source program belongs to the platform universe a JVM frontend can analyze.
+///
+/// `DONT_TARGET_EXACT_BACKEND` is intentionally absent. It commonly records a runtime/codegen
+/// difference (`KType.toString`, enum initialization order, eager global initialization) while the
+/// K2 JVM frontend accepts the source and produces declarations normally. Such files must remain in
+/// a FIR/common-lowering census. Explicit `TARGET_BACKEND` and HMPP metadata-platform declarations,
+/// by contrast, select a source universe whose platform declarations may not exist on JVM at all.
+fn frontend_target_applicable(src: &str, names: &[&str]) -> bool {
+    let mentions_backend = |payload: &str| {
+        payload
+            .split(',')
+            .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+    };
+    if let Some(line) = src
+        .lines()
+        .find(|line| line.starts_with("// TARGET_BACKEND:"))
+    {
+        if !mentions_backend(line.trim_start_matches("// TARGET_BACKEND:").trim()) {
+            return false;
+        }
+    }
+    if let Some(line) = src
+        .lines()
+        .find(|line| line.starts_with("// METADATA_TARGET_PLATFORMS:"))
+    {
+        let payload = line
+            .trim_start_matches("// METADATA_TARGET_PLATFORMS:")
+            .trim();
+        if !payload
+            .split(',')
+            .any(|token| matches!(token.trim().to_ascii_uppercase().as_str(), "JVM" | "JVM_IR"))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether a box-test source is a positive frontend-conformance input for this target.
+///
+/// Backend ignores alone do not excuse a frontend refusal. A test explicitly ignored by both K1
+/// and K2 on this target is different: no reference frontend accepts it as a runnable box test (the
+/// corpus keeps such red/unsupported sources for diagnostics). Those cases have no positive
+/// acceptance oracle and therefore stay outside the frontend denominator.
+pub fn frontend_applicable(src: &str, names: &[&str]) -> bool {
+    if !frontend_target_applicable(src, names) || !k2_language_configuration_applicable(src) {
+        return false;
+    }
+    // Red-code box fixtures are negative diagnostic programs, not positive acceptance inputs.
+    // `-Xheader-mode` is not an acceptance oracle for them: it omits ordinary bodies and therefore
+    // misses precisely the PCLA/type contradictions those fixtures exercise. Their rejection and
+    // exact diagnostics belong to the diagnostic-conformance lane.
+    if src.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("// REASON:")
+            .is_some_and(|reason| reason.trim_start().starts_with("red code"))
+    }) {
+        return false;
+    }
+    let mentions = |line: &str| {
+        line.split(',')
+            .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+    };
+    let ignored = |prefix: &str| {
+        src.lines().any(|line| {
+            line.strip_prefix(prefix)
+                .is_some_and(|targets| mentions(targets.trim()))
+        })
+    };
+    let ignored_k1 = ignored("// IGNORE_BACKEND_K1:");
+    let ignored_k2 =
+        ignored("// IGNORE_BACKEND_K2:") || ignored("// IGNORE_BACKEND_K2_MULTI_MODULE:");
+    !(ignored_k1 && ignored_k2)
+}
+
+/// Whether the test requests a language configuration accepted by the reference K2 compiler.
+///
+/// Kotlin 2.4 rejects attempts to disable features whose pre-feature language version has left the
+/// supported range before it parses the source. Such a box file has no K2 frontend acceptance
+/// oracle; its retained K1 behavior must not be counted as a positive FIR input.
+fn k2_language_configuration_applicable(src: &str) -> bool {
+    const NON_DISABLEABLE_FEATURES: &[&str] =
+        &["ProhibitIllegalValueParameterUsageInDefaultArguments"];
+
+    let unsupported = |token: &str| {
+        token
+            .strip_prefix('-')
+            .is_some_and(|feature| NON_DISABLEABLE_FEATURES.contains(&feature))
+    };
+    !src.lines().any(|line| {
+        let line = line.trim_start();
+        if let Some(payload) = line.strip_prefix("// LANGUAGE:") {
+            return payload
+                .split([' ', ',', '\t'])
+                .filter(|token| !token.is_empty())
+                .any(unsupported);
+        }
+        line.strip_prefix("// FREE_COMPILER_ARGS:")
+            .into_iter()
+            .flat_map(str::split_whitespace)
+            .filter_map(|argument| argument.strip_prefix("-XXLanguage:"))
+            .flat_map(|payload| payload.split(','))
+            .any(unsupported)
+    })
+}
+
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
     // `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for
     // their diagnostic half), so it always mentions ours.
@@ -493,7 +642,12 @@ pub struct ModuleUnit {
     /// Classpath dependency module names, regular deps then FRIEND deps (friends ride the classpath
     /// the same way; their `internal` visibility is the friend part).
     pub deps: Vec<String>,
+    /// Subset of [`Self::deps`] whose `internal` declarations are visible here.
+    pub friends: Vec<String>,
     pub files: Vec<(String, String)>,
+    /// Dependency-first prefix of `files` originating in folded `dependsOn` source sets. The final
+    /// module's own files are platform sources.
+    pub common_file_count: usize,
     pub java_files: Vec<(String, String)>,
 }
 
@@ -550,6 +704,11 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
     built
         .into_iter()
         .map(|(u, chain)| {
+            let common_file_count = chain
+                .iter()
+                .take(chain.len().saturating_sub(1))
+                .map(|module| module.files.len())
+                .sum();
             let mut files = Vec::new();
             let mut java_files = Vec::new();
             for m in &chain {
@@ -558,9 +717,11 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
             }
             // Own deps first (chain ends with the module itself), then the folded source sets'.
             let mut deps: Vec<String> = Vec::new();
+            let mut friends: Vec<String> = Vec::new();
             let mut seen = HashSet::new();
+            let mut seen_friends = HashSet::new();
             for m in chain.iter().rev() {
-                for d in m.deps.iter().chain(m.friends.iter()) {
+                for d in &m.deps {
                     let r = representative
                         .get(d.as_str())
                         .copied()
@@ -569,11 +730,28 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
                         deps.push(r.to_string());
                     }
                 }
+                for d in &m.friends {
+                    let r = representative
+                        .get(d.as_str())
+                        .copied()
+                        .unwrap_or(d.as_str());
+                    if r == u.name {
+                        continue;
+                    }
+                    if seen.insert(r.to_string()) {
+                        deps.push(r.to_string());
+                    }
+                    if seen_friends.insert(r.to_string()) {
+                        friends.push(r.to_string());
+                    }
+                }
             }
             ModuleUnit {
                 name: u.name.clone(),
                 deps,
+                friends,
                 files,
+                common_file_count,
                 java_files,
             }
         })
@@ -626,6 +804,17 @@ mod tests {
         );
         assert!(prepared.contains("private fun <T> checkExactType"));
         assert!(prepared.contains("value: @kotlin.internal.Exact T"));
+    }
+
+    #[test]
+    fn backend_under_test_is_preprocessed_like_the_kotlin_runner() {
+        let prepared = prepare_test_source(
+            "val jvm = BACKEND_UNDER_TEST == \"JVM_IR\"\nval android = BACKEND_UNDER_TEST == \"ANDROID\"",
+        );
+        assert_eq!(
+            prepared,
+            "val jvm = \"JVM_IR\" == \"JVM_IR\"\nval android = \"JVM_IR\" == \"ANDROID\""
+        );
     }
 
     #[test]
@@ -711,6 +900,89 @@ mod tests {
         assert!(!backend_applicable(
             "// DONT_TARGET_EXACT_BACKEND: JVM_IR",
             BACKENDS
+        ));
+    }
+
+    #[test]
+    fn frontend_target_filter_excludes_an_exact_backend_the_source_does_not_target() {
+        assert!(!target_backend_applicable(
+            "// DONT_TARGET_EXACT_BACKEND: JVM_IR",
+            BACKENDS,
+        ));
+        assert!(target_backend_applicable(
+            "// DONT_TARGET_EXACT_BACKEND: JS_IR",
+            BACKENDS,
+        ));
+    }
+
+    #[test]
+    fn exact_backend_directive_is_only_a_request_for_an_acceptance_oracle() {
+        assert!(dont_targets_exact_backend(
+            "  // DONT_TARGET_EXACT_BACKEND: JS_IR, JVM_IR",
+            BACKENDS,
+        ));
+        assert!(!dont_targets_exact_backend(
+            "// DONT_TARGET_EXACT_BACKEND: JS_IR",
+            BACKENDS,
+        ));
+    }
+
+    #[test]
+    fn frontend_filter_keeps_backend_only_dont_target_directives() {
+        assert!(frontend_applicable(
+            "// DONT_TARGET_EXACT_BACKEND: JVM_IR\nfun box() = \"OK\"",
+            BACKENDS,
+        ));
+    }
+
+    #[test]
+    fn frontend_filter_excludes_explicit_non_jvm_hmpp_platform_universe() {
+        assert!(!frontend_applicable(
+            "// METADATA_TARGET_PLATFORMS: JS, WasmJs\nfun box() = \"OK\"",
+            BACKENDS,
+        ));
+        assert!(frontend_applicable(
+            "// METADATA_TARGET_PLATFORMS: JVM, JS\nfun box() = \"OK\"",
+            BACKENDS,
+        ));
+    }
+
+    #[test]
+    fn frontend_filter_excludes_sources_rejected_by_both_reference_frontends() {
+        let source = "// IGNORE_BACKEND_K1: ANY\n// IGNORE_BACKEND_K2: ANY";
+        assert!(!frontend_applicable(source, BACKENDS));
+        assert!(frontend_applicable("// IGNORE_BACKEND_K1: ANY", BACKENDS));
+        assert!(frontend_applicable("// IGNORE_BACKEND_K2: ANY", BACKENDS));
+    }
+
+    #[test]
+    fn frontend_filter_excludes_k2_rejected_nullable_nothing_array_programs() {
+        let source = "// LANGUAGE: +NullableNothingInReifiedPosition\n\
+                      // IGNORE_BACKEND_K1: ANY\n\
+                      // IGNORE_BACKEND_K2: JVM_IR\n\
+                      fun box() = arrayOf<Nothing?>(null)";
+        assert!(!frontend_applicable(source, BACKENDS));
+    }
+
+    #[test]
+    fn frontend_filter_routes_red_code_to_diagnostic_conformance() {
+        let red = "// IGNORE_BACKEND: ANY\n// REASON: red code (diagnostic fixture)";
+        assert!(!frontend_applicable(red, BACKENDS));
+        assert!(frontend_applicable("// IGNORE_BACKEND: ANY", BACKENDS));
+    }
+
+    #[test]
+    fn frontend_filter_excludes_a_language_configuration_k2_refuses_before_parsing() {
+        let source =
+            "// LANGUAGE: -ProhibitIllegalValueParameterUsageInDefaultArguments\nfun box() = \"OK\"";
+        assert!(!frontend_applicable(source, BACKENDS));
+        assert!(!frontend_applicable(
+            "// FREE_COMPILER_ARGS: -XXLanguage:-ProhibitIllegalValueParameterUsageInDefaultArguments",
+            BACKENDS,
+        ));
+        assert!(frontend_applicable(
+            "// LANGUAGE: +ProhibitIllegalValueParameterUsageInDefaultArguments",
+            BACKENDS,
         ));
     }
 
@@ -1226,6 +1498,7 @@ fun box(): String = \"OK\"
 ";
         let units = module_units(&split_modules(src).unwrap());
         assert_eq!(units[1].deps, vec!["lib".to_string()]);
+        assert_eq!(units[1].friends, vec!["lib".to_string()]);
     }
 
     #[test]

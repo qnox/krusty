@@ -104,7 +104,7 @@ fn nullable_type_parameter_admitted_cases_do_not_miscompile() {
     for &(case, reason) in NULLABLE_TPARAM_GATED_CASES {
         assert_eq!(
             common::box_corpus_case_backend_outcome(case),
-            Some(common::BackendOutcome::LowerBail(reason.to_string())),
+            Some(common::BackendOutcome::Rejected(vec![reason.to_string()])),
             "{case} must stop at its precise unsupported backend boundary"
         );
     }

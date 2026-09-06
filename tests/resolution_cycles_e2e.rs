@@ -84,6 +84,24 @@ fn a_cycle_between_two_class_members_declines() {
 }
 
 #[test]
+fn a_cycle_between_inferred_function_returns_declines() {
+    assert_declines("function returns", 2, &["fun a() = b()\nfun b() = a()\n"]);
+}
+
+#[test]
+fn an_anchored_inferred_function_chain_resolves_on_demand() {
+    if !common::stdlib_toolchain_ready() {
+        return;
+    }
+    common::expect_box_ok_with_stdlib(
+        "fun a() = b().length\n\
+         fun b() = \"hello\"\n\
+         fun box(): String = if (a() == 5) \"OK\" else \"fail\"\n",
+        "anchored_inferred_function_chain",
+    );
+}
+
+#[test]
 fn a_declaration_reached_twice_without_a_cycle_still_resolves() {
     // Two readers of one declaration is not a loop. Guarding this keeps a cycle check from
     // degenerating into "anything reached more than once declines".

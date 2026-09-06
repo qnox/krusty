@@ -250,11 +250,9 @@ fn private_source_extension_reference_stays_file_private() {
 
     let diagnostics =
         common::front_end_diagnostics_files(&[declaration, use_site], &[library_output], None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("cannot access 'isUsable'")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        vec!["cannot access 'isUsable': it is private in its file"]
     );
 }
 
@@ -492,11 +490,9 @@ fn private_cross_file_bound_extension_reports_inaccessible() {
     ) else {
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("cannot access 'label'")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        vec!["cannot access 'label': it is private in its file"]
     );
 }
 
@@ -524,11 +520,9 @@ fn private_cross_file_toplevel_reference_reports_inaccessible() {
     ) else {
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("cannot access 'hidden'")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        vec!["cannot access 'hidden': it is private in its file"]
     );
 }
 
@@ -560,12 +554,7 @@ fn unimported_source_extension_reference_is_not_visible() {
     ) else {
         return;
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("unresolved reference 'label'")),
-        "{diagnostics:?}"
-    );
+    assert_eq!(diagnostics, vec!["unresolved reference 'label'."]);
 }
 
 #[test]

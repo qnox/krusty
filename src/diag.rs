@@ -26,6 +26,7 @@ pub enum DiagnosticKind {
     #[default]
     Compiler,
     IncompatibleEquality,
+    ValReassignment,
     Inspection,
 }
 
@@ -60,6 +61,10 @@ pub struct DiagSink {
     /// The file index stamped onto subsequent diagnostics. The driver/front-end sets this before
     /// processing each file (see `set_file`); it stays 0 for the single-file box/test harness.
     current_file: u32,
+    /// When present, this semantic operation owns diagnostics only inside these source ranges.
+    /// Pass-1 retained-fragment preparation uses this while traversing lexical containers whose
+    /// ordinary expressions are authoritative only in Pass 2.
+    authoritative_ranges: Option<Vec<Span>>,
 }
 
 impl DiagSink {
@@ -67,7 +72,46 @@ impl DiagSink {
         DiagSink {
             diags: Vec::new(),
             current_file: 0,
+            authoritative_ranges: None,
         }
+    }
+
+    fn accepts(&self, span: Span) -> bool {
+        self.authoritative_ranges.as_ref().is_none_or(|ranges| {
+            ranges
+                .iter()
+                .any(|range| range.lo <= span.lo && span.hi <= range.hi)
+        })
+    }
+
+    /// Run one semantic operation with diagnostic ownership restricted to `ranges`.
+    ///
+    /// This is not error recovery: diagnostics outside the ranges belong to another phase and are
+    /// never inserted. Nested ownership scopes intersect naturally because an inner operation may
+    /// only narrow the outer operation's ranges.
+    pub(crate) fn with_authoritative_ranges<R>(
+        &mut self,
+        ranges: &[Span],
+        operation: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prior = self.authoritative_ranges.take();
+        let selected = match prior.as_ref() {
+            Some(outer) => outer
+                .iter()
+                .flat_map(|candidate| {
+                    ranges.iter().filter_map(|range| {
+                        let lo = candidate.lo.max(range.lo);
+                        let hi = candidate.hi.min(range.hi);
+                        (lo <= hi).then_some(Span::new(lo, hi))
+                    })
+                })
+                .collect(),
+            None => ranges.to_vec(),
+        };
+        self.authoritative_ranges = Some(selected);
+        let result = operation(self);
+        self.authoritative_ranges = prior;
+        result
     }
 
     /// Stamp subsequent diagnostics as belonging to file `index` (the front-end calls this at the
@@ -85,6 +129,9 @@ impl DiagSink {
     }
 
     pub fn error_kind(&mut self, span: Span, kind: DiagnosticKind, msg: impl Into<String>) {
+        if !self.accepts(span) {
+            return;
+        }
         let msg = msg.into();
         crate::trace_compiler!(
             "diagnostic",
@@ -108,12 +155,22 @@ impl DiagSink {
         identity: DiagnosticIdentity,
         msg: impl Into<String>,
     ) {
+        if !self.accepts(span) {
+            return;
+        }
+        let msg = msg.into();
+        crate::trace_compiler!(
+            "diagnostic",
+            "file={} span={span:?} kind={:?} identity={identity:?} message={msg}",
+            self.current_file,
+            DiagnosticKind::Compiler,
+        );
         self.diags.push(Diagnostic {
             span,
             editor_span: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
-            msg: msg.into(),
+            msg,
             identity: Some(identity),
             file: self.current_file,
         });
@@ -125,12 +182,22 @@ impl DiagSink {
         editor_span: Span,
         msg: impl Into<String>,
     ) {
+        if !self.accepts(span) {
+            return;
+        }
+        let msg = msg.into();
+        crate::trace_compiler!(
+            "diagnostic",
+            "file={} span={span:?} editor_span={editor_span:?} kind={:?} message={msg}",
+            self.current_file,
+            DiagnosticKind::Compiler,
+        );
         self.diags.push(Diagnostic {
             span,
             editor_span: Some(editor_span),
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
-            msg: msg.into(),
+            msg,
             identity: None,
             file: self.current_file,
         });
@@ -165,6 +232,13 @@ impl DiagSink {
             }
         });
         self.diags.extend(tail);
+    }
+
+    /// Restore deterministic source order after diagnostics from multiple semantic phases have
+    /// been merged. The stable sort preserves production order for diagnostics at the same range.
+    pub(crate) fn sort_source_order(&mut self) {
+        self.diags
+            .sort_by_key(|diagnostic| (diagnostic.file, diagnostic.span.lo, diagnostic.span.hi));
     }
 
     pub fn has_errors(&self) -> bool {
@@ -290,20 +364,6 @@ mod tests {
         assert_eq!(s.diags.len(), 2);
         assert_eq!(s.diags[0].msg, "cannot access 'Alias'");
         assert_eq!(s.diags[1].msg, "cannot access 'SecondAlias'");
-    }
-
-    #[test]
-    fn speculative_probes_still_see_every_emission() {
-        let mut s = DiagSink::new();
-        s.error(Span::new(3, 4), "boom");
-        let checkpoint = s.diags.len();
-        s.error(Span::new(3, 4), "boom");
-        assert!(
-            s.diags.len() > checkpoint,
-            "the probe must observe its own error"
-        );
-        s.diags.truncate(checkpoint);
-        assert_eq!(s.diags.len(), 1);
     }
 
     #[test]

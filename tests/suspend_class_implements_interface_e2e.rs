@@ -32,16 +32,19 @@ fn suspend_member_overriding_nongeneric_interface() {
 }
 
 #[test]
-fn suspend_override_needing_generic_bridge_is_skipped_not_miscompiled() {
-    // A suspend member reached through a GENERIC ancestor (`A<T>`) via a raw-looking intermediate
-    // (`B : A<String>`) DOES need an erasure bridge, which the coroutine lowering can't fix up. krusty
-    // must SKIP the file (emit nothing runnable) rather than emit a broken bridge → `AbstractMethodError`.
-    const SRC: &str = "interface A<T> { suspend fun f(x: T): T }\n\
+fn suspend_override_needing_generic_bridge_runs() {
+    // Dispatch through the erased generic ancestor, not through `C`, so this observes the bridge
+    // descriptor and its CPS continuation/result adaptation rather than merely compiling it.
+    const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
+        interface A<T> { suspend fun f(x: T): T }\n\
         interface B : A<String>\n\
         class C : B { override suspend fun f(x: String): String = x }\n\
-        fun box(): String = \"OK\"\n";
-    assert!(
-        run_box(SRC, "Main").is_none(),
-        "a suspend override needing a generic bridge must be skipped, not miscompiled"
+        fun box(): String = runBlocking {\n\
+            val erased: A<String> = C()\n\
+            erased.f(\"OK\")\n\
+        }\n";
+    assert_eq!(
+        run_box(SRC, "Main").expect("generic suspend bridge compile+run"),
+        "OK"
     );
 }

@@ -527,12 +527,12 @@ impl FileAnalysis {
                     });
                 }
                 Stmt::Destructure { entries, .. } => {
-                    for (name, _) in entries {
-                        if name != "_" {
+                    for entry in entries {
+                        if !entry.ignored {
                             result.push(ScopedCompletionSymbol {
                                 scope: enclosing_scope,
                                 declared_at: statement_span.hi,
-                                label: name.clone(),
+                                label: entry.name.clone(),
                                 details: value_details(None),
                                 kind: CompletionKind::Variable,
                                 result_type: None,
@@ -719,7 +719,9 @@ impl FileAnalysis {
                 | Stmt::LocalDelegate { name: local, .. }
                 | Stmt::For { name: local, .. }
                 | Stmt::ForEach { name: local, .. } => local == name,
-                Stmt::Destructure { entries, .. } => entries.iter().any(|(local, _)| local == name),
+                Stmt::Destructure { entries, .. } => entries
+                    .iter()
+                    .any(|entry| !entry.ignored && entry.name == *name),
                 _ => false,
             })
             || self

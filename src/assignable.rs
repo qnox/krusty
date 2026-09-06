@@ -46,6 +46,28 @@ pub trait TypeOracle {
     fn type_param_upper_bounds(&self, _internal: TypeName, _index: usize) -> Vec<Ty> {
         vec![Ty::nullable(Ty::obj("kotlin/Any"))]
     }
+
+    /// Upper bound paired with a platform type's retained lower bound. JVM mapped collections
+    /// override this with their read-only face (`MutableList<T>` -> `List<T>`); common array
+    /// projection flexibility is added by the assignability relation itself.
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        lower
+    }
+}
+
+/// Target-independent upper shape of a flexible type whose lower bound is retained in [`Ty`].
+/// Array projection flexibility is Kotlin type semantics; the JVM provider only decides that an
+/// external declaration has a platform type and supplies its lower bound.
+pub(crate) fn platform_shape_upper_bound(lower: Ty) -> Ty {
+    match lower {
+        Ty::Obj(owner, arguments)
+            if lower.is_reference_array()
+                && matches!(arguments, [argument] if argument.projection_inner().is_none()) =>
+        {
+            Ty::obj_args_name(owner, &[Ty::out_projection(arguments[0])])
+        }
+        _ => lower,
+    }
 }
 
 /// Inferred type-variable bindings. Declared bounds remain on `Ty::TyParam`; keeping the two states
@@ -142,17 +164,18 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     }
     // Projection wrappers are meaningful only as generic arguments. When they reach a recursive
     // comparison, consume their readable bound; `obj_assignable` handles their direction.
-    if let Ty::InProjection(inner) | Ty::OutProjection(inner) = sup {
+    if let Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) = sup {
         return assignable_inner(cx, oracle, sub, *inner);
     }
-    if let Ty::InProjection(inner) | Ty::OutProjection(inner) = sub {
+    if let Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) = sub {
         return assignable_inner(cx, oracle, *inner, sup);
     }
 
     // A Java platform type `T!` is the flexible interval `T..T?`: as a source it may be consumed at
     // either bound, and as a target it accepts values admitted by the nullable upper bound.
     if let Ty::PlatformNullable(inner) = sup {
-        return assignable_inner(cx, oracle, sub, Ty::nullable(*inner));
+        let upper = platform_shape_upper_bound(oracle.platform_flexible_upper_bound(*inner));
+        return assignable_inner(cx, oracle, sub, Ty::nullable(upper));
     }
     if let Ty::PlatformNullable(inner) = sub {
         return assignable_inner(cx, oracle, *inner, sup)
@@ -252,7 +275,7 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
         .enumerate()
         .all(|(index, (&p, &a))| {
             match p {
-                Ty::OutProjection(expected) => {
+                Ty::OutProjection(expected) | Ty::StarProjection(expected) => {
                     if matches!(a, Ty::InProjection(_)) {
                         let readable = target
                             .map(|owner| oracle.type_param_upper_bounds(owner, index))
@@ -262,15 +285,17 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
                             .into_iter()
                             .any(|bound| assignable_inner(cx, oracle, bound, *expected));
                     }
+                    let mut captured = cx.clone();
+                    capture_projection_parameters(&mut captured, oracle, *expected, a);
                     return assignable_inner(
-                        cx,
+                        &captured,
                         oracle,
                         a.projection_inner().unwrap_or(a),
                         *expected,
                     );
                 }
                 Ty::InProjection(expected) => {
-                    if matches!(a, Ty::OutProjection(_)) {
+                    if matches!(a, Ty::OutProjection(_) | Ty::StarProjection(_)) {
                         return *expected == Ty::Nothing;
                     }
                     return assignable_inner(
@@ -288,12 +313,58 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
             {
                 crate::types::TypeVariance::Out => assignable_inner(cx, oracle, a, p),
                 crate::types::TypeVariance::In => assignable_inner(cx, oracle, p, a),
-                crate::types::TypeVariance::Invariant => same_flexible_type_argument(
+                crate::types::TypeVariance::Invariant => same_flexible_type(
                     normalized_type_argument(cx, a),
                     normalized_type_argument(cx, p),
                 ),
             }
         })
+}
+
+/// Bind the declaration variables occurring inside a star projection's readable upper bound to the
+/// corresponding actual shape. F-bounds such as `S : Entity<D, S>` otherwise leave `S` unbound and
+/// reject `EntityImpl<D> : Entity<D, EntityImpl<D>>` as an argument of `Entity<D, *>`.
+fn capture_projection_parameters(
+    cx: &mut TyCtx,
+    oracle: &dyn TypeOracle,
+    template: Ty,
+    actual: Ty,
+) {
+    match template {
+        Ty::TyParam(name, _) => {
+            if cx.lookup(name).is_none() && actual != template {
+                cx.bind(name, actual.projection_inner().unwrap_or(actual));
+            }
+        }
+        Ty::Obj(_, template_args) => {
+            let Some(applied) = applied_supertype(oracle, actual, template) else {
+                return;
+            };
+            for (&template, &actual) in template_args.iter().zip(applied.type_args()) {
+                capture_projection_parameters(cx, oracle, template, actual);
+            }
+        }
+        Ty::Fun(template) => {
+            let Ty::Fun(actual) = actual.projection_inner().unwrap_or(actual) else {
+                return;
+            };
+            for (&template, &actual) in template.params.iter().zip(&actual.params) {
+                capture_projection_parameters(cx, oracle, template, actual);
+            }
+            capture_projection_parameters(cx, oracle, template.ret, actual.ret);
+        }
+        Ty::Nullable(template)
+        | Ty::PlatformNullable(template)
+        | Ty::InProjection(template)
+        | Ty::OutProjection(template)
+        | Ty::StarProjection(template) => capture_projection_parameters(
+            cx,
+            oracle,
+            *template,
+            actual.projection_inner().unwrap_or(actual).non_null(),
+        ),
+        Ty::Unit | Ty::Pending | Ty::Nothing | Ty::Null | Ty::Error => {}
+    }
 }
 
 fn same_type_argument(left: Ty, right: Ty) -> bool {
@@ -305,12 +376,13 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
                 && aa
                     .iter()
                     .zip(ba)
-                    .all(|(&left, &right)| same_flexible_type_argument(left, right))
+                    .all(|(&left, &right)| same_flexible_type(left, right))
         }
         (Ty::Nullable(a), Ty::Nullable(b))
         | (Ty::PlatformNullable(a), Ty::PlatformNullable(b))
         | (Ty::InProjection(a), Ty::InProjection(b))
-        | (Ty::OutProjection(a), Ty::OutProjection(b)) => same_flexible_type_argument(*a, *b),
+        | (Ty::OutProjection(a), Ty::OutProjection(b))
+        | (Ty::StarProjection(a), Ty::StarProjection(b)) => same_flexible_type(*a, *b),
         (Ty::Fun(a), Ty::Fun(b)) => {
             a.context_count == b.context_count
                 && a.has_receiver == b.has_receiver
@@ -319,14 +391,17 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
                 && a.params
                     .iter()
                     .zip(&b.params)
-                    .all(|(&left, &right)| same_flexible_type_argument(left, right))
-                && same_flexible_type_argument(a.ret, b.ret)
+                    .all(|(&left, &right)| same_flexible_type(left, right))
+                && same_flexible_type(a.ret, b.ret)
         }
         _ => left == right,
     }
 }
 
-fn same_flexible_type_argument(left: Ty, right: Ty) -> bool {
+/// Semantic type-shape equality with Java platform nullability treated as its flexible interval.
+/// This is shared by invariant type-argument comparison and declaration override-slot matching;
+/// neither operation may turn the provider's `T!` into a fixed nullable or non-null type.
+pub(crate) fn same_flexible_type(left: Ty, right: Ty) -> bool {
     match (left, right) {
         (Ty::PlatformNullable(left), Ty::PlatformNullable(right)) => {
             same_type_argument(*left, *right)
@@ -413,6 +488,14 @@ mod tests {
             if internal.matches("app/Anonymous") {
                 return vec![g("app/Box", ty.type_args())];
             }
+            if internal.matches("app/EntityImpl") {
+                let data = ty
+                    .type_args()
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| s("kotlin/Any"));
+                return vec![g("app/Entity", &[data, g("app/EntityImpl", &[data])])];
+            }
             let s: &[&str] = match internal {
                 n if n.matches("kotlin/String") => &["kotlin/CharSequence", "kotlin/Comparable"],
                 n if n.matches("kotlin/CharSequence") => &["kotlin/Any"],
@@ -447,6 +530,14 @@ mod tests {
                 crate::types::TypeVariance::Out
             } else {
                 crate::types::TypeVariance::Invariant
+            }
+        }
+        fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+            match lower {
+                Ty::Obj(owner, arguments) if owner.matches("kotlin/collections/MutableList") => {
+                    Ty::obj_args("kotlin/collections/List", &arguments)
+                }
+                _ => lower,
             }
         }
     }
@@ -504,6 +595,18 @@ mod tests {
         assert!(ok(
             Ty::array(dog),
             Ty::platform_nullable(Ty::array(platform_dog))
+        ));
+
+        let platform_array =
+            Ty::platform_nullable(g("kotlin/Array", &[Ty::platform_nullable(Ty::Int)]));
+        assert!(ok(platform_array, g("kotlin/Array", &[Ty::Int])));
+        assert!(ok(
+            platform_array,
+            Ty::nullable(g("kotlin/Array", &[Ty::out_projection(Ty::Int)],)),
+        ));
+        assert!(ok(
+            g("kotlin/Array", &[Ty::out_projection(Ty::Int)]),
+            platform_array,
         ));
     }
 
@@ -574,6 +677,17 @@ mod tests {
     }
 
     #[test]
+    fn platform_collection_target_accepts_its_read_only_upper_bound() {
+        assert!(ok(
+            g("kotlin/collections/List", &[Ty::String]),
+            Ty::platform_nullable(g(
+                "kotlin/collections/MutableList",
+                &[Ty::platform_nullable(Ty::String)],
+            )),
+        ));
+    }
+
+    #[test]
     fn invariant_star_projection_accepts_a_nullable_bounded_argument() {
         let parameter = Ty::ty_param("T", Ty::nullable(s("kotlin/Any")));
         assert!(ok(
@@ -582,6 +696,18 @@ mod tests {
                 "app/Box",
                 &[Ty::out_projection(Ty::nullable(s("kotlin/Any")))]
             )
+        ));
+    }
+
+    #[test]
+    fn f_bounded_star_projection_captures_its_self_type() {
+        let data = Ty::ty_param("D", s("kotlin/Any"));
+        let self_reference = Ty::ty_param("S", s("kotlin/Any"));
+        let self_bound = g("app/Entity", &[data, self_reference]);
+
+        assert!(ok(
+            g("app/EntityImpl", &[data]),
+            g("app/Entity", &[data, Ty::star_projection(self_bound)])
         ));
     }
 

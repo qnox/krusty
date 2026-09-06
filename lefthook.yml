@@ -37,4 +37,4 @@ pre-push:
     # instrumentation belongs on CI (`just ci`); duplicating the corpus here only lengthens the gate.
     test:
       priority: 2
-      run: just test
+      run: just push::test

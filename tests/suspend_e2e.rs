@@ -2676,16 +2676,11 @@ fun box(): String = Holder().accept { val a = step(); a + \"!\" }\n";
     );
 }
 
-/// A `try` that CATCHES over a suspension point, with a value live across it, is skipped.
-///
-/// The coroutine pass wraps the whole `label`-dispatch loop in ONE `catch Throwable` that routes on the
-/// in-flight `label` and re-enters the loop WITHOUT restoring the locals its predecessor spilled. A
-/// resumed machine re-enters the static body as `f(null, …)`, so `a` here read back `null` and `box()`
-/// threw an NPE where kotlinc answers `"A-end"`. `f` has no parameters and no receiver — an ordinary
-/// spilled LOCAL is enough, which is why the bail keys on "a value is live across the try" rather than
-/// on the enclosing function being an extension or a member.
+/// A `try` that catches over a suspension point must restore a local spilled by an earlier state.
+/// This is positive runtime conformance: accepting the source is insufficient because a missing
+/// restore used to turn `a` into null after resumption.
 #[test]
-fn suspend_try_catch_over_a_suspension_still_skips() {
+fn suspend_try_catch_over_a_suspension_restores_live_local() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = "import kotlin.coroutines.*\n\
@@ -2710,10 +2705,11 @@ suspend fun f(): String {\n\
     return a + \"-end\"\n\
 }\n\
 fun box(): String = runBlocking { f() }\n";
-    assert!(
+    assert_eq!(
         common::compile_and_run_box(src, "SuspendTryCatch", &[stdlib], Some(jdk.as_path()))
-            .is_none(),
-        "a catching try over a suspension with a live local must be skipped, never emitted"
+            .as_deref(),
+        Some("A-end"),
+        "a catching try over a suspension must restore values live from an earlier state"
     );
 }
 

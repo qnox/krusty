@@ -57,3 +57,21 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("mixed named and positional args"), "OK");
 }
+
+#[test]
+fn positional_arguments_after_a_named_prefix_remain_vararg_elements() {
+    const SOURCE: &str = r#"
+        fun collect(first: Int, vararg values: String, tail: Double): String =
+            "$first:${values[0]}${values[1]}:${tail.toInt()}"
+
+        fun box(): String {
+            val actual = collect(first = 1, "a", "b", tail = 2.0)
+            return if (actual == "1:ab:2") "OK" else "FAIL: $actual"
+        }
+    "#;
+
+    assert_eq!(
+        run(SOURCE).expect("positional arguments after named prefix"),
+        "OK"
+    );
+}

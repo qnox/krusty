@@ -2,26 +2,29 @@
 //! backend-agnostic IR, emit JS, run it, and assert the result. Proves the IR is target-neutral — the
 //! same lowering that feeds the JVM backend runs correctly on Node — and covers `src/js/mod.rs`.
 //!
-//! Skips cleanly when the kotlin-stdlib jar / JDK modules (needed for front-end resolution) or `node`
-//! are unavailable.
+//! The frontend uses the target-neutral Kotlin builtin provider; only Node is an external runtime
+//! dependency.
 
 use super::common;
 
 /// Lower `src`, emit JS, append `console.log(box())`, run on Node. Returns Node's stdout, or `None`
-/// to skip (toolchain/node missing or a front-end gap).
+/// to skip only when Node is unavailable. A compiler rejection is a test failure.
 fn run(src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let mut js = common::compile_js_in_process(src, "Main", &[stdlib], Some(jdk.as_path()))?;
+    let mut js = common::compile_js_in_process(src, "Main").unwrap_or_else(|diagnostics| {
+        panic!(
+            "JS production pipeline rejected source:\n{src}\n--- diagnostics ---\n{}",
+            diagnostics.join("\n")
+        )
+    });
     js.push_str("\nconsole.log(box());\n");
     common::run_js(&js)
 }
 
-/// Assert Node prints `expected`; skip (return) if the toolchain/node is unavailable.
+/// Assert Node prints `expected`; skip only if Node is unavailable.
 fn check(src: &str, expected: &str) {
     match run(src) {
         Some(out) => assert_eq!(out, expected, "js output mismatch\n--- src ---\n{src}"),
-        None => eprintln!("skipping js_backend_e2e: no stdlib/JDK/node"),
+        None => eprintln!("skipping js_backend_e2e: node is unavailable"),
     }
 }
 
@@ -209,6 +212,15 @@ fn recursion() {
         "fun fib(n: Int): Int = if (n < 2) n else fib(n - 1) + fib(n - 2)\n\
          fun box(): Int { return fib(10) }",
         "55",
+    );
+}
+
+#[test]
+fn member_recursion_with_checked_block_arguments() {
+    check(
+        "class C { tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n\
+         fun box(): Int = C().f(3)",
+        "0",
     );
 }
 

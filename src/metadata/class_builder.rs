@@ -22,6 +22,8 @@ use crate::types::{Ty, Visibility};
 pub struct PropMeta {
     pub name: String,
     pub ty: Ty,
+    /// Named context parameters, emitted as `Property.context_parameter` (field 17).
+    pub context_params: Vec<(String, Ty)>,
     /// How SOURCE spelled the declared type and receiver — see [`FnMeta::spellings`].
     pub spellings: crate::spelling::DeclaredSpellings,
     pub is_var: bool,
@@ -45,6 +47,8 @@ pub struct PropMeta {
     /// without it a consumer sees an ordinary member property that does not exist. `None` for an
     /// ordinary member.
     pub receiver: Option<Ty>,
+    /// Type parameters declared by this property (member extension properties may be generic).
+    pub type_params: Vec<crate::ir::IrTypeParameter>,
     /// `(jvm name, jvm descriptor)` of the accessor, when one is emitted.
     pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>,
@@ -131,6 +135,10 @@ pub struct FnMeta {
     /// (or a short list) ⇒ the missing parameters carry none. Recorded regardless of retention:
     /// `@Metadata` is the Kotlin-level record, so a BINARY-retained annotation appears here too.
     pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
+    /// Kotlin type-use inference policy, parallel to `params`.
+    pub no_infer_params: Vec<bool>,
+    /// Semantic `ValueParameter.equality_bound_type` for `equals`' first ordinary value parameter.
+    pub equality_bound: Option<Ty>,
 }
 
 impl FnMeta {
@@ -155,6 +163,8 @@ impl FnMeta {
             spellings: crate::spelling::DeclaredSpellings::default(),
             annotations: Vec::new(),
             param_annotations: Vec::new(),
+            no_infer_params: Vec::new(),
+            equality_bound: None,
         }
     }
 }
@@ -304,7 +314,12 @@ fn type_pb_tp(
 ) -> Pb {
     match tparam {
         // A bare type parameter is recorded by INDEX and has no classifier to abbreviate.
-        Some(index) => encode_indexed_type_parameter(st, t, index),
+        Some(index) => encode_indexed_type_parameter(st, t, index).map(|mut encoded| {
+            if spelled.definitely_non_null {
+                encoded.field_varint(1, 2); // Type.flags: DEFINITELY_NOT_NULL_TYPE
+            }
+            encoded
+        }),
         None => {
             crate::metadata::type_encoder::encode_declared_type(st, t, spelled, type_parameters)
         }
@@ -451,7 +466,12 @@ fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
 /// A secondary constructor for class metadata (`Class.constructor` = f8, repeated after the primary).
 pub struct CtorMeta<'a> {
     pub params: &'a [(String, Ty)],
+    /// Per-parameter `DECLARES_DEFAULT_VALUE` flags in the same source order as `params`.
+    pub param_defaults: &'a [bool],
     pub desc: &'a str,
+    /// Physical JVM realization name. Ordinary constructors use `<init>` (`None`); value-class
+    /// secondary constructors use the backend-selected static `constructor-impl` handle.
+    pub sig_name: Option<&'a str>,
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type`
     /// (f4), the record a consumer needs to admit `C(a, b, c)` against `vararg` (without it the
     /// parameter reads as a plain array and the call resolves to nothing).
@@ -470,6 +490,7 @@ pub struct CtorMeta<'a> {
 pub enum ClassMemberOrder {
     Property(usize),
     Function(usize),
+    TypeAlias(usize),
 }
 
 pub struct ClassTail<'a> {
@@ -485,6 +506,9 @@ pub struct ClassTail<'a> {
     pub companion: Option<&'a str>,
     pub nested: &'a [&'a str],
     pub member_order: &'a [ClassMemberOrder],
+    /// Type aliases declared directly in this classifier. They share source-order string interning
+    /// with functions and properties, then serialize as `Class.type_alias` (field 11).
+    pub type_aliases: &'a [crate::metadata::builder::TypeAliasMeta],
     /// The `-module-name` value → `Class.classModuleName` (f101, a JvmProtoBuf extension). kotlinc
     /// omits it for the default module `main`; downstream builds always set `-module-name`.
     pub module_name: Option<&'a str>,
@@ -557,6 +581,7 @@ impl Default for ClassTail<'_> {
             companion: None,
             nested: &[],
             member_order: &[],
+            type_aliases: &[],
             module_name: None,
             secondary_ctors: &[],
             ctor_param_defaults: &[],
@@ -718,10 +743,10 @@ pub fn build_class(
                 param_spellings: &[],
                 desc: sc.desc,
                 flags: sc.flags,
-                param_defaults: &[],
+                param_defaults: sc.param_defaults,
                 param_tparams: &[],
                 param_annotations: &[],
-                sig_name: None,
+                sig_name: sc.sig_name,
                 emit_jvm_signature: true,
                 vararg_index: sc.vararg_index,
                 annotations: sc.annotations,
@@ -733,19 +758,56 @@ pub fn build_class(
     let build_prop = |st: &mut StringTable, p: &PropMeta| {
         let mut prop = Pb::new();
         prop.field_varint(2, st.local(&p.name) as u64); // Property.name = 2
+        let mut property_type_parameters = class_type_parameters.clone();
+        for (index, parameter) in p.type_params.iter().enumerate() {
+            let id = captured_count + tail.type_params.len() + index;
+            property_type_parameters.insert(parameter.name.clone(), id as u64);
+            property_type_parameters.insert(parameter.semantic_name.clone(), id as u64);
+            let parameter = encode_metadata_type_parameter(
+                st,
+                id,
+                &MetadataTypeParameter {
+                    name: parameter.name.clone(),
+                    reified: false,
+                    variance: parameter.variance,
+                    upper_bounds: parameter.bounds.iter().map(|(bound, _)| *bound).collect(),
+                    upper_bound_spellings: p
+                        .spellings
+                        .type_param_bounds
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_default(),
+                },
+                &property_type_parameters,
+            )
+            .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
+            prop.repeated_message(4, &parameter);
+        }
         let ty = type_pb_tp(
             st,
             p.ty,
             p.tparam.map(|index| index + captured_count as u32),
             &p.spellings.ret,
-            &class_type_parameters,
+            &property_type_parameters,
         );
         prop.field_message(3, &ty); // Property.return_type = 3
         if let Some(recv) = p.receiver {
             // Property.receiver_type = 5 — a member EXTENSION property's declared receiver;
             // its presence is what makes the record an extension.
-            let rt = type_pb_declared(st, recv, &p.spellings.receiver, &class_type_parameters);
+            let rt = type_pb_declared(st, recv, &p.spellings.receiver, &property_type_parameters);
             prop.field_message(5, &rt);
+        }
+        for (name, ty) in &p.context_params {
+            let mut parameter = Pb::new();
+            parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
+            let ty = type_pb_declared(
+                st,
+                *ty,
+                crate::spelling::Spelled::NONE,
+                &property_type_parameters,
+            );
+            parameter.field_message(3, &ty); // ValueParameter.type = 3
+            prop.repeated_message(17, &parameter); // Property.context_parameter = 17
         }
         // `HAS_ANNOTATIONS` (bit 0) is a function of the annotation records below, on EITHER use
         // site: kotlinc sets it for a field-targeted annotation too.
@@ -881,14 +943,12 @@ pub fn build_class(
             m.type_params.iter().map(String::as_str),
             semantic_names.iter().map(String::as_str),
         );
+        for (key, own) in &own_type_parameters {
+            let id = captured_count + tail.type_params.len() + *own as usize;
+            function_type_parameters.insert(key.clone(), id as u64);
+        }
         for (index, name) in m.type_params.iter().enumerate() {
             let id = captured_count + tail.type_params.len() + index;
-            for key in own_type_parameters
-                .iter()
-                .filter_map(|(key, own)| (*own == index as u64).then_some(key))
-            {
-                function_type_parameters.insert(key.clone(), id as u64);
-            }
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,
@@ -965,7 +1025,7 @@ pub fn build_class(
             } else {
                 m.spellings.param(i).clone()
             };
-            let ty = crate::metadata::type_encoder::encode_declared_type(
+            let mut ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
                 *pty,
                 &declared_spelling,
@@ -979,6 +1039,13 @@ pub fn build_class(
                         )
                     },
                 );
+            if m.no_infer_params.get(i).copied().unwrap_or(false) {
+                let annotation = crate::metadata::type_encoder::encode_annotation(
+                    st,
+                    crate::types::type_name("kotlin/internal/NoInfer"),
+                );
+                ty.field_message(100, &annotation);
+            }
             vp.field_message(3, &ty);
             if m.vararg_index == Some(i) {
                 // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
@@ -1005,6 +1072,23 @@ pub fn build_class(
             // f7 AFTER the type and vararg element: kotlinc interns a parameter's annotation class
             // id following that parameter's own name and type.
             append_param_annotations(st, &mut vp, annotations);
+            if i == m.context_count {
+                if let Some(bound) = m.equality_bound {
+                    let bound = crate::metadata::type_encoder::encode_declared_type(
+                        st,
+                        bound,
+                        crate::spelling::Spelled::NONE,
+                        &function_type_parameters,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "invalid emitted equality bound for '{class_internal}.{}': {error}",
+                            m.name
+                        )
+                    });
+                    vp.field_message(9, &bound);
+                }
+            }
             if i < m.context_count {
                 // Leading context parameters → Function.context_parameter = 13 (filled implicitly
                 // by callers), NOT the positional value_parameter list.
@@ -1056,6 +1140,7 @@ pub fn build_class(
 
     let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
     let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
+    let mut alias_msgs: Vec<Option<Pb>> = (0..tail.type_aliases.len()).map(|_| None).collect();
     for member in tail.member_order {
         match *member {
             ClassMemberOrder::Property(index)
@@ -1067,6 +1152,14 @@ pub fn build_class(
                 if index < methods.len() && func_msgs[index].is_none() =>
             {
                 func_msgs[index] = Some(build_func(&mut st, &methods[index]));
+            }
+            ClassMemberOrder::TypeAlias(index)
+                if index < tail.type_aliases.len() && alias_msgs[index].is_none() =>
+            {
+                alias_msgs[index] = Some(crate::metadata::builder::type_alias_pb(
+                    &mut st,
+                    &tail.type_aliases[index],
+                ));
             }
             _ => {}
         }
@@ -1083,6 +1176,11 @@ pub fn build_class(
             func_msgs[index] = Some(build_func(&mut st, function));
         }
     }
+    for (index, alias) in tail.type_aliases.iter().enumerate() {
+        if alias_msgs[index].is_none() {
+            alias_msgs[index] = Some(crate::metadata::builder::type_alias_pb(&mut st, alias));
+        }
+    }
     let prop_msgs: Vec<Pb> = prop_msgs
         .into_iter()
         .map(|message| message.expect("every property metadata record is built"))
@@ -1090,6 +1188,10 @@ pub fn build_class(
     let func_msgs: Vec<Pb> = func_msgs
         .into_iter()
         .map(|message| message.expect("every function metadata record is built"))
+        .collect();
+    let alias_msgs: Vec<Pb> = alias_msgs
+        .into_iter()
+        .map(|message| message.expect("every type-alias metadata record is built"))
         .collect();
 
     // f13 = enum entries (`EnumEntry { name = f1 }`).
@@ -1165,6 +1267,9 @@ pub fn build_class(
     }
     for prop in &prop_msgs {
         class.repeated_message(10, prop); // Class.property = 10
+    }
+    for alias in &alias_msgs {
+        class.repeated_message(11, alias); // Class.type_alias = 11
     }
     for ee in &enum_msgs {
         class.repeated_message(13, ee); // Class.enum_entry = 13
@@ -1257,6 +1362,7 @@ mod tests {
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
+                context_params: Vec::new(),
                 is_var: false,
                 visibility,
                 has_constant: true,
@@ -1265,6 +1371,7 @@ mod tests {
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
+                type_params: Vec::new(),
                 getter: None,
                 setter: None,
                 field_desc: None,
@@ -1319,6 +1426,7 @@ mod tests {
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
+                context_params: Vec::new(),
                 is_var: false,
                 has_constant: false,
                 is_const: false,
@@ -1327,6 +1435,7 @@ mod tests {
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
+                type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -1371,6 +1480,7 @@ mod tests {
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component1".into(),
+                equality_bound: None,
                 params: vec![],
                 ret: Ty::Int,
                 type_params: Vec::new(),
@@ -1385,11 +1495,13 @@ mod tests {
                 jvm_sig_name: None,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
             },
             FnMeta {
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "component2".into(),
+                equality_bound: None,
                 params: vec![],
                 ret: Ty::String,
                 type_params: Vec::new(),
@@ -1404,11 +1516,13 @@ mod tests {
                 jvm_sig_name: None,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
             },
             FnMeta {
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "copy".into(),
+                equality_bound: None,
                 params: vec![("x".into(), Ty::Int), ("y".into(), Ty::String)],
                 ret: Ty::obj("demo/Point"),
                 type_params: Vec::new(),
@@ -1423,11 +1537,13 @@ mod tests {
                 jvm_sig_name: None,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
             },
             FnMeta {
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "equals".into(),
+                equality_bound: None,
                 params: vec![("other".into(), any_q)],
                 ret: Ty::Boolean,
                 type_params: Vec::new(),
@@ -1442,11 +1558,13 @@ mod tests {
                 jvm_sig_name: None,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
             },
             FnMeta {
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "hashCode".into(),
+                equality_bound: None,
                 params: vec![],
                 ret: Ty::Int,
                 type_params: Vec::new(),
@@ -1461,11 +1579,13 @@ mod tests {
                 jvm_sig_name: None,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
             },
             FnMeta {
                 context_count: 0,
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "toString".into(),
+                equality_bound: None,
                 params: vec![],
                 ret: Ty::String,
                 type_params: Vec::new(),
@@ -1480,6 +1600,7 @@ mod tests {
                 jvm_sig_name: None,
                 annotations: Vec::new(),
                 param_annotations: Vec::new(),
+                no_infer_params: Vec::new(),
             },
         ];
         let props = vec![
@@ -1487,6 +1608,7 @@ mod tests {
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
+                context_params: Vec::new(),
                 is_var: false,
                 has_constant: false,
                 is_const: false,
@@ -1495,6 +1617,7 @@ mod tests {
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
+                type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -1508,6 +1631,7 @@ mod tests {
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "y".into(),
                 ty: Ty::String,
+                context_params: Vec::new(),
                 is_var: true,
                 has_constant: false,
                 is_const: false,
@@ -1516,6 +1640,7 @@ mod tests {
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
+                type_params: Vec::new(),
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                 field_desc: None,
@@ -1578,6 +1703,7 @@ mod tests {
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "r".into(),
                 ty: list_string,
+                context_params: Vec::new(),
                 is_var: false,
                 has_constant: false,
                 is_const: false,
@@ -1586,6 +1712,7 @@ mod tests {
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
+                type_params: Vec::new(),
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
                 field_desc: None,
@@ -1727,6 +1854,7 @@ mod tests {
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
+                context_params: Vec::new(),
                 is_var: false,
                 has_constant: false,
                 is_const: false,
@@ -1735,6 +1863,7 @@ mod tests {
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
+                type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -1784,6 +1913,7 @@ mod tests {
                 spellings: crate::spelling::DeclaredSpellings::default(),
                 name: "x".into(),
                 ty: Ty::Int,
+                context_params: Vec::new(),
                 is_var: false,
                 has_constant: false,
                 is_const: false,
@@ -1792,6 +1922,7 @@ mod tests {
                 has_backing_field: true,
                 tparam: None,
                 receiver: None,
+                type_params: Vec::new(),
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
                 field_desc: None,
@@ -1806,7 +1937,9 @@ mod tests {
             &ClassTail {
                 secondary_ctors: &[CtorMeta {
                     params: &[],
+                    param_defaults: &[],
                     desc: "()V",
+                    sig_name: None,
                     vararg_index: None,
                     flags: 22,
                     annotations: &[],
@@ -1847,6 +1980,7 @@ mod tests {
                     spellings: crate::spelling::DeclaredSpellings::default(),
                     name: "x".into(),
                     ty: Ty::Int,
+                    context_params: Vec::new(),
                     is_var: false,
                     has_constant: false,
                     is_const: false,
@@ -1855,6 +1989,7 @@ mod tests {
                     has_backing_field: true,
                     tparam: None,
                     receiver: None,
+                    type_params: Vec::new(),
                     getter: Some(("getX".into(), "()I".into())),
                     setter: None,
                     field_desc: None,
@@ -1868,6 +2003,7 @@ mod tests {
                     spellings: crate::spelling::DeclaredSpellings::default(),
                     name: "y".into(),
                     ty: Ty::String,
+                    context_params: Vec::new(),
                     is_var: true,
                     has_constant: false,
                     is_const: false,
@@ -1876,6 +2012,7 @@ mod tests {
                     has_backing_field: true,
                     tparam: None,
                     receiver: None,
+                    type_params: Vec::new(),
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
                     field_desc: None,

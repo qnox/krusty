@@ -6,15 +6,8 @@
 
 use super::common;
 
-fn run(src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar();
-    let jdk = std::env::var("JAVA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(|jh| std::path::PathBuf::from(format!("{jh}/lib/modules")));
-    let cp = std::slice::from_ref(&stdlib);
-    let classes = common::compile_in_process(src, "T", cp, jdk.as_deref())?;
-    common::run_box(&classes, "TKt", cp)
+fn run(src: &str) -> String {
+    common::expect_box_run_with_stdlib(src, "T")
 }
 
 #[test]
@@ -27,10 +20,8 @@ fn annotation_instantiation_member_read_and_content_equality() {
         \x20 if (a.hashCode() != b.hashCode()) return \"hash\"\n\
         \x20 if (a == c) return \"neq\"\n\
         \x20 return \"OK\"\n}\n";
-    match run(src) {
-        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
-        None => eprintln!("skipping: no toolchain"),
-    }
+    let output = run(src);
+    assert_eq!(output.trim(), "OK", "box() = {output:?}");
 }
 
 #[test]
@@ -42,10 +33,8 @@ fn annotation_instantiation_array_member_content_equality() {
         \x20 if (a.hashCode() != b.hashCode()) return \"hash\"\n\
         \x20 if (a.equals(c)) return \"neq\"\n\
         \x20 return \"OK\"\n}\n";
-    match run(src) {
-        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
-        None => eprintln!("skipping: no toolchain"),
-    }
+    let output = run(src);
+    assert_eq!(output.trim(), "OK", "box() = {output:?}");
 }
 
 #[test]
@@ -59,8 +48,6 @@ fn annotation_instantiation_nested_and_tostring() {
         \x20 if (a.inn.v != \"q\") return \"read\"\n\
         \x20 if (!a.toString().contains(\"Outer(\")) return \"toString:\" + a.toString()\n\
         \x20 return \"OK\"\n}\n";
-    match run(src) {
-        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
-        None => eprintln!("skipping: no toolchain"),
-    }
+    let output = run(src);
+    assert_eq!(output.trim(), "OK", "box() = {output:?}");
 }

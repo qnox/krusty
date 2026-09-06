@@ -71,6 +71,15 @@ fn nullable_typed_loop_var_downto() {
 }
 
 #[test]
+fn mixed_int_long_until_uses_a_long_counted_loop() {
+    const SRC: &str = "fun box(): String {\n\
+    for (i in 0 until Long.MIN_VALUE) error(\"unreachable: $i\")\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_front_end_ok_files_with_stdlib(&[SRC], "mixed Int/Long until loop");
+}
+
+#[test]
 fn source_interface_inheriting_list_is_iterable() {
     common::expect_front_end_ok_files_with_stdlib(
         &[LIST_INTERFACE_DECLARATIONS, LIST_INTERFACE_USAGE],

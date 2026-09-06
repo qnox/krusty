@@ -33,7 +33,11 @@ if [ "${1:-}" = "--survey" ]; then
   survey_version="$(just max-version)"
   export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$survey_version")}"
   survey_box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$survey_version")}"
-  cargo build --profile gate --bin survey
+  if [ "${KRUSTY_SURVEY_TRACE:-0}" = "1" ]; then
+    cargo build --profile gate --bin survey --features trace
+  else
+    cargo build --profile gate --bin survey
+  fi
   survey_target="${CARGO_TARGET_DIR:-$PWD/target}"
   [[ "$survey_target" = /* ]] || survey_target="$PWD/$survey_target"
   survey_bin="$survey_target/gate/survey"
@@ -90,7 +94,13 @@ if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
   elif [ "$test_target" = "conformance" ]; then
     focused_timeout="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS"
   fi
-  echo "run-tests.sh: focused test timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
+  # Compile before starting the process deadline. A cold CI worker can spend close to a minute
+  # building this profile; charging that time to the test process made a healthy conformance run
+  # time out while the same already-built binary passed. The second Cargo invocation is a cached
+  # executable lookup, so the deadline now measures the behavior it is intended to bound.
+  echo "run-tests.sh: building focused test: cargo test $profile_arg --no-run $*" >&2
+  cargo test $profile_arg --no-run "$@"
+  echo "run-tests.sh: focused test execution timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
   focused_log="$(mktemp)"
   trap 'rm -f "$focused_log"' EXIT
   set +e
@@ -173,6 +183,7 @@ build_log="$logdir/build.log"
 cargo build --color never --profile gate -p krusty-cli
 target_root="${CARGO_TARGET_DIR:-$PWD/target}"
 [[ "$target_root" = /* ]] || target_root="$PWD/$target_root"
+failure_manifest="${KRUSTY_FAILURE_MANIFEST:-$target_root/gate/failed-tests.txt}"
 cli_name="krusty"
 [[ "${OS:-}" = "Windows_NT" ]] && cli_name="krusty.exe"
 export KRUSTY_BIN="$target_root/gate/$cli_name"
@@ -382,6 +393,37 @@ if [ "${#pool_bins[@]}" -gt 0 ]; then
 fi
 
 if [ -f "$logdir/FAILED" ]; then
+  manifest_tmp="$logdir/failed-tests.txt"
+  : >"$manifest_tmp"
+  echo "=== FAILED TEST MANIFEST ==="
+  while IFS=$'\t' read -r name _; do
+    log="$logdir/$name.log"
+    [ -f "$log" ] || continue
+    # Libtest writes two `failures:` sections: captured panic output first, then the final list.
+    # Reset at every marker and print only the names accumulated immediately before `test result:`;
+    # otherwise indented javap headings such as `Code:` are mistaken for test identities.
+    awk '
+      /^failures:$/ { delete failed; count = 0; collecting = 1; next }
+      /^test result:/ {
+        if (collecting) for (i = 1; i <= count; i++) print failed[i]
+        collecting = 0
+        next
+      }
+      collecting && /^    [[:alnum:]_][[:alnum:]_:]*$/ {
+        sub(/^    /, "")
+        failed[++count] = $0
+      }
+    ' "$log" >>"$manifest_tmp"
+  done <"$logdir/FAILED"
+  # Preserve first-seen suite order while removing duplicate identities emitted by an abnormal
+  # binary. This file survives the temporary per-run logs and is the bounded repair set for the
+  # next iteration; a later authoritative full run replaces it atomically.
+  awk '!seen[$0]++' "$manifest_tmp" >"$manifest_tmp.unique"
+  mkdir -p "$(dirname "$failure_manifest")"
+  cp "$manifest_tmp.unique" "$failure_manifest.tmp"
+  mv "$failure_manifest.tmp" "$failure_manifest"
+  sed -n '1,$p' "$failure_manifest"
+  echo "run-tests.sh: persisted failed test IDs to $failure_manifest" >&2
   echo "=== FAILED TEST BINARIES ==="
   while IFS=$'\t' read -r name desc; do
     echo "----- $desc -----"
@@ -413,4 +455,7 @@ fi
 # SIGPIPE, which under `set -o pipefail` fails this cosmetic diagnostic — and thus the whole (green)
 # run — with 141. Letting awk consume all of sort's output keeps the pipeline exit status 0.
 sort -rn "$logdir/TIMINGS" | awk 'NR <= 20 {printf "%7.2fs  %s\n", $1 / 1000, $2}'
+mkdir -p "$(dirname "$failure_manifest")"
+: >"$failure_manifest.tmp"
+mv "$failure_manifest.tmp" "$failure_manifest"
 echo "all test binaries passed"

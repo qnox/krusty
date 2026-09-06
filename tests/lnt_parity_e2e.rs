@@ -144,7 +144,7 @@ fn expression_body_fn() {
 
 #[test]
 fn unit_fn_implicit_return_maps_to_closing_brace() {
-    assert_byte_identical(
+    assert_code_and_lnt_identical(
         "lntUnit",
         "fun act() {\n}\n\
 fun unitTail() {\n    act()\n    act()\n}\n",
@@ -154,7 +154,7 @@ fun unitTail() {\n    act()\n    act()\n}\n",
 
 #[test]
 fn branchy_fn() {
-    assert_byte_identical(
+    assert_code_and_lnt_identical(
         "lntBranch",
         "fun cond(): Boolean {\n    return false\n}\n\
 fun branchy(): Int {\n    if (cond()) {\n        return 1\n    } else {\n        return 2\n    }\n}\n",

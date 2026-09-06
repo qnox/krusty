@@ -4,8 +4,7 @@
 
 use crate::metadata::type_encoder::{
     encode_declared_type, encode_metadata_type_parameter, encode_type, encode_type_parameter,
-    semantic_named_type_parameters, type_parameters, MetadataTypeParameter, StringTable,
-    TypeParameters,
+    semantic_named_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
@@ -84,6 +83,10 @@ pub struct FnMeta {
     /// User annotations on each value parameter (`fun f(@Mark a: Int)`), parallel to `params`. A short
     /// or empty vec leaves the remaining parameters unannotated.
     pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
+    /// Kotlin type-use inference policy, parallel to `params`.
+    pub no_infer_params: Vec<bool>,
+    /// Semantic `ValueParameter.equality_bound_type` for `equals`' first ordinary value parameter.
+    pub equality_bound: Option<Ty>,
 }
 
 #[cfg(test)]
@@ -116,6 +119,8 @@ impl FnMeta {
             visibility: crate::types::Visibility::Public,
             spellings: crate::spelling::DeclaredSpellings::default(),
             param_annotations: Vec::new(),
+            no_infer_params: Vec::new(),
+            equality_bound: None,
         }
     }
 }
@@ -461,7 +466,14 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
         } else {
             (*pty, f.spellings.param(i).clone())
         };
-        let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
+        let mut ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
+        if f.no_infer_params.get(i).copied().unwrap_or(false) {
+            let annotation = crate::metadata::type_encoder::encode_annotation(
+                st,
+                crate::types::type_name("kotlin/internal/NoInfer"),
+            );
+            ty.field_message(100, &annotation);
+        }
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.
@@ -475,6 +487,15 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
             }
         }
         crate::metadata::class_builder::append_param_annotations(st, &mut vp, annotations);
+        if i == f.context_count {
+            if let Some(bound) = f.equality_bound {
+                let bound = encode_declared_type(st, bound, crate::spelling::Spelled::NONE, &tps)
+                    .unwrap_or_else(|error| {
+                        panic!("invalid emitted equality bound for '{}': {error}", f.name)
+                    });
+                vp.field_message(9, &bound);
+            }
+        }
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
             // by callers), NOT the positional value_parameter list.
@@ -536,9 +557,16 @@ pub struct PropMeta {
     /// The property's declared type parameters (`val <T> C<T>.value: T`). Their indices are the
     /// `Type.type_parameter` ids used by the receiver and return type.
     pub type_params: Vec<String>,
+    /// Stable semantic identities parallel to `type_params`.
+    pub semantic_type_params: Vec<String>,
+    /// Declared upper bounds, parallel to `type_params`.
+    pub type_param_bounds: Vec<Vec<Ty>>,
     /// Extension-receiver type (`Property.receiver_type` = 10), `Some` for an extension property —
     /// the same separation from the accessor's JVM parameters as [`FnMeta::receiver`].
     pub receiver: Option<Ty>,
+    /// Resolved context-parameter labels and types in declaration order. Legacy context receivers
+    /// use `_` as their non-value label; both forms occupy the accessor's leading semantic slots.
+    pub context_params: Vec<(String, Ty)>,
     pub getter: (String, String),
     pub setter: Option<(String, String)>,
     /// A `const val`: kotlinc sets the CONST flag bit and records a field-only
@@ -567,7 +595,7 @@ pub struct PropMeta {
     pub has_declared_getter: bool,
 }
 
-/// A public top-level typealias declaration in package metadata.
+/// A source typealias declaration in package or classifier metadata.
 pub struct TypeAliasMeta {
     pub name: String,
     /// The alias's own type-parameter names, in declaration order — `TypeAlias.typeParameter`.
@@ -588,7 +616,7 @@ pub struct TypeAliasMeta {
     pub decl_order: usize,
 }
 
-fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
+pub(crate) fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
     let mut p = Pb::new();
     let vis: u64 = match alias.visibility {
         crate::types::Visibility::Internal => 0,
@@ -660,16 +688,48 @@ fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
 fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
     let mut p = Pb::new();
     p.field_varint(2, st.local(&m.name) as u64); // Property.name = 2
-    let tps = type_parameters(m.type_params.iter().map(String::as_str));
+    assert_eq!(
+        m.semantic_type_params.len(),
+        m.type_params.len(),
+        "metadata property type parameters require semantic identities"
+    );
+    let tps = semantic_named_type_parameters(
+        m.type_params.iter().map(String::as_str),
+        m.semantic_type_params.iter().map(String::as_str),
+    );
     let ret = type_pb_declared(st, m.ty, &m.spellings.ret, &tps);
     p.field_message(3, &ret); // Property.return_type = 3
     for (id, name) in m.type_params.iter().enumerate() {
-        let tp = encode_type_parameter(st, id, name, false);
+        let tp = encode_metadata_type_parameter(
+            st,
+            id,
+            &MetadataTypeParameter {
+                name: name.clone(),
+                reified: false,
+                variance: crate::types::TypeVariance::Invariant,
+                upper_bounds: m.type_param_bounds.get(id).cloned().unwrap_or_default(),
+                upper_bound_spellings: m
+                    .spellings
+                    .type_param_bounds
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+            &tps,
+        )
+        .unwrap_or_else(|error| panic!("invalid emitted property type parameter: {error}"));
         p.repeated_message(4, &tp); // Property.type_parameter = 4
     }
     if let Some(recv) = m.receiver {
         let rt = type_pb_declared(st, recv, &m.spellings.receiver, &tps);
         p.field_message(5, &rt); // Property.receiver_type = 5 (extension properties only)
+    }
+    for (name, ty) in &m.context_params {
+        let mut parameter = Pb::new();
+        parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
+        let ty = type_pb_declared(st, *ty, crate::spelling::Spelled::NONE, &tps);
+        parameter.field_message(3, &ty); // ValueParameter.type = 3
+        p.repeated_message(17, &parameter); // Property.context_parameter = 17
     }
     let vis: u64 = match m.visibility {
         crate::types::Visibility::Internal => 0,
@@ -870,7 +930,10 @@ mod tests {
                 ty: Ty::Int,
                 is_var: false,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 receiver: None,
+                context_params: Vec::new(),
                 getter: ("getAnswer".into(), "()I".into()),
                 setter: None,
                 is_const: false,
@@ -913,7 +976,10 @@ mod tests {
                 ty: Ty::String,
                 is_var: false,
                 type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
                 receiver: Some(Ty::String),
+                context_params: Vec::new(),
                 getter: (
                     "getDoubled".into(),
                     "(Ljava/lang/String;)Ljava/lang/String;".into(),
@@ -948,8 +1014,96 @@ mod tests {
     }
 
     #[test]
+    fn package_context_property_round_trips() {
+        let (d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
+                visibility: crate::types::Visibility::Public,
+                name: "answer".into(),
+                ty: Ty::Int,
+                is_var: false,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                receiver: None,
+                context_params: vec![("_".into(), Ty::Int)],
+                getter: ("getAnswer".into(), "(I)I".into()),
+                setter: None,
+                is_const: false,
+                has_backing_field: false,
+                has_declared_getter: true,
+                has_constant: false,
+                decl_order: 0,
+            }],
+            &[],
+            None,
+        );
+        let d1 = String::from_iter(d1.into_iter().map(char::from));
+        let metadata = crate::jvm::metadata::decode_metadata(
+            &[d1],
+            &d2,
+            Some(2),
+            "sample/ContextKt",
+            None,
+            &[],
+        );
+        let [property] = metadata.package_properties.as_ref() else {
+            panic!("context property metadata must retain one declaration")
+        };
+        assert_eq!(property.context_params.len(), 1);
+        assert_eq!(property.context_params[0].name, "_");
+        assert_eq!(
+            property
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.params.as_slice()),
+            Some([Ty::Int].as_slice()),
+        );
+    }
+
+    #[test]
+    fn inferred_generic_property_type_round_trips_without_declared_spelling() {
+        let value = Ty::obj("sample/S");
+        let property_ref = Ty::obj_args("kotlin/reflect/KProperty0", &[value]);
+        let (d1, d2) = build_package(
+            &[],
+            &[PropMeta {
+                spellings: crate::spelling::DeclaredSpellings::default(),
+                visibility: crate::types::Visibility::Public,
+                name: "ref".into(),
+                ty: property_ref,
+                is_var: false,
+                type_params: Vec::new(),
+                semantic_type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                receiver: None,
+                context_params: Vec::new(),
+                getter: ("getRef".into(), "()Lkotlin/reflect/KProperty0;".into()),
+                setter: None,
+                is_const: false,
+                has_backing_field: true,
+                has_declared_getter: false,
+                has_constant: false,
+                decl_order: 0,
+            }],
+            &[],
+            None,
+        );
+        let d1s: String = d1.iter().map(|&b| b as char).collect();
+        let meta =
+            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[]);
+        let signature = meta.package_properties[0]
+            .generic_sig
+            .as_ref()
+            .expect("generic property signature");
+        assert_eq!(signature.ret, property_ref);
+    }
+
+    #[test]
     fn generic_mutable_extension_property_round_trips() {
-        let t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let semantic = crate::types::declaration_type_parameter(7, 0, 12, 0, "T");
+        let t = Ty::ty_param(semantic, Ty::nullable(Ty::obj("kotlin/Any")));
         let receiver = Ty::obj_args("sample/C", &[t]);
         let (d1, d2) = build_package(
             &[],
@@ -960,7 +1114,10 @@ mod tests {
                 ty: t,
                 is_var: true,
                 type_params: vec!["T".into()],
+                semantic_type_params: vec![semantic.into()],
+                type_param_bounds: vec![Vec::new()],
                 receiver: Some(receiver),
+                context_params: Vec::new(),
                 getter: ("getLive".into(), "(Lsample/C;)Ljava/lang/Object;".into()),
                 setter: Some(("setLive".into(), "(Lsample/C;Ljava/lang/Object;)V".into())),
                 is_const: false,
@@ -980,9 +1137,11 @@ mod tests {
             .generic_sig
             .as_ref()
             .expect("generic property signature");
+        let decoded_t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let decoded_receiver = Ty::obj_args("sample/C", &[decoded_t]);
         assert_eq!(signature.formals, ["T"]);
-        assert_eq!(signature.receiver, Some(receiver));
-        assert_eq!(signature.ret, t);
+        assert_eq!(signature.receiver, Some(decoded_receiver));
+        assert_eq!(signature.ret, decoded_t);
         assert_eq!(
             property.getter.as_ref().map(|it| it.name.as_str()),
             Some("getLive")

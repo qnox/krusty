@@ -6,8 +6,7 @@
 //! (krusty 3 methods, kotlinc 5: `swingIcon$default`/`toSwingIcon$default` missing).
 //!
 //! The stub sections are compared against the provisioned reference kotlinc (fresh, same version —
-//! no committed goldens); the same-module omitted-arg call keeps today's bail-don't-miscompile
-//! behavior, pinned here so the stub-only registration can never leak into call-site filling.
+//! no committed goldens), and same-module default evaluation is exercised at runtime.
 use std::fs;
 
 use super::common;
@@ -182,33 +181,13 @@ fn plain_top_level_companion_ref_default_stub_unchanged() {
     assert_stub_matches("applyTop$default");
 }
 
-/// A SAME-MODULE call that omits the non-constant-defaulted argument keeps today's behavior: the
-/// file bails (skip, never miscompile) — krusty deliberately fills same-module omitted defaults at
-/// the call site from checker-recorded constants and does not route module calls through the stub.
-/// Registering the defaults for the stub must not change that, so the stub-only marker is proven
-/// effective here.
+/// A same-module omitted argument consumes the checked retained default body and observes the
+/// companion-backed value. It must not depend on the downstream `$default` ABI stub.
 #[test]
-fn same_module_omitted_argument_call_still_bails() {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let src = format!("{FIXTURE}fun probe(d: D): Int = d.scaleIt()\n");
-    // `None` here means FRONT-END diagnostics, not a missing toolchain (stdlib_jar/jdk_modules
-    // above already panic on that) — a checker rejection of the fixture must fail loudly, or this
-    // test passes vacuously exactly when the shape regresses.
-    let outcome = common::backend_outcome_in_process(&src, "Probe", &[stdlib], Some(jdk.as_path()))
-        .expect("the checker rejected the fixture; the bail under test is a BACKEND decline");
-    match outcome {
-        common::BackendOutcome::LowerBail(reason) => {
-            // The bail comes from the omitted-arg CALL lowering declining (the checker records no
-            // constant default value for `= S.Default`), not from the declarations themselves —
-            // the declaration-only fixture compiles (see the stub tests).
-            assert_eq!(
-                reason, "qualified call has no supported semantic lowering",
-                "the same-module omitted-arg call must keep its pre-fix bail"
-            );
-        }
-        other => panic!("expected the same-module omitted-arg call to bail, got {other:?}"),
-    }
+fn same_module_omitted_argument_evaluates_checked_default() {
+    let src =
+        format!("{FIXTURE}fun box(): String = if (D().scaleIt() == 2) \"OK\" else \"fail\"\n");
+    common::expect_box_ok_with_stdlib(&src, "SameModuleExtensionDefault");
 }
 
 /// End-to-end over the module boundary: a DOWNSTREAM krusty module omitting the argument resolves

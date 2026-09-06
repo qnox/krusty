@@ -62,11 +62,29 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NameId(pub(crate) u32);
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct NameNode {
     parent: Option<NameId>,
     sep: u8,
     segment: std::sync::Arc<str>,
+    /// Lookup of the classifier owner encoded in this node's final segment. A successful lookup is
+    /// stored as `id + 1`, zero means not yet resolved, and [`NO_NESTED_OWNER`] means the segment has
+    /// no nested separator and therefore can never acquire an owner. A segment that does contain a
+    /// separator but whose owner is not interned remains uncached: another thread may intern it later.
+    nested_owner: AtomicU32,
+}
+
+const NO_NESTED_OWNER: u32 = u32::MAX;
+
+impl Clone for NameNode {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent,
+            sep: self.sep,
+            segment: self.segment.clone(),
+            nested_owner: AtomicU32::new(self.nested_owner.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 /// Chunked append-only node storage. A node is written exactly once (by the single writer, before its
@@ -317,6 +335,7 @@ impl Default for NameTree {
             parent: None,
             sep: 0,
             segment: std::sync::Arc::from(""),
+            nested_owner: AtomicU32::new(0),
         });
         let table = Box::new(Table::new(BASE as usize));
         let current = AtomicPtr::new(&*table as *const Table as *mut Table);
@@ -333,14 +352,36 @@ impl Default for NameTree {
 
 impl Clone for NameTree {
     fn clone(&self) -> Self {
-        // Nodes are inserted parents-first, so replaying them in id order reproduces identical ids.
-        let out = NameTree::default();
-        for id in 1..self.arena.len() {
-            let node = self.arena.get(id);
-            let parent = node.parent.expect("non-root name node has a parent");
-            out.child_or_insert(parent, node.sep, &node.segment);
+        // Take one writer-consistent snapshot. Replaying every node through `child_or_insert` used
+        // to re-hash and re-probe the whole tree (and repeatedly grow its table), even though ids and
+        // table slots are already final. Package-tree base+delta composition clones a large stable
+        // name tree per source module, so that replay was a measured frontend hotspot.
+        let writer = self.writer.lock().unwrap();
+        let arena = Arena::new();
+        for id in 0..self.arena.len() {
+            arena.push(self.arena.get(id).clone());
         }
-        out
+        // The writer lock keeps `current` and its slots stable. Only the live table is needed in the
+        // independent clone; retired tables exist solely for readers of THIS tree that may still hold
+        // their pointers.
+        let live = unsafe { &*self.current.load(Ordering::Acquire) };
+        let table = Box::new(Table {
+            mask: live.mask,
+            slots: live
+                .slots
+                .iter()
+                .map(|slot| AtomicU64::new(slot.load(Ordering::Acquire)))
+                .collect(),
+        });
+        let current = AtomicPtr::new(&*table as *const Table as *mut Table);
+        NameTree {
+            arena,
+            current,
+            writer: Mutex::new(WriterState {
+                tables: vec![table],
+                count: writer.count,
+            }),
+        }
     }
 }
 
@@ -592,6 +633,24 @@ impl NameTree {
             })
     }
 
+    /// Compare one interned identity with a boundary spelling by walking its stored path. This does
+    /// not depend on the reverse lookup table already containing that spelling.
+    pub fn matches_path(&self, id: NameId, path: &str) -> bool {
+        if path.is_empty() {
+            return id == Self::ROOT;
+        }
+        let mut expected = path.rsplit('/');
+        let mut current = id;
+        while current != Self::ROOT {
+            let node = self.node(current);
+            if expected.next() != Some(node.segment.as_ref()) {
+                return false;
+            }
+            current = node.parent.expect("non-root name node has a parent");
+        }
+        expected.next().is_none()
+    }
+
     /// Whether `candidate` is `owner` itself or a classifier nested directly or transitively in
     /// `owner`. Nested classifier segments are flattened (`Outer$Inner$Deep`) in the final path
     /// component, so this compares interned package and segment nodes without rendering either id.
@@ -610,10 +669,39 @@ impl NameTree {
 
     /// The immediate classifier owner encoded in the final segment (`Outer$Inner` or
     /// `Outer.Inner` -> `Outer`). Returns an already-interned identity and never creates a spelling.
+    #[inline]
     pub fn nested_owner(&self, nested: NameId) -> Option<NameId> {
         let node = self.node(nested);
-        let split = node.segment.rfind(['$', '.'])?;
-        self.child(node.parent?, &node.segment[..split])
+        let cached = node.nested_owner.load(Ordering::Acquire);
+        if cached == NO_NESTED_OWNER {
+            return None;
+        }
+        if cached != 0 {
+            return Some(NameId(cached - 1));
+        }
+        let Some(split) = node.segment.rfind(['$', '.']) else {
+            // No future interning can turn this immutable segment into a nested spelling.
+            let _ = node.nested_owner.compare_exchange(
+                0,
+                NO_NESTED_OWNER,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+            return None;
+        };
+        let owner = self.child(node.parent?, &node.segment[..split])?;
+        // `u32::MAX` is reserved for the definitive-negative sentinel. Reaching the one owner id
+        // whose +1 encoding collides with it would require more than four billion interned names;
+        // return it correctly but leave that singular result uncached.
+        if owner.0 != u32::MAX - 1 {
+            let _ = node.nested_owner.compare_exchange(
+                0,
+                owner.0 + 1,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+        }
+        Some(owner)
     }
 
     pub fn parent(&self, id: NameId) -> Option<NameId> {
@@ -634,6 +722,7 @@ impl NameTree {
         self.arena.len() == 0
     }
 
+    #[inline]
     fn node(&self, id: NameId) -> &NameNode {
         self.arena.get(id.0)
     }
@@ -678,6 +767,7 @@ impl NameTree {
             parent: Some(parent),
             sep,
             segment,
+            nested_owner: AtomicU32::new(0),
         });
         table.install(h, id);
         w.count += 1;
@@ -732,7 +822,8 @@ impl NameTree {
 
 #[cfg(test)]
 mod tests {
-    use super::NameTree;
+    use super::{NameTree, NO_NESTED_OWNER};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn compares_paths_without_rendering() {
@@ -779,9 +870,20 @@ mod tests {
         assert_eq!(names.nested_owner(entry), Some(map));
         assert_eq!(names.nested_owner(nested), Some(entry));
         assert_eq!(names.nested_owner(map), None);
+        assert_eq!(
+            names.node(map).nested_owner.load(Ordering::Relaxed),
+            NO_NESTED_OWNER,
+            "a separator-free immutable segment records a definitive miss"
+        );
 
         let dotted = names.insert("kotlin/collections/Map.Entry");
         assert_eq!(names.nested_owner(dotted), Some(map));
+
+        let late_nested = names.insert("late/Outer$Inner");
+        assert_eq!(names.nested_owner(late_nested), None);
+        let late_owner = names.insert("late/Outer");
+        assert_eq!(names.nested_owner(late_nested), Some(late_owner));
+        assert_eq!(names.nested_owner(late_nested), Some(late_owner));
     }
 
     #[test]
@@ -798,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_replays_identical_ids_and_isolates_growth() {
+    fn clone_snapshots_identical_ids_and_isolates_growth() {
         let names = NameTree::default();
         let map = names.insert("kotlin/collections/Map");
         let entry = names.insert("kotlin/collections/Map$Entry");

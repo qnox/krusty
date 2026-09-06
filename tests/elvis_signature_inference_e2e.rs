@@ -45,40 +45,54 @@ fn only_the_left_sides_nullability_is_discharged() {
 }
 
 #[test]
-fn sides_that_do_not_agree_decline() {
-    // Kotlin's type for a mix is the least upper bound — for `Int` and `Double` that is
-    // `Comparable<*> & Number`, which kotlinc emits as `Object`, never as a widened primitive. The
-    // nearest helper to hand is arithmetic PROMOTION, and reusing it typed this property `double`:
-    // a field descriptor kotlinc never writes and a different printed value (3.0 against 3), with
-    // nothing to reveal it at runtime. Declining costs an inference on a shape that erases to
-    // `Object` anyway.
-    //
-    // An earlier version of this test asserted the value through the NULL branch, where both
-    // typings agree — it passed while the bug was live. The assertion has to be the descriptor.
+fn mixed_numeric_sides_infer_any_without_numeric_promotion() {
+    // Elvis computes a common supertype; it is not an arithmetic operator. kotlinc publishes both
+    // properties as Kotlin `Any` and JVM `Object`, while each initializer keeps the runtime class of
+    // the selected branch. Pin both facts: a primitive descriptor or numeric conversion would make
+    // the program observably different even if a null-branch-only test happened to pass.
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    for (label, source, expected) in [
-        (
-            "Int and Double",
-            "package repro\n\
-             fun maybeInt(): Int? = 3\n\
-             val NUMBER = maybeInt() ?: 2.5\n\
-             fun box(): String = \"OK\"\n",
-            "krusty: cannot infer the type of property 'NUMBER'; add an explicit type",
-        ),
-        (
-            "Int and Long",
-            "package repro\n\
-             val n: Int? = null\n\
-             val A = n ?: 1L\n\
-             fun box(): String = \"OK\"\n",
-            "krusty: cannot infer the type of property 'A'; add an explicit type",
-        ),
-    ] {
-        let diagnostics =
-            common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-        assert_eq!(diagnostics.len(), 1, "{label}: diagnostic count");
-        assert_eq!(diagnostics, [expected], "{label}: exact diagnostic");
+    const SRC: &str = "package repro\n\
+        fun maybeInt(): Int? = 3\n\
+        val NUMBER = maybeInt() ?: 2.5\n\
+        val n: Int? = null\n\
+        val A = n ?: 1L\n\
+        fun box(): String = if (NUMBER is Int && NUMBER == 3 && A is Long && A == 1L) \"OK\" else \"fail\"\n";
+    let Some(classes) =
+        common::compile_in_process(SRC, "Main", std::slice::from_ref(&stdlib), Some(&jdk))
+    else {
+        panic!(
+            "{:?}",
+            common::front_end_diagnostics(SRC, std::slice::from_ref(&stdlib), Some(&jdk))
+        );
+    };
+    let result = common::run_box(&classes, "repro.MainKt", std::slice::from_ref(&stdlib))
+        .expect("JVM box runner unavailable");
+    assert_eq!(
+        result, "OK",
+        "elvis must preserve the selected value's runtime class"
+    );
+
+    let work = std::env::temp_dir().join(format!("krusty_elvis_lub_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    for (internal, bytes) in &classes {
+        let path = work.join(format!("{internal}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("scratch dir");
+        }
+        std::fs::write(&path, bytes).expect("write class");
+    }
+    let dumped = common::javap(&["-p", "-s", "-cp", &work.to_string_lossy(), "repro.MainKt"])
+        .expect("javap unavailable");
+    let _ = std::fs::remove_dir_all(&work);
+    for property in ["NUMBER", "A"] {
+        let getter = format!("get{property}");
+        assert!(
+            dumped.contains(&format!(
+                "java.lang.Object {getter}();\n    descriptor: ()Ljava/lang/Object;"
+            )),
+            "{property} must publish Object rather than a promoted numeric primitive:\n{dumped}"
+        );
     }
 }
 

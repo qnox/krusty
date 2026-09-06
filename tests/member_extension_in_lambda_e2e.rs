@@ -95,3 +95,25 @@ fn member_extension_in_non_inline_closure() {
     let out = common::expect_box_run_with_stdlib(SRC, "MemberExtNonInlineClosure");
     assert_eq!(out, "OK", "member ext in non-inline closure");
 }
+
+#[test]
+fn member_extension_property_threads_dispatch_through_nested_closures() {
+    const SRC: &str = "class Model(val id: String)\n\
+        fun <T, R> applyOne(value: T, block: (T) -> R): R = block(value)\n\
+        class Ctl {\n\
+        \x20 fun tag(model: Model): String = applyOne(model) { outer ->\n\
+        \x20\x20 applyOne(outer) { it.tag }\n\
+        \x20 }\n\
+        \x20 private val Model.tag: String\n\
+        \x20\x20 get() = \"nested:\" + id\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 val value = Ctl().tag(Model(\"x\"))\n\
+        \x20 return if (value == \"nested:x\") \"OK\" else \"F:\" + value\n\
+        }\n";
+    let out = common::expect_box_run_with_stdlib(SRC, "MemberExtPropNestedClosures");
+    assert_eq!(
+        out, "OK",
+        "member extension dispatch forwarded through nested closures"
+    );
+}

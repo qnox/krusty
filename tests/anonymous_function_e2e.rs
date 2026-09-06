@@ -98,3 +98,24 @@ fn anon_fun_immediately_invoked() {
         \x20 }).invoke(\"K\")\n";
     assert_eq!(run(SRC).expect("anon fun immediately invoked"), "OK");
 }
+
+// An anonymous EXTENSION function stored in a top-level property. The bare `return` inside it is
+// local to the anonymous function, so checked FIR must resolve it against the anonymous function's
+// own control target rather than the enclosing declaration's — the enclosing declaration here is a
+// property initializer, which has no function return at all
+// (`extensionFunctions/extensionFunctionAsAnonymous.kt`).
+#[test]
+fn anon_extension_fun_in_a_property_initializer_returns_locally() {
+    const SRC: &str = "val a = fun String.(y: String): String { return this + y }\n\
+        fun box(): String = if (a(\"O\", \"K\") == \"OK\") \"OK\" else \"Fail\"\n";
+    assert_eq!(run(SRC).expect("anon extension fun local return"), "OK");
+}
+
+// The same local return in a plain (non-extension) anonymous function initializing a top-level
+// property, so the fix cannot be specific to the extension-receiver shape.
+#[test]
+fn anon_fun_in_a_property_initializer_returns_locally() {
+    const SRC: &str = "val a = fun (y: String): String { return y }\n\
+        fun box(): String = if (a(\"OK\") == \"OK\") \"OK\" else \"Fail\"\n";
+    assert_eq!(run(SRC).expect("anon fun local return"), "OK");
+}

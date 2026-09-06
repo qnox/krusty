@@ -78,3 +78,23 @@ fun box(): String {{\n\
     );
     assert_eq!(run(&src).expect("compiles + runs"), "OK");
 }
+
+#[test]
+fn suspend_unit_expression_and_external_unit_branch_are_return_boxed_generically() {
+    let src = format!(
+        "{PRELUDE}var log = \"\"\n\
+suspend fun noOp() = Unit\n\
+suspend fun choose(x: Int) {{\n\
+    when (x) {{\n\
+        0 -> {{ log += \"O\"; noOp() }}\n\
+        else -> Unit\n\
+    }}\n\
+}}\n\
+fun builder(c: suspend () -> Unit) {{ c.startCoroutine(EC) }}\n\
+fun box(): String {{\n\
+    builder {{ choose(0); choose(1); log += \"K\" }}\n\
+    return log\n\
+}}\n"
+    );
+    assert_eq!(run(&src).expect("compiles + runs"), "OK");
+}

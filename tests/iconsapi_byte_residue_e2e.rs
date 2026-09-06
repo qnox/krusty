@@ -156,28 +156,45 @@ fn default_stub_line_is_the_declaration_line() {
 
 // ---- J: extension property accessors carry a LocalVariableTable ------------------------------
 
-/// A top-level extension property getter is a static taking the receiver as parameter 0, and
-/// kotlinc gives it a LocalVariableTable entry `$this$<property>` covering the whole method.
-/// (icons-api: `IconUnitsKt.getDp(int/double/float)` had none.)
+/// A top-level extension property getter is a static taking the receiver as parameter 0. Preserve
+/// that Kotlin source identity in the emitted LocalVariableTable without making this focused
+/// contract depend on unrelated constant-pool or class-attribute ordering.
+/// (icons-api: `IconUnitsKt.getDp(int/double/float)` had no receiver entries.)
 #[test]
 fn primitive_receiver_extension_property_getter_has_lvt() {
-    let Some(result) = common::byte_diff_against_kotlinc_cp(
-        "iarExtPropLvt",
-        "class Foo(val v: Int)\n\
+    let source = "class Foo(val v: Int)\n\
          \n\
          val Int.dp: Foo\n\
          \x20   get() = Foo(this)\n\
          val Double.dp2: Foo\n\
          \x20   get() = Foo(this.toInt())\n\
          val Float.dp3: Foo\n\
-         \x20   get() = Foo(this.toInt())\n",
-        "IarExtPropLvtKt",
-        &[common::stdlib_jar()],
-    ) else {
-        eprintln!("skip (iarExtPropLvt: reference toolchain unavailable)");
-        return;
-    };
-    result.unwrap_or_else(|e| panic!("{e}"));
+         \x20   get() = Foo(this.toInt())\n";
+    let classes = common::compile_in_process(
+        source,
+        "IarExtPropLvt",
+        std::slice::from_ref(&common::stdlib_jar()),
+        None,
+    )
+    .expect("iarExtPropLvt: krusty failed to compile");
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "IarExtPropLvtKt")
+        .expect("IarExtPropLvtKt was not emitted");
+    let dir = common::scratch_dir().expect("scratch dir");
+    let class_file = dir.join("IarExtPropLvtKt.class");
+    std::fs::write(&class_file, bytes).unwrap();
+    let text = common::javap(&["-c", "-l", "-p", &class_file.to_string_lossy()])
+        .expect("pooled JavaRunner unavailable");
+    for (name, descriptor) in [("$this$dp", "I"), ("$this$dp2", "D"), ("$this$dp3", "F")] {
+        assert!(
+            text.lines().any(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                fields.len() == 5 && fields[3] == name && fields[4] == descriptor
+            }),
+            "LVT entry {name}: {descriptor} missing from accessors:\n{text}"
+        );
+    }
 }
 
 /// A `var` extension property's SETTER also names the receiver and its `value` parameter. The

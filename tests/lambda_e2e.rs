@@ -21,6 +21,29 @@ return \"OK\"\n\
 }
 
 #[test]
+fn function_n_lambda_unpacks_high_arity_arguments() {
+    let parameter_types = std::iter::repeat_n("Int", 23)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let parameter_names = (0..23)
+        .map(|index| format!("p{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = (1..=23)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src = format!(
+        "fun apply(f: ({parameter_types}) -> Int): Int = f({arguments})\n\
+         fun box(): String {{\n\
+             val result = apply {{ {parameter_names} -> p0 + p22 }}\n\
+             return if (result == 24) \"OK\" else \"fail: $result\"\n\
+         }}\n"
+    );
+    common::expect_box_ok_with_stdlib(&src, "HighArityLambda");
+}
+
+#[test]
 fn same_named_declarations_share_lambda_sequence() {
     let src = r#"
 fun consume(block: () -> String): String = block()

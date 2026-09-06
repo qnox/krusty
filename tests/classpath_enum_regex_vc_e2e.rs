@@ -60,3 +60,15 @@ fn generated_enum_entries_accessor_is_not_a_source_callable_companion_method() {
         "the generated accessor must remain hidden from source call resolution: {diagnostics:?}"
     );
 }
+
+#[test]
+fn inferred_signature_reads_an_enum_entry_from_dependency_metadata() {
+    let Some(diagnostics) = common::diagnostics_against(
+        "dependency_enum_entry_signature",
+        "package lib\nenum class Kind { PENDING, DONE }\n",
+        "import lib.Kind\nfun selectedName() = Kind.PENDING.name\n",
+    ) else {
+        return;
+    };
+    assert_eq!(diagnostics, Vec::<String>::new());
+}

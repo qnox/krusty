@@ -112,6 +112,94 @@ impl KtString {
     }
 }
 
+/// Whether a UTF-16 code unit is `Char.isWhitespace()` under Kotlin's JVM semantics:
+/// `Character.isWhitespace(c) || Character.isSpaceChar(c)`.
+///
+/// Rust's Unicode `White_Space` predicate differs for `U+001C..U+001F` and `U+0085`. A surrogate
+/// half is not whitespace and deliberately never passes through a lossy scalar conversion.
+fn is_kotlin_whitespace(unit: u16) -> bool {
+    if (0x1c..=0x1f).contains(&unit) {
+        return true;
+    }
+    unit != 0x85 && char::from_u32(unit as u32).is_some_and(char::is_whitespace)
+}
+
+fn is_blank_line(line: &[u16]) -> bool {
+    line.iter().all(|&unit| is_kotlin_whitespace(unit))
+}
+
+const LF: u16 = b'\n' as u16;
+
+fn join_lines(lines: Vec<Vec<u16>>) -> KtString {
+    let mut output = Vec::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        if index > 0 {
+            output.push(LF);
+        }
+        output.extend_from_slice(&line);
+    }
+    KtString::from_units(output)
+}
+
+/// The value semantics of Kotlin's `String.trimIndent()` over UTF-16 code units.
+pub(crate) fn trim_indent(value: &KtString) -> KtString {
+    let units = value.units().collect::<Vec<_>>();
+    let lines = units.split(|&unit| unit == LF).collect::<Vec<_>>();
+    let minimum_indent = lines
+        .iter()
+        .filter(|line| !is_blank_line(line))
+        .map(|line| {
+            line.iter()
+                .take_while(|&&unit| is_kotlin_whitespace(unit))
+                .count()
+        })
+        .min()
+        .unwrap_or(0);
+    let last = lines.len().saturating_sub(1);
+    join_lines(
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                if (index == 0 || index == last) && is_blank_line(line) {
+                    return None;
+                }
+                let cut = minimum_indent.min(line.len());
+                Some(line[cut..].to_vec())
+            })
+            .collect(),
+    )
+}
+
+/// The value semantics of Kotlin's `String.trimMargin(prefix)` over UTF-16 code units.
+pub(crate) fn trim_margin(value: &KtString, margin: &KtString) -> KtString {
+    let margin = margin.units().collect::<Vec<_>>();
+    let units = value.units().collect::<Vec<_>>();
+    let lines = units.split(|&unit| unit == LF).collect::<Vec<_>>();
+    let last = lines.len().saturating_sub(1);
+    join_lines(
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                if (index == 0 || index == last) && is_blank_line(line) {
+                    return None;
+                }
+                let indent = line
+                    .iter()
+                    .take_while(|&&unit| is_kotlin_whitespace(unit))
+                    .count();
+                let trimmed = &line[indent..];
+                Some(if trimmed.starts_with(&margin) {
+                    trimmed[margin.len()..].to_vec()
+                } else {
+                    line.to_vec()
+                })
+            })
+            .collect(),
+    )
+}
+
 impl From<String> for KtString {
     fn from(text: String) -> KtString {
         if text.is_empty() {
@@ -296,5 +384,29 @@ mod tests {
         buf.push('a');
         buf.push_unit(0xD800);
         assert_eq!(format!("{:?}", buf.finish()), "\"a\\u{d800}\"");
+    }
+
+    #[test]
+    fn trim_indent_uses_kotlin_whitespace_and_preserves_surrogates() {
+        let source = KtString::from_units(vec![LF, b' ' as u16, 0xd800, b'x' as u16, LF]);
+        assert_eq!(
+            trim_indent(&source).units().collect::<Vec<_>>(),
+            [0xd800, b'x' as u16]
+        );
+
+        let nel = KtString::from("\u{85}a\n\u{85}b");
+        assert_eq!(trim_indent(&nel), nel);
+    }
+
+    #[test]
+    fn trim_margin_operates_on_code_units() {
+        let source =
+            KtString::from_units(vec![LF, b' ' as u16, b'|' as u16, b'a' as u16, 0xdfff, LF]);
+        assert_eq!(
+            trim_margin(&source, &KtString::from("|"))
+                .units()
+                .collect::<Vec<_>>(),
+            [b'a' as u16, 0xdfff]
+        );
     }
 }

@@ -8,10 +8,8 @@
 //! owner/receiver at each read/write site (`ExprLowering::MemberExtensionPropertyRead`,
 //! `StmtLowering::MemberExtensionPropertyWrite`).
 //!
-//! Deliberately still gated (never miscompile): a receiver or return mentioning a class type
-//! parameter's OWN type (`val T.x: T`), a value-class receiver/return (mangling/boxing), property
-//! type parameters (`val <T> T.x`), delegated member extension properties, and
-//! open/override/abstract extension properties (cross-class extension dispatch isn't modeled).
+//! Value-class receiver/return mangling remains a JVM realization concern; open/override member
+//! extension properties use the same virtual accessor dispatch as ordinary overridden members.
 
 use super::common;
 
@@ -410,36 +408,44 @@ fn corpus_member_ext_props_box_ok() {
     }
 }
 
-/// The corpus generic-receiver case (`class Test<T> { val T.foo }`) needs the erased/rebound
-/// receiver handoff — gated in pass 1. Must stay skipped (never a partial miscompile).
+/// The corpus generic-receiver case (`class Test<T> { val T.foo }`) uses the same stable generic
+/// receiver handoff as focused repository sources.
 #[test]
-fn corpus_generic_receiver_member_ext_prop_stays_skipped() {
+fn corpus_generic_receiver_member_ext_prop_runs() {
     if !common::corpus_ready() {
         return;
     }
     assert_eq!(
-        common::run_box_corpus_case("extensionProperties/extensionMemberWithTypeParameter.kt"),
-        None,
-        "extensionMemberWithTypeParameter needs the generic-receiver tier — must stay skipped"
+        common::run_box_corpus_case("extensionProperties/extensionMemberWithTypeParameter.kt")
+            .as_deref(),
+        Some("OK"),
+        "extensionMemberWithTypeParameter must execute through checked FIR"
     );
 }
 
-/// REJECTION GUARDS: shapes that must never EMIT (the accessor/dispatch isn't modeled). Asserts
-/// on the backend outcome, not a run result — a skip and an emitted-but-crashing class both make a
-/// run-based check pass, but only the former is acceptable.
 #[test]
-fn unsupported_member_ext_prop_shapes_still_rejected() {
-    let jdk = common::jdk_modules();
-    let cases: &[(&str, &str)] = &[
-        // A DELEGATED member extension property (`by Del()`): the delegate's getValue receives a
-        // KProperty + the extension receiver — a splice this path doesn't build.
-        (
-            "MemberExtPropDelegated",
-            r#"
+fn property_type_parameter_member_extension_property_runs() {
+    run_box(
+        r#"
+class Test {
+    val <T> T.foo: T
+        get() = this
+}
+
+fun box(): String = with(Test()) { "OK".foo }
+"#,
+        "MemberExtPropGenericProperty",
+    );
+}
+
+#[test]
+fn delegated_member_extension_property_passes_the_extension_receiver_to_get_value() {
+    run_box(
+        r#"
 import kotlin.reflect.KProperty
 
 class Del {
-    operator fun getValue(t: Int, p: KProperty<*>): String = "OK"
+    operator fun getValue(receiver: Int, property: KProperty<*>): String = "OK"
 }
 
 class Test {
@@ -449,25 +455,64 @@ class Test {
 
 fun box(): String = Test().test()
 "#,
-        ),
-        // A property TYPE PARAMETER (`val <T> T.x`): its erasure/bound handling isn't modeled here.
-        (
-            "MemberExtPropGenericProp",
-            r#"
-class Test {
-    val <T> T.foo: String
-        get() = "OK"
-
-    fun test(): String = 1.foo
+        "MemberExtPropDelegated",
+    );
 }
 
-fun box(): String = Test().test()
+#[test]
+fn generic_delegated_member_extension_uses_the_selected_dispatch_receiver() {
+    run_box(
+        r#"
+object Host {
+    interface Delegate<D, E, R>
+
+    fun <D, E, R> delegate(): Delegate<D, E, R> =
+        object : Delegate<D, E, R> {}
+
+    operator fun <D, E, R> Delegate<D, E, R>.provideDelegate(
+        host: D,
+        property: Any?,
+    ): Delegate<D, E, R> = this
+
+    operator fun <D, E, R> Delegate<D, E, R>.getValue(
+        receiver: E,
+        property: Any?,
+    ): R = "OK" as R
+
+    val Long.inferred: String by delegate()
+    val Long.explicit: String by delegate<Host, Long, String>()
+}
+
+fun box(): String = with(Host) {
+    if (1L.inferred + 2L.explicit == "OKOK") "OK" else "fail"
+}
 "#,
-        ),
-        // An OPEN member extension property: cross-class extension overrides register nothing.
-        (
-            "MemberExtPropOpen",
-            r#"
+        "GenericDelegatedMemberExtensionDispatch",
+    );
+}
+
+#[test]
+fn delegated_top_level_extension_property_passes_the_extension_receiver_to_get_value() {
+    run_box(
+        r#"
+import kotlin.reflect.KProperty
+
+class Del {
+    operator fun getValue(receiver: String, property: KProperty<*>): String = receiver
+}
+
+val String.echo: String by Del()
+
+fun box(): String = "OK".echo
+"#,
+        "TopLevelExtPropDelegated",
+    );
+}
+
+#[test]
+fn open_member_extension_property_dispatches_to_the_override() {
+    run_box(
+        r#"
 open class Base {
     open val Int.foo: String
         get() = "Fail"
@@ -480,7 +525,17 @@ class Derived : Base() {
 
 fun box(): String = with(Derived()) { 1.foo }
 "#,
-        ),
+        "MemberExtPropOpen",
+    );
+}
+
+/// Kotlin/JVM rejects source declarations that map an extension-property accessor and an ordinary
+/// function to the same physical method signature. These are declaration conflicts, not unsupported
+/// semantic property shapes, and therefore must not produce duplicate methods.
+#[test]
+fn member_extension_accessor_signature_collisions_are_rejected() {
+    let jdk = common::jdk_modules();
+    let cases: &[(&str, &str)] = &[
         // A source method can spell the exact accessor JVM signature. Registering both would emit
         // duplicate `getToken(I)Ljava/lang/String;` methods; the class must be rejected instead of
         // relying on the JVM to fail while loading it.
@@ -535,7 +590,7 @@ fun box(): String = with(SyntheticOwner()) { 1.token }
         assert_ne!(
             outcome,
             Some(common::BackendOutcome::Emitted),
-            "{stem}: unsupported member extension property shape must not emit (skip, never miscompile)"
+            "{stem}: conflicting accessor declarations must not emit duplicate methods"
         );
     }
 }

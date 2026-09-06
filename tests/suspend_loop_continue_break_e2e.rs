@@ -46,3 +46,84 @@ fn suspend_loop_continue_break_runs() {
         "continue/break (bare, in-if, elvis) across suspend for/while/do-while + nested loops"
     );
 }
+
+#[test]
+fn suspend_loop_nested_elvis_fallback_exposes_break_and_continue() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        suspend fun maybe(i: Int): String? = if (i == 0) null else \"\"\n\
+        suspend fun continueCase(): Int {\n\
+            var i = 0; var hits = 0\n\
+            while (i < 3) {\n\
+                val value = maybe(i) ?: if (i == 0) { i++; continue } else error(\"bad\")\n\
+                if (value != \"\") error(\"value\")\n\
+                hits++; i++\n\
+            }\n\
+            return hits\n\
+        }\n\
+        suspend fun breakCase(): Boolean {\n\
+            var seen = false\n\
+            while (true) {\n\
+                val value = maybe(0) ?: if (!seen) { seen = true; break } else error(\"bad\")\n\
+                error(\"unexpected: $value\")\n\
+            }\n\
+            return seen\n\
+        }\n\
+        fun box(): String = runBlocking {\n\
+            if (continueCase() == 2 && breakCase()) \"OK\" else \"FAIL\"\n\
+        }\n";
+    let out = common::expect_box_run(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn nested_elvis_continue_runs_suspending_loop_finally() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        suspend fun maybe(i: Int): String? = if (i == 0) null else \"\"\n\
+        suspend fun test(): String {\n\
+            var i = 0; var cleanup = 0\n\
+            while (i < 3) {\n\
+                try {\n\
+                    val value = maybe(i) ?: if (i == 0) { i++; continue } else error(\"bad\")\n\
+                    if (value != \"\") error(\"value\")\n\
+                    i++\n\
+                } finally { cleanup++ }\n\
+            }\n\
+            return \"$i:$cleanup\"\n\
+        }\n\
+        fun box(): String = runBlocking { if (test() == \"3:3\") \"OK\" else \"FAIL:${test()}\" }\n";
+    let out = common::expect_box_run(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn suspending_when_conditions_remain_left_to_right_and_short_circuit() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        var log = \"\"\n\
+        suspend fun condition(mark: String, answer: Boolean): Boolean { log += mark; return answer }\n\
+        suspend fun select(): String {\n\
+            val first = when {\n\
+                condition(\"a\", true) -> \"first\"\n\
+                condition(\"b\", true) -> \"wrong\"\n\
+                else -> \"wrong-else\"\n\
+            }\n\
+            val second = when {\n\
+                condition(\"c\", false) -> \"wrong\"\n\
+                condition(\"d\", true) -> \"second\"\n\
+                condition(\"e\", true) -> \"wrong\"\n\
+                else -> \"wrong-else\"\n\
+            }\n\
+            return \"$first:$second:$log\"\n\
+        }\n\
+        fun box(): String = runBlocking { if (select() == \"first:second:acd\") \"OK\" else \"FAIL:$log\" }\n";
+    let out = common::expect_box_run(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
+    assert_eq!(out, "OK");
+}

@@ -3,8 +3,8 @@
 
 use super::common;
 
-fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "C")
+fn run(src: &str) -> String {
+    common::expect_box_run_with_stdlib(src, "C")
 }
 
 #[test]
@@ -21,7 +21,7 @@ fun box(): String {\n\
     if (findLast(1000000) != 1) return \"fail block\"\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("deep tailrec should compile + run without stack overflow");
+    let out = run(SRC);
     assert_eq!(out, "OK");
 }
 
@@ -51,6 +51,6 @@ fun box(): String {\n\
     if (pinged[0] != 1) return \"fail ping\"\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("Unit-returning tailrec should compile + run without stack overflow");
+    let out = run(SRC);
     assert_eq!(out, "OK");
 }

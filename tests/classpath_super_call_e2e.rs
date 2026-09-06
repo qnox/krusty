@@ -76,3 +76,44 @@ fn super_call_binds_a_reference_type_argument() {
     };
     assert_eq!(output, "4");
 }
+
+// The four `super` dispatch shapes, all through checked FIR. `super` is not a receiver expression:
+// the checker fixes one supertype declaration and dispatch must stay non-virtual, so the call
+// carries its own FIR target rather than a module/dependency callable id (which would re-resolve to
+// the override and recurse forever).
+#[test]
+fn super_dispatch_shapes_run() {
+    const CLASS_SUPER: &str = "open class B { open fun f(): String = \"O\" }\n\
+        class D : B() { override fun f(): String = super.f() + \"K\" }\n\
+        fun box(): String = D().f()\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(CLASS_SUPER, "Main").expect("class super"),
+        "OK"
+    );
+
+    const INTERFACE_SUPER: &str = "interface I { fun f(): String = \"O\" }\n\
+        class D : I { override fun f(): String = super.f() + \"K\" }\n\
+        fun box(): String = D().f()\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(INTERFACE_SUPER, "Main").expect("interface super"),
+        "OK"
+    );
+
+    const QUALIFIED_SUPER: &str = "interface I { fun f(): String = \"O\" }\n\
+        open class B { open fun f(): String = \"X\" }\n\
+        class D : B(), I { override fun f(): String = super<I>.f() + \"K\" }\n\
+        fun box(): String = D().f()\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(QUALIFIED_SUPER, "Main").expect("qualified super"),
+        "OK"
+    );
+
+    const DEPENDENCY_SUPER: &str = "class N : ArrayList<Any>() {\n\
+        \x20 override fun add(el: Any): Boolean = super.add(el)\n\
+        }\n\
+        fun box(): String { val n = N(); n.add(\"x\"); return if (n.size == 1) \"OK\" else \"Fail\" }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(DEPENDENCY_SUPER, "Main").expect("dependency super"),
+        "OK"
+    );
+}

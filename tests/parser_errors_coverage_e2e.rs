@@ -334,3 +334,37 @@ fn nested_unclosed_paren_in_call() {
     let d = parse_diags("fun box(): Int { return maxOf(1, 2 ; }");
     assert_rejected(&d, "call argument list unclosed");
 }
+
+// A source set whose FIRST file fails to parse still reports that file's diagnostic instead of
+// aborting the compiler. Pass 1 extracts compact declaration headers only from files that parsed, so
+// signature collection — which walks every file's recovered AST declarations — must treat a file
+// with no header inventory as a legacy-header file rather than requiring a compact header for
+// declarations that were never walked. A single unparsable file used to panic the whole compile
+// (and the language server, which analyzes incomplete source by definition).
+#[test]
+fn an_unparsable_file_does_not_abort_a_source_set() {
+    let d = common::front_end_diagnostics_files(
+        &[
+            "class Broken(\nfun stray(): Int { return 1 }\n",
+            "class Fine(val n: Int)\nfun box(): Int = Fine(1).n\n",
+        ],
+        &[],
+        None,
+    );
+    assert_rejected(&d, "an unparsable first file in a source set");
+}
+
+// The same invariant with the valid file FIRST: source ids stay positionally aligned with the
+// header inventory, so the guard cannot be a fixed "file 0 is legacy" special case.
+#[test]
+fn an_unparsable_second_file_does_not_abort_a_source_set() {
+    let d = common::front_end_diagnostics_files(
+        &[
+            "class Fine(val n: Int)\nfun box(): Int = Fine(1).n\n",
+            "class AlsoBroken(\nval stray: Int = 1\n",
+        ],
+        &[],
+        None,
+    );
+    assert_rejected(&d, "an unparsable second file in a source set");
+}

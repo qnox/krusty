@@ -80,7 +80,7 @@ fun box(): String {\n\
     fun pick(value: String): String = \"wrong\"\n\
     context(b: B)\n\
     fun pick(value: Any): String = \"OK\"\n\
-    return pick(\"value\")\n\
+    return with(b) { pick(\"value\") }\n\
 }\n";
     assert_eq!(
         run(SRC).expect("local overload context applicability"),

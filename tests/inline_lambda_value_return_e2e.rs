@@ -26,3 +26,25 @@ fn inline_lambda_value_labeled_return_runs() {
         "value-result `return@let`/`return@run` on both the early and fall-through paths"
     );
 }
+
+#[test]
+fn classpath_inline_lambda_boxes_primitive_body_for_erased_result() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    const SOURCE: &str = "fun box(): String {\n\
+        val boolean: Any? = run<Any?> { true }\n\
+        val integer: Any? = run<Any?> { 7 }\n\
+        return if (boolean == true && integer == 7) \"OK\" else \"FAIL\"\n\
+    }\n";
+
+    assert_eq!(
+        common::compile_and_run_box(
+            SOURCE,
+            "InlineErasedPrimitiveResult",
+            &[stdlib, jdk.clone()],
+            Some(jdk.as_path()),
+        )
+        .as_deref(),
+        Some("OK")
+    );
+}

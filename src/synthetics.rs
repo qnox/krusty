@@ -22,7 +22,7 @@
 
 use crate::ast::ExprId as AstExprId;
 use crate::ir::{Callee, ExprId, IrExpr};
-use crate::types::Ty;
+use crate::types::{stored_value_ty, Ty, TypeName};
 
 /// A call site matched against the registry: the call's argument AST ids and the call expression
 /// itself (so a body can read the checker-inferred result element type).
@@ -67,15 +67,7 @@ pub(crate) trait SyntheticIrBuilder {
 pub(crate) type BodyFn =
     fn(&'static Synthetic, &mut dyn SyntheticIrBuilder, &SynthCall<'_>) -> Option<ExprId>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyntheticKind {
-    PrimitiveVararg(Ty),
-    PrimitiveSize(Ty),
-    ReferenceVararg,
-    ReferenceSize,
-    EmptyReference,
-    NullableReference,
-}
+pub use crate::types::ArrayFactoryKind as SyntheticKind;
 
 /// One synthetic function: its fully-qualified name (the identity shared with the JVM intrinsic
 /// registry), the source call name lookup matches on, and its mandatory IR body.
@@ -90,6 +82,19 @@ pub struct Synthetic {
 /// caller is responsible for honoring user-declared shadowing first.
 pub fn lookup(name: &str) -> Option<&'static Synthetic> {
     TABLE.iter().find(|s| s.name == name)
+}
+
+/// Resolve a compiler-provided declaration from an already-bound package qualifier. This is the
+/// qualified counterpart of [`lookup`]: callers supply semantic package identity, so source syntax
+/// such as `kotlin.arrayOf` and an imported `arrayOf` select the same registry entry.
+pub fn lookup_qualified(package: TypeName, name: &str) -> Option<&'static Synthetic> {
+    TABLE.iter().find(|synthetic| {
+        synthetic.name == name
+            && synthetic
+                .fqn
+                .rsplit_once('/')
+                .is_some_and(|(owner, declared)| declared == name && package.matches(owner))
+    })
 }
 
 pub(crate) fn by_kind(kind: SyntheticKind) -> Option<&'static Synthetic> {
@@ -160,8 +165,20 @@ static TABLE: &[Synthetic] = &[
         SyntheticKind::PrimitiveVararg(Ty::Short),
         b_prim_vararg,
     ),
-    // Unsigned vararg literals — `uintArrayOf(1u, 2u): UIntArray`. The element is `UInt`/`ULong`; the
-    // physical array is the unboxed `[I`/`[J` (see `ir_lower`'s `Ty::Array(UInt)` mapping).
+    // Unsigned vararg literals keep their semantic inline-class element. The backend owns the
+    // corresponding signed primitive storage array (`UByteArray` -> `[B`, `UIntArray` -> `[I`).
+    syn(
+        "kotlin/ubyteArrayOf",
+        "ubyteArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::UByte),
+        b_prim_vararg,
+    ),
+    syn(
+        "kotlin/ushortArrayOf",
+        "ushortArrayOf",
+        SyntheticKind::PrimitiveVararg(Ty::UShort),
+        b_prim_vararg,
+    ),
     syn(
         "kotlin/uintArrayOf",
         "uintArrayOf",
@@ -223,7 +240,19 @@ static TABLE: &[Synthetic] = &[
         SyntheticKind::PrimitiveSize(Ty::Short),
         b_prim_size,
     ),
-    // Unsigned size constructors — `UIntArray(n) { i -> e }` (unboxed `[I`/`[J`).
+    // Unsigned size constructors use the same semantic elements as their vararg factories.
+    syn(
+        "kotlin/UByteArray",
+        "UByteArray",
+        SyntheticKind::PrimitiveSize(Ty::UByte),
+        b_prim_size,
+    ),
+    syn(
+        "kotlin/UShortArray",
+        "UShortArray",
+        SyntheticKind::PrimitiveSize(Ty::UShort),
+        b_prim_size,
+    ),
     syn(
         "kotlin/UIntArray",
         "UIntArray",
@@ -303,7 +332,12 @@ fn vararg_of(
         if lw.synth_is_branchy(arg) {
             return None;
         }
-        elements.push(lw.lower_arg(arg, &elem)?);
+        let target = if reference_array {
+            stored_value_ty(elem)
+        } else {
+            elem
+        };
+        elements.push(lw.lower_arg(arg, &target)?);
     }
     // The whole array type (`kotlin/IntArray` / `kotlin/Array<Int>` / `kotlin/Array<String>`) drives the
     // emitter — a boxed `Array<Int>` becomes `Integer[]`, a primitive `IntArray` stays `[I`.

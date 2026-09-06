@@ -22,13 +22,13 @@ use crate::frontend::{
     ResolvedCall, ResolvedConstructor, ResolvedContextArgument, ResolvedCtorDelegationTarget,
     ResolvedExtensionCall, ResolvedIncDec, ResolvedLocalFunctionCall, ResolvedMember,
     ResolvedPropertyAccess, ResolvedSuperCall, ResolvedTopLevelCall, ResolvedTopLevelFunctionRef,
-    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering, TopLevelReferenceOwner,
+    ReturnTarget, SigFlags, Signature, SingletonValue, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrAnnotationConstruction, IrBinOp, IrCatch, IrClass,
     IrConst, IrCtorArg, IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp, IrfFlags,
 };
-use crate::kt_string::KtString;
+use crate::kt_string::{trim_indent, trim_margin, KtString};
 use crate::libraries::{map_call_args, InlineKind, LibraryMember, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
 use crate::runtime::{
@@ -38,6 +38,9 @@ use crate::runtime::{
 use crate::types::{
     existing_type_name, stored_value_ty, ty_mentions_param, type_name, Ty, TypeName,
 };
+
+mod classifier_hierarchy;
+mod compound_assignments;
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
@@ -614,9 +617,12 @@ fn lower_file_at_reporting_impl(
                         | Stmt::LocalDelegate { name, .. }
                         | Stmt::For { name, .. }
                         | Stmt::ForEach { name, .. } => names.push(name.clone()),
-                        Stmt::Destructure { entries, .. } => {
-                            names.extend(entries.iter().map(|(n, _)| n.clone()))
-                        }
+                        Stmt::Destructure { entries, .. } => names.extend(
+                            entries
+                                .iter()
+                                .filter(|entry| !entry.ignored)
+                                .map(|entry| entry.name.clone()),
+                        ),
                         _ => {}
                     }
                 }
@@ -717,9 +723,8 @@ fn lower_file_at_reporting_impl(
             );
             crate::trace_compiler!(
                 "lower",
-                "class {internal} captures={anonymous_captures:?} delegations={:?} delegation_exprs={}",
-                c.delegations,
-                c.delegation_exprs.len()
+                "class {internal} captures={anonymous_captures:?} delegations={:?}",
+                c.interface_delegations,
             );
             // A generic class gets a JVM class `Signature` (kotlinc does), matching its bytecode.
             match class_generic_sig(file, c, info, syms) {
@@ -790,7 +795,7 @@ fn lower_file_at_reporting_impl(
             }
             let mut ctor_fields: Vec<(String, Ty)> = anonymous_captures
                 .iter()
-                .map(|capture| (capture.name.clone(), capture.ty))
+                .map(|capture| (capture.name.clone(), capture.stored_ty()))
                 .chain(
                     c.props
                         .iter()
@@ -919,30 +924,32 @@ fn lower_file_at_reporting_impl(
                 .map(|p| p.name.as_str())
                 .collect();
             let iface_delegate_fields: Vec<(String, Ty)> = c
-                .delegations
+                .interface_delegations
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, d, _))| !ctor_prop_names.contains(d.as_str()))
-                .filter_map(|(i, (_, d, _))| {
-                    c.props.iter().position(|p| &p.name == d).map(|parameter| {
-                        (format!("$$delegate_{i}"), class_sig.ctor_params[parameter])
-                    })
+                .filter(|(_, delegation)| {
+                    delegation
+                        .bare_name
+                        .as_deref()
+                        .is_none_or(|name| !ctor_prop_names.contains(name))
                 })
-                .collect();
-            // Interface delegation to an EXPRESSION (`: I by Impl()`): a synthesized `$$delegate_e<j>`
-            // field holding the once-evaluated expression (stored in the ctor).
-            let expr_delegate_fields: Vec<(String, Ty)> = c
-                .delegation_exprs
-                .iter()
-                .enumerate()
-                .map(|(j, (_, e))| (format!("$$delegate_e{j}"), info.ty(*e)))
+                .filter_map(|(i, delegation)| {
+                    let ty = match delegation.bare_name.as_deref() {
+                        Some(name) => c
+                            .props
+                            .iter()
+                            .position(|parameter| parameter.name == name)
+                            .map(|parameter| class_sig.ctor_params[parameter]),
+                        None => Some(info.ty(delegation.value)),
+                    }?;
+                    Some((format!("$$delegate_{i}"), ty))
+                })
                 .collect();
             let fields: Vec<(String, Ty)> = ctor_fields
                 .into_iter()
                 .chain(body_fields)
                 .chain(delegate_fields.iter().cloned())
                 .chain(iface_delegate_fields.iter().cloned())
-                .chain(expr_delegate_fields.iter().cloned())
                 .collect();
             // The names backing a `lateinit var` — `IrField::is_lateinit` is set by name below (matched
             // in the final `fields`, so any `this$0` offset is handled). The backend null-checks every
@@ -974,9 +981,8 @@ fn lower_file_at_reporting_impl(
             );
             // Parallel `None` for each synthetic `x$delegate` field (concrete delegate type, no type-param).
             field_type_params.extend(delegate_fields.iter().map(|_| None));
-            // Parallel `None` for each synthetic interface-delegation `$$delegate_N`/`$$delegate_e<j>` field.
+            // Parallel `None` for each synthetic interface-delegation `$$delegate_N` field.
             field_type_params.extend(iface_delegate_fields.iter().map(|_| None));
-            field_type_params.extend(expr_delegate_fields.iter().map(|_| None));
             let class_ty = Ty::obj(&internal);
             // Supertype names and kinds are checker facts. Lowering copies the selected JVM names; it
             // must never reinterpret AST spelling or query providers to classify a supertype again.
@@ -1085,21 +1091,8 @@ fn lower_file_at_reporting_impl(
             // annotation; the property- and field-targeted ones are already claimed by
             // `class_property_annotations` / `class_field_annotations`.
             let synthetic_ctor_params = inner_outer.iter().len() + anonymous_captures.len();
-            let ctor_param_annotations = parameter_annotation_table(
-                synthetic_ctor_params,
-                c.props.iter().map(|p| {
-                    if p.is_property {
-                        property_site_annotations(
-                            &p.annotations,
-                            info,
-                            true,
-                            crate::types::PropertyAnnotationSite::ValueParameter,
-                        )
-                    } else {
-                        value_parameter_annotations(&p.annotations, info)
-                    }
-                }),
-            );
+            let ctor_param_annotations =
+                primary_constructor_parameter_annotations(c, info, synthetic_ctor_params);
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
                 is_source_declared: true,
@@ -1122,6 +1115,7 @@ fn lower_file_at_reporting_impl(
                 properties: Vec::new(),
                 fields: ir_fields,
                 ctor_param_count,
+                constructor_prefix_count: synthetic_ctor_params as u32,
                 // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
                 // An inner class's synthetic `this$0` (the outer instance) is the first field param —
                 // never null-checked (kotlinc doesn't guard it).
@@ -1130,25 +1124,29 @@ fn lower_file_at_reporting_impl(
                     .map(|o| IrCtorArg {
                         name: None,
                         ty: ty_to_ir(Ty::obj(o)),
+                        declared_ty: None,
                         is_field: true,
+                        field_index: Some(0),
                         has_default: false,
                         is_vararg: false,
                         type_param: None,
                         check: None,
                     })
                     .chain(anonymous_captures.iter().map(|capture| {
+                        let stored_ty = capture.stored_ty();
                         IrCtorArg {
                             name: Some(capture.name.clone()),
-                            ty: ty_to_ir(capture.ty),
+                            ty: ty_to_ir(stored_ty),
+                            declared_ty: None,
                             is_field: true,
+                            field_index: None,
                             has_default: false,
                             is_vararg: false,
                             type_param: None,
-                            check: capture
-                                .ty
+                            check: stored_ty
                                 .is_reference()
                                 .then(|| capture.name.clone())
-                                .filter(|_| !capture.ty.is_nullable()),
+                                .filter(|_| !stored_ty.is_nullable()),
                         }
                     }))
                     .chain(c.props.iter().enumerate().map(|(i, p)| {
@@ -1182,7 +1180,12 @@ fn lower_file_at_reporting_impl(
                         IrCtorArg {
                             name: Some(p.name.clone()),
                             ty: t,
+                            declared_ty: class_sig
+                                .ctor_param_shapes
+                                .get(i)
+                                .map(|(shape, _)| *shape),
                             is_field: p.is_property,
+                            field_index: None,
                             has_default: p.default.is_some(),
                             is_vararg: p.is_vararg,
                             type_param: c
@@ -1215,6 +1218,7 @@ fn lower_file_at_reporting_impl(
                 is_abstract: c.is_abstract(),
                 is_open: c.is_open(),
                 superclass,
+                super_arg_prelude: Vec::new(),
                 super_args: Vec::new(),
                 super_ctor_params: Vec::new(),
                 // Entry names + subclass markers now; constructor-arg value-ids are lowered in pass 2.
@@ -1223,7 +1227,9 @@ fn lower_file_at_reporting_impl(
                     .iter()
                     .map(|e| IrEnumEntry {
                         name: e.name.clone(),
+                        argument_prelude: Vec::new(),
                         args: Vec::new(),
+                        default_parameters: Vec::new(),
                         subclass: None,
                         decl_line: e.decl_line,
                     })
@@ -1341,6 +1347,9 @@ fn lower_file_at_reporting_impl(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks,
                 });
+                if let Some(bound) = sig.equality_bound {
+                    lo.ir.fn_equality_bounds.insert(fid, bound);
+                }
                 // A member EXTENSION realizes its extension receiver as `params[0]` — record the
                 // fid so class `@Metadata` can restore `Function.receiver_type` (f5) instead of
                 // publishing the receiver as an ordinary value parameter.
@@ -1363,6 +1372,9 @@ fn lower_file_at_reporting_impl(
                 }
                 if m.is_inline() && m.visibility.is_public() {
                     lo.ir.public_inline_functions.insert(fid);
+                }
+                if m.is_inline() {
+                    lo.ir.inline_fns.insert(fid);
                 }
                 if let Some(vi) = m.params.iter().position(|p| p.is_vararg) {
                     lo.ir.fn_vararg_index.insert(fid, vi);
@@ -1580,7 +1592,25 @@ fn lower_file_at_reporting_impl(
                 }
                 // A generic member method gets the same JVM `Signature` as a generic top-level function.
                 match fn_generic_sig(info, m) {
-                    Ok(Some(signature)) => {
+                    Ok(Some(mut signature)) => {
+                        if let Some(extension) = extension_receiver.as_ref() {
+                            let semantic_receiver = m
+                                .receiver
+                                .as_ref()
+                                .and_then(|receiver| info.resolved_declaration_type(receiver))
+                                .or_else(|| {
+                                    extension
+                                        .signature()
+                                        .generic_sig
+                                        .as_ref()
+                                        .and_then(|generic| generic.receiver)
+                                })
+                                .unwrap_or_else(|| extension.receiver_ty());
+                            signature.params.insert(
+                                member_recv_index.min(signature.params.len()),
+                                semantic_receiver,
+                            );
+                        }
                         lo.ir.signatures.insert(fid, signature);
                     }
                     Ok(None) => {}
@@ -1600,15 +1630,20 @@ fn lower_file_at_reporting_impl(
             // Computed body properties → `getX()` instance methods (no backing field).
             for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
                 let ty = body_prop_ty(file, info, p, &*syms.libraries);
-                let context_types = syms
-                    .class_by_internal(&internal)?
-                    .declared_props
-                    .get(&p.name)
-                    .map(|property| property.context_params.as_slice())
-                    .unwrap_or_default();
-                let getter_params = context_types
+                let context_params = p
+                    .context_params
                     .iter()
-                    .copied()
+                    .map(|parameter| {
+                        (
+                            parameter.name.clone(),
+                            info.resolved_declaration_type(&parameter.ty)
+                                .unwrap_or(Ty::Error),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let getter_params = context_params
+                    .iter()
+                    .map(|(_, ty)| *ty)
                     .map(stored_value_ty)
                     .map(ty_to_ir)
                     .collect::<Vec<_>>();
@@ -1628,10 +1663,12 @@ fn lower_file_at_reporting_impl(
                     .properties
                     .push(crate::ir::IrProperty {
                         name: p.name.clone(),
+                        context_params,
                         source_order: p.span.lo,
                         decl_line: p.decl_line,
                         ty,
                         visibility: p.visibility,
+                        annotations: Box::new([]),
                         initializer: None,
                         storage_ty: None,
                         backing_field: None,
@@ -1788,22 +1825,25 @@ fn lower_file_at_reporting_impl(
                         receiver: sig.receiver,
                         ty: ret,
                         is_var: p.is_var,
+                        is_abstract: false,
                         getter: gfid,
                         setter: ext_setter,
                         visibility: p.visibility,
+                        type_params: Vec::new(),
                     });
             }
             // Delegated body properties (`val/var x by Del()`) → a `getX()` (and `setX()` for a `var`)
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
             for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
-                let prop_ty = syms
-                    .class_by_internal(&internal)
-                    .and_then(|cs| {
-                        cs.props
-                            .iter()
-                            .find_map(|(n, t, _)| (n == &p.name).then_some(*t))
-                    })
-                    .unwrap_or(Ty::Error);
+                // The declaration's type is a Pass-2 checker result. In particular, an inferred
+                // delegated property inside a local/anonymous class is ordinary lexical body work:
+                // Pass 1 may only have a temporary pending header for it. Common lowering consumes
+                // the checked declaration type recorded for this bounded unit; consulting the
+                // retained module symbol view here would leak that Pass-1 marker into FIR/IR.
+                let prop_ty = body_prop_ty(file, info, p, &*syms.libraries);
+                if prop_ty.mentions_pending() || prop_ty.mentions_error() {
+                    return lo.bail("checked delegated property has no determined semantic type");
+                }
                 let gname = property_getter_name(&p.name);
                 let mi = method_fids.len() as u32;
                 let fid = lo.ir.add_fun(IrFunction {
@@ -1824,10 +1864,12 @@ fn lower_file_at_reporting_impl(
                     .properties
                     .push(crate::ir::IrProperty {
                         name: p.name.clone(),
+                        context_params: Vec::new(),
                         source_order: p.span.lo,
                         decl_line: p.decl_line,
                         ty: prop_ty,
                         visibility: p.visibility,
+                        annotations: Box::new([]),
                         initializer: None,
                         storage_ty: None,
                         backing_field: None,
@@ -1911,10 +1953,22 @@ fn lower_file_at_reporting_impl(
                         .properties
                         .push(crate::ir::IrProperty {
                             name: p.name.clone(),
+                            context_params: p
+                                .context_params
+                                .iter()
+                                .map(|parameter| {
+                                    (
+                                        parameter.name.clone(),
+                                        info.resolved_declaration_type(&parameter.ty)
+                                            .unwrap_or(Ty::Error),
+                                    )
+                                })
+                                .collect(),
                             source_order: p.span.lo,
                             decl_line: p.decl_line,
                             ty,
                             visibility: p.visibility,
+                            annotations: Box::new([]),
                             initializer: None,
                             storage_ty: None,
                             backing_field: None,
@@ -2055,10 +2109,12 @@ fn lower_file_at_reporting_impl(
                         .properties
                         .push(crate::ir::IrProperty {
                             name: pname.clone(),
+                            context_params: Vec::new(),
                             source_order: *source_order,
                             decl_line: *decl_line,
                             ty: *property_ty,
                             visibility: *visibility,
+                            annotations: Box::new([]),
                             initializer: None,
                             storage_ty: (fty != *property_ty).then_some(fty),
                             backing_field: Some(fidx as u32),
@@ -2287,7 +2343,7 @@ fn lower_file_at_reporting_impl(
             // (`box-impl`/`unbox-impl`/`constructor-impl`/`equals-impl0`/`equals`/`hashCode`/`toString`).
             // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
             // methods that calls `this.d.method(args)`. Bails the file if a delegate can't be modeled.
-            if (!c.delegations.is_empty() || !c.delegation_exprs.is_empty())
+            if !c.interface_delegations.is_empty()
                 && lo
                     .synth_delegation_forwarders(file, c, &internal, id)
                     .is_none()
@@ -2390,8 +2446,11 @@ fn lower_file_at_reporting_impl(
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
-                // Extension functions prepend their receiver to the static method parameters.
+                // Ordinary extensions carry a runtime receiver. A companion extension uses the
+                // same declared receiver for source lookup/metadata, but its associated JVM method
+                // is receiver-less.
                 let (recv_ty, sig) = syms.source_extension_function(file_index, d)?;
+                let companion_extension = f.is_companion_extension();
                 let recv_key = recv_ty.erased_recv();
                 let recv_param = if recv_ref.nullable() {
                     mark_nullable(ty_to_ir(recv_ty))
@@ -2402,20 +2461,24 @@ fn lower_file_at_reporting_impl(
                 // parameter list and the guards parallel to it splice it in at that index.
                 let recv_index = sig.context_count.min(sig.params.len());
                 let mut params: Vec<_> = sig.params.iter().map(|t| stored_value_ty(*t)).collect();
-                params.insert(recv_index, recv_param);
+                if !companion_extension {
+                    params.insert(recv_index, recv_param);
+                }
                 let ret = ty_to_ir(sig.ret);
                 let receiver_nullable_type_parameter =
                     recv_ty.is_ty_param() && recv_ty.upper_bound_admits_null();
                 let mut param_checks =
                     param_checks_for(f, &sig.params, &[], &std::collections::HashSet::new());
-                param_checks.insert(
-                    recv_index,
-                    (!f.visibility.is_private()
-                        && !recv_ref.nullable()
-                        && !receiver_nullable_type_parameter
-                        && recv_ty.is_reference())
-                    .then(|| "<this>".to_string()),
-                );
+                if !companion_extension {
+                    param_checks.insert(
+                        recv_index,
+                        (!f.visibility.is_private()
+                            && !recv_ref.nullable()
+                            && !receiver_nullable_type_parameter
+                            && recv_ty.is_reference())
+                        .then(|| "<this>".to_string()),
+                    );
+                }
                 let id = lo.ir.add_fun(IrFunction {
                     name: f.name.clone(),
                     params,
@@ -2436,11 +2499,14 @@ fn lower_file_at_reporting_impl(
                     .or_insert(id);
                 lo.fun_ids_by_decl.insert(d, id);
                 lo.ir.top_level_function_fids.insert(d.0, id);
-                lo.ir.extension_receiver_fns.insert(id);
+                if !companion_extension {
+                    lo.ir.extension_receiver_fns.insert(id);
+                }
                 if f.is_inline() && f.visibility.is_public() {
                     lo.ir.public_inline_functions.insert(id);
                 }
                 if f.is_inline() {
+                    lo.ir.inline_fns.insert(id);
                     lo.ir.top_level_inline_functions.insert(id);
                 }
                 if !f.reified_type_params.is_empty() {
@@ -2458,9 +2524,11 @@ fn lower_file_at_reporting_impl(
                 // the call falls back to the compiled body, which exists only to throw.
                 match fn_generic_sig(info, f) {
                     Ok(Some(mut signature)) => {
-                        signature
-                            .params
-                            .insert(recv_index.min(signature.params.len()), recv_ty);
+                        if !companion_extension {
+                            signature
+                                .params
+                                .insert(recv_index.min(signature.params.len()), recv_ty);
+                        }
                         lo.ir.signatures.insert(id, signature);
                     }
                     Ok(None) => {}
@@ -2524,6 +2592,7 @@ fn lower_file_at_reporting_impl(
                     lo.ir.public_inline_functions.insert(id);
                 }
                 if f.is_inline() {
+                    lo.ir.inline_fns.insert(id);
                     lo.ir.top_level_inline_functions.insert(id);
                 }
                 // A `private` top-level function is `private static` on the facade (kotlinc); a
@@ -2669,21 +2738,30 @@ fn lower_file_at_reporting_impl(
             // function's lowering. No backing field; only a `get()`-bodied property is modeled. A `var`
             // needs an explicit `set(v) { … }` body (no backing field to default to).
             if p.receiver.is_some() {
-                if p.getter.is_none() || p.delegate.is_some() {
+                let companion_extension = p.is_companion_extension;
+                if companion_extension {
+                    if p.init.is_none() || p.delegate.is_some() || p.getter.is_some() {
+                        return lo.bail("gate:companion-extension-property-shape");
+                    }
+                } else if p.getter.is_none() || p.delegate.is_some() {
                     return lo.bail("gate:extension-property-shape");
                 }
                 let has_set_body = p
                     .setter
                     .as_ref()
                     .is_some_and(|s| s.body.is_some() && s.param.is_some());
-                if p.is_var && !has_set_body {
+                if p.is_var && !companion_extension && !has_set_body {
                     return lo.bail("gate:extension-property-shape");
                 }
                 let signature = syms.source_extension_property((file_index, d.0))?;
                 let recv_ty = signature.receiver;
                 let recv_key = recv_ty.erased_recv();
                 let pty_ir = ty_to_ir(stored_value_ty(signature.ty));
-                let mut accessor_params = vec![recv_ty];
+                let mut accessor_params = if companion_extension {
+                    Vec::new()
+                } else {
+                    vec![recv_ty]
+                };
                 accessor_params.extend(signature.context_params.iter().copied());
                 let accessor_params_ir = accessor_params
                     .iter()
@@ -2704,7 +2782,11 @@ fn lower_file_at_reporting_impl(
                 // kotlinc names the accessor's receiver slot `$this$<property>` in its
                 // LocalVariableTable; registering the names (and a decl line, which switches the
                 // emitter's `record_locals` on) is what makes the table exist at all.
-                let mut accessor_names = vec![format!("$this${}", p.name)];
+                let mut accessor_names = if companion_extension {
+                    Vec::new()
+                } else {
+                    vec![format!("$this${}", p.name)]
+                };
                 accessor_names.extend(
                     p.context_params
                         .iter()
@@ -2741,6 +2823,11 @@ fn lower_file_at_reporting_impl(
                     if p.decl_line != 0 {
                         lo.ir.fn_decl_lines.insert(sfid, p.decl_line);
                     }
+                }
+                if companion_extension {
+                    let index = static_base + lo.statics.len() as u32;
+                    lo.statics.insert(p.name.clone(), (index, signature.ty));
+                    lo.source_property_statics.insert(d, index);
                 }
                 continue;
             }
@@ -2850,7 +2937,7 @@ fn lower_file_at_reporting_impl(
                         f.name.clone(),
                         sig.params.clone(),
                     ))?;
-                    (fid, sig, Some(recv_ty))
+                    (fid, sig, (!f.is_companion_extension()).then_some(recv_ty))
                 } else {
                     let sig = syms.funs.get(&f.name)?.iter().find(|sig| {
                         sig.source_file == Some(lo.file_index) && sig.source_decl == Some(d)
@@ -3539,9 +3626,12 @@ fn lower_file_at_reporting_impl(
                             DelegateGetValueTarget::Member {
                                 physical_params, ..
                             } => physical_params.as_slice(),
-                            DelegateGetValueTarget::Extension(callable) => {
+                            DelegateGetValueTarget::Extension { callable, .. } => {
                                 callable.physical_params.as_slice()
                             }
+                            DelegateGetValueTarget::MemberExtension {
+                                physical_params, ..
+                            } => physical_params.as_slice(),
                         };
                         let this_e = lo.emit_get_value(0);
                         let dele = lo.emit_get_field(this_e, class_id, field_idx);
@@ -3763,36 +3853,12 @@ fn lower_file_at_reporting_impl(
                     lo.ir.classes[class_id as usize].super_args = sargs;
                     lo.ir.classes[class_id as usize].super_ctor_params = super_field_tys;
                 }
-                // A `@JvmInline value class` with a DEFAULT on its single underlying property needs
-                // kotlinc's synthetic `constructor-impl$default`. Lower the default in the STATIC
-                // `constructor-impl` frame — the sole param is value-index 0, no `this` — and stash it by
-                // class internal; the value-class JVM pass registers it as `constructor-impl`'s param
-                // default so the backend emits the stub.
-                if c.is_value {
-                    if let Some((parameter, p)) =
-                        c.props.iter().enumerate().find(|(_, p)| p.is_property)
-                    {
-                        if let Some(d) = p.default {
-                            lo.scope.clear();
-                            lo.boxed_elem.clear();
-                            lo.next_value = 0;
-                            lo.cur_class = Some(type_name(&internal));
-                            let pty = class_sig.ctor_params[parameter];
-                            let v = lo.fresh_value(); // value-index 0 = the underlying param
-                            lo.scope.push((p.name.clone(), v, pty));
-                            if let Some(lowered) = lo.lower_arg(d, &ty_to_ir(pty)) {
-                                lo.ir.insert_value_ctor_default(&internal, lowered);
-                            }
-                        }
-                    }
-                }
-                // A REGULAR (non-value, non-inner) class with a DEFAULT on any primary-ctor parameter needs
-                // kotlinc's synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload. Lower
-                // each default in the INSTANCE `<init>` frame (`this` = value 0, then captured parameters,
-                // then source parameters) and stash one parallel entry per physical constructor parameter;
-                // the backend emits the overload (one int mask per 32 params).
-                if !c.is_value
-                    && c.inner_of.is_none()
+                // A non-inner class with a DEFAULT on any primary-constructor parameter retains the
+                // target-neutral constructor contract. Lower every default in the ordinary INSTANCE
+                // constructor frame (`this` = value 0, then captured parameters, then source parameters)
+                // and stash one entry per physical constructor parameter. The backend decides whether
+                // this becomes an `<init>` overload or another physical representation.
+                if c.inner_of.is_none()
                     && !c.is_interface()
                     && c.primary_ctor_annotations.is_some()
                     && c.props.iter().any(|p| p.default.is_some())
@@ -3806,7 +3872,8 @@ fn lower_file_at_reporting_impl(
                         .push(("this".to_string(), this_v, Ty::obj(&internal)));
                     for capture in &anonymous_captures {
                         let value = lo.fresh_value();
-                        lo.scope.push((capture.name.clone(), value, capture.ty));
+                        lo.scope
+                            .push((capture.name.clone(), value, capture.stored_ty()));
                     }
                     let mut ptys = Vec::new();
                     for (p, &pty) in c.props.iter().zip(&class_sig.ctor_params) {
@@ -3845,11 +3912,13 @@ fn lower_file_at_reporting_impl(
                 let has_delegated = c.body_props.iter().any(|p| p.delegate.is_some());
                 // Interface delegation `: I by d` whose `d` is a NON-`val` param needs a `$$delegate_<i>`
                 // field store in the ctor.
-                let has_iface_synth_delegate = c
-                    .delegations
-                    .iter()
-                    .any(|(_, d, _)| !c.props.iter().any(|p| p.is_property && &p.name == d))
-                    || !c.delegation_exprs.is_empty();
+                let has_iface_synth_delegate = c.interface_delegations.iter().any(|delegation| {
+                    delegation.bare_name.as_deref().is_none_or(|name| {
+                        !c.props
+                            .iter()
+                            .any(|parameter| parameter.is_property && parameter.name == name)
+                    })
+                });
                 // Run whenever there is ANY ctor body to lower OR any primary-constructor `val`/`var`
                 // param (or inner `this$0`) to store: the param→field stores are desugared explicitly
                 // into `init_body` here (no implicit auto-store in the backend).
@@ -3859,11 +3928,10 @@ fn lower_file_at_reporting_impl(
                     || c.inner_of.is_some()
                     || !anonymous_captures.is_empty()
                     || c.props.iter().any(|p| p.is_property))
-                    // An enum always has a primary construction path, even when source writes no
-                    // constructor header (`enum class E { A; val x = 1 }`). Its body-property
-                    // initializers belong in that implicit constructor exactly like an explicitly
-                    // declared class primary constructor.
-                    && (c.primary_ctor_annotations.is_some() || c.is_enum())
+                    // For an enum without secondary constructors the parser publishes the implicit
+                    // primary constructor. An enum with explicit secondaries has no separate
+                    // source-level primary path; each secondary owns the shared initialization.
+                    && c.primary_ctor_annotations.is_some()
                 {
                     let class_id = lo.class_info(&internal)?.id;
                     let ctor_count = lo.ir.classes[class_id as usize].ctor_param_count;
@@ -3891,7 +3959,8 @@ fn lower_file_at_reporting_impl(
                     }
                     for capture in &anonymous_captures {
                         let value = lo.fresh_value();
-                        lo.scope.push((capture.name.clone(), value, capture.ty));
+                        lo.scope
+                            .push((capture.name.clone(), value, capture.stored_ty()));
                     }
                     // ALL ctor params (property and plain) in scope as values, declaration order.
                     for (p, &parameter_ty) in c.props.iter().zip(&class_sig.ctor_params) {
@@ -3937,8 +4006,12 @@ fn lower_file_at_reporting_impl(
                     }
                     // Interface-delegation `$$delegate_<i>` stores (`this.$$delegate_i = <delegate param>`),
                     // first in the ctor body (kotlinc stores them right after `super()`).
-                    for (di, (_iface, dname, _)) in c.delegations.iter().enumerate() {
-                        if c.props.iter().any(|p| p.is_property && &p.name == dname) {
+                    for (di, delegation) in c.interface_delegations.iter().enumerate() {
+                        if delegation.bare_name.as_deref().is_some_and(|name| {
+                            c.props
+                                .iter()
+                                .any(|parameter| parameter.is_property && parameter.name == name)
+                        }) {
                             continue; // a `val`-param delegate has its own auto-stored field
                         }
                         let synth = format!("$$delegate_{di}");
@@ -3947,26 +4020,17 @@ fn lower_file_at_reporting_impl(
                             .iter()
                             .position(|f| f.name == synth)?
                             as u32;
-                        let (pv, _) = lo.lookup(dname)?;
                         let this_e = lo.emit_get_value(this_v);
-                        let val_e = lo.emit_get_value(pv);
-                        let sf = lo.emit_set_field(this_e, class_id, fidx, val_e);
-                        stmts.push(sf);
-                    }
-                    // Expression delegates (`: I by Impl()`): evaluate the expression once into its
-                    // `$$delegate_e<j>` field.
-                    for (j, (_iface, e)) in c.delegation_exprs.iter().enumerate() {
-                        let synth = format!("$$delegate_e{j}");
-                        let fidx = lo.ir.classes[class_id as usize]
-                            .fields
-                            .iter()
-                            .position(|f| f.name == synth)?
-                            as u32;
                         let fty = lo.ir.classes[class_id as usize].fields[fidx as usize]
                             .ty
                             .clone();
-                        let val_e = lo.lower_arg(*e, &fty)?;
-                        let this_e = lo.emit_get_value(this_v);
+                        let val_e = match delegation.bare_name.as_deref() {
+                            Some(name) => {
+                                let (parameter, _) = lo.lookup(name)?;
+                                lo.emit_get_value(parameter)
+                            }
+                            None => lo.lower_arg(delegation.value, &fty)?,
+                        };
                         let sf = lo.emit_set_field(this_e, class_id, fidx, val_e);
                         stmts.push(sf);
                     }
@@ -4175,6 +4239,15 @@ fn lower_file_at_reporting_impl(
                 if !c.secondary_ctors.is_empty() {
                     use crate::ir::CtorDelegateTarget;
                     let class_id = lo.class_info(&internal)?.id;
+                    let constructor_prefix = {
+                        let class = &lo.ir.classes[class_id as usize];
+                        class
+                            .ctor_args
+                            .get(..class.constructor_prefix_count as usize)?
+                            .iter()
+                            .map(|argument| argument.ty)
+                            .collect::<Vec<_>>()
+                    };
                     let mut secs = Vec::new();
                     for (sc_idx, sc) in c.secondary_ctors.iter().enumerate() {
                         lo.scope.clear();
@@ -4318,6 +4391,7 @@ fn lower_file_at_reporting_impl(
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             annotations: ctor_annotations(sc, info),
+                            prefix_params: constructor_prefix.clone(),
                             vararg_index: sc.params.iter().position(|p| p.is_vararg),
                             params: param_irs,
                             named_params: sc
@@ -4329,6 +4403,7 @@ fn lower_file_at_reporting_impl(
                             defaults,
                             delegate_prelude,
                             delegate_args,
+                            default_parameters: Vec::new(),
                             body,
                             delegate,
                             synthetic: false,
@@ -4526,6 +4601,7 @@ fn lower_file_at_reporting_impl(
                                 })
                                 .collect(),
                             ctor_param_count: 0,
+                            constructor_prefix_count: 0,
                             ctor_args: vec![],
                             ctor_param_annotations: Vec::new(),
                             init_body: None,
@@ -4542,6 +4618,7 @@ fn lower_file_at_reporting_impl(
                             is_abstract: false,
                             is_open: false,
                             superclass: type_name(&internal),
+                            super_arg_prelude: Vec::new(),
                             super_args: vec![],
                             super_ctor_params: vec![],
                             enum_entries: vec![],
@@ -4638,6 +4715,9 @@ fn lower_file_at_reporting_impl(
                             if bm.is_inline() && bm.visibility.is_public() {
                                 lo.ir.public_inline_functions.insert(fid);
                             }
+                            if bm.is_inline() {
+                                lo.ir.inline_fns.insert(fid);
+                            }
                             lo.scope.clear();
                             lo.boxed_elem.clear();
                             lo.next_value = 0;
@@ -4725,6 +4805,47 @@ fn lower_file_at_reporting_impl(
                             property_ty,
                         ));
                         lo.lower_body(setter.body.as_ref()?, &ty_to_ir(Ty::Unit), setter_id)?;
+                    }
+                } else if p.is_companion_extension {
+                    let signature = syms.source_extension_property((file_index, d.0))?;
+                    let recv_key = signature.receiver.erased_recv();
+                    let property_ty = stored_value_ty(signature.ty);
+                    let property_ir = ty_to_ir(property_ty);
+                    let init = lo.lower_arg(p.init?, &property_ir)?;
+                    let static_id = lo.ir.statics.len() as u32;
+                    lo.ir.statics.push(crate::ir::IrStatic {
+                        visibility: crate::types::Visibility::Private,
+                        name: p.name.clone(),
+                        ty: property_ir.clone(),
+                        init,
+                        is_var: p.is_var,
+                        is_const: false,
+                        owner: None,
+                        custom_accessor: true,
+                        line: p.decl_line,
+                        source_order: p.span.lo,
+                    });
+
+                    let getter = *lo.ext_prop_get_ids.get(&(recv_key, p.name.clone()))?;
+                    lo.cur_fn =
+                        crate::ir::IrFunctionScope::declared(getter, property_getter_name(&p.name));
+                    let value = lo.emit_get_static(static_id);
+                    let ret = lo.emit_return(Some(value));
+                    let body = lo.emit_block(vec![ret], None);
+                    lo.ir.functions[getter as usize].body = Some(body);
+
+                    if p.is_var {
+                        let setter = *lo.ext_prop_set_ids.get(&(recv_key, p.name.clone()))?;
+                        lo.cur_fn = crate::ir::IrFunctionScope::declared(
+                            setter,
+                            property_setter_name(&p.name),
+                        );
+                        let value_parameter = signature.context_params.len() as u32;
+                        let value = lo.emit_get_value(value_parameter);
+                        let set = lo.emit_set_static(static_id, value);
+                        let ret = lo.emit_return(None);
+                        let body = lo.emit_block(vec![set, ret], None);
+                        lo.ir.functions[setter as usize].body = Some(body);
                     }
                 } else if p.receiver.is_some() {
                     // Extension property getter: lower `get() = …` with `this` = receiver (param 0).
@@ -4927,6 +5048,19 @@ fn lower_file_at_reporting_impl(
             let v = lo.fresh_value();
             lo.scope.push((p.name.clone(), v, *t));
         }
+        let physical_prefix = local_fun.captures.len() + usize::from(local_fun.receiver.is_some());
+        let mut defaults = vec![None; lo.ir.functions[fid as usize].params.len()];
+        for (parameter, source) in f.params.iter().enumerate() {
+            if let Some(default) = source.default {
+                defaults[physical_prefix + parameter] =
+                    Some(lo.lower_arg(default, &ty_to_ir(sig.params[parameter]))?);
+            }
+        }
+        if defaults.iter().any(Option::is_some) {
+            lo.ir
+                .fn_params
+                .insert(fid, FnParamInfo::defaults(Vec::new(), defaults));
+        }
         let ret_ty = lo.ir.functions[fid as usize].ret.clone();
         lo.lower_body(&f.body, &ret_ty, fid)?;
     }
@@ -5024,6 +5158,7 @@ fn lower_file_at_reporting_impl(
             }
         }
     }
+    classifier_hierarchy::publish(&mut lo.ir, lo.syms);
     Some(lo.ir)
 }
 
@@ -5089,7 +5224,7 @@ fn break_continue_tail_only(file: &ast::File, e: AstExprId, tail: bool) -> bool 
                 && arms.iter().all(|a| {
                     a.conditions
                         .iter()
-                        .all(|&c| break_continue_tail_only(file, c, false))
+                        .all(|c| break_continue_tail_only(file, c.expression(), false))
                         && break_continue_tail_only(file, a.body, tail)
                 })
         }
@@ -6313,38 +6448,6 @@ impl<'a> Lower<'a> {
         )
     }
 
-    /// Emit one already-selected implicit enum classifier callable on an owner outside this file. The
-    /// semantic operation, rather than a source spelling, determines the backend ABI.
-    fn emit_external_enum_classifier_callable(
-        &mut self,
-        owner: TypeName,
-        operation: crate::libraries::ImplicitClassifierCallable,
-        args: Vec<u32>,
-    ) -> Option<u32> {
-        let rendered = owner.render();
-        let (name, descriptor, arity) = match operation {
-            crate::libraries::ImplicitClassifierCallable::EnumValues => {
-                ("values", format!("()[L{rendered};"), 0)
-            }
-            crate::libraries::ImplicitClassifierCallable::EnumValueOf => {
-                ("valueOf", format!("(Ljava/lang/String;)L{rendered};"), 1)
-            }
-        };
-        if args.len() != arity {
-            return None;
-        }
-        Some(self.emit_call(
-            Callee::Static {
-                owner,
-                name: name.to_string(),
-                descriptor,
-                inline: crate::libraries::InlineKind::None,
-            },
-            None,
-            args,
-        ))
-    }
-
     fn lower_implicit_classifier_call(
         &mut self,
         member: &crate::libraries::LibraryMember,
@@ -6360,23 +6463,20 @@ impl<'a> Lower<'a> {
             .map(|(&argument, parameter)| self.lower_arg(argument, &ty_to_ir(*parameter)))
             .collect::<Option<Vec<_>>>()?;
         let owner = member.owner?;
-        if let Some(class) = self.class_info(&owner.render()).map(|class| class.id) {
-            return match operation {
-                crate::libraries::ImplicitClassifierCallable::EnumValues => {
-                    Some(self.ir.add_expr(IrExpr::EnumValues { class }))
-                }
-                crate::libraries::ImplicitClassifierCallable::EnumValueOf => {
-                    let [argument] = lowered.as_slice() else {
-                        return None;
-                    };
-                    Some(self.ir.add_expr(IrExpr::EnumValueOf {
-                        class,
-                        arg: *argument,
-                    }))
-                }
-            };
+        match operation {
+            crate::libraries::ImplicitClassifierCallable::EnumValues => {
+                Some(self.ir.add_expr(IrExpr::EnumValues { classifier: owner }))
+            }
+            crate::libraries::ImplicitClassifierCallable::EnumValueOf => {
+                let [argument] = lowered.as_slice() else {
+                    return None;
+                };
+                Some(self.ir.add_expr(IrExpr::EnumValueOf {
+                    classifier: owner,
+                    arg: *argument,
+                }))
+            }
         }
-        self.emit_external_enum_classifier_callable(owner, operation, lowered)
     }
 
     fn emit_virtual_call(
@@ -6401,15 +6501,37 @@ impl<'a> Lower<'a> {
         )
     }
 
-    /// Materialize the exact singleton storage selected by the checker. Objects and companions share
-    /// this path; lowering does not infer either category from a type or source spelling.
+    /// Preserve the checker-selected singleton declaration. Physical storage is a backend decision:
+    /// common lowering neither invents an `INSTANCE` field nor assumes how companions are represented.
     fn lower_singleton_value(&mut self, singleton: &SingletonValue) -> Option<u32> {
-        let read = self.runtime.companion_instance_field(
-            &singleton.owner.render(),
-            &singleton.classifier.render(),
-            &singleton.field,
-        )?;
-        Some(self.platform_static_field(read))
+        // The legacy per-file entry point does not have the streamed module index that
+        // `fir_lower::module_declarations` uses to publish referenced declarations. Preserve the
+        // equivalent compact classifier fact here when this singleton belongs to another source
+        // unit. The fact remains Kotlin-level (singleton + companion ownership); a backend alone
+        // chooses its storage.
+        if !self
+            .ir
+            .referenced_module_classifiers
+            .contains_key(&singleton.classifier)
+        {
+            if let Some(classifier) = self.syms.class_by_type_name(singleton.classifier) {
+                let companion_owner = singleton.classifier.nested_owner().filter(|owner| {
+                    self.syms
+                        .class_by_type_name(*owner)
+                        .is_some_and(|outer| outer.companion_internal == Some(singleton.classifier))
+                });
+                self.ir.referenced_module_classifiers.insert(
+                    singleton.classifier,
+                    crate::ir::IrModuleClassifier {
+                        singleton: classifier.is_object(),
+                        companion_owner,
+                    },
+                );
+            }
+        }
+        Some(self.ir.add_expr(IrExpr::SingletonValue {
+            classifier: singleton.classifier,
+        }))
     }
 
     fn lower_recorded_singleton_value(&mut self, expression: AstExprId) -> Option<u32> {
@@ -6422,19 +6544,20 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_recorded_static_property(&mut self, expression: AstExprId) -> Option<u32> {
-        let ExprLowering::StaticPropertyRead {
-            owner,
-            name,
-            descriptor,
-        } = self.info.expr_lowers.get(&expression)?.clone()
+        let ExprLowering::AssociatedPropertyRead { owner, name, .. } =
+            self.info.expr_lowers.get(&expression)?.clone()
         else {
             return None;
         };
-        let descriptor = match descriptor {
-            Some(descriptor) => descriptor,
-            None => self.runtime.type_descriptor(self.info.ty(expression))?,
-        };
-        Some(self.emit_external_static_field(owner.render(), name, descriptor))
+        let ty = self.info.ty(expression);
+        Some(self.ir.add_expr(IrExpr::PropertyRead {
+            receiver: None,
+            owner,
+            name,
+            ty,
+            interface: false,
+            operation: None,
+        }))
     }
 
     /// A receiver-less static call to a callable of EITHER origin.
@@ -6546,20 +6669,13 @@ impl<'a> Lower<'a> {
             &args,
             continuation,
         )?;
-        // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
-        // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
-        // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
-        // companion), so the load is a read of that field and the invoke is virtual.
+        // A member of an `object` / `companion object` brought into scope by `import Owner.name` has a
+        // semantic singleton dispatch receiver. Common lowering retains that receiver; the backend
+        // chooses its storage and invocation instruction.
         let call = if let Some(singleton) = callable.singleton_dispatch.clone() {
-            let descriptor = singleton
-                .descriptor
-                .clone()
-                .or_else(|| self.runtime.type_descriptor(singleton.ty))?;
-            let receiver = self.emit_external_static_field(
-                singleton.owner.render(),
-                &singleton.name,
-                descriptor,
-            );
+            let receiver = self.ir.add_expr(IrExpr::SingletonValue {
+                classifier: singleton.classifier,
+            });
             if callable.inline.must_inline() {
                 // `@InlineOnly` (the shape `Duration.Companion`'s accessors have): the method is
                 // non-public, so there is no call to make — the backend splices its body with the
@@ -6807,6 +6923,8 @@ impl<'a> Lower<'a> {
                 name,
                 params,
                 ret,
+                module_target: None,
+                module_default_call: false,
             },
             None,
             args,
@@ -6847,7 +6965,7 @@ impl<'a> Lower<'a> {
                 let ctor_params = ctor_params.map(|params| {
                     captures
                         .iter()
-                        .map(|capture| capture.ty)
+                        .map(AnonymousObjectCapture::stored_ty)
                         .chain(params)
                         .collect()
                 });
@@ -6860,6 +6978,7 @@ impl<'a> Lower<'a> {
             args,
             ctor_params,
             ctor_desc: None,
+            external_target: None,
         });
         self.record_annotation_construction(construction, internal)?;
         Some(construction)
@@ -6936,6 +7055,7 @@ impl<'a> Lower<'a> {
             args,
             ctor_params: None,
             ctor_desc: Some(ctor_desc.into()),
+            external_target: None,
         });
         self.record_annotation_construction(construction, owner)?;
         Some(construction)
@@ -6961,6 +7081,7 @@ impl<'a> Lower<'a> {
                 args,
                 ctor_params: Some(vec![ty_to_ir(underlying)]),
                 ctor_desc: None,
+                external_target: None,
             }));
         }
         let descriptor = if member.descriptor.is_empty() {
@@ -7261,27 +7382,13 @@ impl<'a> Lower<'a> {
         self.ir.external_static_field(&owner, name, descriptor)
     }
 
-    /// Lower the enum entry identity selected by the checker.
+    /// Lower the enum entry owner selected by the checker.
     fn lower_resolved_enum_entry(&mut self, e: AstExprId) -> Option<u32> {
-        let (enum_internal, name) = self.info.resolved_enum_entry(e)?;
-        if let Some(cls) = self.class_info_name(enum_internal).map(|class| class.id) {
-            if let Some(index) = self.ir.classes[cls as usize]
-                .enum_entries
-                .iter()
-                .position(|entry| entry.name == name)
-            {
-                return Some(self.ir.add_expr(IrExpr::EnumEntry {
-                    class: cls,
-                    index: index as u32,
-                }));
-            }
-        }
-        let enum_internal = enum_internal.render();
-        Some(self.emit_external_static_field(
-            enum_internal.clone(),
-            name,
-            format!("L{enum_internal};"),
-        ))
+        let entry = self.info.resolved_enum_entry(e)?;
+        Some(self.ir.add_expr(IrExpr::EnumEntry {
+            classifier: entry.classifier,
+            name: entry.name.clone().into_boxed_str(),
+        }))
     }
 
     /// Returns the already-checked `getValue` target for a delegated property.
@@ -7327,7 +7434,7 @@ impl<'a> Lower<'a> {
                     *interface,
                 ))
             }
-            DelegateGetValueTarget::Extension(c) => Some((
+            DelegateGetValueTarget::Extension { callable: c, .. } => Some((
                 c.owner,
                 c.descriptor.clone(),
                 c.physical_ret,
@@ -7336,6 +7443,7 @@ impl<'a> Lower<'a> {
                 c.name.clone(),
                 false,
             )),
+            DelegateGetValueTarget::MemberExtension { .. } => None,
         }
     }
 
@@ -7648,9 +7756,9 @@ impl<'a> Lower<'a> {
         match target {
             ImplicitPropertyWriteTarget::Member {
                 receiver,
+                stable_declaration: _,
                 property_ty,
                 setter,
-                field,
                 ..
             } => {
                 crate::trace_compiler!(
@@ -7659,24 +7767,20 @@ impl<'a> Lower<'a> {
                 );
                 let value = self.lower_arg(value, &ty_to_ir(property_ty))?;
                 let (receiver, _) = self.materialize_implicit_receiver(receiver)?;
-                if let Some(field) = field {
-                    // The checker bound this write to a Java instance field; emit the store it
-                    // selected (`putfield`), never a reconstructed accessor.
-                    let owner = field.owner;
-                    return Some(self.add_property_write_target(
-                        receiver,
-                        owner,
-                        name,
-                        value,
-                        property_ty,
-                        false,
-                        Some(field),
-                    ));
-                }
-                self.emit_selected_property_set(receiver, name, property_ty, *setter?, value)
+                self.emit_selected_property_set(
+                    receiver,
+                    name,
+                    property_ty,
+                    setter?.callable,
+                    value,
+                )
             }
             ImplicitPropertyWriteTarget::Extension { receiver, access } => {
                 let value = self.lower_arg(value, &ty_to_ir(access.property.ty))?;
+                if access.property.is_companion_extension() {
+                    let actual = access.property.receiver?;
+                    return self.emit_extension_property_set_value(name, *access, 0, actual, value);
+                }
                 let (receiver, actual) = self.materialize_implicit_receiver(receiver)?;
                 self.emit_extension_property_set_value(name, *access, receiver, actual, value)
             }
@@ -7704,22 +7808,11 @@ impl<'a> Lower<'a> {
         &mut self,
         receiver: ImplicitReceiverSelection,
         name: &str,
-        property_ty: Ty,
+        _property_ty: Ty,
         getter: Option<Box<crate::symbol_resolver::ResolvedMember>>,
-        field: Option<Box<crate::libraries::InstanceFieldRef>>,
     ) -> Option<u32> {
         let (receiver, _) = self.materialize_implicit_receiver(receiver)?;
-        match field {
-            Some(field) => Some(self.add_property_read_target(
-                receiver,
-                field.owner,
-                name,
-                property_ty,
-                false,
-                Some(field),
-            )),
-            None => self.emit_selected_property_get(receiver, name, *getter?),
-        }
+        self.emit_selected_property_get(receiver, name, *getter?)
     }
 
     fn lower_implicit_member_property_set(
@@ -7727,23 +7820,11 @@ impl<'a> Lower<'a> {
         receiver: ImplicitReceiverSelection,
         name: &str,
         property_ty: Ty,
-        setter: Option<Box<crate::libraries::LibraryCallable>>,
-        field: Option<Box<crate::libraries::InstanceFieldRef>>,
+        setter: Option<Box<crate::symbol_resolver::ResolvedPropertySetter>>,
         value: u32,
     ) -> Option<u32> {
         let (receiver, _) = self.materialize_implicit_receiver(receiver)?;
-        match field {
-            Some(field) => Some(self.add_property_write_target(
-                receiver,
-                field.owner,
-                name,
-                value,
-                property_ty,
-                false,
-                Some(field),
-            )),
-            None => self.emit_selected_property_set(receiver, name, property_ty, *setter?, value),
-        }
+        self.emit_selected_property_set(receiver, name, property_ty, setter?.callable, value)
     }
 
     fn lower_selected_implicit_property_incdec(
@@ -7758,17 +7839,17 @@ impl<'a> Lower<'a> {
         match target {
             ImplicitPropertyWriteTarget::Member {
                 receiver,
+                stable_declaration: _,
                 property_ty,
                 getter,
                 setter,
-                field,
+                ..
             } => {
                 let current = self.lower_implicit_member_property_get(
                     receiver.clone(),
                     name,
                     property_ty,
                     getter.clone(),
-                    field.clone(),
                 )?;
                 if prefix {
                     let updated =
@@ -7778,7 +7859,6 @@ impl<'a> Lower<'a> {
                         name,
                         property_ty,
                         setter.clone(),
-                        field.clone(),
                         updated,
                     )?;
                     let value = if as_value {
@@ -7787,7 +7867,6 @@ impl<'a> Lower<'a> {
                             name,
                             property_ty,
                             getter,
-                            field,
                         )?)
                     } else {
                         None
@@ -7804,7 +7883,6 @@ impl<'a> Lower<'a> {
                     name,
                     property_ty,
                     setter,
-                    field,
                     updated,
                 )?;
                 let value = as_value.then(|| self.emit_get_value(old_value));
@@ -8141,10 +8219,11 @@ impl<'a> Lower<'a> {
     /// as an EMITTED reified method; `None` otherwise (the caller resolves the class normally).
     fn emitted_reified_marker(&mut self, ty: Ty) -> Option<u32> {
         let (name, erased) = self.emitted_reified_parameter(ty)?;
-        Some(
-            self.ir
-                .add_expr(IrExpr::ReifiedClassMarker { name, erased }),
-        )
+        Some(self.ir.add_expr(IrExpr::ReifiedClassMarker {
+            name,
+            erased,
+            kclass: false,
+        }))
     }
 
     /// A `ReifiedTypeOp` marker node for `is`/`as` on the emitted fn's own reified parameter.
@@ -8246,10 +8325,6 @@ impl<'a> Lower<'a> {
     fn runtime_call(&mut self, op: RuntimeOp, ty: Ty, args: Vec<u32>) -> Option<u32> {
         let c = self.runtime.runtime_callable(op, ty)?;
         self.emit_library_static_call(c, args, false)
-    }
-
-    fn platform_static_field(&mut self, field: PlatformField) -> u32 {
-        self.emit_external_static_field(field.owner, field.name, field.descriptor)
     }
 
     fn record_suspend_call(&mut self, call: u32, suspend: bool, ret: Ty) -> u32 {
@@ -9354,6 +9429,8 @@ impl<'a> Lower<'a> {
                 omitted,
                 vararg,
                 default_masks,
+                stable_declaration: _,
+                context_args: _,
             } => {
                 let model = self.syms.class_model(owner)?;
                 let value_underlying = model.value_underlying;
@@ -9589,7 +9666,7 @@ impl<'a> Lower<'a> {
         if !omitted.is_empty() || !default_masks.is_empty() {
             let internal = self.ir.classes[class as usize].fq_name();
             let stub_missing = if value_class {
-                self.ir.value_ctor_default(&internal).is_none()
+                self.ir.class_ctor_defaults(&internal).is_none()
             } else {
                 params.iter().any(|parameter| {
                     parameter
@@ -9778,13 +9855,17 @@ impl<'a> Lower<'a> {
         if let Some(intrinsic) = property.getter.compiler_intrinsic {
             return self.lower_compiler_property_intrinsic(receiver, intrinsic);
         }
+        let companion_extension = property.is_companion_extension();
         let getter = property.getter;
         let physical_ret = getter.physical_ret;
         let receiver_ty = property.receiver?;
-        let physical_receiver = getter.params.first().copied().unwrap_or(receiver_ty);
-        let receiver = self.coerce_argument_value(receiver, actual_receiver, physical_receiver)?;
         let context_types = getter.params.get(1..1 + property.context_count)?;
-        let mut arguments = vec![receiver];
+        let mut arguments = if companion_extension {
+            Vec::new()
+        } else {
+            let physical_receiver = getter.params.first().copied().unwrap_or(receiver_ty);
+            vec![self.coerce_argument_value(receiver, actual_receiver, physical_receiver)?]
+        };
         arguments.extend(self.lower_context_argument_values(&access.context_args, context_types)?);
         let call = match getter.origin {
             crate::libraries::Origin::Module { .. } => {
@@ -9800,7 +9881,7 @@ impl<'a> Lower<'a> {
                     self.emit_cross_file_call(
                         getter.owner,
                         getter.name,
-                        getter.params,
+                        getter.physical_params,
                         getter.physical_ret,
                         arguments,
                     )
@@ -9824,13 +9905,17 @@ impl<'a> Lower<'a> {
         let property = access.property;
         let receiver_ty = property.receiver?;
         let source = property.source_key;
+        let companion_extension = property.is_companion_extension();
         let setter = property.setter?;
-        let physical_receiver = setter.params.first().copied().unwrap_or(receiver_ty);
-        let receiver = self.coerce_argument_value(receiver, actual_receiver, physical_receiver)?;
         let physical_value = setter.params.last().copied().unwrap_or(property.ty);
         let value = self.coerce_argument_value(value, property.ty, physical_value)?;
         let context_types = setter.params.get(1..1 + property.context_count)?;
-        let mut arguments = vec![receiver];
+        let mut arguments = if companion_extension {
+            Vec::new()
+        } else {
+            let physical_receiver = setter.params.first().copied().unwrap_or(receiver_ty);
+            vec![self.coerce_argument_value(receiver, actual_receiver, physical_receiver)?]
+        };
         arguments.extend(self.lower_context_argument_values(&access.context_args, context_types)?);
         arguments.push(value);
         match setter.origin {
@@ -9844,7 +9929,7 @@ impl<'a> Lower<'a> {
                         self.emit_cross_file_call(
                             setter.owner,
                             setter.name,
-                            setter.params,
+                            setter.physical_params,
                             setter.ret,
                             arguments,
                         )
@@ -10114,7 +10199,7 @@ impl<'a> Lower<'a> {
     fn lower_destructure(
         &mut self,
         stmt: ast::StmtId,
-        entries: &[(String, bool)],
+        entries: &[ast::DestructureEntry],
         init: AstExprId,
         out: &mut Vec<u32>,
     ) -> Option<()> {
@@ -10122,10 +10207,11 @@ impl<'a> Lower<'a> {
         let init_v = self.expr(init)?;
         let tmp = self.fresh_value();
         out.push(self.emit_variable(tmp, ty_to_ir(it_ty), Some(init_v)));
-        for (idx, (name, _)) in entries.iter().enumerate() {
-            if name == "_" {
+        for (idx, entry) in entries.iter().enumerate() {
+            if entry.ignored {
                 continue;
             }
+            let name = &entry.name;
             let recv = self.emit_get_value(tmp);
             let target = self
                 .info
@@ -10136,8 +10222,7 @@ impl<'a> Lower<'a> {
                 "destructure component{} receiver={it_ty:?} target={target:?}",
                 idx + 1
             );
-            let (call, log_ty) =
-                self.lower_destructure_component_target(recv, it_ty, idx, target)?;
+            let (call, log_ty) = self.lower_destructure_component_target(recv, it_ty, target)?;
             self.bind_destructure_component(name, call, log_ty, out)?;
         }
         Some(())
@@ -10147,36 +10232,15 @@ impl<'a> Lower<'a> {
         &mut self,
         recv: u32,
         recv_ty: Ty,
-        idx: usize,
         target: DestructureComponentTarget,
     ) -> Option<(u32, Ty)> {
-        match target {
-            DestructureComponentTarget::Call(target) => {
-                let name = match target.as_ref() {
-                    ResolvedCall::Member(member) => member.member.name.clone(),
-                    ResolvedCall::MemberExtension { name, .. } => name.clone(),
-                    ResolvedCall::Extension(extension) => extension.callable.name.clone(),
-                    _ => return None,
-                };
-                self.lower_selected_op_call(recv, recv_ty, &name, &[], *target, None, &[], None)
-            }
-            DestructureComponentTarget::IndexedGet(m) => {
-                let m = *m;
-                let internal = recv_ty.kotlin_class_internal()?;
-                let physical_ret = m.member.physical_ret;
-                let ret = m.ret;
-                let i = self.emit_const(IrConst::Int(idx as i32));
-                let c = self.emit_library_member_call(
-                    recv,
-                    internal,
-                    m.member,
-                    ret,
-                    m.suspend,
-                    vec![i],
-                )?;
-                Some((self.coerce_to_static(c, ret, physical_ret), ret))
-            }
-        }
+        let name = match target.as_ref() {
+            ResolvedCall::Member(member) => member.member.name.clone(),
+            ResolvedCall::MemberExtension { name, .. } => name.clone(),
+            ResolvedCall::Extension(extension) => extension.callable.name.clone(),
+            _ => return None,
+        };
+        self.lower_selected_op_call(recv, recv_ty, &name, &[], *target, None, &[], None)
     }
 
     /// Bind one destructured component `name` to its (already-lowered) initializer value `call` of
@@ -10308,7 +10372,11 @@ impl<'a> Lower<'a> {
         }
         // Bound parameter names: explicit, or the implicit single `it` for a unary lambda. For a receiver
         // lambda these are the VALUE parameters only (the receiver binds as `this`, separately).
-        let bind_names = ast::lambda_params_or_implicit(declared_value_names, value_arity)?;
+        let bind_names = ast::lambda_params_or_implicit(
+            declared_value_names,
+            value_arity,
+            self.afile.lambda_explicit_arrows.contains(&e.0),
+        )?;
         if bind_names.len() != value_arity {
             return None;
         }
@@ -10719,11 +10787,21 @@ impl<'a> Lower<'a> {
                 .or_insert(0);
             let ordinal = *next;
             *next += 1;
+            let identity = self
+                .ir
+                .lambda_origins
+                .values()
+                .map(|origin| origin.identity)
+                .max()
+                .map_or(0, |identity| identity.saturating_add(1));
             let origin = crate::ir::IrLambdaOrigin {
-                source_expression: e.0,
+                identity,
+                lexical_owner: self.cur_class,
                 enclosing_name,
                 binding_name,
                 ordinal,
+                implementation_name: self.cur_fn.source_name.clone(),
+                implementation_ordinal: seq,
             };
             self.lambda_origin_by_source.insert(e.0, origin.clone());
             origin
@@ -10852,7 +10930,18 @@ impl<'a> Lower<'a> {
             impl_fn: fid,
             arity: arity as u8,
             captures: capture_vals,
-            sam: sam.map(|target| (target.internal.render(), target.method, target.descriptor)),
+            sam: sam.map(|target| crate::ir::IrSamTarget {
+                classifier: target.internal,
+                method: target.method,
+                parameters: target.params,
+                result: target.ret,
+                declared_parameters: target.declared_params,
+                declared_result: target.declared_ret,
+                context_count: target.context_count as u32,
+                has_receiver: target.has_receiver,
+                suspend: target.suspend,
+                function_adapter: false,
+            }),
             inline_body: Some(inline_body),
         }))
     }
@@ -11164,6 +11253,7 @@ impl<'a> Lower<'a> {
         names.extend(ast::lambda_params_or_implicit(
             value_names,
             slots - implicit_count,
+            self.afile.lambda_explicit_arrows.contains(&arg.0),
         )?);
         (names.len() == slots).then_some(names)
     }
@@ -11319,7 +11409,9 @@ impl<'a> Lower<'a> {
             .map(|(_, _, ty)| IrCtorArg {
                 name: None,
                 ty: ty_to_ir(*ty),
+                declared_ty: None,
                 is_field: false,
+                field_index: None,
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -11328,7 +11420,9 @@ impl<'a> Lower<'a> {
             .chain(std::iter::once(IrCtorArg {
                 name: None,
                 ty: cont_ir.clone(),
+                declared_ty: None,
                 is_field: false,
+                field_index: None,
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -11374,6 +11468,7 @@ impl<'a> Lower<'a> {
             properties: Vec::new(),
             fields: ir_fields,
             ctor_param_count: 0,
+            constructor_prefix_count: captures.len() as u32,
             ctor_args,
             ctor_param_annotations: Vec::new(),
             init_body,
@@ -11390,6 +11485,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name("kotlin/coroutines/jvm/internal/SuspendLambda"),
+            super_arg_prelude: Vec::new(),
             super_args: vec![arity_const, completion_get],
             super_ctor_params: vec![Ty::Int, Ty::obj("kotlin/coroutines/Continuation")],
             enum_entries: vec![],
@@ -11787,35 +11883,40 @@ impl<'a> Lower<'a> {
         internal: &str,
         class_id: ClassId,
     ) -> Option<()> {
-        for (di, (iface_name, delegate, has_primitive_targ)) in c.delegations.iter().enumerate() {
+        for (di, delegation) in c.interface_delegations.iter().enumerate() {
             // A `val`-param delegate has its own field (`a`); a non-`val` param uses the synthesized
             // `$$delegate_<di>` (see field synthesis + the ctor store).
-            let is_synth = !c.props.iter().any(|p| p.is_property && &p.name == delegate);
+            let is_synth = delegation.bare_name.as_deref().is_none_or(|name| {
+                !c.props
+                    .iter()
+                    .any(|parameter| parameter.is_property && parameter.name == name)
+            });
             // A SYNTHESIZED-field delegation to a primitive-instantiated generic interface (`A<Long> by a`
             // where `a` is a non-`val` param) needs the substituted-type bridges that a raw erased-`Object`
             // forward mis-coerces (an `int` literal boxed as `Integer` reaches a `Long` parameter) — skip
             // rather than miscompile. A `val`-param delegate forwards through its own typed field and is
             // handled correctly, so it is not affected.
-            if is_synth && *has_primitive_targ {
+            if is_synth && delegation.bare_name.is_some() && delegation.has_primitive_type_argument
+            {
                 return None;
             }
             let synth_name = format!("$$delegate_{di}");
-            let delegate_idx =
-                self.class_info(internal)?
-                    .fields
-                    .iter()
-                    .position(|(n, _)| n == delegate || n == &synth_name)? as u32;
-            self.forward_iface_methods(file, c, iface_name, delegate_idx, class_id, internal)?;
-        }
-        // Expression delegates (`: I by Impl()`) always use a synthesized `$$delegate_e<j>` field.
-        for (j, (iface_name, _e)) in c.delegation_exprs.iter().enumerate() {
-            let synth_name = format!("$$delegate_e{j}");
+            let field_name = delegation.bare_name.as_deref().filter(|_| !is_synth);
             let delegate_idx = self
                 .class_info(internal)?
                 .fields
                 .iter()
-                .position(|(n, _)| n == &synth_name)? as u32;
-            self.forward_iface_methods(file, c, iface_name, delegate_idx, class_id, internal)?;
+                .position(|(name, _)| {
+                    field_name.is_some_and(|field| name == field) || name == &synth_name
+                })? as u32;
+            self.forward_iface_methods(
+                file,
+                c,
+                &delegation.interface,
+                delegate_idx,
+                class_id,
+                internal,
+            )?;
         }
         Some(())
     }
@@ -12141,9 +12242,7 @@ impl<'a> Lower<'a> {
     fn field_hash(&mut self, class_id: ClassId, idx: u32, t: Ty) -> Option<u32> {
         let field = &self.ir.classes[class_id as usize].fields[idx as usize];
         let guarded = field.ty.is_nullable() || field.type_param.is_some();
-        // Keys for recording this field's chosen `hashCode` owner (read by the pool seeder).
         let class_name = self.ir.classes[class_id as usize].fq_name_id();
-        let class_internal = class_name.render();
         let field_name = field.name.clone();
         // The checker `Ty` of a nullable-primitive field is `Nullable(Int)` — test the classifier
         // under the `?`.
@@ -12174,7 +12273,6 @@ impl<'a> Lower<'a> {
                     let erased = s.vc_erase_ty(under);
                     let udesc = s.runtime.type_descriptor(erased)?;
                     let owner = internal.render();
-                    s.ir.set_data_hashcode_owner(&class_internal, &field_name, owner.clone());
                     return Some(s.emit_static_call(
                         owner,
                         "hashCode-impl".to_string(),
@@ -12206,9 +12304,6 @@ impl<'a> Lower<'a> {
             match t.non_null().kotlin_class_internal() {
                 Some(_) => {
                     let owner = s.info.data_class_hash_owner(class_name, &field_name)?;
-                    // Record the owner (backend maps `kotlin/Any` → `java/lang/Object`) so the pool seeder
-                    // interns the SAME `hashCode` methodref this body emits.
-                    s.ir.set_data_hashcode_owner(&class_internal, &field_name, owner.render());
                     Some(s.emit_virtual_call(
                         owner,
                         "hashCode".into(),
@@ -12537,7 +12632,7 @@ impl<'a> Lower<'a> {
 
     fn lower_anonymous_capture(&mut self, capture: &AnonymousObjectCapture) -> Option<u32> {
         match capture.source {
-            AnonymousObjectCaptureSource::EnclosingInstance => {
+            AnonymousObjectCaptureSource::EnclosingInstance { .. } => {
                 // Materialize the exact enclosing type recorded by capture discovery. In a superclass
                 // constructor argument the current `this` is uninitialized; an inner class's already
                 // supplied `this$0` is the legal source. The shared dispatch-materialization walk knows
@@ -12545,11 +12640,23 @@ impl<'a> Lower<'a> {
                 let owner = capture.ty.non_null().obj_internal()?;
                 return self.member_extension_dispatch_value(owner);
             }
+            AnonymousObjectCaptureSource::ImplicitReceiver { .. } => {
+                let owner = capture.ty.non_null().obj_internal()?;
+                return self.member_extension_dispatch_value(owner);
+            }
+            AnonymousObjectCaptureSource::ClassStorage { field } => {
+                let owner = self.cur_class?;
+                let class = self.class_info_name(owner)?.id;
+                let (this, _) = self.lookup("$dispatch").or_else(|| self.lookup("this"))?;
+                let receiver = self.emit_get_value(this);
+                let value = self.emit_get_field(receiver, class, field);
+                return self.coerce_argument_value(value, capture.ty, capture.stored_ty());
+            }
             AnonymousObjectCaptureSource::LexicalValue => {}
         }
         if let Some((value, actual)) = self.lookup(&capture.name) {
             let value = self.emit_get_value(value);
-            return self.coerce_argument_value(value, actual, capture.ty);
+            return self.coerce_argument_value(value, actual, capture.stored_ty());
         }
         let owner = self.cur_class?;
         let class = self.class_info_name(owner)?.id;
@@ -12563,7 +12670,7 @@ impl<'a> Lower<'a> {
         let (this, _) = self.lookup("$dispatch").or_else(|| self.lookup("this"))?;
         let receiver = self.emit_get_value(this);
         let value = self.emit_get_field(receiver, class, field as u32);
-        self.coerce_argument_value(value, actual, capture.ty)
+        self.coerce_argument_value(value, actual, capture.stored_ty())
     }
 
     /// The label a lambda answers to. An EXPLICITLY labelled literal (`run rr@{ … }`) answers to its
@@ -13510,8 +13617,6 @@ impl<'a> Lower<'a> {
                             .class_info_name(named_owner)
                             .filter(|info| self.ir.classes[info.id as usize].is_object)
                             .map(|_| SingletonValue {
-                                owner: named_owner,
-                                field: "INSTANCE".to_string(),
                                 classifier: named_owner,
                             }),
                     };
@@ -13627,6 +13732,7 @@ impl<'a> Lower<'a> {
             properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
+            constructor_prefix_count: 0,
             ctor_args: vec![],
             ctor_param_annotations: Vec::new(),
             init_body: None,
@@ -13643,6 +13749,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
@@ -13777,6 +13884,7 @@ impl<'a> Lower<'a> {
             properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
+            constructor_prefix_count: 0,
             ctor_args: vec![],
             ctor_param_annotations: Vec::new(),
             init_body: None,
@@ -13792,6 +13900,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
@@ -14026,6 +14135,7 @@ impl<'a> Lower<'a> {
             properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
+            constructor_prefix_count: 0,
             ctor_args: vec![],
             ctor_param_annotations: Vec::new(),
             init_body: None,
@@ -14041,6 +14151,7 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass: type_name(&superclass),
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
@@ -14494,10 +14605,13 @@ impl<'a> Lower<'a> {
                 let value = self.coerce_argument_value(value, receiver, selected_receiver)?;
                 (value, Vec::new(), 0usize, Vec::new())
             }
-            CallableReferenceBinding::Singleton(internal) => {
-                let value = self.selected_singleton_value(internal)?;
-                let value =
-                    self.coerce_argument_value(value, Ty::obj_name(internal), selected_receiver)?;
+            CallableReferenceBinding::Singleton(singleton) => {
+                let value = self.selected_singleton_value(singleton.classifier)?;
+                let value = self.coerce_argument_value(
+                    value,
+                    Ty::obj_name(singleton.classifier),
+                    selected_receiver,
+                )?;
                 (
                     self.emit_get_value(0),
                     vec![value],
@@ -14736,6 +14850,7 @@ impl<'a> Lower<'a> {
             properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
+            constructor_prefix_count: 0,
             ctor_args: vec![],
             ctor_param_annotations: Vec::new(),
             init_body: None,
@@ -14752,15 +14867,19 @@ impl<'a> Lower<'a> {
             is_abstract: false,
             is_open: false,
             superclass,
+            super_arg_prelude: Vec::new(),
             super_args: vec![],
             super_ctor_params: vec![],
             enum_entries: vec![],
             enum_entry_of: None,
             prop_ref: None,
             func_ref: Some(crate::ir::FuncRef {
+                adapted: false,
                 bound,
                 arity,
                 is_suspend,
+                module_target: None,
+                local_target: None,
                 owner_class,
                 fn_name,
                 flags,
@@ -14768,6 +14887,9 @@ impl<'a> Lower<'a> {
                 call_owner,
                 call_name,
                 reflection_name,
+                reflection_receiver_parameter: false,
+                reflection_target_ret_ty: None,
+                reflection_target_param_tys: None,
                 call_interface,
                 target_param_tys: target_override
                     .as_ref()
@@ -15322,6 +15444,7 @@ impl<'a> Lower<'a> {
                     params: selected_params,
                     context_args,
                     source,
+                    stable_declaration: _,
                     vararg,
                     vararg_index,
                     param_default_values,
@@ -16085,7 +16208,18 @@ impl<'a> Lower<'a> {
             impl_fn: fid,
             arity: params.len() as u8,
             captures: vec![captured],
-            sam: Some((target.internal.render(), target.method, target.descriptor)),
+            sam: Some(crate::ir::IrSamTarget {
+                classifier: target.internal,
+                method: target.method,
+                parameters: target.params,
+                result: target.ret,
+                declared_parameters: target.declared_params,
+                declared_result: target.declared_ret,
+                context_count: target.context_count as u32,
+                has_receiver: target.has_receiver,
+                suspend: target.suspend,
+                function_adapter: false,
+            }),
             inline_body: None,
         }))
     }
@@ -16377,7 +16511,9 @@ impl<'a> Lower<'a> {
                             "suspendConversion0".to_string(),
                             0,
                             crate::ir::FrDispatch::SuspendConvert,
-                            Some(type_name(&format!("kotlin/jvm/functions/Function{n}"))),
+                            // Keep the selected target in its Kotlin semantic spelling. The backend
+                            // owns the physical Function0..22/FunctionN carrier choice.
+                            Some(type_name(&format!("kotlin/Function{n}"))),
                             "invoke".to_string(),
                             true,
                             param_tys,
@@ -17011,55 +17147,25 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
-        self.add_property_read_target(receiver, owner, name, ty, interface, None)
-    }
-
-    /// Construct a property read with the exact declaration target selected by resolution. The caller
-    /// does not classify source/module/classpath origins; it merely forwards the semantic selection.
-    fn add_property_read_target(
-        &mut self,
-        receiver: u32,
-        owner: TypeName,
-        name: &str,
-        ty: Ty,
-        interface: bool,
-        field: Option<Box<crate::libraries::InstanceFieldRef>>,
-    ) -> u32 {
         self.note_property_declaration(owner, name);
         let read = self.ir.add_expr(IrExpr::PropertyRead {
-            receiver,
+            receiver: Some(receiver),
             owner,
             name: name.to_string(),
             ty,
             interface,
-            field,
             operation: None,
         });
         self.record_property_declaration_type(read, owner, name, ty);
         read
     }
 
-    /// The two realization facts every property read and write must settle before the node exists,
-    /// from ONE walk of the declaration hierarchy:
-    ///
-    /// * a PRIVATE property NAMED from outside its declaring class has no accessor to call — kotlinc
-    ///   emits none for a private property, and the backing field is unreachable from another class
-    ///   file, even a lexically enclosed one, since the companion, a nested class and an inlined body
-    ///   are all separate classes on the JVM. Such a use is reached through the synthetic `access$…$p`
-    ///   bridge instead;
-    /// * a `@JvmField` property of a class this file only SEES has no accessor either, and unlike the
-    ///   private case there is nothing to bridge: the backend must load the field. The backend cannot
-    ///   discover that on its own — a sibling-file class is neither in this IR nor in the classpath it
-    ///   reads — so the declaration fact is recorded here for it.
-    ///
-    /// This sits at the one place every property read and write is CONSTRUCTED, so no naming path can
-    /// forget either. The bridge half previously lived on two of the callers, and the
+    /// Record whether a private property named from outside its declaring class requires a synthetic
+    /// access bridge. This sits at the one place every property read and write is constructed, so no
+    /// naming path can forget it. The bridge handling previously lived on two callers, and the
     /// `StmtLowering::MemberPropertyWrite` path — which preempts them — emitted a call to a `setX`
     /// that is never generated (`NoSuchMethodError`; box `classes/kt504.kt`, a companion writing its
     /// outer class's private `var`).
-    ///
-    /// [`FrontendSymbols::declared_member_prop`] is an uncached hierarchy search, so the two facts
-    /// deliberately share one lookup rather than taking one each.
     fn note_property_declaration(&mut self, owner: TypeName, name: &str) {
         let Some((declaring, property)) = self.syms.declared_member_prop(owner, name) else {
             return;
@@ -17070,23 +17176,8 @@ impl<'a> Lower<'a> {
             return;
         }
         let is_private = property.visibility.is_private();
-        // An OBJECT's (or companion's) `@JvmField` is a STATIC realization krusty plans elsewhere —
-        // see the matching exclusion in `jvm::ir_emit::is_jvm_field`. Recording an instance field for
-        // one would contradict that plan.
-        let module_jvm_field = property.is_jvm_field
-            && !self
-                .syms
-                .class_by_type_name(declaring)
-                .is_none_or(|class| class.is_object())
-            && self.class_info_name(owner).is_none();
-        let field_ty = property.storage_ty.unwrap_or(property.ty);
         if is_private && !self.can_access_source_private(declaring) {
             self.mark_property_access_bridge(declaring, name);
-        }
-        if module_jvm_field {
-            self.ir
-                .module_jvm_field_properties
-                .insert((owner, name.to_string()), (declaring, field_ty));
         }
     }
 
@@ -17101,30 +17192,14 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
-        self.add_property_write_target(receiver, owner, name, value, ty, interface, None)
-    }
-
-    /// Write analogue of [`Self::add_property_read_target`]: forwards the exact declaration target
-    /// resolution selected, without classifying origins.
-    fn add_property_write_target(
-        &mut self,
-        receiver: u32,
-        owner: TypeName,
-        name: &str,
-        value: u32,
-        ty: Ty,
-        interface: bool,
-        field: Option<Box<crate::libraries::InstanceFieldRef>>,
-    ) -> u32 {
         self.note_property_declaration(owner, name);
         let write = self.ir.add_expr(IrExpr::PropertyWrite {
-            receiver,
+            receiver: Some(receiver),
             owner,
             name: name.to_string(),
             value,
             ty,
             interface,
-            field,
             operation: None,
         });
         self.record_property_declaration_type(write, owner, name, ty);
@@ -17189,7 +17264,8 @@ impl<'a> Lower<'a> {
                     })?;
                 self.lower_declared_property_read_ty(receiver, owner, name, ty)
             }
-            ReceiverFnValueOrigin::ClassStorage(field) => {
+            ReceiverFnValueOrigin::ClassStorage(field)
+            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
                 let owner = self.cur_class?;
                 let class = self.class_info_name(owner)?.id;
                 let (this, _) = self.lookup("this")?;
@@ -17234,6 +17310,7 @@ impl<'a> Lower<'a> {
             params,
             ret,
             origin,
+            property_callee: _,
             implicit_receiver: _,
             suspend,
         } = self.info.expr_lowers.get(&call).cloned()?
@@ -17375,6 +17452,7 @@ impl<'a> Lower<'a> {
                     descriptor,
                     interface: target.interface,
                     source_member: target.source_member,
+                    source: None,
                 },
                 Some(receiver),
                 arguments,
@@ -17586,13 +17664,15 @@ impl<'a> Lower<'a> {
         // decision, made from the owner's declaration. Without the record the read resolved to something
         // else, and the caller's other paths handle it.
         if let Some(ExprLowering::MemberPropertyRead {
+            stable_declaration: _,
+            source_member: _,
             name: declaration_name,
             owner,
             declaration_ty,
             interface,
-            field,
             context_access,
             compiler_intrinsic,
+            accessor: _,
         }) = self.info.expr_lowers.get(&e)
         {
             if let Some(intrinsic) = compiler_intrinsic {
@@ -17608,14 +17688,8 @@ impl<'a> Lower<'a> {
             // This node is the selected property operation in the non-null safe-call branch. Its
             // type is the property's own type; the surrounding safe-call lowering owns the nullable
             // merge and any primitive boxing (`array?.size`: this read is `Int`, the wrapper is `Int?`).
-            let read = self.add_property_read_target(
-                recv,
-                *owner,
-                declaration_name,
-                *declaration_ty,
-                *interface,
-                field.clone(),
-            );
+            let read =
+                self.add_property_read(recv, *owner, declaration_name, *declaration_ty, *interface);
             // A selected declaration may also carry an exact accessor identity. Preserve that semantic
             // selection beside the property node; a backend realization remains a separate decision.
             let physical_ty = if let Some(resolved) = self.info.resolved_member(e) {
@@ -17673,11 +17747,14 @@ impl<'a> Lower<'a> {
         }
         // A MEMBER EXTENSION PROPERTY read reached through the implicit-receiver path.
         if let Some(ExprLowering::MemberExtensionPropertyRead {
+            stable_declaration: _,
+            dispatch_receiver: _,
             owner,
             receiver,
             ty,
             context_params,
             context_args,
+            ..
         }) = self.info.expr_lowers.get(&e).cloned()
         {
             return self.lower_member_extension_property_read(
@@ -18299,46 +18376,49 @@ impl<'a> Lower<'a> {
             return None;
         };
         lowered.extend(context_values);
-        let mut arg_prelude = Vec::new();
         if let Some(slots) = self.info.resolved_call_arg_slots.get(&call).cloned() {
             let (provided, prelude) = self.lower_method_slot_args_source_order(
                 args,
                 &slots,
                 &target.sig.params[ctx_n..],
             )?;
-            let crate::ast::Stmt::LocalFun(function) = self.afile.stmt(stmt_id) else {
+            let mut physical = lowered.into_iter().map(Some).collect::<Vec<_>>();
+            physical.extend(provided);
+            if physical.len() != params.len() {
                 return None;
-            };
-            for (index, value) in provided.into_iter().enumerate() {
-                match value {
-                    Some(value) => lowered.push(value),
-                    None => {
-                        let parameter = function.params.get(ctx_n + index)?;
-                        lowered.push(self.lower_arg(
-                            parameter.default?,
-                            &ty_to_ir(target.sig.params[ctx_n + index]),
-                        )?);
-                    }
-                }
             }
-            arg_prelude = prelude;
+            if physical.iter().all(Option::is_some) {
+                let call = self.emit_local_call(fid, physical.into_iter().flatten().collect());
+                return Some(self.wrap_arg_prelude(call, prelude));
+            }
+            let mut masks = vec![0i32; default_mask_count(params.len())];
+            let mut arguments = Vec::with_capacity(params.len() + masks.len() + 1);
+            for (parameter, (value, ty)) in
+                physical.into_iter().zip(params.iter().copied()).enumerate()
+            {
+                arguments.push(value.unwrap_or_else(|| {
+                    masks[parameter / 32] |= default_mask_bit(parameter);
+                    self.zero_placeholder(ty)
+                }));
+            }
+            arguments.extend(
+                masks
+                    .into_iter()
+                    .map(|mask| self.emit_const(crate::ir::IrConst::Int(mask))),
+            );
+            arguments.push(self.emit_const(crate::ir::IrConst::Null));
+            let call = self.emit_local_default_call(fid, arguments);
+            return Some(self.wrap_arg_prelude(call, prelude));
         } else {
             for (arg, pt) in args.iter().zip(&params[ncap + receiver_count + ctx_n..]) {
                 lowered.push(self.lower_arg(*arg, pt)?);
             }
         }
-        if lowered.len() < params.len() {
-            let crate::ast::Stmt::LocalFun(f) = self.afile.stmt(stmt_id) else {
-                return None;
-            };
-            for (i, pt) in params[lowered.len()..].iter().enumerate() {
-                let fp = f.params.get(ctx_n + args.len() + i)?;
-                let def = fp.default?;
-                lowered.push(self.lower_arg(def, pt)?);
-            }
+        if lowered.len() != params.len() {
+            return None;
         }
         let call = self.emit_local_call(fid, lowered);
-        Some(self.wrap_arg_prelude(call, arg_prelude))
+        Some(call)
     }
 
     /// The reified-type substitution to record for a spliceable classpath extension call: pair the
@@ -19297,28 +19377,6 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn lower_plus_assign(
-        &mut self,
-        value: AstExprId,
-        target: CompoundAssignmentTarget,
-    ) -> Option<u32> {
-        let Expr::Binary { op, lhs, rhs, .. } = self.afile.expr(value).clone() else {
-            return None;
-        };
-        let aname = match op {
-            BinOp::Add => "plusAssign",
-            BinOp::Sub => "minusAssign",
-            BinOp::Mul => "timesAssign",
-            BinOp::Div => "divAssign",
-            BinOp::Rem => "remAssign",
-            _ => return None,
-        };
-        let recv_ty = self.info.ty(lhs);
-        let recv = self.expr(lhs)?;
-        self.lower_selected_op_call(recv, recv_ty, aname, &[rhs], *target.call, None, &[], None)
-            .map(|(call, _)| call)
-    }
-
     fn stmt(&mut self, s: crate::ast::StmtId) -> Option<u32> {
         let binding = match self.afile.stmt(s) {
             Stmt::Local { name, .. } => Some(name.clone()),
@@ -19409,11 +19467,36 @@ impl<'a> Lower<'a> {
         }
         // A compound assignment routed to an `opAssign` operator (checker-selected) — emit the call.
         if let Some(StmtLowering::PlusAssign(target)) = self.info.stmt_lowers.get(&s) {
-            if let Stmt::Assign { value, .. }
-            | Stmt::AssignMember { value, .. }
-            | Stmt::AssignIndex { value, .. } = self.afile.stmt(s).clone()
-            {
-                return self.lower_plus_assign(value, target.clone());
+            match self.afile.stmt(s).clone() {
+                Stmt::Assign { value, .. }
+                | Stmt::AssignMember { value, .. }
+                | Stmt::AssignIndex { value, .. } => {
+                    return self.lower_plus_assign(value, target.clone());
+                }
+                Stmt::CompoundAssign {
+                    target: receiver,
+                    value,
+                    op,
+                    ..
+                } => {
+                    return self.lower_plus_assign_operands(op, receiver, value, target.clone());
+                }
+                Stmt::Local { .. }
+                | Stmt::LocalLateinit { .. }
+                | Stmt::LocalDelegate { .. }
+                | Stmt::Destructure { .. }
+                | Stmt::IncDec { .. }
+                | Stmt::Return(_, _)
+                | Stmt::Break(_)
+                | Stmt::Continue(_)
+                | Stmt::While { .. }
+                | Stmt::DoWhile { .. }
+                | Stmt::For { .. }
+                | Stmt::ForEach { .. }
+                | Stmt::Expr(_)
+                | Stmt::LocalFun(_)
+                | Stmt::LocalClass(_)
+                | Stmt::LocalTypeAlias(_) => {}
             }
         }
         match self.afile.stmt(s).clone() {
@@ -19785,10 +19868,12 @@ impl<'a> Lower<'a> {
                                         .with_is_final(true)
                                         .with_is_suspend(false),
                                     annotations: Vec::new(),
+                                    equality_bound: None,
                                     vararg_index: None,
                                     required: physical_params.len(),
                                     param_defaults: Vec::new(),
                                     exact_params: Vec::new(),
+                                    no_infer_params: Vec::new(),
                                     implicit_integer_coercion: Vec::new(),
                                     param_default_values: Vec::new(),
                                     param_names: Vec::new(),
@@ -19797,6 +19882,7 @@ impl<'a> Lower<'a> {
                                     visibility: crate::types::Visibility::Public,
                                     context_count: 0,
                                     source_decl: None,
+                                    stable_declaration: None,
                                     source_file: None,
                                     source_member: None,
                                     source_receiver: None,
@@ -19809,7 +19895,8 @@ impl<'a> Lower<'a> {
                                 *interface,
                             )
                         }
-                        DelegateGetValueTarget::Extension(_) => return None,
+                        DelegateGetValueTarget::Extension { .. }
+                        | DelegateGetValueTarget::MemberExtension { .. } => return None,
                     };
                 let prop_ty = ty
                     .as_ref()
@@ -19840,10 +19927,12 @@ impl<'a> Lower<'a> {
                                     .with_is_final(true)
                                     .with_is_suspend(false),
                                 annotations: Vec::new(),
+                                equality_bound: None,
                                 vararg_index: None,
                                 required: physical_params.len(),
                                 param_defaults: Vec::new(),
                                 exact_params: Vec::new(),
+                                no_infer_params: Vec::new(),
                                 implicit_integer_coercion: Vec::new(),
                                 param_default_values: Vec::new(),
                                 param_names: Vec::new(),
@@ -19852,6 +19941,7 @@ impl<'a> Lower<'a> {
                                 visibility: crate::types::Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
+                                stable_declaration: None,
                                 source_file: None,
                                 source_member: None,
                                 source_receiver: None,
@@ -19862,7 +19952,8 @@ impl<'a> Lower<'a> {
                             Some(name.clone()),
                             *interface,
                         ),
-                        DelegateGetValueTarget::Extension(_) => return None,
+                        DelegateGetValueTarget::Extension { .. }
+                        | DelegateGetValueTarget::MemberExtension { .. } => return None,
                     }
                 } else {
                     (None, None, false)
@@ -19910,7 +20001,7 @@ impl<'a> Lower<'a> {
                 // never guesses from the source spelling (which may instead be a local named `field`).
                 if matches!(
                     self.info.stmt_lowers.get(&s),
-                    Some(StmtLowering::BackingFieldWrite)
+                    Some(StmtLowering::BackingFieldWrite { .. })
                 ) {
                     let Some(ty) = self.selected_backing_field_ty() else {
                         return self.bail("captured backing field write is not lowered");
@@ -19957,6 +20048,7 @@ impl<'a> Lower<'a> {
                     receiver,
                     owner,
                     ty,
+                    ..
                 }) = self.info.stmt_lowers.get(&s).cloned()
                 {
                     let receiver_value = self
@@ -20098,7 +20190,7 @@ impl<'a> Lower<'a> {
                 };
                 if matches!(
                     self.info.stmt_lowers.get(&s),
-                    Some(StmtLowering::BackingFieldWrite)
+                    Some(StmtLowering::BackingFieldWrite { .. })
                 ) {
                     return self.lower_selected_backing_field_incdec(site, dec, prefix, false);
                 }
@@ -20764,7 +20856,11 @@ impl<'a> Lower<'a> {
         if receiver_count != 0 {
             names.push("this".to_string());
         }
-        names.extend(ast::lambda_params_or_implicit(&params, value_arity)?);
+        names.extend(ast::lambda_params_or_implicit(
+            &params,
+            value_arity,
+            self.afile.lambda_explicit_arrows.contains(&lambda.0),
+        )?);
         if names.len() != args.len() || signature.params.len() != args.len() {
             return self.bail("selected inline body plan lambda arity mismatch");
         }
@@ -20989,6 +21085,9 @@ impl<'a> Lower<'a> {
                     Some(result),
                 ))
             }
+            // The production checked-FIR path consumes this provider plan. The legacy lowerer has
+            // its pre-existing suspend-only collection expansion earlier in expression lowering.
+            crate::libraries::InlineBodyPlan::CollectionTransform { .. } => None,
         }
     }
 
@@ -21209,39 +21308,31 @@ impl<'a> Lower<'a> {
                 }
             };
         }
-        // A `@JvmField` companion `var`: the checker selected the OWNER class's public static field
-        // as the complete write target — `putstatic owner.name`, no setter exists anywhere. A bare
-        // classifier/companion receiver (`C`, `C.Companion` — a recorded `SingletonValue`) runs no
-        // code and is not materialized, but any OTHER receiver expression keeps its effects in
-        // kotlinc's order: receiver, then value, then `putstatic` (measured: `side().v = 7`
-        // evaluates `side()` and pops; the READ of the same shape drops the call entirely).
-        if let Some(StmtLowering::StaticPropertyWrite {
-            owner,
-            name,
-            ty,
-            descriptor,
+        // A receiver-less associated property write. A bare classifier/companion receiver (`C`,
+        // `C.Companion`) has no runtime evaluation, while any other source receiver expression keeps
+        // its side effects before the write. The target backend alone decides whether the selected
+        // property is realized through storage or an accessor.
+        if let Some(StmtLowering::AssociatedPropertyWrite {
+            owner, name, ty, ..
         }) = self.info.stmt_lowers.get(&stmt).cloned()
         {
-            let external_field = descriptor.is_some();
-            let receiver_effect = if external_field
-                || matches!(
-                    self.info.expr_lowers.get(&receiver),
-                    Some(ExprLowering::SingletonValue(_))
-                ) {
+            let receiver_effect = if matches!(
+                self.info.expr_lowers.get(&receiver),
+                Some(ExprLowering::SingletonValue(_))
+            ) {
                 None
             } else {
                 Some(self.expr(receiver)?)
             };
             let v = self.lower_arg(value, &ty_to_ir(ty))?;
-            let descriptor = match descriptor {
-                Some(descriptor) => descriptor,
-                None => self.runtime.type_descriptor(ty)?,
-            };
-            let store = self.ir.add_expr(IrExpr::SetExternalStaticField {
+            let store = self.ir.add_expr(IrExpr::PropertyWrite {
+                receiver: None,
                 owner,
                 name,
-                descriptor,
                 value: v,
+                ty,
+                interface: false,
+                operation: None,
             });
             return Some(match receiver_effect {
                 Some(effect) => self.ir.add_expr(IrExpr::Block {
@@ -21256,11 +21347,14 @@ impl<'a> Lower<'a> {
         // backend's decision, made from the owner's declaration. Mirrors the read in
         // `lower_member_read_on`.
         if let Some(StmtLowering::MemberPropertyWrite {
+            stable_declaration: _,
+            backing_field: _,
             owner,
             ty,
             interface,
-            field,
             context_access,
+            setter: _,
+            setter_declaration: _,
         }) = self.info.stmt_lowers.get(&stmt).cloned()
         {
             let r = self.expr(receiver)?;
@@ -21268,18 +21362,21 @@ impl<'a> Lower<'a> {
                 return self.lower_property_set(&access, value, Some((r, self.info.ty(receiver))));
             }
             let v = self.lower_arg(value, &ty_to_ir(ty))?;
-            let write = self.add_property_write_target(r, owner, name, v, ty, interface, field);
+            let write = self.add_property_write(r, owner, name, v, ty, interface);
             return Some(write);
         }
         // A `var` MEMBER EXTENSION PROPERTY write (`i.foo = v` where `class C { var Int.foo }`) —
         // the write analogue of the read in `lower_member_read_on`: call the owner's
         // `setX(Recv, T)` accessor with dispatch `this` from the implicit-receiver scope.
         if let Some(StmtLowering::MemberExtensionPropertyWrite {
+            stable_declaration: _,
+            dispatch_receiver: _,
             owner,
             receiver: recv_ty,
             ty,
             context_params,
             context_args,
+            ..
         }) = self.info.stmt_lowers.get(&stmt).cloned()
         {
             let sname = property_setter_name(name);
@@ -22019,7 +22116,11 @@ impl<'a> Lower<'a> {
                         .params
                         .len()
                         .saturating_sub(context_count + receiver_count);
-                    let value_params = ast::lambda_params_or_implicit(&params, value_arity)?;
+                    let value_params = ast::lambda_params_or_implicit(
+                        &params,
+                        value_arity,
+                        self.afile.lambda_explicit_arrows.contains(&args[ai].0),
+                    )?;
                     let mut params = vec!["this".to_string(); context_count + receiver_count];
                     params.extend(value_params);
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
@@ -22633,29 +22734,31 @@ impl<'a> Lower<'a> {
                 .map(|function| function.name.clone())
         };
         let name = match &self.ir.exprs[value as usize] {
-            IrExpr::Call { callee, .. } => match callee {
-                Callee::Static { name, .. }
-                | Callee::Virtual { name, .. }
-                | Callee::Special { name, .. }
-                | Callee::CrossFile { name, .. } => Some(name.clone()),
-                Callee::Local(function) | Callee::LocalDefault(function) => {
-                    named_function(function)
+            IrExpr::Call { callee, .. } => {
+                if let Some(function) = callee.source_function() {
+                    named_function(&function)
+                } else {
+                    match callee {
+                        Callee::Static { name, .. }
+                        | Callee::Virtual { name, .. }
+                        | Callee::Special { name, .. }
+                        | Callee::Super { name, .. }
+                        | Callee::CrossFile { name, .. }
+                        | Callee::Module { name, .. } => Some(name.clone()),
+                        Callee::Intrinsic { .. } | Callee::External { .. } => None,
+                        _ => unreachable!("source-function callees were handled above"),
+                    }
                 }
-                Callee::ClassStatic { function, .. } => named_function(function),
-                Callee::Intrinsic { .. } => None,
-            },
+            }
             IrExpr::MethodCall { class, index, .. } => self
                 .ir
                 .classes
                 .get(*class as usize)
                 .and_then(|class| class.methods.get(*index as usize))
                 .and_then(named_function),
-            // A property read is its ACCESSOR call, which is what kotlinc names — unless resolution
-            // selected a physical field, whose read names the field with no argument list.
-            IrExpr::PropertyRead { name, field, .. } => match field {
-                Some(field) => return Some(field.name.clone()),
-                None => Some(crate::names::property_getter_name(name)),
-            },
+            // Common lowering records the semantic property operation. Its target-specific
+            // realization is deliberately unavailable here.
+            IrExpr::PropertyRead { name, .. } => Some(crate::names::property_getter_name(name)),
             _ => None,
         }?;
         Some(format!("{name}(...)"))
@@ -23082,7 +23185,13 @@ impl<'a> Lower<'a> {
                     // continuation argument appended.
                     self.ir
                         .intrinsic_suspension_points
-                        .insert(block, logical_ret);
+                        .insert(
+                            block,
+                            crate::ir::IrIntrinsicSuspensionPoint {
+                                result: logical_ret,
+                                kind: crate::ir::IrIntrinsicSuspensionKind::Unintercepted,
+                            },
+                        );
                     // Bind the block to a temp: in any position (statement, value, tail) the
                     // block-splicing transforms dissolve the OUTER grouping but preserve the
                     // `Variable { init: <suspension point> }` — the exact bound-local shape
@@ -23117,6 +23226,7 @@ impl<'a> Lower<'a> {
                     params,
                     ret,
                     origin,
+                    property_callee: _,
                     implicit_receiver,
                     suspend,
                 }) = self.info.expr_lowers.get(&e).cloned()
@@ -23607,6 +23717,17 @@ impl<'a> Lower<'a> {
             // non-null lhs unboxes to the primitive and the rhs coerces to it too.
             let result_ty = self.info.ty(e);
             let mut get2 = self.emit_get_value(v);
+            if result_ty == Ty::Unit {
+                // A nullable-Unit lhs is represented by `Unit.INSTANCE` or null, while an ordinary
+                // Unit-producing rhs may lower to a void effect. Materialize the singleton after
+                // either effect so both IR branches have one identical reference-shaped value;
+                // later consumers can discard that stored Unit normally.
+                let present = self.unit_value_after_effect(get2);
+                let fallback_effect = self.expr(rhs)?;
+                let fallback = self.unit_value_after_effect(fallback_effect);
+                let when = self.emit_when(vec![(Some(cond), present), (None, fallback)]);
+                return Some(self.emit_block(vec![var], Some(when)));
+            }
             if self.has_scalar_value_repr(result_ty) && lty.is_reference() {
                 // Unbox to the wrapper's OWN primitive (`Integer`→`Int`), then numeric-convert to the
                 // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
@@ -23670,9 +23791,14 @@ impl<'a> Lower<'a> {
             {
                 return self.bail(reason);
             }
+            if matches!(
+                self.info.expr_lowers.get(&e),
+                Some(ExprLowering::FunctionInvokeReference { .. })
+            ) {
+                return self.bail("function-value invoke reference requires checked FIR lowering");
+            }
             if let Some(ExprLowering::AdaptedRef {
                 target,
-                owner,
                 target_default_values,
                 adapted_params,
                 ret,
@@ -23680,9 +23806,18 @@ impl<'a> Lower<'a> {
                 target_vararg,
                 vararg_collect,
                 argument_mapping,
+                resolved_argument_mapping: _,
                 suspend_conversion,
+                stable_declaration,
             }) = self.info.expr_lowers.get(&e).cloned()
             {
+                if stable_declaration.is_some()
+                    || !matches!(target.origin, crate::libraries::Origin::Library)
+                {
+                    return self.bail(
+                        "same-module adapted callable reference requires checked FIR lowering",
+                    );
+                }
                 if suspend_conversion {
                     return self
                         .bail("suspend conversion of a regular callable reference is not lowered");
@@ -23698,7 +23833,7 @@ impl<'a> Lower<'a> {
                 return self.lower_adapted_ref(
                     e,
                     &target,
-                    owner,
+                    Some(target.owner),
                     &target_default_values,
                     &adapted_params,
                     ret,
@@ -23822,13 +23957,13 @@ impl<'a> Lower<'a> {
                         );
                     }
                     (
-                        CallableReferenceBinding::Singleton(internal),
+                        CallableReferenceBinding::Singleton(singleton),
                         CallableReferenceTarget::Member {
                             receiver: selected_receiver,
                             member,
                         },
                     ) => {
-                        let capture = self.selected_singleton_value(internal)?;
+                        let capture = self.selected_singleton_value(singleton.classifier)?;
                         return self.lower_bound_selected_member_ref(
                             e,
                             capture,
@@ -23845,8 +23980,20 @@ impl<'a> Lower<'a> {
                     }
                     (
                         CallableReferenceBinding::Unbound,
-                        CallableReferenceTarget::Extension { callable, owner },
+                        CallableReferenceTarget::Extension {
+                            callable,
+                            stable_declaration,
+                            companion_extension: _,
+                        },
                     ) => {
+                        if stable_declaration.is_some()
+                            || !matches!(callable.origin, crate::libraries::Origin::Library)
+                        {
+                            return self.bail(
+                                "same-module extension reference requires checked FIR lowering",
+                            );
+                        }
+                        let owner = Some(callable.owner);
                         let Ty::Fun(signature) =
                             self.info.callable_reference_type(e).unwrap_or(Ty::Error)
                         else {
@@ -23896,8 +24043,20 @@ impl<'a> Lower<'a> {
                     }
                     (
                         CallableReferenceBinding::Bound,
-                        CallableReferenceTarget::Extension { callable, owner },
+                        CallableReferenceTarget::Extension {
+                            callable,
+                            stable_declaration,
+                            companion_extension: _,
+                        },
                     ) => {
+                        if stable_declaration.is_some()
+                            || !matches!(callable.origin, crate::libraries::Origin::Library)
+                        {
+                            return self.bail(
+                                "same-module extension reference requires checked FIR lowering",
+                            );
+                        }
+                        let owner = Some(callable.owner);
                         let (Some(recv), Ty::Fun(signature)) = (
                             receiver,
                             self.info.callable_reference_type(e).unwrap_or(Ty::Error),
@@ -23959,18 +24118,16 @@ impl<'a> Lower<'a> {
             {
                 let ResolvedTopLevelFunctionRef {
                     target,
-                    emit_name,
-                    owner,
+                    stable_declaration,
                 } = *reference;
-                let owner = match owner {
-                    TopLevelReferenceOwner::CurrentFile => None,
-                    TopLevelReferenceOwner::External(owner) => Some(owner),
-                    TopLevelReferenceOwner::Unavailable => {
-                        return self.bail(
-                            "top-level callable reference has no registered physical facade",
-                        );
-                    }
-                };
+                if stable_declaration.is_some()
+                    || !matches!(target.origin, crate::libraries::Origin::Library)
+                {
+                    return self.bail(
+                        "same-module top-level callable reference requires checked FIR lowering",
+                    );
+                }
+                let owner = Some(target.owner);
                 let Ty::Fun(signature) = self.info.callable_reference_type(e).unwrap_or(Ty::Error)
                 else {
                     return None;
@@ -24013,7 +24170,7 @@ impl<'a> Lower<'a> {
                     1,
                     crate::ir::FrDispatch::Static,
                     owner,
-                    emit_name,
+                    target.name,
                     false,
                     tys_to_ir(&invoke_params),
                     ty_to_ir(invoke_ret),
@@ -24039,7 +24196,8 @@ impl<'a> Lower<'a> {
             // closure over the lifted static method, capturing the same outer locals the method
             // takes as leading params. A `Unit` SAM-return is wrapped (`invoke` yields the `Unit`
             // singleton); `Nothing` stays unmodeled.
-            if let Some(ExprLowering::LocalFunction { stmt_id }) = self.info.expr_lowers.get(&e) {
+            if let Some(ExprLowering::LocalFunction { stmt_id, .. }) = self.info.expr_lowers.get(&e)
+            {
                 if let Some(&fid) = self.local_fun_ids.get(stmt_id) {
                     if sig.ret == Ty::Nothing {
                         return None;
@@ -24192,6 +24350,9 @@ impl<'a> Lower<'a> {
                 self.info.expr_lowers.get(&e).cloned()
             {
                 let property = &access.property;
+                if property.is_companion_extension() {
+                    return self.emit_extension_property_get(e, &n, *access, 0);
+                }
                 let (receiver, this_ty) = if self.info.implicit_receiver_selections.contains_key(&e)
                 {
                     self.selected_implicit_receiver(e)?
@@ -24225,7 +24386,7 @@ impl<'a> Lower<'a> {
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
-                Some(ExprLowering::StaticPropertyRead { .. })
+                Some(ExprLowering::AssociatedPropertyRead { .. })
             ) {
                 return self.lower_recorded_static_property(e);
             }
@@ -24391,17 +24552,26 @@ impl<'a> Lower<'a> {
             }
             // `::prop.isInitialized` — a null check on the `lateinit` backing field, the shape kotlinc
             // emits (`getfield prop; ifnull`). No `KProperty` value is materialized.
-            if let Some(ExprLowering::LateinitInitialized { owner, property }) =
-                self.info.expr_lowers.get(&e).cloned()
+            if let Some(ExprLowering::LateinitInitialized {
+                owner,
+                property,
+                top_level,
+                ..
+            }) = self.info.expr_lowers.get(&e).cloned()
             {
-                let (this_v, _) = self.lookup("this")?;
-                let receiver = self.emit_get_value(this_v);
-                let (class, index, _) = self.own_backing_field_slot(owner, &property)?;
-                let raw = self.ir.add_expr(IrExpr::LateinitInitialized {
-                    receiver,
-                    class,
-                    index,
-                });
+                let raw = if top_level {
+                    let &(index, _) = self.statics.get(&property)?;
+                    self.emit_get_static(index)
+                } else {
+                    let (this_v, _) = self.lookup("this")?;
+                    let receiver = self.emit_get_value(this_v);
+                    let (class, index, _) = self.own_backing_field_slot(owner, &property)?;
+                    self.ir.add_expr(IrExpr::LateinitInitialized {
+                        receiver,
+                        class,
+                        index,
+                    })
+                };
                 let null = self.emit_const(IrConst::Null);
                 return Some(self.emit_primitive_bin_op(IrBinOp::Ne, raw, null));
             }
@@ -24441,7 +24611,7 @@ impl<'a> Lower<'a> {
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
-                Some(ExprLowering::StaticPropertyRead { .. })
+                Some(ExprLowering::AssociatedPropertyRead { .. })
             ) {
                 return self.lower_recorded_static_property(e);
             }
@@ -24468,6 +24638,9 @@ impl<'a> Lower<'a> {
                 self.info.expr_lowers.get(&e).cloned()
             {
                 let property = &access.property;
+                if property.is_companion_extension() {
+                    return self.emit_extension_property_get(e, &name, *access, 0);
+                }
                 let target = property.receiver.unwrap_or_else(|| self.info.ty(receiver));
                 let receiver = self.lower_arg(receiver, &target)?;
                 return self.emit_extension_property_get(e, &name, *access, receiver);
@@ -24476,11 +24649,14 @@ impl<'a> Lower<'a> {
             // checker selected the declaring owner — call its `getX(Recv)` accessor with dispatch
             // `this` from the implicit-receiver scope.
             if let Some(ExprLowering::MemberExtensionPropertyRead {
+                stable_declaration: _,
+                dispatch_receiver: _,
                 owner,
                 receiver: ext_receiver,
                 ty,
                 context_params,
                 context_args,
+                ..
             }) = self.info.expr_lowers.get(&e).cloned()
             {
                 let recv = self.expr(receiver)?;
@@ -25689,7 +25865,7 @@ impl<'a> Lower<'a> {
     ///   is skipped rather than risk the wrong equality. Corpus case:
     ///   `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`.
     fn when_boxed_comparand(&self, subject_ty: Ty, condition: AstExprId) -> Option<Ty> {
-        if !subject_ty.is_reference() || is_when_test(self.afile, condition) {
+        if !subject_ty.is_reference() {
             return None;
         }
         let ct = self.info.ty(condition);
@@ -25738,7 +25914,8 @@ impl<'a> Lower<'a> {
             // `const val` comparand isn't materialized yet.
             if subject.is_some_and(|s| self.info.ty(s).is_unsigned())
                 && !arms.iter().all(|arm| {
-                    arm.conditions.iter().all(|&c| {
+                    arm.conditions.iter().all(|condition| {
+                        let c = condition.expression();
                         matches!(self.afile.expr(c), Expr::UIntLit(_) | Expr::ULongLit(_))
                     })
                 })
@@ -25757,10 +25934,11 @@ impl<'a> Lower<'a> {
             let subj_ty = subject.map(|subj| self.info.ty(subj));
             if let Some(st) = subj_ty {
                 for arm in &arms {
-                    for &c in &arm.conditions {
+                    for &condition in &arm.conditions {
+                        let c = condition.expression();
                         // `is`/`in` conditions are complete boolean tests, not `==` comparands —
                         // their type (`Boolean`) needn't match the subject's primitiveness.
-                        if is_when_test(self.afile, c) {
+                        if condition.is_predicate() {
                             continue;
                         }
                         // A REFERENCE subject with a primitive comparand (`when (x: Any) { 1 -> … }`)
@@ -25818,10 +25996,11 @@ impl<'a> Lower<'a> {
                     branches.push((None, body)); // else (real, or the exhaustive last arm)
                 } else {
                     let mut cond: Option<u32> = None;
-                    for &c in &arm.conditions {
+                    for &condition in &arm.conditions {
+                        let c = condition.expression();
                         let test = if subject.is_none() {
                             self.lower_arg(c, &ty_to_ir(Ty::Boolean))?
-                        } else if is_when_test(self.afile, c) {
+                        } else if condition.is_predicate() {
                             // Subject tests already include their comparison.
                             self.expr(c)?
                         } else {
@@ -25899,10 +26078,13 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         if let Some(ExprLowering::SamConstructor {
             internal,
+            result: _,
             method,
             descriptor,
             params,
             ret,
+            declared_params,
+            declared_ret,
             context_count,
             has_receiver,
             suspend,
@@ -25915,10 +26097,10 @@ impl<'a> Lower<'a> {
                 internal,
                 method,
                 descriptor,
-                params: params.clone(),
+                params,
                 ret,
-                declared_params: params,
-                declared_ret: ret,
+                declared_params,
+                declared_ret,
                 context_count,
                 has_receiver,
                 suspend,
@@ -26080,13 +26262,15 @@ impl<'a> Lower<'a> {
                     crate::libraries::CompilerIntrinsic::EnumValues => {
                         return crate::synthetics::lower_enum_values(self, &call);
                     }
-                    crate::libraries::CompilerIntrinsic::ForEach
+                    crate::libraries::CompilerIntrinsic::ArrayFactory(_)
+                    | crate::libraries::CompilerIntrinsic::ForEach
                     | crate::libraries::CompilerIntrinsic::ForEachIndexed
                     | crate::libraries::CompilerIntrinsic::Assert
                     | crate::libraries::CompilerIntrinsic::AssertFailsWith
                     | crate::libraries::CompilerIntrinsic::Print
                     | crate::libraries::CompilerIntrinsic::Println
                     | crate::libraries::CompilerIntrinsic::StartCoroutine
+                    | crate::libraries::CompilerIntrinsic::CoroutineContext
                     | crate::libraries::CompilerIntrinsic::CoroutineSuspended
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
@@ -26101,7 +26285,19 @@ impl<'a> Lower<'a> {
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString => {}
                     crate::libraries::CompilerIntrinsic::ArraySize
                     | crate::libraries::CompilerIntrinsic::CharCode
-                    | crate::libraries::CompilerIntrinsic::StringLength => return None,
+                    | crate::libraries::CompilerIntrinsic::StringLength
+                    | crate::libraries::CompilerIntrinsic::NumericConversion
+                    | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
+                    | crate::libraries::CompilerIntrinsic::PrimitiveCompare
+                    | crate::libraries::CompilerIntrinsic::BooleanNot
+                    | crate::libraries::CompilerIntrinsic::PrimitiveBitAnd
+                    | crate::libraries::CompilerIntrinsic::PrimitiveBitOr
+                    | crate::libraries::CompilerIntrinsic::PrimitiveBitXor
+                    | crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft
+                    | crate::libraries::CompilerIntrinsic::PrimitiveShiftRight
+                    | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
+                    | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
+                    | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_) => return None,
                 }
             }
             if let Some(ExprLowering::CompilerSynthetic(kind)) = self.info.expr_lowers.get(&e) {
@@ -26571,7 +26767,7 @@ impl<'a> Lower<'a> {
                     let folded = match string_normalization {
                         Some(crate::libraries::CompilerIntrinsic::TrimIndent) => trim_indent(&s),
                         Some(crate::libraries::CompilerIntrinsic::TrimMargin) => {
-                            trim_margin(&s, "|")
+                            trim_margin(&s, &KtString::from("|"))
                         }
                         _ => unreachable!(),
                     };
@@ -27287,8 +27483,12 @@ impl<'a> Lower<'a> {
                 let call = self.coerce_to_static(call, ret, physical_ret);
                 self.wrap_arg_prelude(call, prelude)
             } else if let Some((internal, m)) = {
-                // A `@JvmStatic` member of a classpath `object` (`IdGen.of(x)`) → a static
-                // method on the object class (`invokestatic`), found in the type's static list.
+                // A callable selected through a classifier namespace has one of two semantic call
+                // shapes. A genuine associated/static declaration has no dispatch receiver. An
+                // ordinary member of an object or companion carries its exact singleton dispatch;
+                // materialize that Kotlin value in common IR and leave its physical storage to the
+                // backend. Do not collapse both shapes into a receiver-less call: a target pass can
+                // choose the invocation instruction, but it cannot recreate a missing operand.
                 rt.obj_internal()
                     .zip(self.info.resolved_companion(e).cloned())
             } {
@@ -27299,10 +27499,42 @@ impl<'a> Lower<'a> {
                     .len()
                     .saturating_sub(usize::from(m.call_sig.vararg));
                 let a = self.lower_call_args_vararg(&args, &params, m.call_sig.vararg, fixed)?;
-                let call = self.emit_static_call(owner, m.name, m.descriptor, m.inline, a);
+                let call = if let Some(singleton) = m.singleton_dispatch.as_deref() {
+                    let interface = m.is_interface();
+                    let receiver = self.ir.add_expr(IrExpr::SingletonValue {
+                        classifier: singleton.classifier,
+                    });
+                    let physical_params = if m.physical_params.len() == m.params.len() {
+                        m.physical_params
+                    } else {
+                        m.params
+                    };
+                    let params = m
+                        .descriptor
+                        .is_empty()
+                        .then_some((tys_to_ir(&physical_params), ty_to_ir(m.physical_ret)));
+                    self.emit_call(
+                        Callee::Virtual {
+                            owner,
+                            name: m.name,
+                            descriptor: m.descriptor,
+                            params,
+                            interface,
+                        },
+                        Some(receiver),
+                        a,
+                    )
+                } else {
+                    self.emit_static_call(owner, m.name, m.descriptor, m.inline, a)
+                };
                 self.coerce_to_static(call, m.ret, m.physical_ret)
             } else if let Some(c) = self.info.resolved_extension(e).cloned() {
-                if let Some(plan) = c.inline_body_plan.as_deref() {
+                if let Some(plan) = c.inline_body_plan.as_deref().filter(|plan| {
+                    !matches!(
+                        plan,
+                        crate::libraries::InlineBodyPlan::CollectionTransform { .. }
+                    )
+                }) {
                     return self
                         .lower_extension_inline_body_plan(e, receiver, &args, &c, plan, &name);
                 }
@@ -27599,103 +27831,6 @@ fn has_byte_or_short_param(params: &[Ty]) -> bool {
             || p.array_elem()
                 .is_some_and(|elem| matches!(elem, Ty::Byte | Ty::Short))
     })
-}
-
-/// A `when (subject) { … }` condition that is a complete boolean test of the subject (`is`/`!is`,
-/// `in`/`!in` range) — built by the parser as a structural `Is`/`InRange` node, so it is used directly,
-/// not compared with `subject == cond`.
-fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
-    matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
-}
-
-/// Whether a UTF-16 code unit is `Char.isWhitespace()` — Kotlin's predicate, which on the JVM is
-/// `Character.isWhitespace(c) || Character.isSpaceChar(c)`.
-///
-/// That is NOT Rust's `char::is_whitespace` (the Unicode `White_Space` property). Compared against
-/// JBR 21 over the whole BMP, the two sets differ in exactly five code points: Kotlin also counts
-/// the separators `U+001C..U+001F`, and does not count `U+0085` (NEL — a `Cc` control that is
-/// neither `isWhitespace` nor `isSpaceChar`). The rest — including `U+00A0`, `U+2007` and `U+202F`,
-/// which `Character.isWhitespace` alone excludes — agree, because `isSpaceChar` re-admits every
-/// `Zs`/`Zl`/`Zp` character. This decides where an indent ends, so the difference is observable:
-/// `"\u{85}a".trimIndent()` keeps its leading NEL under kotlinc.
-///
-/// A surrogate half is not whitespace and has no scalar form, so it answers `false` without a lossy
-/// conversion.
-fn is_unit_whitespace(unit: u16) -> bool {
-    if (0x1c..=0x1f).contains(&unit) {
-        return true;
-    }
-    unit != 0x85 && char::from_u32(unit as u32).is_some_and(char::is_whitespace)
-}
-
-/// `String.isBlank()` over code units.
-fn is_unit_line_blank(line: &[u16]) -> bool {
-    line.iter().all(|&u| is_unit_whitespace(u))
-}
-
-const LF: u16 = b'\n' as u16;
-
-/// Join `lines` with `\n`, the shared tail of `trimIndent`/`trimMargin`.
-fn join_unit_lines(lines: Vec<Vec<u16>>) -> KtString {
-    let mut out: Vec<u16> = Vec::new();
-    for (i, line) in lines.into_iter().enumerate() {
-        if i > 0 {
-            out.push(LF);
-        }
-        out.extend_from_slice(&line);
-    }
-    KtString::from_units(out)
-}
-
-/// `String.trimIndent()`: split into lines, drop the common minimal indentation of the non-blank
-/// lines from every line, and omit a blank FIRST or LAST line — matching `kotlin.text.trimIndent`.
-///
-/// Works in UTF-16 code units, not `char`s: the receiver may contain an unpaired surrogate (folded
-/// in from a `${'\uD800'}` template part), and Kotlin measures the indent in code units anyway.
-fn trim_indent(s: &KtString) -> KtString {
-    let units: Vec<u16> = s.units().collect();
-    let lines: Vec<&[u16]> = units.split(|&u| u == LF).collect();
-    let min_indent = lines
-        .iter()
-        .filter(|l| !is_unit_line_blank(l))
-        .map(|l| l.iter().take_while(|&&u| is_unit_whitespace(u)).count())
-        .min()
-        .unwrap_or(0);
-    let last = lines.len().saturating_sub(1);
-    let mut out: Vec<Vec<u16>> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if (i == 0 || i == last) && is_unit_line_blank(line) {
-            continue;
-        }
-        // A blank line may be shorter than `min_indent`; only cut what is there.
-        let cut = min_indent.min(line.len());
-        out.push(line[cut..].to_vec());
-    }
-    join_unit_lines(out)
-}
-
-/// `String.trimMargin(prefix)`: for each line, remove leading whitespace up to and including the
-/// first `prefix`; a line without the prefix is left unchanged. A blank FIRST or LAST line is
-/// omitted — matching `kotlin.text.trimMargin`.
-fn trim_margin(s: &KtString, margin: &str) -> KtString {
-    let margin: Vec<u16> = margin.encode_utf16().collect();
-    let units: Vec<u16> = s.units().collect();
-    let lines: Vec<&[u16]> = units.split(|&u| u == LF).collect();
-    let last = lines.len().saturating_sub(1);
-    let mut out: Vec<Vec<u16>> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if (i == 0 || i == last) && is_unit_line_blank(line) {
-            continue;
-        }
-        let indent = line.iter().take_while(|&&u| is_unit_whitespace(u)).count();
-        let trimmed = &line[indent..];
-        if trimmed.starts_with(&margin) {
-            out.push(trimmed[margin.len()..].to_vec());
-        } else {
-            out.push(line.to_vec());
-        }
-    }
-    join_unit_lines(out)
 }
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
@@ -28105,9 +28240,9 @@ fn collect_shared_cell_stmt(
         Stmt::Destructure { entries, init } => {
             collect_shared_cell_expr(file, *init, info, reassigned, scopes, out);
             if let Some(scope) = scopes.last_mut() {
-                for (name, is_var) in entries {
-                    if name != "_" {
-                        scope.insert(name.clone(), *is_var);
+                for entry in entries {
+                    if !entry.ignored {
+                        scope.insert(entry.name.clone(), entry.mutable);
                     }
                 }
             }
@@ -28326,7 +28461,10 @@ fn outer_local_access_stmt(
             let access = outer_local_access_expr(file, *init, name, shadowed);
             (
                 access,
-                shadowed || entries.iter().any(|(n, _)| n != "_" && n == name),
+                shadowed
+                    || entries
+                        .iter()
+                        .any(|entry| !entry.ignored && entry.name == name),
             )
         }
         Stmt::Assign { name: n, value } => {
@@ -28555,7 +28693,7 @@ fn checked_applied_annotation<'a>(
     })
 }
 
-fn class_field_annotations(
+pub(crate) fn class_field_annotations(
     c: &ast::ClassDecl,
     info: &FrontendTypeInfo,
 ) -> Vec<crate::ir::FieldAnnotations> {
@@ -28609,7 +28747,7 @@ fn class_field_annotations(
 /// argument such as `@SerialName("$prefix.bar")` never reaches `applied_annotation`), and property
 /// applications were never checked before. Recording what folds keeps the previous behaviour for the
 /// rest instead of rejecting sources kotlinc accepts.
-fn property_site_annotations(
+pub(crate) fn property_site_annotations(
     declared: &[ast::AnnotationRef],
     info: &FrontendTypeInfo,
     on_constructor_parameter: bool,
@@ -28636,13 +28774,37 @@ fn property_site_annotations(
     )
 }
 
+/// Checked annotations on primary-constructor parameters in physical constructor order. Compiler-
+/// supplied leading parameters have no source declaration and therefore receive empty entries.
+pub(crate) fn primary_constructor_parameter_annotations(
+    class: &ast::ClassDecl,
+    info: &FrontendTypeInfo,
+    leading: usize,
+) -> Vec<crate::ir::DeclarationAnnotations> {
+    parameter_annotation_table(
+        leading,
+        class.props.iter().map(|parameter| {
+            if parameter.is_property {
+                property_site_annotations(
+                    &parameter.annotations,
+                    info,
+                    true,
+                    crate::types::PropertyAnnotationSite::ValueParameter,
+                )
+            } else {
+                value_parameter_annotations(&parameter.annotations, info)
+            }
+        }),
+    )
+}
+
 /// The user annotations applied to this class's PROPERTY declarations that Kotlin's use-site
 /// defaulting places on the property itself. A property application with no use-site prefix takes
 /// the first target the annotation declares among `param` → `property` → `field`, and only the
 /// middle one belongs here: a primary-constructor parameter's own annotation is a parameter
 /// annotation, and a FIELD-targeted one goes through [`class_field_annotations`]. SOURCE-retained
 /// annotations drop out of both, as everywhere else.
-fn class_property_annotations(
+pub(crate) fn class_property_annotations(
     c: &ast::ClassDecl,
     info: &FrontendTypeInfo,
 ) -> Vec<crate::ir::PropertyAnnotations> {
@@ -28784,7 +28946,7 @@ fn parameter_annotation_table_at(
 /// Convert checked annotation applications into one backend-agnostic declaration collection. SOURCE
 /// retention intentionally produces no runtime/binary declaration fact; all other retention stays
 /// attached until a backend chooses a physical representation.
-fn declaration_annotations(
+pub(crate) fn declaration_annotations(
     annotations: &[ast::AnnotationRef],
     info: &FrontendTypeInfo,
 ) -> crate::ir::DeclarationAnnotations {
@@ -28918,14 +29080,13 @@ fn fn_generic_sig(
             .ok_or("internal:missing-checked-generic-declaration-type")?,
         None => Ty::Unit,
     };
+    let mut type_params =
+        type_param_bounds_ir(info, tps, &[], &f.type_param_bounds, f.signature_span.lo)?;
+    for parameter in &mut type_params {
+        parameter.reified = f.reified_type_params.contains(&parameter.name);
+    }
     Ok(Some(crate::ir::IrGenericSig {
-        type_params: type_param_bounds_ir(
-            info,
-            tps,
-            &[],
-            &f.type_param_bounds,
-            f.signature_span.lo,
-        )?,
+        type_params,
         params,
         ret: Some(ret),
         supers: Vec::new(),
@@ -28964,6 +29125,7 @@ fn type_param_bounds_ir(
             semantic_name: semantic_names[index].clone(),
             bounds: resolved_bounds,
             variance: variances.get(index).copied().unwrap_or_default(),
+            reified: false,
         });
     }
     Ok(out)
@@ -29192,30 +29354,35 @@ fn lowered_reference_class(
                 .get(*index as usize)?;
             ir.functions.get(function as usize)?.ret.obj_internal()
         }
-        IrExpr::Call { callee, .. } => match callee {
-            Callee::Local(function)
-            | Callee::LocalDefault(function)
-            | Callee::ClassStatic { function, .. } => {
-                ir.functions.get(*function as usize)?.ret.obj_internal()
+        IrExpr::Call { callee, .. } => {
+            if let Some(function) = callee.source_function() {
+                ir.functions.get(function as usize)?.ret.obj_internal()
+            } else {
+                match callee {
+                    Callee::CrossFile { ret, .. }
+                    | Callee::Module { ret, .. }
+                    | Callee::Super { ret, .. }
+                    | Callee::External { ret, .. } => ret.obj_internal(),
+                    // A callee carrying `Ty`s answers from them; one carrying a verbatim platform
+                    // descriptor is read by the platform, never parsed here.
+                    Callee::Virtual {
+                        params: Some((_, ret)),
+                        ..
+                    } => ret.obj_internal(),
+                    Callee::Static { descriptor, .. }
+                    | Callee::Special { descriptor, .. }
+                    | Callee::Virtual { descriptor, .. } => runtime
+                        .descriptor_method_layout(descriptor)
+                        .and_then(|layout| layout.return_class),
+                    Callee::Intrinsic { ret, .. } => ret
+                        .scalar_value_repr()
+                        .is_none()
+                        .then(|| ret.obj_internal())
+                        .flatten(),
+                    _ => unreachable!("source-function callees were handled above"),
+                }
             }
-            Callee::CrossFile { ret, .. } => ret.obj_internal(),
-            // A callee carrying `Ty`s answers from them; one carrying a verbatim platform descriptor
-            // is read by the platform, never parsed here.
-            Callee::Virtual {
-                params: Some((_, ret)),
-                ..
-            } => ret.obj_internal(),
-            Callee::Static { descriptor, .. }
-            | Callee::Special { descriptor, .. }
-            | Callee::Virtual { descriptor, .. } => runtime
-                .descriptor_method_layout(descriptor)
-                .and_then(|layout| layout.return_class),
-            Callee::Intrinsic { ret, .. } => ret
-                .scalar_value_repr()
-                .is_none()
-                .then(|| ret.obj_internal())
-                .flatten(),
-        },
+        }
         _ => None,
     }
 }
@@ -29476,38 +29643,6 @@ fn align_call_values_to_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `Char.isWhitespace()` is `Character.isWhitespace(c) || Character.isSpaceChar(c)`, which is not
-    /// Rust's `char::is_whitespace`. The two sets differ in exactly these five code points (checked
-    /// against JBR 21 over the whole BMP), and the predicate decides where a `trimIndent` indent ends.
-    #[test]
-    fn unit_whitespace_matches_kotlins_predicate_not_rusts() {
-        // Kotlin-only: the file/group/record/unit separators are `Character.isWhitespace`.
-        for unit in 0x1c..=0x1f {
-            assert!(
-                is_unit_whitespace(unit),
-                "U+{unit:04X} is Kotlin whitespace"
-            );
-        }
-        // Rust-only: NEL is a `Cc` control — neither `isWhitespace` nor `isSpaceChar`.
-        assert!(!is_unit_whitespace(0x85));
-        // Agreeing cases, including the `Zs` characters `Character.isWhitespace` alone excludes and
-        // `isSpaceChar` re-admits.
-        for unit in [b' ' as u16, b'\t' as u16, 0x00a0, 0x2007, 0x202f, 0x3000] {
-            assert!(is_unit_whitespace(unit), "U+{unit:04X} is whitespace");
-        }
-        for unit in [b'a' as u16, 0x00, 0xd800, 0xdfff] {
-            assert!(!is_unit_whitespace(unit), "U+{unit:04X} is not whitespace");
-        }
-    }
-
-    /// A blank line and the common indent are both measured with that predicate, so a leading NEL is
-    /// ordinary content: kotlinc leaves it in place rather than stripping it as indentation.
-    #[test]
-    fn trim_indent_does_not_treat_nel_as_indentation() {
-        let source = KtString::from("\u{85}a\n\u{85}b");
-        assert_eq!(trim_indent(&source), source);
-    }
 
     struct UnsignedBoxRuntime;
 

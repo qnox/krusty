@@ -49,3 +49,27 @@ fn untyped_lambda_captures_local_named_it() {
         }\n";
     common::expect_box_ok_with_stdlib(SRC, "N");
 }
+
+/// Flow narrowing at the construction site must not become the storage type of a mutable capture.
+/// The nested classifier writes through the shared nullable cell after `value` was initialized with a
+/// non-null expression.
+#[test]
+fn nested_classifier_mutable_capture_keeps_its_declared_nullable_type() {
+    const SRC: &str = "fun runNow(block: () -> Unit) { block() }\n\
+        fun box(): String {\n\
+        \x20 var value: Any? = Any()\n\
+        \x20 runNow { val ignored = object { init { value = null } } }\n\
+        \x20 return if (value == null) \"OK\" else \"FAIL\"\n\
+        }\n";
+    let (reference_code, reference_diagnostics) =
+        common::kotlinc_source_result("NestedMutableNullableCapture", SRC);
+    assert_eq!(
+        reference_code, 0,
+        "kotlinc rejected the fixture: {reference_diagnostics}"
+    );
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(SRC),
+        Vec::<String>::new(),
+        "the mutable capture must retain its declared nullable type"
+    );
+}

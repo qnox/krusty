@@ -68,3 +68,22 @@ fn labeled_break_continue_as_elvis_rhs() {
         fun box(): String = if (f(listOf(listOf(1, 2), listOf<Int?>(3, null, 9), listOf(4))) == 6) \"OK\" else \"fail\"\n";
     assert_eq!(run(BRK).expect("labeled break"), "OK");
 }
+
+#[test]
+fn nested_stdlib_inline_lambdas_transfer_to_the_enclosing_loop() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20 var visits = 0\n\
+        \x20 outer@ while (true) {\n\
+        \x20   visits += 1\n\
+        \x20   \"\".let { it.run {\n\
+        \x20     if (visits < 3) continue@outer\n\
+        \x20     break@outer\n\
+        \x20   } }\n\
+        \x20 }\n\
+        \x20 return if (visits == 3) \"OK\" else \"Fail: $visits\"\n\
+        }\n";
+    assert_eq!(
+        run(SRC).expect("nested inline break/continue transfer"),
+        "OK"
+    );
+}

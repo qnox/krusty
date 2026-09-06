@@ -147,6 +147,15 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
         self.map.values().map(|(value, _)| value)
     }
 
+    /// Remove one entry. Its heap record is left stale and discarded by the ordinary eviction walk.
+    pub fn remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.map.remove(k).map(|(value, _)| value)
+    }
+
     /// Remove every entry.
     pub fn clear(&mut self) {
         self.map.clear();
@@ -190,6 +199,20 @@ mod tests {
         assert_eq!(c.len(), 2);
         assert_eq!(c.get(&"a"), Some(&10));
         assert_eq!(c.get(&"b"), Some(&2));
+    }
+
+    #[test]
+    fn removed_entry_does_not_confuse_later_eviction() {
+        let mut c = LruCache::new(2);
+        c.insert("a", 1);
+        c.insert("b", 2);
+        assert_eq!(c.remove(&"a"), Some(1));
+        c.insert("c", 3);
+        c.insert("d", 4);
+        assert_eq!(c.get(&"a"), None);
+        assert_eq!(c.get(&"b"), None);
+        assert_eq!(c.get(&"c"), Some(&3));
+        assert_eq!(c.get(&"d"), Some(&4));
     }
 
     #[test]

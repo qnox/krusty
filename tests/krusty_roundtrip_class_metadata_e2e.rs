@@ -15,6 +15,22 @@ use std::path::PathBuf;
 /// pairs themselves (so a test can decode the `@Metadata` without re-reading the files).
 type CompiledLib = (PathBuf, Vec<(String, Vec<u8>)>);
 
+fn write_compiled_lib(tag: &str, classes: &[(String, Vec<u8>)]) -> PathBuf {
+    let dir = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{tag}: allocate class-metadata scratch directory"));
+    for (name, bytes) in classes {
+        let path = dir.join(format!("{name}.class"));
+        let parent = path
+            .parent()
+            .unwrap_or_else(|| panic!("{tag}: emitted class path has no parent"));
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|error| panic!("{tag}: create class directory: {error}"));
+        std::fs::write(&path, bytes)
+            .unwrap_or_else(|error| panic!("{tag}: write {}: {error}", path.display()));
+    }
+    dir
+}
+
 /// Compile `lib_src` with krusty's default backend options and write the classes into a fresh
 /// harness-owned directory.
 fn krusty_lib_dir(tag: &str, lib_src: &str) -> CompiledLib {
@@ -26,24 +42,11 @@ fn krusty_lib_dir(tag: &str, lib_src: &str) -> CompiledLib {
             let diagnostics = common::front_end_diagnostics(lib_src, &classpath, Some(&jdk));
             panic!("{tag}: krusty rejected the library source; diagnostics: {diagnostics:?}")
         });
-    let dir = common::scratch_dir()
-        .unwrap_or_else(|| panic!("{tag}: allocate class-metadata scratch directory"));
-    for (name, bytes) in &classes {
-        let path = dir.join(format!("{name}.class"));
-        let parent = path
-            .parent()
-            .unwrap_or_else(|| panic!("{tag}: emitted class path has no parent"));
-        std::fs::create_dir_all(parent)
-            .unwrap_or_else(|error| panic!("{tag}: create class directory: {error}"));
-        std::fs::write(&path, bytes)
-            .unwrap_or_else(|error| panic!("{tag}: write {}: {error}", path.display()));
-    }
+    let dir = write_compiled_lib(tag, &classes);
     (dir, classes)
 }
 
-/// Compile+run `main` against a krusty-built `lib_src`, asserting `"OK"`.
-fn expect_roundtrip_ok(tag: &str, lib_src: &str, main: &str) {
-    let (dir, _) = krusty_lib_dir(tag, lib_src);
+fn expect_consumer_ok(tag: &str, dir: PathBuf, main: &str) {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let classpath = [dir, stdlib];
@@ -53,6 +56,83 @@ fn expect_roundtrip_ok(tag: &str, lib_src: &str, main: &str) {
             panic!("{tag}: compiling/running against krusty's own output failed; diagnostics: {diagnostics:?}")
         });
     assert_eq!(output, "OK", "{tag}");
+}
+
+/// Compile+run `main` against a krusty-built `lib_src`, asserting `"OK"`.
+fn expect_roundtrip_ok(tag: &str, lib_src: &str, main: &str) {
+    let (dir, _) = krusty_lib_dir(tag, lib_src);
+    expect_consumer_ok(tag, dir, main);
+}
+
+#[test]
+fn top_level_generic_overload_roundtrip_preserves_intersection_bounds() {
+    let (dir, classes) = krusty_lib_dir(
+        "generic_overload_intersection_bounds",
+        r#"
+fun <T> choose(value: T): String = "unbounded"
+fun <T> choose(value: T): String where T : Comparable<T> = "comparable"
+fun <T> choose(value: T): String where T : Comparable<T>, T : Number = "number"
+"#,
+    );
+    let (_, facade) = classes
+        .iter()
+        .find(|(name, _)| name == "LibKt")
+        .expect("top-level declarations emit a LibKt facade");
+    let parsed = parse_class(facade).expect("LibKt.class parses");
+    let mut descriptors = parsed
+        .methods
+        .iter()
+        .filter(|method| method.name == "choose")
+        .map(|method| method.descriptor.clone())
+        .collect::<Vec<_>>();
+    descriptors.sort();
+    assert_eq!(
+        descriptors,
+        [
+            "(Ljava/lang/Comparable;)Ljava/lang/String;",
+            "(Ljava/lang/Number;)Ljava/lang/String;",
+            "(Ljava/lang/Object;)Ljava/lang/String;",
+        ]
+    );
+    let metadata = parsed.meta;
+    let mut bound_sets = metadata
+        .package_functions
+        .iter()
+        .filter(|function| function.kotlin_name == "choose")
+        .map(|function| {
+            function
+                .generic_sig
+                .as_ref()
+                .expect("generic overload has a metadata signature")
+                .formal_bounds[0]
+                .iter()
+                .map(|bound| bound.source_name())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    bound_sets.sort();
+    assert_eq!(
+        bound_sets,
+        [
+            Vec::<String>::new(),
+            vec!["Comparable<T>".to_string()],
+            vec!["Number".to_string(), "Comparable<T>".to_string()],
+        ]
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [dir, stdlib];
+    let output = common::compile_and_run_box(
+        r#"
+fun box(): String = if (choose(1) == "number" && choose("x") == "comparable") "OK" else "FAIL"
+"#,
+        "Main",
+        &classpath,
+        Some(&jdk),
+    )
+    .expect("consumer compiles and runs against intersection-bound overloads");
+    assert_eq!(output, "OK");
 }
 
 /// The write side, pinned directly: krusty's DEFAULT emit puts a `@kotlin.Metadata` on the class file
@@ -89,6 +169,88 @@ fn a_class_carries_its_own_metadata_by_default() {
         .map(|p| p.name.as_str())
         .collect();
     assert_eq!(properties, ["x", "y"], "and its constructor properties");
+}
+
+#[test]
+fn generic_value_class_constructor_keeps_classifier_inference_across_modules() {
+    const LIB: &str = "@JvmInline value class A<T : String>(val value: T)\n\
+fun interface B { fun f(a: A<String>): String }\n";
+    const MAIN: &str = "fun get(b: B) = b.f(A(\"OK\"))\n\
+fun use() {\n\
+    val lambda = { a: A<String> -> a.value }\n\
+    get(lambda)\n\
+}\n";
+
+    let (dir, classes) = krusty_lib_dir("generic_value_constructor", LIB);
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "A")
+        .expect("krusty emits A.class");
+    let metadata = parse_class(bytes).expect("A.class parses").meta;
+    assert_eq!(metadata.class_type_parameters.type_params(), &["T"]);
+    assert_eq!(
+        metadata.class_type_parameters.type_param_bounds(),
+        &vec![vec![krusty::types::Ty::String]],
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(MAIN, &[dir, stdlib], Some(&jdk));
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+/// A value class whose carrier erases to `Object` remains a semantic return type in class metadata.
+/// The physical member is mangled and returns the carrier, while dependency-call realization retains
+/// whether its declaring owner is an interface. Withholding the metadata makes the whole operator
+/// invisible to the consuming module; losing the owner kind emits `invokevirtual` for an interface.
+#[test]
+fn object_erased_value_class_operator_round_trips_across_modules() {
+    const LIB: &str = r#"
+public class WhateverUseCase : UseCaseWithParameter<Result<Int>, Int> {
+    override operator fun invoke(param: Result<Int>): Result<Int> {
+        return param.onFailure {
+            return if (it is NumberFormatException)
+                Result.success(0)
+            else
+                Result.failure(it)
+        }
+    }
+}
+
+interface UseCaseWithParameter<P, R> {
+    operator fun invoke(param: P): Result<R>
+}
+"#;
+    const MAIN: &str = r#"
+fun box(): String {
+    val useCase = WhateverUseCase()
+    return if (useCase(Result.failure(NumberFormatException())) == Result.success(0)) "OK"
+        else "Fail"
+}
+"#;
+
+    expect_roundtrip_ok("object_erased_result_operator", LIB, MAIN);
+}
+
+/// An Object-erased value-class carrier and a box in a generic slot have the same descriptor but
+/// opposite representation contracts. The dependency declaration, not the substituted call-site type,
+/// must keep those boundaries distinct.
+#[test]
+fn object_erased_value_class_direct_and_generic_parameters_stay_distinct() {
+    const LIB: &str = r#"
+fun direct(value: Result<Int>): Result<Int> = value
+fun <T> genericEqual(first: T, second: T): Boolean = first == second
+"#;
+    const MAIN: &str = r#"
+fun box(): String {
+    val directValue = direct(Result.success(1))
+    if (directValue != Result.success(1)) return "direct"
+    if (!genericEqual(Result.success(2), Result.success(2))) return "generic"
+    return "OK"
+}
+"#;
+
+    expect_roundtrip_ok("object_erased_direct_and_generic_parameters", LIB, MAIN);
 }
 
 /// A value-class-typed BODY property is DESCRIBED, and the record is byte-identical to kotlinc's:
@@ -227,14 +389,11 @@ class Holder {\n\
     expect_roundtrip_ok("valueclass", LIB, MAIN);
 }
 
-/// Admission is TRANSITIVE, and the value class need not be in the same FILE. A value class without a
-/// record of its own reads downstream as an ordinary class — the caller casts the carrier to the box
-/// and binds an instance accessor where kotlinc emits the static `-impl`, a ClassCastException.
-/// Whether a sibling file's value class ends up described is decided by that file's own emit, so a
-/// record here cannot assume it is: `Holder.make(): A` is withheld. (A CLASSPATH value class is
-/// different — being known as one at all means its `@Metadata` inline record was read.)
+/// Metadata admission is transitive across sibling files: both the value class's carrier-member ABI
+/// and the ordinary class returning it must be described so a downstream caller selects the mangled
+/// carrier methods instead of treating the value class as an ordinary box.
 #[test]
-fn a_sibling_files_undescribed_value_class_withholds_the_record() {
+fn a_sibling_file_value_class_member_round_trips() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let sources = [
@@ -266,14 +425,29 @@ fn a_sibling_files_undescribed_value_class_withholds_the_record() {
         .iter()
         .find(|(name, _)| name == "A")
         .expect("krusty emits A.class");
-    let carries_metadata = |bytes: &[u8]| bytes.windows(17).any(|w| w == b"Lkotlin/Metadata;");
     assert!(
-        !carries_metadata(value_class),
-        "precondition: a value class with a declared member is itself withheld",
+        parse_class(value_class)
+            .expect("A.class parses")
+            .meta
+            .class_functions
+            .iter()
+            .any(|function| function.kotlin_name == "shout"),
+        "the sibling value class publishes its carrier member",
     );
     assert!(
-        !carries_metadata(holder),
-        "so the class whose member RETURNS it must be withheld too",
+        parse_class(holder)
+            .expect("Holder.class parses")
+            .meta
+            .class_functions
+            .iter()
+            .any(|function| function.kotlin_name == "make"),
+        "the sibling consumer publishes its value-class return",
+    );
+    let dir = write_compiled_lib("sibling_value_class", &classes);
+    expect_consumer_ok(
+        "sibling_value_class",
+        dir,
+        "fun box(): String = if (Holder().make().shout() == \"O!\") \"OK\" else \"FAIL\"\n",
     );
 }
 
@@ -309,63 +483,62 @@ class Holder {\n\
     expect_roundtrip_ok("vcparam", LIB, MAIN);
 }
 
-/// A CONCRETE `suspend` member returning a value class over a REFERENCE underlying still withholds,
-/// and unlike the shapes above the reason is in the BYTECODE, not the record. kotlinc boxes a
-/// value-class CPS return only when the underlying is a PRIMITIVE; over a reference/nullable/generic
-/// underlying it `areturn`s the raw carrier. krusty boxes unconditionally, so its `constructor-impl;
-/// box-impl; areturn` disagrees with kotlinc's `constructor-impl; areturn` — while the record krusty
-/// would write is byte-identical to kotlinc's. Describing it therefore advertises an ABI the class
-/// file does not implement: a consumer doing `C().gk().v` gets "class K cannot be cast to class
-/// java.lang.String". An ABSTRACT suspend member has no return expression to box and stays
-/// describable, which is what `data_class_metadata_wiring_e2e`'s suspend interface cases pin.
+/// A concrete suspend member returning a reference-backed value class publishes the same metadata and
+/// CPS boxing contract consumed by a separately compiled coroutine state machine.
 #[test]
-fn a_concrete_suspend_value_class_return_withholds_the_record() {
+fn a_concrete_suspend_value_class_return_round_trips() {
     const LIB: &str = "@JvmInline\nvalue class K(val v: String)\n\
 class C {\n\
     suspend fun gk(): K = K(\"OK\")\n\
 }\n";
-    let (_, classes) = krusty_lib_dir("suspendvcret", LIB);
+    let (dir, classes) = krusty_lib_dir("suspendvcret", LIB);
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "C")
         .expect("krusty emits C.class");
-    assert!(
-        !bytes
-            .windows(b"Lkotlin/Metadata;".len())
-            .any(|w| w == b"Lkotlin/Metadata;"),
-        "a boxed value-class CPS return means the class carries NO @Metadata until the boxing matches",
+    let metadata = parse_class(bytes).expect("C.class parses").meta;
+    assert!(metadata
+        .class_functions
+        .iter()
+        .any(|function| function.kotlin_name == "gk"));
+    expect_consumer_ok(
+        "suspendvcret",
+        dir,
+        r#"import kotlin.coroutines.*
+class Done : Continuation<Unit> {
+    override val context: CoroutineContext = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Unit>) = result.getOrThrow()
+}
+fun box(): String {
+    var answer = "FAIL"
+    suspend { answer = C().gk().v }.startCoroutine(Done())
+    return answer
+}
+"#,
     );
 }
 
-/// A VALUE class with a DECLARED member still withholds — for a WRITE-side reason the return model
-/// does not reach. kotlinc realizes `fun k()` on a value class as the STATIC
-/// `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the unboxed carrier; krusty emits an INSTANCE
-/// `k()` on the box. A caller reading the record puts the carrier under an `invokevirtual S.k()` —
-/// "Type 'java/lang/String' is not assignable to 'S'", a VerifyError. The READ half is fine: against a
-/// KOTLINC-built `S` the same `box()` runs, which is what makes this a member-ABI gap and not a
-/// metadata one. Asserted on the emitted METHOD so it fails the day the ABI is corrected, prompting
-/// the decline (and this test) to be replaced by a round-trip.
+/// A value class with a declared member emits the static carrier implementation advertised by its
+/// class metadata, so a separately compiled caller can invoke it on the unboxed carrier.
 #[test]
-fn a_value_class_with_a_declared_member_withholds_the_record() {
+fn a_value_class_with_a_declared_member_round_trips() {
     const LIB: &str = "@JvmInline\nvalue class S(val v: String) {\n\
     fun k(): String = v + \"K\"\n\
 }\n";
-    let (_, classes) = krusty_lib_dir("vcdeclared", LIB);
+    let (dir, classes) = krusty_lib_dir("vcdeclared", LIB);
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "S")
         .expect("krusty emits S.class");
-    let info = parse_class(bytes).expect("S.class parses");
+    let metadata = parse_class(bytes).expect("S.class parses").meta;
     assert!(
-        info.methods.iter().any(|m| m.name == "k"),
-        "pins the divergence being protected: krusty emits an instance `k`, kotlinc a static `k-impl`",
+        metadata
+            .class_functions
+            .iter()
+            .any(|function| function.kotlin_name == "k"),
+        "the value class metadata publishes the declared member",
     );
-    assert!(
-        !bytes
-            .windows(b"Lkotlin/Metadata;".len())
-            .any(|w| w == b"Lkotlin/Metadata;"),
-        "a value class with a declared member carries NO @Metadata until its member ABI matches",
-    );
+    expect_consumer_ok("vcdeclared", dir, "fun box(): String = S(\"O\").k()\n");
 }
 
 /// The FAKE OVERRIDE shape: the value-class-returning member is inherited, so the receiver the caller
@@ -459,4 +632,63 @@ fn plain_class_member_named_arguments_round_trip() {
     return \"OK\"\n\
 }\n";
     expect_roundtrip_ok("member", LIB, MAIN);
+}
+
+#[test]
+fn object_member_extension_function_round_trips_as_an_importable_extension() {
+    const LIB: &str = "package test\ninterface I { fun <T> T.fromInterface(): T = this }\nobject C : I {\nfun f(value: Int): Int = 1\nfun f(value: String): Int = 2\nfun Boolean.f(): Int = 3\n}\n";
+    const MAIN: &str = "import test.C.f\nimport test.C.fromInterface\nfun box(): String = if (f(1) == 1 && f(\"s\") == 2 && true.f() == 3 && 4.fromInterface() == 4) \"OK\" else \"fail\"\n";
+
+    let (dir, classes) = krusty_lib_dir("object_member_extension", LIB);
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "test/C")
+        .expect("krusty emits the object class");
+    let metadata = parse_class(bytes).expect("object class parses").meta;
+    let functions = metadata
+        .class_functions
+        .iter()
+        .filter(|function| function.kotlin_name == "f")
+        .collect::<Vec<_>>();
+    assert_eq!(functions.len(), 3);
+    assert_eq!(
+        functions
+            .iter()
+            .filter(|function| function.is_extension())
+            .count(),
+        1
+    );
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "test/I")
+        .expect("krusty emits the interface class");
+    let metadata = parse_class(bytes).expect("interface class parses").meta;
+    let inherited_extension = metadata
+        .class_functions
+        .iter()
+        .find(|function| function.kotlin_name == "fromInterface")
+        .expect("interface metadata contains the member extension");
+    assert!(
+        inherited_extension.is_extension(),
+        "the inherited member extension retains its declaration kind",
+    );
+    assert!(
+        inherited_extension
+            .generic_sig
+            .as_ref()
+            .and_then(|signature| signature.receiver)
+            .is_some_and(|receiver| receiver.is_ty_param()),
+        "the generic extension receiver remains a type parameter: {:?}",
+        inherited_extension.generic_sig,
+    );
+
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [dir, stdlib];
+    let output =
+        common::compile_and_run_box(MAIN, "Main", &classpath, Some(&jdk)).unwrap_or_else(|| {
+            let diagnostics = common::front_end_diagnostics(MAIN, &classpath, Some(&jdk));
+            panic!("consumer failed to compile or run: {diagnostics:?}")
+        });
+    assert_eq!(output, "OK");
 }

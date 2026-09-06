@@ -21,6 +21,65 @@ return \"OK\"\n\
 }
 
 #[test]
+fn imported_companion_block_members_stream_and_run() {
+    let src = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+import C.func\n\
+class C {\n\
+    companion {\n\
+        fun func(value: String): String = value\n\
+        fun ok(): String = \"OK\"\n\
+    }\n\
+}\n\
+fun box(): String = func(C.ok())\n";
+    common::expect_box_ok_with_stdlib(src, "CompanionBlockImport");
+}
+
+#[test]
+fn companion_block_mutable_property_reference_is_receiverless() {
+    let src = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+class C {\n\
+    companion { var mutable: String = \"FAIL\" }\n\
+}\n\
+fun box(): String {\n\
+    C::mutable.set(\"OK\")\n\
+    return C.mutable\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "CompanionBlockPropertyReference");
+}
+
+#[test]
+fn companion_block_lateinit_references_use_static_storage() {
+    let src = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+class C {\n\
+    companion {\n\
+        lateinit var value: String\n\
+        fun initialized() = ::value.isInitialized\n\
+    }\n\
+}\n\
+companion lateinit var C.other: String\n\
+fun box(): String {\n\
+    if (C.initialized() || C::other.isInitialized) return \"FAIL-before\"\n\
+    C.value = \"O\"\n\
+    C.other = \"K\"\n\
+    return if (C.initialized() && C::other.isInitialized) C.value + C.other else \"FAIL-after\"\n\
+}\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process(
+        src,
+        "CompanionBlockLateinit",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    )
+    .expect("the production FIR pipeline must emit the companion lateinit case");
+    let box_class = common::find_box_class(&classes).expect("emitted box facade");
+    assert_eq!(
+        common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib)).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
 fn companion_property_custom_accessors_run() {
     // A `companion object` property with a custom accessor IS its accessor: kotlinc emits no static
     // field for it, just `getZERO()`/`getLEVEL()`/`setLEVEL(int)` on `C$Companion`, and `C.ZERO`

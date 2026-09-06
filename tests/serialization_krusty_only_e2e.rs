@@ -86,8 +86,9 @@ fn run_box_in_krusty(src: &str, stem: &str) -> Option<(String, String)> {
     let cp_jars = serialization_runtime_jars()?;
     let classes = common::compile_in_process(src, stem, &cp_jars, None).unwrap_or_else(|| {
         let diagnostics = common::front_end_diagnostics(src, &cp_jars, None);
+        let backend = common::backend_outcome_in_process(src, stem, &cp_jars, None);
         panic!(
-            "krusty failed to compile the pure-krusty program ({stem}); diagnostics: {diagnostics:?}"
+            "krusty failed to compile the pure-krusty program ({stem}); diagnostics: {diagnostics:?}; backend: {backend:?}"
         )
     });
     let box_class = common::find_box_class(&classes)?;

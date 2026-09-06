@@ -176,13 +176,11 @@ fun box(): String {
 
 // ---- Runtime: ineligible placements fall back TOGETHER -------------------------------------------
 
-/// An interface companion mixing a `@JvmField val` with a `const val` fails kotlinc's
-/// whole-companion rule, so NOTHING hoists — krusty accepts the source (kotlinc rejects it) and
-/// must keep the ordinary accessor realization CONSISTENTLY: the pass that emits and the checker
-/// that routes reads must consult the same property universe, or a read resolves to an accessor
-/// that was never emitted (`NoSuchMethodError` with zero compile signal).
+/// An interface companion mixing a `@JvmField val` with a `const val` violates Kotlin's
+/// whole-companion rule. Reject it in the frontend; the JVM backend must not invent a fallback
+/// representation for a semantically invalid declaration.
 #[test]
-fn jvmfield_mixed_interface_companion_falls_back_whole() {
+fn jvmfield_mixed_interface_companion_is_rejected() {
     let src = r#"
 interface I {
     fun f(): Int
@@ -197,17 +195,19 @@ fun box(): String {
     return "OK"
 }
 "#;
-    common::expect_box_ok_files_with_stdlib(
-        &[("MixedIface.kt", src)],
-        "mixed interface companion falls back whole",
+    let diagnostics = common::front_end_diagnostics_files_with_stdlib(&[src]);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("@JvmField")),
+        "mixed interface companion must be rejected: {diagnostics:?}"
     );
 }
 
-/// A VALUE-CLASS-typed `@JvmField` companion property: the JVM pass declines the hoist (the
-/// backing field erases), so the checker must not route reads to a hoisted field that was never
-/// emitted (`NoSuchFieldError`). Both sides fall back to the ordinary accessor realization.
+/// Kotlin rejects a value-class-typed `@JvmField` property. This is a declaration-semantic error,
+/// not a reason for the JVM backend to fall back to an accessor.
 #[test]
-fn jvmfield_value_class_companion_falls_back() {
+fn jvmfield_value_class_companion_is_rejected() {
     let src = r#"
 @JvmInline
 value class V(val x: Int)
@@ -218,9 +218,12 @@ class C {
 }
 fun box(): String = if (C.a.x == 41) "OK" else "F:" + C.a.x
 "#;
-    common::expect_box_ok_files_with_stdlib(
-        &[("VcCompanion.kt", src)],
-        "value-class @JvmField companion falls back",
+    let diagnostics = common::front_end_diagnostics_files_with_stdlib(&[src]);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("@JvmField")),
+        "value-class @JvmField must be rejected: {diagnostics:?}"
     );
 }
 
@@ -294,4 +297,33 @@ fn jvmfield_companion_reads_cross_module() {
     let out =
         common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(out.as_deref(), Some("OK"), "cross-module @JvmField reads");
+}
+
+/// An annotation class is a distinct Kotlin declaration kind but a JVM interface. Its companion
+/// therefore uses the same self-hosted singleton and hoisted `@JvmField` surface as an interface
+/// companion, and a dependent module must recover the property through that emitted surface.
+#[test]
+fn jvmfield_annotation_companion_reads_cross_module() {
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    const LIB: &str = "// LANGUAGE: +JvmFieldInInterface +NestedClassesInAnnotations\n\
+        package lib\n\
+        class Bar(val value: String)\n\
+        annotation class Foo {\n\
+            companion object {\n\
+                @JvmField val FOO = Bar(\"OK\")\n\
+            }\n\
+        }\n";
+    let Some(lib) = common::compile_lib("jvmfield_annotation_companion", LIB) else {
+        return;
+    };
+    const MAIN: &str = "import lib.Foo\n\
+        fun box(): String = Foo.FOO.value\n";
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[lib, sl, jdk.clone()], Some(jdk.as_path()));
+    assert_eq!(
+        out.as_deref(),
+        Some("OK"),
+        "cross-module annotation-companion @JvmField read",
+    );
 }

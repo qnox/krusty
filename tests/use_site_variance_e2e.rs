@@ -185,6 +185,22 @@ fun box(): String {\n\
 }
 
 #[test]
+fn contravariant_only_result_terminates_in_bottom_value_position() {
+    const SRC: &str = "class Context<T>\n\
+fun <T> select(context: Context<in T>): T = throw IllegalStateException()\n\
+fun bottom(): Nothing = select(Context<Any>())\n\
+fun box(): String = try {\n\
+    bottom()\n\
+} catch (_: IllegalStateException) {\n\
+    \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("Nothing result terminates in value position"),
+        "OK"
+    );
+}
+
+#[test]
 fn nested_projected_nothing_result_can_be_discarded() {
     const SRC: &str = "class Context<T>\n\
 fun <T> something(): T = Any() as T\n\

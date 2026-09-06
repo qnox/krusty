@@ -58,7 +58,8 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
         let facade = file_class_name(stems[i], file.package.as_deref());
         let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
         let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
-        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
+        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms, &cp)
+            .ok()?;
         all.extend(krusty::jvm::ir_emit::emit_all(
             &ir, &facade, &*cp, None, &syms,
         )?);

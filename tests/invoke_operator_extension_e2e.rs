@@ -184,6 +184,55 @@ fn classpath_member_extension_resolves_in_a_plain_receiver_lambda() {
     assert_eq!(output, "OK");
 }
 
+#[test]
+fn kotlinc_dependency_member_extension_is_embedded_in_checked_fir() {
+    const LIB: &str = r#"
+        package api
+
+        open class Scope {
+            fun String.decorate(suffix: String): String = this + suffix
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.Scope
+
+        class Use : Scope() {
+            fun result(): String = "O".decorate("K")
+        }
+
+        fun box(): String = Use().result()
+    "#;
+
+    let Some(output) = common::expect_box_run_against_kotlinc(LIB, MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+#[test]
+fn kotlinc_dependency_member_extension_invoke_is_embedded_in_checked_fir() {
+    const LIB: &str = r#"
+        package api
+
+        class Scope {
+            operator fun String.invoke(suffix: String): String = this + suffix
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.Scope
+
+        fun box(): String {
+            val run: Scope.() -> String = { "O"("K") }
+            return run(Scope())
+        }
+    "#;
+
+    let Some(output) = common::expect_box_run_against_kotlinc(LIB, MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
 /// The dispatch hierarchy is semantic input, not a source-origin boundary. A member extension
 /// inherited entirely inside a dependency must remain visible when the receiver lambda is typed as
 /// the subclass; stopping the walk at the first classpath classifier loses the base declaration.

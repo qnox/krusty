@@ -43,7 +43,10 @@ fn elvis_of_safe_takeif_and_nullable_string() {
         return effective?.length ?: -1\n\
     }\n\
     fun box(): String {\n\
-        return if (pick(\"  \", \"ab\") == 2 && pick(null, null) == -1 && pick(\"hey\", null) == 3) \"OK\" else \"FAIL\"\n\
+        val blank = pick(\"  \", \"ab\")\n\
+        val absent = pick(null, null)\n\
+        val present = pick(\"hey\", null)\n\
+        return if (blank == 2 && absent == -1 && present == 3) \"OK\" else \"FAIL:$blank:$absent:$present\"\n\
     }\n";
     assert_eq!(
         run(SRC)

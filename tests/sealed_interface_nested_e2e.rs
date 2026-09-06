@@ -65,3 +65,13 @@ fn data_object_has_no_copy() {
         "a data object's @Metadata names only kotlinc's synthesized set",
     );
 }
+
+#[test]
+fn data_object_to_string_is_its_bare_name() {
+    let source = "sealed class Result { data object Ok : Result() }\n\
+                  fun box(): String = if (Result.Ok.toString() == \"Ok\") \"OK\" else Result.Ok.toString()\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "DataObjectToString"),
+        "OK"
+    );
+}

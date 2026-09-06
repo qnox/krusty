@@ -42,7 +42,10 @@ pub(crate) fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
     use crate::types::Ty;
     let Ty::Obj(name, args) = ty else { return ty };
     match args.first().copied() {
-        Some(element) if ty.is_reference_array() && !matches!(element, Ty::OutProjection(_)) => {
+        Some(element)
+            if ty.is_reference_array()
+                && !matches!(element, Ty::OutProjection(_) | Ty::StarProjection(_)) =>
+        {
             Ty::obj_args_name(name, &[Ty::out_projection(element)])
         }
         _ => ty,

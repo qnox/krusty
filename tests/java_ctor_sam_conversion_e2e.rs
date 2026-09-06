@@ -262,9 +262,8 @@ fn java_ctor_lambda_body_error_reports_exactly_once() {
 }
 
 /// A lambda cannot convert to a non-SAM parameter: `TextOnly(String)` called with a trailing lambda
-/// must still fail resolution. (kotlinc reports `argument type mismatch: actual type is '() ->
-/// Unit', but 'String!' was expected`; krusty's constructor path reports an inapplicable call as
-/// unresolved — this pins that resolution still fails, in krusty's existing shape.)
+/// must still fail resolution with the same argument mismatch as kotlinc. No enclosing return-type
+/// cascade is valid once the construction expression has already failed.
 #[test]
 fn java_ctor_lambda_against_non_sam_parameter_still_fails() {
     let jdk = common::jdk_modules();
@@ -285,10 +284,8 @@ fn java_ctor_lambda_against_non_sam_parameter_still_fails() {
     if let Some(root) = root {
         let _ = std::fs::remove_dir_all(root);
     }
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("unresolved reference 'TextOnly'.")),
-        "expected unresolved-constructor diagnostic, got {diags:?}"
+    assert_eq!(
+        diags,
+        ["argument type mismatch: actual type is '() -> Unit', but 'String!' was expected."]
     );
 }

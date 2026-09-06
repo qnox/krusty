@@ -5,6 +5,91 @@
 
 use crate::ast::{Expr, ExprId, File, Stmt, TypeRef};
 
+/// A contract whose source type references have all been bound to publishable semantic types.
+///
+/// Keeping this wrapper at the phase boundary prevents an unresolved [`TypeRef`] from reaching
+/// checked FIR, common lowering, metadata, or a backend. Source decoding may temporarily produce a
+/// [`Contract`], but only this form may be retained in the stable declaration index.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedContract(std::sync::Arc<Contract>);
+
+impl Eq for ResolvedContract {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnpublishableContract {
+    SourceType,
+    PendingType,
+    ErrorType,
+}
+
+impl ResolvedContract {
+    pub fn new(contract: Contract) -> Result<Self, UnpublishableContract> {
+        fn validate(condition: &Condition) -> Result<(), UnpublishableContract> {
+            match condition {
+                Condition::IsType { ty, .. } => match ty {
+                    ConditionType::Source(_) => Err(UnpublishableContract::SourceType),
+                    ConditionType::Metadata(ty) if ty.mentions_pending() => {
+                        Err(UnpublishableContract::PendingType)
+                    }
+                    ConditionType::Metadata(ty) if ty.mentions_error() => {
+                        Err(UnpublishableContract::ErrorType)
+                    }
+                    ConditionType::Metadata(_) => Ok(()),
+                },
+                Condition::And(left, right) | Condition::Or(left, right) => {
+                    validate(left)?;
+                    validate(right)
+                }
+                Condition::IsNull { .. } | Condition::BoolParam(_) | Condition::Const(_) => Ok(()),
+            }
+        }
+
+        for effect in &contract.effects {
+            if let Effect::ConditionalReturns { conclusion, .. } = effect {
+                validate(conclusion)?;
+            }
+        }
+        Ok(Self(std::sync::Arc::new(contract)))
+    }
+
+    pub fn as_contract(&self) -> &Contract {
+        &self.0
+    }
+
+    pub fn to_arc(&self) -> std::sync::Arc<Contract> {
+        self.0.clone()
+    }
+
+    pub fn storage_payload_bytes(&self) -> usize {
+        fn condition_bytes(condition: &Condition) -> usize {
+            match condition {
+                Condition::And(left, right) | Condition::Or(left, right) => {
+                    std::mem::size_of::<Condition>()
+                        + condition_bytes(left)
+                        + condition_bytes(right)
+                }
+                _ => std::mem::size_of::<Condition>(),
+            }
+        }
+
+        std::mem::size_of::<Contract>()
+            + self
+                .0
+                .effects
+                .iter()
+                .map(|effect| {
+                    std::mem::size_of::<Effect>()
+                        + match effect {
+                            Effect::ConditionalReturns { conclusion, .. } => {
+                                condition_bytes(conclusion)
+                            }
+                            Effect::Returns(_) | Effect::CallsInPlace { .. } => 0,
+                        }
+                })
+                .sum::<usize>()
+    }
+}
+
 /// A function's declared contract: the effects from its `contract { … }` block.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Contract {
@@ -12,9 +97,12 @@ pub struct Contract {
 }
 
 impl Contract {
-    /// A copy with every `ConditionType::Source` mapped through `resolve` to a semantic type
-    /// (metadata emission resolves source references once, against the declaring module).
-    /// References `resolve` declines stay `Source` — consumers skip or degrade them.
+    /// Map the temporary source type references produced by DSL decoding to semantic types.
+    ///
+    /// Pass 1 invokes this while the declaration's lexical type scope is live and then requires
+    /// [`ResolvedContract::new`] to succeed before publishing the contract. The legacy whole-file
+    /// resolver also uses it while that migration path remains; checked FIR, lowering, metadata,
+    /// and backends must never receive a surviving `Source` variant.
     pub fn with_resolved_types(
         &self,
         resolve: &mut dyn FnMut(&TypeRef) -> Option<crate::types::Ty>,
@@ -174,9 +262,9 @@ pub enum Condition {
     Or(Box<Condition>, Box<Condition>),
 }
 
-/// The type in an `is`-conclusion, at the stage decoding produced it. Source contracts carry
-/// the unresolved AST reference (the checker resolves it at the call site, against the call's
-/// type arguments); metadata contracts carry the decoded semantic type.
+/// The type in an `is`-conclusion at the decoding boundary. Source DSL decoding temporarily carries
+/// an unresolved AST reference only until Pass 1 binds it in the declaring function's lexical type
+/// scope. Stable source contracts and metadata contracts both carry the semantic form.
 #[derive(Clone, Debug)]
 pub enum ConditionType {
     Source(TypeRef),

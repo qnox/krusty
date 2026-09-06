@@ -1,20 +1,15 @@
-//! Pins for the PRECISE `BackendOutcome::LowerBail` reason each pass-2 CLASS-region lowering guard
-//! reports (companion to `lower_bail_reason_e2e.rs`, which pins the pre-pass-2 gates).
-//!
-//! Pass 2 sets the phase marker `deep:class` per class; every class-region guard that returned `None`
-//! without refining it lumped 76 box-corpus skips into the survey's `lower: deep:class` blob. Each
-//! guard now records its precise unsupported-feature boundary, so the survey buckets stay attributable
-//! (a failure here means a guard lost — or never got — its label).
+//! Production checked-FIR regressions for class shapes once rejected only by the retired AST lowerer.
+//! Each fixture exercises the formerly gated behavior at runtime; merely observing emitted bytes
+//! would allow a verifier or dispatch failure to masquerade as support.
 //!
 use super::common;
 
 #[test]
-fn suspend_covariant_override_reports_erasure_gate() {
-    // A suspend member overriding a (non-generic) interface method with a value-class COVARIANT
-    // return needs an erasure bridge the coroutine pass never fixes up. The gate lives in the bridge
-    // pass (bridges are derived in the JVM backend), so the file stops there rather than in lowering.
-    common::assert_inline_source_backend_bail(
+fn suspend_covariant_value_class_override_runs_through_interface() {
+    common::expect_box_ok_with_stdlib(
         r#"
+import kotlin.coroutines.*
+
 @JvmInline
 value class IC(val s: String)
 
@@ -26,70 +21,61 @@ class Test : IBar {
     override suspend fun bar(): IC = IC("OK")
 }
 
-fun box(): String = "OK"
+fun box(): String {
+    var result = "fail"
+    val invoke: suspend () -> Any = { (Test() as IBar).bar() }
+    invoke.startCoroutine(Continuation(EmptyCoroutineContext) {
+        result = (it.getOrThrow() as IC).s
+    })
+    return result
+}
 "#,
-        krusty::jvm::backend::SkipReason::Bridges,
+        "SuspendCovariantValueClassOverride",
     );
 }
 
 #[test]
-fn suspend_lambda_in_class_member_emits_unless_body_suspends() {
-    // A suspend lambda inside a class member is modeled when its body does not itself SUSPEND
-    // (`reparent_lambda_impls` places the state-machine class); a body that calls a member suspend
-    // function still gates — the machine would need the enclosing instance threaded through the
-    // continuation (corpus kt44221 miscompiled when admitted).
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
-    assert_eq!(
-        common::inline_source_backend_outcome(
-            r#"
-class C {
-    fun g(): suspend () -> Int = suspend { 1 }
-}
-
-fun box(): String = "OK"
-"#,
-        ),
-        Some(common::BackendOutcome::Emitted),
-        "a non-suspending suspend lambda in a class member must lower"
-    );
-    common::assert_inline_source_lower_bail(
+fn suspending_lambda_in_class_member_captures_dispatch_receiver() {
+    common::expect_box_ok_with_stdlib(
         r#"
+import kotlin.coroutines.*
+
 class C {
-    suspend fun m(): Int = 1
+    private val value = 1
+    suspend fun m(): Int = value
     fun g(): suspend () -> Int = suspend { m() }
 }
 
-fun box(): String = "OK"
+fun box(): String {
+    var result = 0
+    C().g().startCoroutine(Continuation(EmptyCoroutineContext) {
+        result = it.getOrThrow()
+    })
+    return if (result == 1) "OK" else "fail: $result"
+}
 "#,
-        "gate:suspend-lambda-in-class",
+        "SuspendingLambdaClassReceiver",
     );
 }
 
 #[test]
-fn enum_external_supertype_reports_unavailable_obligations() {
-    // The lowering guard has no abstract-obligation inventory for a supertype outside this AST. The
-    // fixture uses a platform interface, but the reason is intentionally identical for another source
-    // file or module: provenance is not the unsupported semantic fact.
-    common::assert_inline_source_lower_bail(
+fn enum_external_supertype_obligation_dispatches() {
+    common::expect_box_ok_with_stdlib(
         r#"
 enum class ExternalEnum : java.util.function.Supplier<String> {
     ONLY;
     override fun get(): String = "OK"
 }
 
-fun box(): String = "OK"
+fun box(): String = ExternalEnum.ONLY.get()
 "#,
-        "gate:enum-supertype-obligations-unavailable",
+        "EnumExternalSupertype",
     );
 }
 
 #[test]
-fn generic_enum_entry_override_reports_erasure_gate() {
-    // Per-entry implementations of a generic interface need bridges on each synthesized entry
-    // subclass. The enum-level bridge path cannot stand in for those subclass-local bridges.
-    common::assert_inline_source_lower_bail(
+fn generic_enum_entry_override_dispatches_through_interface() {
+    common::expect_box_ok_with_stdlib(
         r#"
 interface GenericAction<T> {
     fun apply(value: T): String
@@ -101,28 +87,30 @@ enum class EntryEnum : GenericAction<String> {
     }
 }
 
-fun box(): String = "OK"
+fun box(): String {
+    val action: GenericAction<String> = EntryEnum.ONLY
+    return action.apply("OK")
+}
 "#,
-        "gate:enum-entry-override-erasure",
+        "GenericEnumEntryOverride",
     );
 }
 
 #[test]
-fn enum_entry_custom_property_reports_shape_gate() {
-    // Entry-subclass property emission models a plain initialized backing field only. A computed
-    // getter has a different class shape and must remain a deliberate bail rather than inheriting the
-    // coarse class-phase marker.
-    common::assert_inline_source_lower_bail(
+fn enum_entry_custom_property_getter_runs() {
+    common::expect_box_ok_with_stdlib(
         r#"
 enum class PropertyEnum {
     ONLY {
-        val value: Int get() = 1
-    }
+        override val value: String get() = "OK"
+    };
+
+    abstract val value: String
 }
 
-fun box(): String = "OK"
+fun box(): String = PropertyEnum.ONLY.value
 "#,
-        "gate:enum-entry-property-shape",
+        "EnumEntryCustomProperty",
     );
 }
 

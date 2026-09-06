@@ -33,6 +33,7 @@ pub struct WorkUnit {
     pub cri_file: Option<PathBuf>,
     pub sources: Vec<PathBuf>,
     pub classpath: Vec<PathBuf>,
+    pub friend_paths: Vec<PathBuf>,
     pub module_name: Option<String>,
     pub target_label: Option<String>,
     /// The kotlinc-style flags translated from the worker's own option names.
@@ -206,19 +207,10 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 }
                 "--src-jars" => source_jars.extend(values),
                 "--cp" => unit.classpath.extend(values.into_iter().map(PathBuf::from)),
-                // `associates` — the modules whose `internal` declarations this target may see.
-                // krusty has no `-Xfriend-paths`, and it hides classpath `internal` members by
-                // design, so accepting this would fail later with "unresolved" on every internal
-                // reference instead of naming the real cause here.
-                "--friends" => {
-                    if !values.is_empty() {
-                        return Err(Refusal::Unsupported(format!(
-                            "--friends ({}): krusty cannot grant `internal` visibility across \
-                             modules",
-                            values.join(", ")
-                        )));
-                    }
-                }
+                // `associates` — classpath modules whose `internal` declarations this target sees.
+                "--friends" => unit
+                    .friend_paths
+                    .extend(values.into_iter().map(PathBuf::from)),
                 // krusty does not enforce opt-in requirements, so supplying an opt-in changes no
                 // emitted bytes today. Report that fact instead of pretending the CLI consumed it.
                 "--opt_in" => unit
@@ -1056,12 +1048,9 @@ mod tests {
         assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
     }
 
-    /// `--friends` carries the modules whose `internal` declarations must be visible. krusty has no
-    /// equivalent and hides classpath `internal` members, so accepting it would fail later with
-    /// "unresolved" on every internal reference instead of naming the cause here.
     #[test]
-    fn associates_are_refused_rather_than_dropped() {
-        let refusal = translate(&args(&[
+    fn associates_are_preserved_as_friend_paths() {
+        let unit = translate(&args(&[
             "--friends",
             "peer.jar",
             "--srcs",
@@ -1069,8 +1058,8 @@ mod tests {
             "--out",
             "o.jar",
         ]))
-        .unwrap_err();
-        assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+        .expect("friend path should translate");
+        assert_eq!(unit.friend_paths, [PathBuf::from("peer.jar")]);
     }
 
     /// Options understood but without effect are REPORTED, through the channel bazel prints.

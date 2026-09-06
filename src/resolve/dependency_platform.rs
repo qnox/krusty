@@ -1,6 +1,6 @@
 use crate::libraries::{
     Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind, PropertyInfo,
-    PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype, StaticFieldRef,
+    PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
 };
 use crate::module_symbols::ModuleSymbols;
 use crate::name_tree::FxHashMap;
@@ -58,6 +58,32 @@ impl DependencyPlatform {
         ModuleSymbols::new(&self.symbols)
     }
 
+    fn source_alias_expansion(
+        &self,
+        identity: TypeName,
+    ) -> Option<crate::libraries::AliasExpansion> {
+        let (formals, expansion) = self.symbols.source_alias_expansions.get(&identity)?;
+        let target = expansion.non_null().kotlin_class_internal().or_else(|| {
+            expansion
+                .fun_arity()
+                .and_then(|arity| self.platform.function_type(usize::from(arity)))
+                .and_then(Ty::obj_internal)
+        })?;
+        let expansion_spelling = self
+            .symbols
+            .alias_expansion_spellings
+            .get(&identity)
+            .map(|(spelling, _, _)| spelling.clone())
+            .unwrap_or_default();
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            target,
+            formals: formals.clone(),
+            expansion: *expansion,
+            expansion_spelling,
+        })
+    }
+
     fn source_type_access(&self, internal: TypeName) -> SourceTypeAccess {
         let source = self.source();
         let leaf_visibility = source
@@ -82,54 +108,6 @@ impl DependencyPlatform {
             enclosing = owner.nested_owner();
         }
         leaf_visibility.map_or(SourceTypeAccess::Absent, SourceTypeAccess::Declared)
-    }
-
-    fn public_source_type_name(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
-        if self.source_type_access(internal) != SourceTypeAccess::Declared(Visibility::Public) {
-            return None;
-        }
-        self.source()
-            .classifier(internal)
-            .filter(|shape| shape.is_public())
-    }
-
-    fn public_source_static_field(&self, internal: TypeName, name: &str) -> Option<StaticFieldRef> {
-        self.public_source_type_name(internal)?;
-        let ty = self
-            .symbols
-            .static_classifier_values
-            .get(&internal)?
-            .get(name)
-            .copied()?;
-        Some(StaticFieldRef {
-            owner: internal,
-            name: name.to_string(),
-            // `static_classifier_values` contains enum entries, whose JVM field type is the enum
-            // itself. Dependency sources use their source internal name as their physical JVM name.
-            descriptor: Some(format!("L{};", internal.render())),
-            ty,
-            constant: None,
-            visibility: Visibility::Public,
-            is_final: true,
-        })
-    }
-
-    fn static_field_with_platform(
-        &self,
-        internal: TypeName,
-        name: &str,
-        platform_field: impl FnOnce() -> Option<StaticFieldRef>,
-    ) -> Option<StaticFieldRef> {
-        // `SemanticPlatform` retains both string- and id-backed field hooks for compatibility.
-        // Centralize their source visibility/precedence policy here so the two public entry points
-        // cannot disagree while still invoking the platform hook the caller selected.
-        match self.source_type_access(internal) {
-            SourceTypeAccess::Declared(Visibility::Public) => {
-                self.public_source_static_field(internal, name)
-            }
-            SourceTypeAccess::Absent => platform_field(),
-            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => None,
-        }
     }
 }
 
@@ -193,12 +171,54 @@ fn merge_functions(
     source: FunctionSet,
 ) -> FunctionSet {
     for candidate in source.overloads {
-        if primary
+        if let Some(existing) = primary
             .overloads
             .iter()
             .position(|existing| same_function(platform, existing, &candidate))
-            .is_none()
         {
+            crate::trace_compiler!(
+                "resolve",
+                "merge dependency function owner={:?} name={} primary_flags={:?} source_flags={:?}",
+                candidate.callable.owner,
+                candidate.callable.name,
+                primary.overloads[existing].flags,
+                candidate.flags,
+            );
+            // Keep the primary provider's physical callable identity, descriptor, and realization,
+            // but restore declaration semantics from the dependency source. A compiled dependency
+            // projection may omit Kotlin-only capabilities such as `operator`/`inline`; dropping the
+            // matching source candidate made ordinary calls work while language conventions (most
+            // visibly delegated properties) disappeared.
+            let existing = &mut primary.overloads[existing];
+            existing.companion_extension = candidate.companion_extension;
+            existing.receiver = candidate.receiver.or(existing.receiver);
+            existing.flags = candidate.flags;
+            existing.visibility = candidate.visibility;
+            existing.generic_sig = candidate
+                .generic_sig
+                .clone()
+                .or(existing.generic_sig.clone());
+            existing.projected_return_hazard = candidate.projected_return_hazard;
+            existing.call_sig = candidate.call_sig.clone();
+            existing.default_values = candidate.default_values.clone();
+            existing.context_count = candidate.context_count;
+            existing.annotations = candidate.annotations.clone();
+            existing.callable.inline = candidate.flags.inline;
+            existing.callable.suspend = candidate.flags.suspend;
+            existing.callable.is_abstract = candidate.flags.is_abstract;
+            existing.callable.context_count = candidate.context_count;
+            existing.callable.equality_bound = candidate
+                .callable
+                .equality_bound
+                .or(existing.callable.equality_bound);
+            existing.callable.source_receiver = candidate
+                .callable
+                .source_receiver
+                .or(existing.callable.source_receiver);
+            if let Some(generic) = &candidate.generic_sig {
+                existing.callable.generic_sig = Some(Box::new(generic.clone()));
+            }
+        } else {
             primary.overloads.push(candidate);
         }
     }
@@ -231,11 +251,26 @@ fn merge_type(
     mut primary: LibraryType,
     source: LibraryType,
 ) -> LibraryType {
+    // The source signature is the semantic declaration and therefore owns its declaration order;
+    // the platform copy contributes physical realization. Preserve any platform-only direct
+    // declarations afterwards in their own provider order without consulting either hash table.
+    let primary_order = std::mem::take(&mut primary.declared_callable_order);
+    primary.declared_callable_order = source.declared_callable_order.clone();
+    for name in primary_order {
+        if !primary.declared_callable_order.contains(&name) {
+            primary.declared_callable_order.push(name);
+        }
+    }
     primary.access = source.access;
     primary.source_file = source.source_file;
     if !source.type_params.is_empty() {
         primary.type_parameters = source.type_parameters.clone();
     }
+    // Enum entries are source declarations, not physical fields or accessor artifacts. The stable
+    // source classifier therefore owns the complete ordered entry list, including the meaningful
+    // empty list of an enum with no entries. The primary provider contributes only the optional
+    // physical `entries` accessor below.
+    primary.enum_entries = source.enum_entries.clone();
     if primary.enum_entries_accessor.is_none() {
         primary.enum_entries_accessor = source.enum_entries_accessor.clone();
     }
@@ -299,13 +334,35 @@ impl SymbolSource for DependencyPlatform {
             return merged.clone();
         }
         let primary = self.platform.symbols(namespace, name);
-        let source = self.source().symbols(namespace, name);
-        let source_access = source
-            .classifier_name
-            .or(primary.classifier_name)
-            .map_or(SourceTypeAccess::Absent, |name| {
-                self.source_type_access(name)
-            });
+        let source_alias = namespace
+            .existing_classifier(name)
+            .and_then(|identity| self.source_alias_expansion(identity));
+        let source = source_alias.as_ref().map_or_else(
+            || self.source().symbols(namespace, name),
+            |alias| {
+                let classifier = self.platform.classifier(alias.target).map(|classifier| {
+                    let mut classifier = (*classifier).clone();
+                    classifier.alias_target = Some(alias.target);
+                    std::sync::Arc::new(classifier)
+                });
+                Rc::new(ResolvedSymbols {
+                    classifier_name: Some(alias.target),
+                    classifier,
+                    importable_declaration: true,
+                    ..ResolvedSymbols::default()
+                })
+            },
+        );
+        let source_access = if source_alias.is_some() {
+            SourceTypeAccess::Declared(Visibility::Public)
+        } else {
+            source
+                .classifier_name
+                .or(primary.classifier_name)
+                .map_or(SourceTypeAccess::Absent, |name| {
+                    self.source_type_access(name)
+                })
+        };
         let source_classifier = match source_access {
             SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => {
                 source.classifier.as_ref()
@@ -369,17 +426,39 @@ impl SemanticPlatform for DependencyPlatform {
         })
     }
 
-    fn static_field(&self, internal: &str, name: &str) -> Option<StaticFieldRef> {
-        let internal_name = crate::types::type_name(internal);
-        self.static_field_with_platform(internal_name, name, || {
-            self.platform.static_field(internal, name)
-        })
+    fn classifier_associated_property(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<crate::libraries::PropertyInfo> {
+        match self.source_type_access(internal) {
+            SourceTypeAccess::Absent => {
+                self.platform.classifier_associated_property(internal, name)
+            }
+            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => None,
+        }
     }
 
-    fn static_field_name(&self, internal: TypeName, name: &str) -> Option<StaticFieldRef> {
-        self.static_field_with_platform(internal, name, || {
-            self.platform.static_field_name(internal, name)
-        })
+    fn inherits_classifier_callables(&self, internal: TypeName) -> bool {
+        self.platform.inherits_classifier_callables(internal)
+    }
+
+    fn top_level_associated_property(
+        &self,
+        package: TypeName,
+        name: &str,
+    ) -> Option<crate::libraries::PropertyInfo> {
+        self.platform.top_level_associated_property(package, name)
+    }
+
+    fn external_property_diagnostic_label(
+        &self,
+        property: crate::fir::ExternalPropertyId,
+        name: &str,
+        ty: Ty,
+    ) -> Option<String> {
+        self.platform
+            .external_property_diagnostic_label(property, name, ty)
     }
 
     fn library_value_form(&self, ty: Ty) -> Ty {
@@ -395,7 +474,8 @@ impl SemanticPlatform for DependencyPlatform {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.platform.type_alias_expansion(internal)
+        self.source_alias_expansion(internal)
+            .or_else(|| self.platform.type_alias_expansion(internal))
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
@@ -446,6 +526,16 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.physical_property_getter_names(property)
     }
 
+    fn inherited_accessor_properties(
+        &self,
+        source: &dyn crate::symbol_source::SymbolSource,
+        receiver: Ty,
+        property: &str,
+    ) -> crate::libraries::PropertySet {
+        self.platform
+            .inherited_accessor_properties(source, receiver, property)
+    }
+
     fn builtin_type_internal(&self, simple_name: &str) -> Option<String> {
         self.platform.builtin_type_internal(simple_name)
     }
@@ -479,6 +569,7 @@ mod tests {
     #[derive(Default)]
     struct TypeVisibility {
         public: HashMap<TypeName, bool>,
+        inherits_classifier_callables: bool,
     }
 
     impl SymbolSource for TypeVisibility {
@@ -495,7 +586,11 @@ mod tests {
         }
     }
 
-    impl SemanticPlatform for TypeVisibility {}
+    impl SemanticPlatform for TypeVisibility {
+        fn inherits_classifier_callables(&self, _internal: TypeName) -> bool {
+            self.inherits_classifier_callables
+        }
+    }
 
     fn type_shape(is_public: bool) -> LibraryType {
         LibraryType {
@@ -506,6 +601,7 @@ mod tests {
                 crate::libraries::ClassifierAccess::Private
             },
             source_file: None,
+            stable_declaration: None,
             is_nested: false,
             outer_instance: None,
             kind: TypeKind::Class,
@@ -513,18 +609,21 @@ mod tests {
             supertypes: Default::default(),
             supertype_templates: Vec::new(),
             constructors: Vec::new(),
-            fields: Vec::new(),
+            hidden_member_properties: Default::default(),
             declared_callables: HashMap::new(),
+            declared_callable_order: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
             constants: HashMap::new(),
             sam_eligible: false,
             callable_signature: None,
+            callable_signatures: Vec::new(),
             companion_object: None,
             value_underlying: None,
             value_underlying_property: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
+            own_type_parameter_count: 0,
             sealed_subclasses: Default::default(),
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
@@ -578,6 +677,9 @@ mod tests {
             owner,
             receiver_rank: 0,
             source_key: None,
+            stable_declaration: None,
+            getter_declaration: None,
+            setter_declaration: None,
             source_member: None,
             accessor_derived: false,
         }
@@ -601,6 +703,20 @@ mod tests {
             Rc::ptr_eq(&first, &second),
             "repeated queries must not re-merge the namespace record"
         );
+    }
+
+    #[test]
+    fn dependency_wrapper_preserves_foreign_classifier_inheritance_capability() {
+        let classifier = crate::types::type_name("foreign/Derived");
+        let platform = DependencyPlatform::new(
+            Box::new(TypeVisibility {
+                inherits_classifier_callables: true,
+                ..TypeVisibility::default()
+            }),
+            crate::resolve::SymbolTable::default(),
+        );
+
+        assert!(platform.inherits_classifier_callables(classifier));
     }
 
     #[test]
@@ -662,6 +778,49 @@ mod tests {
     }
 
     #[test]
+    fn matching_source_function_restores_kotlin_declaration_capabilities() {
+        let owner = crate::types::type_name("demo/Delegate");
+        let mut member = LibraryMember::new(
+            "getValue".to_string(),
+            vec![Ty::nullable(Ty::obj("kotlin/Any")), Ty::obj("kotlin/Any")],
+            Ty::Int,
+            "(Ljava/lang/Object;Ljava/lang/Object;)I".to_string(),
+        );
+        member.owner = Some(owner);
+        let primary =
+            FunctionInfo::classifier_member(crate::libraries::FnKind::Member, owner, member);
+        let mut source = primary.clone();
+        source.flags.operator = true;
+        source.flags.inline = crate::libraries::InlineKind::CanInline;
+        source.callable.inline = crate::libraries::InlineKind::CanInline;
+
+        let merged = merge_functions(
+            &TypeVisibility::default(),
+            FunctionSet {
+                overloads: vec![primary],
+            },
+            FunctionSet {
+                overloads: vec![source],
+            },
+        );
+
+        assert_eq!(merged.overloads.len(), 1);
+        assert!(merged.overloads[0].flags.operator);
+        assert_eq!(
+            merged.overloads[0].flags.inline,
+            crate::libraries::InlineKind::CanInline,
+        );
+        assert_eq!(
+            merged.overloads[0].callable.inline,
+            crate::libraries::InlineKind::CanInline,
+        );
+        assert_eq!(
+            merged.overloads[0].callable.descriptor,
+            "(Ljava/lang/Object;Ljava/lang/Object;)I",
+        );
+    }
+
+    #[test]
     fn property_on_non_public_primary_type_uses_source_metadata() {
         let owner = crate::types::type_name("demo/Owner");
         let mut platform = TypeVisibility::default();
@@ -717,5 +876,20 @@ mod tests {
             merged.declared_callables["secret"].functions()[0].visibility,
             Visibility::Protected
         );
+    }
+
+    #[test]
+    fn source_enum_entries_are_the_authoritative_declaration_list() {
+        let mut primary = type_shape(true);
+        primary.kind = TypeKind::Enum;
+        primary.enum_entries = vec!["STALE".to_string()];
+
+        let mut source = type_shape(true);
+        source.kind = TypeKind::Enum;
+        source.enum_entries = vec!["FIRST".to_string(), "SECOND".to_string()];
+
+        let merged = merge_type(&TypeVisibility::default(), primary, source);
+
+        assert_eq!(merged.enum_entries, ["FIRST", "SECOND"]);
     }
 }

@@ -30,7 +30,7 @@ fn sealed_metadata_includes_sibling_file_subclasses() {
     let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
     let mut ir = krusty::ir_lower::lower_file(&files[0], &info, &symbols, &runtime)
         .expect("lower sealed base");
-    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], "p/BaseKt", "main", &symbols)
+    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], "p/BaseKt", "main", &symbols, &cp)
         .expect("backend passes");
     let options = EmitOptions {
         emit_class_metadata: true,

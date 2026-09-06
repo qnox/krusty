@@ -37,6 +37,84 @@ fn captures_local_val() {
 }
 
 #[test]
+fn mutable_local_capture_uses_one_shared_cell_across_anonymous_class() {
+    run_ok(
+        "AnonMutableLocal",
+        "interface Setter { fun set(value: String) }\n\
+         fun box(): String {\n\
+         var result = \"fail\"\n\
+         val setter = object : Setter {\n\
+             override fun set(value: String) { result = value }\n\
+         }\n\
+         setter.set(\"OK\")\n\
+         return result }\n",
+    );
+}
+
+#[test]
+fn nested_anonymous_object_uses_outer_capture_field_identity() {
+    run_ok(
+        "NestedAnonCaptureField",
+        "interface Result { fun value(): String }\n\
+         fun box(): String {\n\
+             var first = \"O\"\n\
+             var second = \"K\"\n\
+             val outer = object {\n\
+                 fun make(prefix: String) = object : Result {\n\
+                     override fun value(): String {\n\
+                         first = prefix\n\
+                         return first + second\n\
+                     }\n\
+                 }\n\
+             }\n\
+             return outer.make(\"O\").value()\n\
+         }\n",
+    );
+}
+
+#[test]
+fn generic_override_approximates_anonymous_result_to_declared_supertype() {
+    run_ok(
+        "GenericAnonymousResult",
+        "interface Value<T> { fun get(): T }\n\
+         interface Factory { fun <T> make(value: T): Value<T> }\n\
+         fun factory(): Factory = object : Factory {\n\
+             override fun <T> make(value: T) = object : Value<T> {\n\
+                 override fun get(): T = value\n\
+             }\n\
+         }\n\
+         fun box(): String = factory().make(\"OK\").get()\n",
+    );
+}
+
+#[test]
+fn nullable_primitive_capture_uses_reference_shared_cell() {
+    run_ok(
+        "AnonNullablePrimitiveCapture",
+        "interface NullableSetter { fun set(value: Int?) }\n\
+         fun box(): String {\n\
+         var result: Int? = null\n\
+         val setter = object : NullableSetter {\n\
+             override fun set(value: Int?) { result = value }\n\
+         }\n\
+         setter.set(42)\n\
+         return if (result == 42) \"OK\" else \"fail\" }\n",
+    );
+}
+
+#[test]
+fn mutable_local_capture_uses_one_shared_cell_across_local_class() {
+    run_ok(
+        "LocalClassMutableLocal",
+        "fun box(): String {\n\
+         var result = \"fail\"\n\
+         class Setter { fun set(value: String) { result = value } }\n\
+         Setter().set(\"OK\")\n\
+         return result }\n",
+    );
+}
+
+#[test]
 fn captures_constructor_initialized_local() {
     run_ok(
         "AnonCtorLocal",
@@ -160,5 +238,77 @@ fn captures_inner_shadowed_local() {
          fun box(): String {\n\
          if (f(false) != -1) return \"FAIL false\"\n\
          return if (f(true) == 3) \"OK\" else \"FAIL\" }\n",
+    );
+}
+
+#[test]
+fn pass_two_captures_receiver_function_values_in_anonymous_object() {
+    run_ok(
+        "AnonReceiverFunctionCapture",
+        "interface WriteContext { val prefix: String }\n\
+         interface Codec<T> { fun WriteContext.encode(value: T): String }\n\
+         fun <T> codec(block: WriteContext.(T) -> String): Codec<T> = object : Codec<T> {\n\
+             override fun WriteContext.encode(value: T): String = block(value)\n\
+         }\n\
+         fun box(): String {\n\
+             val codec = codec<String> { prefix + it }\n\
+             val context = object : WriteContext { override val prefix: String get() = \"O\" }\n\
+             return with(codec) { context.encode(\"K\") }\n\
+         }\n",
+    );
+}
+
+#[test]
+fn pass_two_lifts_outer_receiver_through_lambda_into_anonymous_class() {
+    run_ok(
+        "AnonOuterReceiverThroughLambda",
+        "fun execute(block: () -> Unit) { block() }\n\
+         class Outer(result: String) {\n\
+             var result: String = \"Failed\"\n\
+             init {\n\
+                 execute {\n\
+                     object {\n\
+                         init { execute { completed(result) } }\n\
+                     }\n\
+                 }\n\
+             }\n\
+             fun completed(value: String) { this.result = value }\n\
+         }\n\
+         fun box(): String = Outer(\"OK\").result\n",
+    );
+}
+
+#[test]
+fn pass_two_discovers_anonymous_super_outer_receiver_inside_local_class() {
+    run_ok(
+        "AnonInnerSuperInsideLocal",
+        "fun box(): String {\n\
+             class Local {\n\
+                 open inner class Inner(val value: String) {\n\
+                     open fun result(): String = \"Fail\"\n\
+                 }\n\
+                 val expected = \"OK\"\n\
+                 val instance = object : Inner(expected) {\n\
+                     override fun result(): String = value\n\
+                 }\n\
+             }\n\
+             return Local().instance.result()\n\
+         }\n",
+    );
+}
+
+#[test]
+fn property_initializer_captures_same_named_enclosing_value() {
+    run_ok(
+        "AnonPropertyInitializerShadow",
+        "interface Value { val value: Int; fun read(): Int }\n\
+         fun make(value: Int): Value = object : Value {\n\
+             override val value: Int = value + 1\n\
+             override fun read(): Int = value\n\
+         }\n\
+         fun box(): String {\n\
+             val result = make(41)\n\
+             return if (result.value == 42 && result.read() == 42) \"OK\" else \"FAIL\"\n\
+         }\n",
     );
 }

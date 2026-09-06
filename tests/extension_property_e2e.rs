@@ -10,6 +10,44 @@ fn run(src: &str) -> Option<String> {
 }
 
 #[test]
+fn inferred_member_extension_constructor_keeps_the_dispatch_type_parameter() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(
+        "class Wrapper<T>(val value: T)\n\
+         class Container<T>(private val value: T) {\n\
+             val String.wrapped get() = Wrapper(value)\n\
+         }\n\
+         fun read(container: Container<String>, token: String): Int =\n\
+             container.run { token.wrapped.value.length }\n",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn inferred_generic_call_keeps_a_common_source_supertype() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(
+        "interface Sized { val size: Int }\n\
+         class First : Sized { override val size: Int = 1 }\n\
+         class Second : Sized { override val size: Int = 2 }\n\
+         class Container {\n\
+             fun <T> choose(first: T, second: T): T = first\n\
+             val String.marker get() = choose(First(), Second()).size\n\
+             fun read(token: String): Int = token.marker\n\
+         }\n",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn member_extension_property_resolution() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();

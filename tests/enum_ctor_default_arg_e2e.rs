@@ -17,6 +17,18 @@ fn enum_entry_uses_default_argument() {
 }
 
 #[test]
+fn enum_entry_block_body_has_a_finalized_unit_signature() {
+    const SRC: &str = "enum class Test(val str: String = \"OK\") {\n\
+        \x20 OK { fun marker() {} }\n\
+        }\n\
+        fun box(): String = Test.OK.str\n";
+    assert_eq!(
+        common::module_front_end_diagnostics(&[("EntryBody", SRC)]).expect("frontend toolchain"),
+        Vec::<String>::new(),
+    );
+}
+
+#[test]
 fn enum_mixed_default_and_explicit() {
     const SRC: &str = "enum class E(val a: Int, val b: Int = 10) {\n\
         \x20 X(1),\n\

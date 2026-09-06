@@ -262,22 +262,16 @@ fn a_value_class_type_argument_still_infers() {
 }
 
 #[test]
-fn a_nested_value_class_argument_is_withheld_too() {
-    // The withhold is about the whole applied type, not its outermost spelling: `Box<List<Money>>`
-    // reaches the same erased constructor parameter as `Box<Money>`. Committing it compiles and
-    // then throws `ClassCastException` on the first read, so the construction stays unapplied and
-    // the program is REJECTED rather than miscompiled.
+fn a_nested_value_class_argument_remains_semantic_in_the_frontend() {
+    // Value-class storage is a backend concern. The frontend must retain the complete inferred
+    // `Box<List<Money>>` type rather than erase it to raw `Box` as a safety fallback.
     const LIB: &str = "package repro\n\
         @JvmInline value class Money(val amount: String)\n\
         class Box<T>(val v: T)\n";
     const MAIN: &str = "package repro\n\
         val boxed = Box(listOf(Money(\"1\"), Money(\"2\")))\n\
         fun box(): String = boxed.v[0].amount\n";
-    let diagnostics = common::front_end_diagnostics_files_with_stdlib(&[LIB, MAIN]);
-    assert!(
-        !diagnostics.is_empty(),
-        "a nested value-class type argument must not be committed: {diagnostics:?}"
-    );
+    common::expect_front_end_ok_files_with_stdlib(&[LIB, MAIN], "nested value-class type argument");
 }
 
 #[test]

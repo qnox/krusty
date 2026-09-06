@@ -119,6 +119,50 @@ fun box(): String {
     );
 }
 
+/// A nullable-`Unit` safe call nested below a checked conversion and then consumed by another
+/// expression. The branch suspension must be split into states inside the selected branch; the
+/// outer consumer runs only after the coroutine resumes.
+#[test]
+fn suspend_lambda_nested_unit_safe_call_resumes_before_outer_consumer() {
+    run(
+        r#"
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+var pending: Continuation<Unit>? = null
+var observed = "FAIL"
+
+suspend fun pause(): Unit = suspendCoroutineUninterceptedOrReturn {
+    pending = it
+    COROUTINE_SUSPENDED
+}
+
+class Holder {
+    suspend fun act() = pause()
+}
+
+val Any?.tag: String
+    get() = if (this == null) "null" else "Unit"
+
+fun builder(c: suspend () -> Unit) {
+    c.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+}
+
+fun box(): String {
+    val holder: Holder? = Holder()
+    builder {
+        observed = holder?.act().tag
+        Unit
+    }
+    if (observed != "FAIL") return "completed before resume: $observed"
+    pending!!.resume(Unit)
+    return if (observed == "Unit") "OK" else observed
+}
+"#,
+        "NestedSafeUnitKt",
+    );
+}
+
 /// A non-suspending void tail call whose ARGUMENT suspends must still be materialized. Argument
 /// evaluation is lowered ahead of the call and remains visible to the coroutine flattener; treating
 /// every call subtree containing suspension as a suspending tail would incorrectly leave the outer

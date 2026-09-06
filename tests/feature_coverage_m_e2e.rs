@@ -57,9 +57,8 @@ fun box(): String {\n\
 
 #[test]
 fn unbound_member_reference_user_method() {
-    // NOTE: an unbound member ref on a LIBRARY type (`String::length`) is not modeled by krusty and is
-    // dropped; this covers the general unbound member reference (`Class::method`) on a user class, which
-    // takes the receiver as its first argument.
+    // General unbound member method reference (`Class::method`) on a user class. Dependency property
+    // references such as `String::length` have their own focused bound/unbound regressions.
     let _jh = common::java_home();
     let _sl = common::stdlib_jar();
     const SRC: &str = "class Cell(val n: Int) { fun doubled(): Int = n * 2 }\n\

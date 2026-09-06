@@ -214,6 +214,7 @@ fn diagnostic_key(diagnostic: &Diagnostic) -> DiagnosticKey {
             DiagnosticKind::Compiler => 0,
             DiagnosticKind::IncompatibleEquality => 1,
             DiagnosticKind::Inspection => 2,
+            DiagnosticKind::ValReassignment => 3,
         },
     )
 }
@@ -395,14 +396,6 @@ pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
     analyze_source_set(sources, Box::new(StandaloneKotlinSymbols))
 }
 
-pub(crate) fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> SourceSetAnalysis {
-    analyze_source_inputs_with_features(
-        inputs,
-        Box::new(krusty::libraries::EmptySymbolSource),
-        &LangFeatures::new(),
-    )
-}
-
 /// Minimal semantic dependency used by standalone LSP analysis. It is an ordinary symbol provider,
 /// so annotations still resolve through default imports to canonical identities; no production path
 /// treats the source spelling `Deprecated` specially.
@@ -444,6 +437,10 @@ impl SemanticPlatform for StandaloneKotlinSymbols {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> SourceSetAnalysis {
+        crate::jvm_analysis::analyze_standalone_source_inputs(inputs)
+    }
 
     #[test]
     fn source_set_analysis_resolves_cross_file_declarations() {

@@ -19,3 +19,14 @@ return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "D");
 }
+
+#[test]
+fn do_while_condition_keeps_body_local_in_scope() {
+    const SRC: &str = "fun box(): String {\n\
+do {\n\
+    val sentinel = 999\n\
+} while (sentinel != 999)\n\
+return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "DoWhileBodyLocal");
+}

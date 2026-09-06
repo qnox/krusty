@@ -127,13 +127,16 @@ fn unary_not_on_int() {
 }
 
 // ---------------------------------------------------------------------------
-// if-expression branch incompatibility
+// if-expression common-supertype inference
 // ---------------------------------------------------------------------------
 
 #[test]
-fn incompatible_if_branches() {
-    let d = diags("fun box(): Int { val y = if (true) 1 else \"s\"; return 0 }");
-    assert_rejected(&d, "incompatible if branches");
+fn mixed_if_branches_infer_a_common_supertype() {
+    let output = common::compile_and_run_with_stdlib(
+        "fun box(): String { val y = if (true) 1 else \"s\"; return if (y is Int) \"OK\" else \"FAIL\" }",
+        "C",
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,10 +304,14 @@ fn return_value_from_unit_function() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn elvis_on_non_null_operand() {
-    // The left operand is a non-null Int; `?:` and its Char rhs is a type soup the checker rejects.
-    let d = diags("fun box(): Int { val n = 5; val r = n ?: \"x\"; return 0 }");
-    assert_rejected(&d, "elvis with a non-null left operand mixing types");
+fn elvis_on_non_null_operand_keeps_the_left_value() {
+    // Kotlin accepts this and warns that the right side is unreachable; warning production is
+    // separate from semantic acceptance and result typing.
+    let output = common::compile_and_run_with_stdlib(
+        "fun box(): String { val n = 5; val r = n ?: \"x\"; return if (r == 5) \"OK\" else \"FAIL\" }",
+        "C",
+    );
+    assert_eq!(output.as_deref(), Some("OK"));
 }
 
 // ---------------------------------------------------------------------------

@@ -76,19 +76,18 @@ fun box(): String = C().ref().get()
     );
 }
 
-/// Known boundaries of THIS feature (promote these to box-OK pins when the machinery lands):
-/// delegation BY a callable reference (`val b by ::a`) isn't modeled even for the pre-existing
-/// `this::a`/`A()::a` forms (the delegate's `getValue` operator on `KProperty0` isn't resolved).
+/// Delegation by an extension-member property reference retains the selected receiver/property
+/// identity through checked FIR and executes through the ordinary delegated-property protocol.
 #[test]
-fn delegate_boundary_stays_skipped() {
+fn delegated_extension_member_property_reference_runs() {
     if !common::corpus_ready() {
         return;
     }
     let case = "delegatedProperty/delegatedByExtensionMemberProperty.kt";
     assert_eq!(
-        common::run_box_corpus_case(case),
-        None,
-        "{case} needs machinery outside this feature — must stay skipped"
+        common::run_box_corpus_case(case).as_deref(),
+        Some("OK"),
+        "{case}"
     );
 }
 
@@ -116,8 +115,8 @@ fn member_prop_ref_shapes_fail_closed_or_use_the_selected_getter() {
     // Public computed getters are exact callable targets and run. Inaccessible/synthetic-field
     // shapes still fail closed rather than rebinding a same-named extension or top-level property.
     let cases: &[(&str, &str, Option<&str>)] = &[
-        // A private member property: no accessor is emitted, so the reference class's `get()`
-        // would hit a NoSuchMethodError.
+        // A private member property is accessible from its declaring class. Its reference uses the
+        // exact selected property through the declaring class's synthetic access bridge.
         (
             "PrivateProp",
             r#"
@@ -127,10 +126,10 @@ class C {
 }
 fun box(): String = C().r().get()
 "#,
-            None,
+            Some("OK"),
         ),
-        // A `var` with a private setter: the reference's `set` would dispatch the private setter
-        // from a separate class (IllegalAccessError).
+        // A `var` with a private setter remains mutable inside its declaring class. The returned
+        // reference reaches that selected setter through the same synthetic access bridge.
         (
             "PrivateSetter",
             r#"
@@ -145,7 +144,7 @@ fun box(): String {
     return c.x
 }
 "#,
-            None,
+            Some("K"),
         ),
         // An anonymous object's capture of an enclosing LOCAL (`::x` on a captured local —
         // kotlinc rejects this outright; a top-level capture resolves as the top-level ref,

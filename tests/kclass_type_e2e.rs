@@ -52,3 +52,33 @@ fn kclass_returned_and_compared() {
         "OK"
     );
 }
+
+#[test]
+fn constructor_metadata_preserves_nested_class_type_parameters_across_modules() {
+    let dependency = common::compile_lib(
+        "kclass_constructor_type_parameter",
+        "package dependency\n\
+         import kotlin.reflect.KClass\n\
+         class WithKClass<K : Any>(val k: KClass<K>)\n",
+    )
+    .expect("compile generic constructor dependency");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process(
+        "package consumer\n\
+         import dependency.WithKClass\n\
+         fun box(): String {\n\
+             val value = WithKClass(String::class)\n\
+             return if (value.k == String::class) \"OK\" else \"fail\"\n\
+         }\n",
+        "Use",
+        &[dependency.clone(), stdlib.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("consume the generic constructor metadata");
+
+    assert_eq!(
+        common::run_box(&classes, "consumer.UseKt", &[dependency, stdlib]).as_deref(),
+        Some("OK")
+    );
+}

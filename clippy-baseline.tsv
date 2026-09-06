@@ -1,21 +1,87 @@
+1	src/assignable.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
+1	src/backend/module_facts.rs	called `iter().copied().collect()` on a slice to create a `Vec`. Calling `to_vec()` is both faster and more readable: help: try: `.to_vec()`
 1	src/bin/blockers.rs	consider using `sort_by_key`
+1	src/compiler.rs	the method `accept_inline_bodies` doesn't need a mutable reference
+1	src/compiler.rs	this function has too many arguments (9/7)
+1	src/conformance/reference_jvm.rs	this function has too many arguments (9/7)
+1	src/fir/active_source.rs	usage of `bool::then` in `filter_map`
+1	src/fir/body.rs	large size difference between variants: the entire enum is at least 784 bytes
+1	src/fir/body.rs	large size difference between variants: the entire enum is at least 816 bytes
+1	src/fir/body.rs	large size difference between variants: the entire enum is at least 824 bytes
+1	src/fir/body.rs	usage of `bool::then` in `filter_map`
+1	src/fir/body.rs	using `clone` on type `FirCapture` which implements the `Copy` trait: help: try dereferencing it: `*capture`
+1	src/fir/body_check.rs	explicit call to `.into_iter()` in function argument accepting `IntoIterator`
+1	src/fir/body_check.rs	this function has too many arguments (8/7)
+1	src/fir/body_check/arguments.rs	this function has too many arguments (8/7)
+1	src/fir/body_check/assignment_tests.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `expression_types.contains(&expected)`
+1	src/fir/body_check/calls.rs	this function has too many arguments (11/7)
+1	src/fir/body_check/calls.rs	unneeded `return` statement
+1	src/fir/body_check/calls.rs	using `clone` on type `Option<SourceMember>` which implements the `Copy` trait: help: try removing the `clone` call: `target.source_member`
+1	src/fir/body_check/calls.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/fir/body_check/constructors.rs	called `expect` on `secondary` after checking its variant with `is_none`
+1	src/fir/body_check/constructors.rs	the following explicit lifetimes could be elided: 'a
+1	src/fir/body_check/driver.rs	the following explicit lifetimes could be elided: 'a
+1	src/fir/body_check/driver_tests.rs	unnecessary closure used with `bool::then`
+1	src/fir/body_check/invokes.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `dispatch_receiver`
+1	src/fir/body_check/local_classes.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/fir/body_check/property_tests.rs	this call to `as_ref` does nothing: help: try: `arguments`
+1	src/fir/body_check/test_support.rs	the function `crate::resolve::publish_checked_local_signatures` doesn't need a mutable reference
+1	src/fir/body_work.rs	these patterns are unneeded as the `..` pattern can match those elements: help: remove them
+1	src/fir/header.rs	called `expect` on `property.init` after checking its variant with `is_some`
+1	src/fir/module_symbols.rs	this function has too many arguments (8/7)
+1	src/fir/signature/evaluate.rs	this function has too many arguments (8/7)
+1	src/fir/signature_extract.rs	redundant guard
+1	src/fir/signature_extract.rs	this function has too many arguments (8/7)
+1	src/fir/signature_extract.rs	unnecessary closure used to substitute value for `Option::None`
+1	src/fir/tests.rs	useless conversion to the same type: `fir::identities::TypeParameterId`: help: consider removing `.into()`: `TypeParameterId::from_raw(0)`
+1	src/fir_lower/checked.rs	called `expect` on `enclosing` after checking its variant with `is_some`
+1	src/fir_lower/checked.rs	using `clone` on type `Option<SourceMember>` which implements the `Copy` trait: help: try dereferencing it: `*source_member`
+1	src/fir_lower/classifier_references.rs	this function has too many arguments (11/7)
+1	src/fir_lower/classifier_references.rs	this function has too many arguments (8/7)
+1	src/fir_lower/constructors.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let identity = index.type_parameter(classifier, ordinal)?;`
+1	src/fir_lower/constructors.rs	using `map` over `inspect`
+1	src/fir_lower/external_references.rs	unnecessary closure used to substitute value for `Option::None`
+1	src/fir_lower/module_declarations.rs	this `if` can be collapsed into the outer `match`
+1	src/fir_lower/properties.rs	this function has too many arguments (10/7)
+1	src/fir_lower/properties.rs	this function has too many arguments (8/7)
+1	src/fir_lower/ranges.rs	returning the result of a `let` binding from a block
+1	src/fir_lower/source_calls.rs	called `expect` on `physical_function` after checking its variant with `is_none`
+1	src/fir_lower/source_calls.rs	this function has too many arguments (15/7)
+1	src/fir_lower/source_calls.rs	this function has too many arguments (9/7)
+1	src/fir_lower/source_calls.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/fir_lower/tests.rs	deref which would be done by auto-deref: help: try: `source`
+1	src/fir_lower/tests.rs	deref which would be done by auto-deref: help: try: `stem`
+1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_bodies = bodies.get_mut(provider.source.raw() as usize)?;`
+1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_roots = roots.get_mut(root.source.raw() as usize)?;`
+1	src/frontend/inline_preparation.rs	this function has too many arguments (8/7)
+1	src/frontend/tests/streaming.rs	using `clone` on type `ResolvedCallableHeader` which implements the `Copy` trait: help: try removing the `clone` call: `callable`
 1	src/ir_lower.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `*i`
 1	src/ir_lower.rs	the loop variable `k` is used to index `adapted_params`
 1	src/ir_lower.rs	this block may be rewritten with the `?` operator
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lambda_ty`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `pir`
+1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `property_ir`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `ret_ty`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `self.ir.functions[fid as usize].ret`
 1	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `target_ir`
+1	src/jvm/backend.rs	this function has too many arguments (8/7)
+1	src/jvm/bridges.rs	this function has too many arguments (9/7)
+1	src/jvm/classpath.rs	called `expect` on `jdk_release` after checking its variant with `is_some`
+1	src/jvm/external_calls.rs	unnecessary closure used with `bool::then`
 1	src/jvm/inline.rs	the loop variable `k` is used to index `insns`
+1	src/jvm/ir_emit.rs	this method chain can be written more clearly with `if .. else ..`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*result`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `c.fields[*index as usize].ty`
 1	src/jvm/ir_emit.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `c.fields[index as usize].ty`
-1	src/jvm/jvm_libraries.rs	this function has too many arguments (8/7)
+1	src/jvm/java_stub.rs	unnecessary closure used with `bool::then`
+1	src/jvm/jvm_libraries.rs	unnecessarily eager cloning of iterator items
 1	src/jvm/jvm_libraries.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/jvm/metadata.rs	this function has too many arguments (10/7)
+1	src/jvm/metadata.rs	this function has too many arguments (11/7)
 1	src/jvm/metadata.rs	this function has too many arguments (8/7)
+1	src/jvm/ranges.rs	this function has too many arguments (8/7)
+1	src/jvm/shared_captures.rs	you seem to want to iterate on a map's keys
+1	src/jvm/suspend.rs	unneeded `return` statement
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ret_ty`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*target`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `cont_ty`
@@ -24,60 +90,130 @@
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `ir.functions[fid as usize].ret`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `real_params[(idx - this_offset) as usize]`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `recv_ty`
+1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*p`
 1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*params.get(i)?`
 1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `b.concrete_ret`
 1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ret`
 1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
 1	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `u`
 1	src/lexer.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `self.i`
-1	src/libraries.rs	large size difference between variants: the entire enum is at least 1504 bytes
+1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`
+1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if merged.as_slice() != arguments { Ty::obj_args_name(name, &merged) } else { declared }`
+1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
-1	src/resolve.rs	large size difference between variants: the entire enum is at least 232 bytes
-1	src/resolve.rs	large size difference between variants: the entire enum is at least 832 bytes
-1	src/resolve.rs	large size difference between variants: the entire enum is at least 920 bytes
-1	src/resolve.rs	large size difference between variants: the entire enum is at least 944 bytes
-1	src/resolve.rs	large size difference between variants: the entire enum is at least 976 bytes
+1	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
+1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
+1	src/resolve.rs	iterating on a map's keys
+1	src/resolve.rs	large size difference between variants: the entire enum is at least 1192 bytes
+1	src/resolve.rs	large size difference between variants: the entire enum is at least 408 bytes
+1	src/resolve.rs	large size difference between variants: the entire enum is at least 656 bytes
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&is_own_call`
+1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
+1	src/resolve.rs	returning the result of a `let` binding from a block
+1	src/resolve.rs	this `if` has identical blocks
 1	src/resolve.rs	this function has too many arguments (10/7)
+1	src/resolve.rs	this function has too many arguments (11/7)
+1	src/resolve.rs	this function has too many arguments (12/7)
+1	src/resolve.rs	this function has too many arguments (15/7)
+1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if internal == foo { vec!["prop".to_string()] } else { Default::default() }`
+1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if name == "equals" { vec!["other".into()] } else { Default::default() }`
+1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if views.len() > 1 { views } else { Default::default() }`
+1	src/resolve.rs	usage of `bool::then` in `filter_map`
 1	src/resolve.rs	usage of `contains_key` followed by `insert` on a `HashMap`
-1	src/symbol_resolver.rs	large size difference between variants: the entire enum is at least 728 bytes
-1	src/symbol_resolver.rs	this function has too many arguments (8/7)
-1	src/symbol_resolver.rs	this function has too many arguments (9/7)
+1	src/resolve.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `other`
+1	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `is_assignable`
+1	src/resolve/callable_reference_selection.rs	this `match` expression can be replaced with `?`
+1	src/resolve/delegated_properties.rs	this `if` statement can be collapsed
+1	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
+1	src/resolve/delegated_properties.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `arguments.contains(&ret)`
+1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
+1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
+1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
+1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/resolve/source_constructors.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/resolve/streaming_signature_bridge.rs	large size difference between variants: the entire enum is at least 1272 bytes
+1	src/resolve/streaming_signature_bridge.rs	redundant closure: help: replace the closure with the associated function itself: `Box::<str>::from`
+1	src/resolve/streaming_signature_bridge.rs	the following explicit lifetimes could be elided: 'a
+1	src/resolve/streaming_signature_bridge.rs	this `.into_iter()` call is equivalent to `.iter()` and will not consume the `slice`: help: call directly: `iter`
+1	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if member.ret.obj_internal() == Some(owner) { member.ret.type_args() } else { Default::default() }`
+1	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (10/7)
+1	src/resolve/streaming_signature_bridge/local_signatures.rs	this method chain can be written more clearly with `if .. else ..`
+1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (8/7)
+1	src/resolve/streaming_signature_bridge/semantics.rs	this `if let` can be collapsed into the outer `if let`
+1	src/resolve/streaming_signature_bridge/semantics.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
+1	src/resolve/streaming_signature_bridge/semantics.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/resolve/streaming_signature_tests.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
+1	src/symbol_resolver.rs	unnecessarily eager cloning of iterator items
 1	src/symbol_resolver.rs	very complex type used. Consider factoring parts into `type` definitions
-1	tests/common/mod.rs	function `assert_language_feature_gate` is never used
-1	tests/common/mod.rs	function `expect_suspend_result_against` is never used
-1	tests/common/mod.rs	function `expect_suspend_result_with_classpath` is never used
-1	tests/common/mod.rs	function `expect_suspend_result` is never used
-1	tests/common/mod.rs	function `inspect_checker_with_stdlib` is never used
-1	tests/common/mod.rs	function `kotlinc_source_result` is never used
+1	src/symbol_resolver/generic_inference.rs	this function has too many arguments (8/7)
+1	src/symbol_resolver/generic_inference.rs	this function has too many arguments (9/7)
+1	src/symbol_resolver/sam.rs	very complex type used. Consider factoring parts into `type` definitions
+1	src/types.rs	redundant guard
+1	src/types.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (base, nested) = split_nested_name(segment)?;`
+1	src/types/interning.rs	unnecessary use of `to_string`: help: use: `"T"`
 1	tests/kotlin_box_ir_jvm_conformance.rs	consider using `sort_by_key`
+1	tests/kotlin_box_ir_jvm_conformance.rs	this function has too many arguments (8/7)
+10	src/fir/body_check/driver_tests.rs	the function `crate::resolve::publish_checked_local_signatures` doesn't need a mutable reference
+2	src/fir/body_check.rs	unnecessary closure used to substitute value for `Option::None`
+2	src/fir/module_symbols.rs	this method chain can be written more clearly with `if .. else ..`
+2	src/fir/signature.rs	this function has too many arguments (10/7)
+2	src/fir/signature.rs	this function has too many arguments (8/7)
+2	src/fir/signature.rs	this function has too many arguments (9/7)
+2	src/fir_lower/checked.rs	this function has too many arguments (8/7)
+2	src/fir_lower/inlining.rs	unneeded `return` statement
+2	src/fir_lower/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`
+2	src/fir_lower/source_calls.rs	this function has too many arguments (8/7)
+2	src/fir_lower/tests.rs	the method `accept_inline_bodies` doesn't need a mutable reference
+2	src/frontend/inline_preparation.rs	the function `crate::fir::check_and_dispatch_body_in_session` doesn't need a mutable reference
 2	src/ir_lower.rs	unneeded `return` statement
 2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ret_ty`
 2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `cont_ir`
 2	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `int_ir`
+2	src/jvm/ir_emit.rs	this function has too many arguments (8/7)
 2	src/jvm/ir_emit.rs	unneeded `return` statement
+2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
+2	src/jvm/suspend.rs	usage of `bool::then` in `filter_map`
 2	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*cont_ty`
-2	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*p`
 2	src/jvm/value_classes.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*t`
-2	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ty`
-2	src/resolve.rs	very complex type used. Consider factoring parts into `type` definitions
+2	src/resolve.rs	the `Err`-variant returned from this function is very large
+2	src/resolve.rs	this `map_or` can be simplified
+2	src/resolve.rs	this `match` can be collapsed into the outer `match`
+2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
+2	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`
+2	src/resolve/streaming_signature_bridge.rs	unneeded `return` statement
+2	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (8/7)
+2	src/resolve/streaming_signature_bridge/qualified_calls.rs	explicit call to `.into_iter()` in function argument accepting `IntoIterator`
+2	src/resolve/streaming_signature_bridge/semantics.rs	matching on `Some` with `ok()` is redundant
+2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
+2	src/symbol_resolver.rs	this function has too many arguments (8/7)
 2	tests/ir_blockers.rs	consider using `sort_by_key`
+24	src/resolve.rs	this function has too many arguments (8/7)
+27	src/parser.rs	this `map_or` can be simplified
+3	src/fir/body_check/calls.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `selected`
+3	src/fir/header.rs	this function has too many arguments (8/7)
+3	src/fir/header.rs	this function has too many arguments (9/7)
+3	src/fir/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `class_ty`
 3	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `fty_ir`
 3	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `self.cur_ret_ty`
-3	src/jvm/classpath.rs	this `map_or` can be simplified
 3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `d`
 3	src/jvm/inline.rs	unnecessary use of `to_string`: help: use: `n`
-30	src/parser.rs	this `map_or` can be simplified
+3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
+3	src/resolve.rs	this `if` statement can be collapsed
+4	src/ir_lower.rs	this function has too many arguments (8/7)
 4	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `object_ir`
+4	src/jvm/backend.rs	doc list item without indentation
+4	src/jvm/classpath.rs	this `map_or` can be simplified
+4	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
+4	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
 5	src/ir_lower.rs	this `map_or` can be simplified
-5	src/ir_lower.rs	this function has too many arguments (8/7)
 5	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait
 5	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `lo.ir.functions[fid as usize].ret`
 5	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
-5	src/plugins/serialization.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
-5	src/resolve.rs	this `map_or` can be simplified
-5	src/resolve.rs	this function has too many arguments (9/7)
+5	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `&mut is_assignable`
+6	src/conformance.rs	doc list item without indentation
 6	src/jvm/ir_emit.rs	this `map_or` can be simplified
 8	src/ir_lower.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `elem_ir`
-9	src/resolve.rs	this function has too many arguments (8/7)
+8	src/resolve.rs	this function has too many arguments (9/7)
+9	src/resolve.rs	very complex type used. Consider factoring parts into `type` definitions
+9	src/symbol_resolver.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`

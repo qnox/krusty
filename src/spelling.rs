@@ -24,6 +24,10 @@ use crate::types::{Ty, TypeName};
 /// this node", which is the overwhelmingly common case and allocates nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Spelled {
+    /// This occurrence was written as a definitely-non-null intersection (`T & Any`). The semantic
+    /// [`Ty`] already carries that fact in its occurrence bound; this sidecar preserves the exact
+    /// Kotlin-metadata flag without making it part of structural type identity.
+    pub definitely_non_null: bool,
     /// The `typealias` named AT this node, fully qualified.
     ///
     /// kotlinc records only the OUTERMOST alias of a chain: with `typealias Cargo = Payload` and
@@ -49,6 +53,7 @@ impl Spelled {
     /// The "nothing was spelled as an alias" spelling — usable as a `&'static` argument at the many
     /// encode sites whose types cannot carry an alias (synthesized members, builtin classifiers).
     pub const NONE: &'static Spelled = &Spelled {
+        definitely_non_null: false,
         alias: None,
         alias_args: Vec::new(),
         args: Vec::new(),
@@ -57,7 +62,7 @@ impl Spelled {
     /// Whether this node and everything below it is free of alias spellings — the fast path that
     /// lets the encoder skip the parallel walk entirely.
     pub fn is_none(&self) -> bool {
-        self.alias.is_none() && self.args.iter().all(Spelled::is_none)
+        !self.definitely_non_null && self.alias.is_none() && self.args.iter().all(Spelled::is_none)
     }
 
     /// This node's spelling for the type argument at `index`, or the empty spelling when the
@@ -73,6 +78,7 @@ impl Spelled {
     /// applying the element's spelling to the array directly would claim the array was the alias.
     pub fn as_array_element(&self) -> Spelled {
         Spelled {
+            definitely_non_null: false,
             alias: None,
             alias_args: Vec::new(),
             args: vec![self.clone()],
@@ -86,6 +92,21 @@ impl Spelled {
             alias: Some(alias),
             ..Spelled::default()
         }
+    }
+
+    pub(crate) fn storage_payload_bytes(&self) -> usize {
+        self.alias_args.len() * std::mem::size_of::<(Ty, Spelled)>()
+            + self.args.len() * std::mem::size_of::<Spelled>()
+            + self
+                .alias_args
+                .iter()
+                .map(|(_, spelling)| spelling.storage_payload_bytes())
+                .sum::<usize>()
+            + self
+                .args
+                .iter()
+                .map(Spelled::storage_payload_bytes)
+                .sum::<usize>()
     }
 }
 
@@ -120,17 +141,20 @@ impl DeclaredSpellings {
     /// The empty record, for the many builder paths whose declaration spelled no alias.
     pub const NONE: &'static DeclaredSpellings = &DeclaredSpellings {
         ret: Spelled {
+            definitely_non_null: false,
             alias: None,
             alias_args: Vec::new(),
             args: Vec::new(),
         },
         params: Vec::new(),
         receiver: Spelled {
+            definitely_non_null: false,
             alias: None,
             alias_args: Vec::new(),
             args: Vec::new(),
         },
         superclass: Spelled {
+            definitely_non_null: false,
             alias: None,
             alias_args: Vec::new(),
             args: Vec::new(),
@@ -180,6 +204,28 @@ impl DeclaredSpellings {
             .get(parameter)
             .and_then(|bounds| bounds.get(index))
             .unwrap_or(Spelled::NONE)
+    }
+
+    pub(crate) fn storage_payload_bytes(&self) -> usize {
+        self.ret.storage_payload_bytes()
+            + self.receiver.storage_payload_bytes()
+            + self.superclass.storage_payload_bytes()
+            + self
+                .params
+                .iter()
+                .map(Spelled::storage_payload_bytes)
+                .sum::<usize>()
+            + self
+                .type_param_bounds
+                .iter()
+                .flatten()
+                .map(Spelled::storage_payload_bytes)
+                .sum::<usize>()
+            + self
+                .supertypes
+                .iter()
+                .map(Spelled::storage_payload_bytes)
+                .sum::<usize>()
     }
 }
 

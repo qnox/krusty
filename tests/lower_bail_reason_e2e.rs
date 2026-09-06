@@ -1,11 +1,4 @@
-//! Pins for the PRECISE `BackendOutcome::LowerBail` reason each pre-pass-2 lowering gate reports.
-//!
-//! `src/ir_lower.rs` seeds the caller-owned bail sink with the catch-all `"deep"` and is supposed to
-//! refine it as lowering progresses — but every gate/pass-1 bail that returned `None` without a
-//! `set_bail` left the reason unrefined, lumping ~195 box-corpus skips into one unactionable survey
-//! bucket (`lower: deep`, the top skip-bucket). Each gate now records its precise unsupported-feature
-//! boundary so the survey stays attributable; a failure here means a bail path lost (or never got) its
-//! label.
+//! Runtime regressions for constructs once rejected by the retired AST-to-IR lowerer.
 //!
 use super::common;
 
@@ -73,5 +66,43 @@ fun box(): String = C().x
             Some(jdk.as_path()),
         ),
         "OK"
+    );
+}
+
+#[test]
+fn sibling_inline_extension_provide_delegate_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "Library.kt",
+                r#"
+var log: String = ""
+
+inline fun <T> runLogged(entry: String, action: () -> T): T {
+    log += entry
+    return action()
+}
+
+inline operator fun String.provideDelegate(host: Any?, property: Any): String =
+    runLogged("tdf($this);") { this }
+"#,
+            ),
+            (
+                "Main.kt",
+                r#"
+operator fun String.getValue(receiver: Any?, property: Any): String =
+    runLogged("get($this);") { this }
+
+val testO by runLogged("O;") { "O" }
+val testK by runLogged("K;") { "K" }
+val testOK = runLogged("OK;") { testO + testK }
+
+fun box(): String =
+    if (log == "O;tdf(O);K;tdf(K);OK;get(O);get(K);" && testOK == "OK") "OK"
+    else "FAIL: $log / $testOK"
+"#,
+            ),
+        ],
+        "SiblingInlineProvideDelegate",
     );
 }

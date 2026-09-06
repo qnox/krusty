@@ -264,28 +264,22 @@ fn cross_file_adapted_value_class_parameter_materializes_simple_default() {
 }
 
 #[test]
-fn cross_file_value_class_constructor_default_reports_materialization_error() {
-    let stdlib = common::stdlib_jar();
-    let diagnostics = common::front_end_diagnostics_files(
-        &[
+fn cross_file_value_class_constructor_default_materializes() {
+    let output = common::compile_and_run_files_with_stdlib(&[
+        (
+            "Target",
             "package sample\n\
              @JvmInline value class Id(val value: String)\n\
              fun foo(x: String, y: Id = Id(\"K\")): String = x + y.value\n",
+        ),
+        (
+            "Use",
             "package sample\n\
              fun call(f: (String) -> String): String = f(\"O\")\n\
-             fun bad(): String = call(::foo)\n",
-        ],
-        std::slice::from_ref(&stdlib),
-        None,
-    );
-    assert_eq!(
-        diagnostics,
-        vec![
-            "cannot adapt cross-file reference 'foo': default value for parameter 'y' is not \
-             available at this call site"
-                .to_string()
-        ]
-    );
+             fun box(): String = call(::foo)\n",
+        ),
+    ]);
+    assert_eq!(output.as_deref(), Some("OK"));
 }
 
 #[test]

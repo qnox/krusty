@@ -81,6 +81,26 @@ fn a_classpath_top_level_property_is_an_argument_and_a_receiver() {
     common::expect_box_ok_against("cptoplevelpropuse", LIB, main);
 }
 
+#[test]
+fn an_inferred_property_reference_keeps_its_value_class_argument_in_metadata() {
+    const LIBRARY: &str = "package lib\n\
+        @JvmInline value class S(val text: String)\n\
+        val value = S(\"OK\")\n\
+        val reference = ::value.apply { }\n";
+    const MAIN: &str = "import lib.*\n\
+        fun box(): String = reference.call().text\n";
+    let diagnostics = common::diagnostics_against(
+        "classpath_inferred_property_reference_value_class",
+        LIBRARY,
+        MAIN,
+    )
+    .expect("Kotlin toolchain must be available");
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+}
+
 /// Kotlin `internal` is SOURCE visibility even though its file-facade getter is public JVM bytecode.
 /// Namespace discovery must filter on metadata visibility before selection; otherwise an explicit import
 /// can read a dependency's internal state merely because the backend accessor happens to be invocable.

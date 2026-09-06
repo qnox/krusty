@@ -35,6 +35,34 @@ fun box(): String = A().test()
     );
 }
 
+/// A dependency member extension keeps one stable external identity while its classifier and
+/// callable indexes are populated lazily. The later view carrying the `$default` bridge must enrich
+/// that identity, including when value-class mangling changes the physical method name.
+#[test]
+fn cross_module_value_class_member_extension_default_uses_published_bridge() {
+    common::Fixture::new()
+        .lib(
+            "Lib.kt",
+            r#"
+                package dep
+
+                @JvmInline
+                value class Token(val value: String)
+
+                class Host {
+                    fun Int.render(token: Token, fallback: String = "OK"): String = fallback
+                }
+            "#,
+        )
+        .assert_box_ok(
+            r#"
+                import dep.*
+
+                fun box(): String = with(Host()) { 1.render(Token("")) }
+            "#,
+        );
+}
+
 /// Two defaults, all omission combinations incl. named.
 #[test]
 fn inner_member_ext_two_defaults() {
