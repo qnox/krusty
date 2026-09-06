@@ -417,6 +417,28 @@ impl<'a> BodyLowering<'a> {
         temporary
     }
 
+    /// Attach a generated static helper to the class that lexically owns this checked FIR body.
+    /// The body carries the stable declaration identity; callers never recover ownership from a
+    /// generated function name or from the source expression that happens to reference it.
+    fn attach_generated_static_to_lexical_class(&mut self, function: crate::ir::FunId) {
+        let Some(owner) = self.body.lexical_class_owner() else {
+            return;
+        };
+        let Some(class) = self
+            .ir
+            .checked_classifier_classes
+            .get(&owner)
+            .or_else(|| self.ir.checked_enum_entry_classes.get(&owner))
+            .copied()
+        else {
+            return;
+        };
+        if !self.ir.classes[class as usize].methods.contains(&function) {
+            self.ir.classes[class as usize].methods.push(function);
+        }
+        self.ir.class_static_local_functions.insert(function);
+    }
+
     /// Build the implementation body of a function-like reference after the frontend has selected
     /// its target and adaptation. Kotlin `Unit` is `void` only at a declared-call boundary; a
     /// `FunctionN.invoke` result is a value and therefore returns the `kotlin.Unit` singleton after

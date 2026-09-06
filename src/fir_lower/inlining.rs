@@ -422,6 +422,12 @@ fn rebase_values(
 fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
     match expression {
         IrExpr::Checked(operation) => specialize_checked_operation(operation, bindings),
+        IrExpr::CallableReference(reference) => {
+            specialize_ty(&mut reference.function_type, bindings);
+            specialize_tys(&mut reference.declaration_parameters, bindings);
+            specialize_ty(&mut reference.declaration_result, bindings);
+            specialize_reference_adaptation(&mut reference.adaptation, bindings);
+        }
         IrExpr::KClassLiteral { classifier, .. } => specialize_optional_ty(classifier, bindings),
         IrExpr::LocalPropertyReference { property_type, .. } => {
             specialize_ty(property_type, bindings)

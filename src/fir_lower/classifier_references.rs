@@ -4,7 +4,7 @@ use crate::fir::{
     FirAdaptedReferenceArgument, FirCallableReferenceBinding, FirClassifierCallable,
     FirReferenceAdaptation, ResolvedTy,
 };
-use crate::ir::{ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFunction};
+use crate::ir::{ExprId, IrExpr, IrFunction};
 use crate::types::{Ty, TypeName};
 
 use super::source_calls::ModuleConstructorRequest;
@@ -85,10 +85,8 @@ impl BodyLowering<'_> {
 
             return Ok(self.structural_constructor_reference(
                 classifier,
-                arity,
                 function,
-                adapter_name,
-                reference,
+                reference_ty,
                 reference.params.clone(),
                 None,
             ));
@@ -224,10 +222,8 @@ impl BodyLowering<'_> {
             };
             return Ok(self.structural_constructor_reference(
                 classifier,
-                arity,
                 function,
-                adapter_name,
-                reference,
+                reference_ty,
                 wrapper_parameters,
                 capture,
             ));
@@ -247,75 +243,23 @@ impl BodyLowering<'_> {
     fn structural_constructor_reference(
         &mut self,
         classifier: TypeName,
-        arity: u8,
         adapter: crate::ir::FunId,
-        adapter_name: String,
-        reference: &crate::types::FnSig,
+        function_type: Ty,
         target_parameters: Vec<Ty>,
         capture: Option<ExprId>,
     ) -> ExprId {
-        let simple_name = format!(
-            "$fir$ctorref${}_{}",
-            self.body.owner().raw(),
-            self.ir.classes.len()
-        );
-        let internal = self.ir.package.as_ref().map_or_else(
-            || crate::types::type_name(&simple_name),
-            |package| {
-                crate::types::type_name(&format!("{}/{}", package.replace('.', "/"), simple_name))
-            },
-        );
-        let bound = capture.is_some();
-        let mut class = IrClass::synthetic(internal);
-        class.superclass = crate::types::type_name("kotlin/jvm/internal/FunctionReferenceImpl");
-        class.func_ref = Some(FuncRef {
-            adapted: false,
-            bound,
-            arity,
-            is_suspend: false,
-            module_target: None,
-            local_target: Some(adapter),
-            owner_class: Some(classifier),
-            fn_name: "<init>".to_string(),
-            flags: 0,
-            dispatch: if bound {
-                FrDispatch::StaticBound
-            } else {
-                FrDispatch::Static
-            },
-            call_owner: None,
-            call_name: adapter_name,
-            reflection_name: None,
-            reflection_receiver_parameter: false,
-            reflection_target_ret_ty: Some(Ty::Unit),
-            reflection_target_param_tys: None,
-            call_interface: false,
-            param_tys: reference.params.clone(),
-            ret_ty: reference.ret,
-            target_param_tys: target_parameters,
-            target_ret_ty: reference.ret,
-            unbox_params: vec![None; reference.params.len()],
-            unbox_param_nullable: vec![false; reference.params.len()],
-            box_ret: None,
-            staticbound_recv_unbox: None,
-        });
-        let class = self.ir.add_class(class);
-        match capture {
-            Some(capture) => self.ir.add_expr(IrExpr::New {
-                internal,
-                args: vec![capture],
-                ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
-                ctor_desc: None,
-                external_target: None,
-                defaults: Box::new([]),
-                default_prefix_count: 0,
-            }),
-            None => self.ir.add_expr(IrExpr::StaticInstance {
-                owner: class,
-                ty: class,
-                field: "INSTANCE",
-            }),
-        }
+        self.ir
+            .add_expr(IrExpr::CallableReference(crate::ir::IrCallableReference {
+                target: crate::ir::IrCallableReferenceTarget::Constructor { classifier },
+                adapter,
+                captures: Vec::new(),
+                bound_receiver: capture,
+                function_type,
+                declaration_parameters: target_parameters.into_boxed_slice(),
+                declaration_result: Ty::Unit,
+                declaration_suspend: false,
+                adaptation: None,
+            }))
     }
 
     fn constructor_reference_call(
