@@ -13,6 +13,13 @@ parameters.
 - Use `./run-tests.sh --survey --frontend-only` to audit parser/signature/checker skips against the
   pinned corpus without building or running the backend. This is deliberately not a parser metric.
 - Do not pass `--release`; the gate profile is the intended fast edit/build/test loop.
+- `gate` is a Cargo *profile* (`--profile gate`), never a target directory. `--target-dir target/gate`
+  or `CARGO_TARGET_DIR=target/gate` silently builds the *dev* profile into `target/gate/debug`; the
+  harness refuses that shape. It also prunes orphan `*.rcgu.o` codegen temporaries (left by any rustc
+  killed mid-build) older than six hours before building — cargo never garbage-collects `target/`
+  itself, so stale profile/feature variants still need an occasional
+  `cargo clean -p krusty -p krusty-cli -p krusty-lsp --profile gate` (drops only workspace crates,
+  keeps third-party deps).
 - For Kotlin box conformance changes, run `./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture` and keep `FAIL: 0`.
 - For performance work, start with the harness timing output or `KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1`.
 

@@ -291,3 +291,138 @@ fn real_e2e_libtest_filters_select_exactly_the_planned_shards() {
     );
     fs::remove_dir_all(temp).expect("remove shard test directory");
 }
+
+fn target_hygiene(function: &str, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+    let helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("target-hygiene.sh");
+    let mut command = Command::new("bash");
+    command
+        .args([
+            "-c",
+            "source \"$1\"; fn=\"$2\"; shift 2; \"$fn\" \"$@\"",
+            "target-hygiene-test",
+        ])
+        .arg(helper)
+        .arg(function)
+        .args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("run target hygiene helper")
+}
+
+#[test]
+fn target_hygiene_rejects_a_profile_name_used_as_the_target_dir() {
+    // `gate` is a Cargo *profile*. `--target-dir target/gate` / `CARGO_TARGET_DIR=target/gate` builds
+    // the dev profile into `target/gate/debug`, which nothing ever reuses or cleans.
+    for bad in ["target/gate", "/abs/target/gate/", "target/gate-trace"] {
+        let output = target_hygiene("target_hygiene_reject_profile_dir", &[bad], &[]);
+        assert_eq!(output.status.code(), Some(2), "{bad} must be rejected");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--profile gate"),
+            "hint missing for {bad}: {stderr}"
+        );
+    }
+    for good in [
+        "target",
+        "/abs/target",
+        "target/kt-2.4.10",
+        "target/coverage-run",
+    ] {
+        let output = target_hygiene("target_hygiene_reject_profile_dir", &[good], &[]);
+        assert!(
+            output.status.success(),
+            "{good} wrongly rejected: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn target_hygiene_prunes_orphan_objects_and_nested_profile_dirs() {
+    let root = std::env::temp_dir().join(format!("krusty-target-hygiene-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let deps = root.join("gate").join("deps");
+    let nested = root.join("gate").join("debug").join("deps");
+    let debug_deps = root.join("debug").join("deps");
+    for dir in [&deps, &nested, &debug_deps] {
+        fs::create_dir_all(dir).expect("create fake target tree");
+    }
+    let old_obj = deps.join("krusty-0123456789abcdef.abc.def.rcgu.o");
+    let fresh_obj = deps.join("krusty-fedcba9876543210.abc.def.rcgu.o");
+    let rlib = deps.join("libkrusty-0123456789abcdef.rlib");
+    let old_debug_obj = debug_deps.join("survey-0123456789abcdef.abc.def.rcgu.o");
+    let nested_obj = nested.join("krusty-0123456789abcdef.abc.def.rcgu.o");
+    for file in [&old_obj, &fresh_obj, &rlib, &old_debug_obj, &nested_obj] {
+        fs::write(file, b"x").expect("write fake artifact");
+    }
+    for old in [&old_obj, &rlib, &old_debug_obj] {
+        let status = Command::new("touch")
+            .args(["-t", "202001010000"])
+            .arg(old)
+            .status()
+            .expect("age fake artifact");
+        assert!(status.success());
+    }
+
+    let output = target_hygiene("target_hygiene_prune", &[root.to_str().unwrap(), "60"], &[]);
+    assert!(
+        output.status.success(),
+        "prune failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(!old_obj.exists(), "old orphan object must be pruned");
+    assert!(
+        !old_debug_obj.exists(),
+        "orphan objects are pruned under every profile dir"
+    );
+    assert!(
+        fresh_obj.exists(),
+        "objects younger than the cutoff may belong to a live rustc"
+    );
+    assert!(
+        rlib.exists(),
+        "only *.rcgu.o temporaries are pruned, never finished artifacts"
+    );
+    assert!(
+        !root.join("gate").join("debug").exists(),
+        "nested profile dir is junk by construction"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("gate/debug"),
+        "removal must be reported: {stderr}"
+    );
+    assert!(
+        stderr.contains("2 orphan"),
+        "pruned object count must be reported: {stderr}"
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn run_tests_wires_target_hygiene_before_building() {
+    let script = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("run-tests.sh"))
+        .expect("read run-tests.sh");
+    let source = script
+        .find("scripts/target-hygiene.sh")
+        .expect("run-tests.sh sources target-hygiene.sh");
+    let reject = script
+        .find("target_hygiene_reject_profile_dir")
+        .expect("run-tests.sh rejects profile-named target dirs");
+    let prune = script
+        .find("target_hygiene_prune")
+        .expect("run-tests.sh prunes orphan objects");
+    let first_build = script.find("cargo build").expect("run-tests.sh builds");
+    assert!(
+        source < reject && reject < first_build,
+        "reject must run before the first cargo build"
+    );
+    assert!(
+        prune < first_build,
+        "prune must run before the first cargo build"
+    );
+}

@@ -19,6 +19,14 @@ cd "$(dirname "$0")"
 # Shared with instrumented coverage, which executes the already-built test binaries directly.
 source "$(dirname "$0")/scripts/test-deadline.sh"
 source "$(dirname "$0")/scripts/libtest-shards.sh"
+source "$(dirname "$0")/scripts/target-hygiene.sh"
+
+# `gate` is a Cargo profile, not a target dir; and cargo never prunes `target/` itself. Refuse the
+# `--target-dir target/gate` mistake and drop orphan codegen objects before the first build.
+target_root="${CARGO_TARGET_DIR:-$PWD/target}"
+[[ "$target_root" = /* ]] || target_root="$PWD/$target_root"
+target_hygiene_reject_profile_dir "$target_root"
+target_hygiene_prune "$target_root"
 
 # Frontend/corpus diagnosis is part of the test workflow, not a separate release-build path. Keep it
 # behind this harness so it receives the same provisioned Kotlin version and global deadline as the
@@ -38,9 +46,7 @@ if [ "${1:-}" = "--survey" ]; then
   else
     cargo build --profile gate --bin survey
   fi
-  survey_target="${CARGO_TARGET_DIR:-$PWD/target}"
-  [[ "$survey_target" = /* ]] || survey_target="$PWD/$survey_target"
-  survey_bin="$survey_target/gate/survey"
+  survey_bin="$target_root/gate/survey"
   [[ -x "$survey_bin" ]] || {
     echo "run-tests.sh --survey: survey binary missing: $survey_bin" >&2
     exit 1
@@ -181,8 +187,6 @@ trap cleanup EXIT
 # while avoiding the sequential binary bottleneck.
 build_log="$logdir/build.log"
 cargo build --color never --profile gate -p krusty-cli
-target_root="${CARGO_TARGET_DIR:-$PWD/target}"
-[[ "$target_root" = /* ]] || target_root="$PWD/$target_root"
 failure_manifest="${KRUSTY_FAILURE_MANIFEST:-$target_root/gate/failed-tests.txt}"
 cli_name="krusty"
 [[ "${OS:-}" = "Windows_NT" ]] && cli_name="krusty.exe"

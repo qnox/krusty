@@ -25,6 +25,11 @@ what and why — with no tooling provenance. Keep this rule when amending or rew
   (`./run-tests.sh --test metadata_return_types`); any argument deliberately falls back to Cargo's
   normal runner. Set `KRUSTY_TEST_JOBS=<n>` only when profiling the full-suite binary scheduler. Do
   not use `--release` for tests: the longer build cycle costs more than the faster run saves.
+- `gate` is a Cargo **profile**, never a target dir: `--profile gate`, not `--target-dir target/gate`
+  or `CARGO_TARGET_DIR=target/gate` (that nests a dev-profile build nothing reuses; the harness
+  refuses it). Do not kill a running `cargo`/`rustc` casually: each kill strands per-codegen-unit
+  `*.rcgu.o` temporaries in `target/*/deps` that cargo never removes (the harness prunes ones older
+  than six hours).
 - The harness already has profiling hooks. For compiler-only conformance profiling, run
   `KRUSTY_NO_RUN=1 KRUSTY_FLAMEGRAPH=1 ./run-tests.sh --test kotlin_box_ir_jvm_conformance -- --nocapture`;
   it writes `target/flamegraph.svg` and prints phase timing. For full-suite profiling, use the slowest
