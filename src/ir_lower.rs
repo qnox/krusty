@@ -1229,6 +1229,7 @@ fn lower_file_at_reporting_impl(
                         name: e.name.clone(),
                         argument_prelude: Vec::new(),
                         args: Vec::new(),
+                        constructor_parameter_types: Vec::new(),
                         default_parameters: Vec::new(),
                         subclass: None,
                         decl_line: e.decl_line,
@@ -4542,6 +4543,8 @@ fn lower_file_at_reporting_impl(
                             }
                         }
                         lo.ir.classes[class_id as usize].enum_entries[ei].args = lowered;
+                        lo.ir.classes[class_id as usize].enum_entries[ei]
+                            .constructor_parameter_types = param_tys.clone();
                     }
                     // Entry bodies (`ENTRY { override fun m() = … }`) → a synthesized subclass per
                     // bodied entry (`Enum$ENTRY extends Enum`) whose overrides are lowered with the
