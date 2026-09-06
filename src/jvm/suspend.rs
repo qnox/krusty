@@ -803,6 +803,8 @@ fn realize_safe_coroutine_points(ir: &mut IrFile) {
             ctor_params: None,
             ctor_desc: Some("(Lkotlin/coroutines/Continuation;)V".to_string()),
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
         let declare_safe = ir.add_expr(IrExpr::Variable {
             index: safe_slot,
@@ -6806,6 +6808,8 @@ fn build_get_or_create(
             ctor_params: None,
             ctor_desc: None,
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
         if param_caps.is_empty() {
             return new;

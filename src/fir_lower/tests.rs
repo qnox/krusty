@@ -884,6 +884,72 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
 }
 
 #[test]
+fn external_default_call_keeps_only_supplied_common_operands() {
+    let origin = OriginId::from_raw(0);
+    let declaration = ExternalCallableId::from_raw(24);
+    let mut body = FirBody::new(BodyOwnerId::from_raw(4));
+    let supplied = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::String),
+        kind: FirExprKind::Constant(FirConstant::String("K".into())),
+    });
+    let call = body.add_expr(FirExpr {
+        origin,
+        ty: resolved(Ty::String),
+        kind: FirExprKind::Call(FirCall {
+            target: FirCallTarget::External {
+                declaration,
+                default_provider: None,
+                receiver: None,
+                declared_receiver: None,
+                parameters: Box::new([resolved(Ty::Int), resolved(Ty::String)]),
+                result: resolved(Ty::String),
+                declared_result: None,
+                suspend: false,
+                can_inline: false,
+                inline_plan: None,
+                extension_receiver_parameter: None,
+            },
+            dispatch_receiver: None,
+            extension_receiver: None,
+            parameter_types: Box::new([resolved(Ty::Int), resolved(Ty::String)]),
+            arguments: Box::new([
+                FirCallArgument::Default {
+                    parameter: 0,
+                    origin,
+                },
+                FirCallArgument::Expression {
+                    parameter: 1,
+                    value: supplied,
+                    conversion: None,
+                },
+            ]),
+            substitutions: Box::new([]),
+        }),
+    });
+    let statement = body.add_statement(FirStatement {
+        origin,
+        kind: FirStatementKind::Expression(call),
+    });
+    body.push_root(statement);
+
+    let mut ir = IrFile::default();
+    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
+    assert!(matches!(
+        ir.expr(lowered.roots[0]),
+        IrExpr::Call {
+            callee: Callee::External {
+                target,
+                defaults,
+                ..
+            },
+            args,
+            ..
+        } if *target == declaration && defaults == &[0] && args.len() == 1
+    ));
+}
+
+#[test]
 fn external_property_function_reference_is_materialized_without_lookup() {
     let origin = OriginId::from_raw(0);
     let property = crate::fir::ExternalPropertyId::from_raw(17);
@@ -2475,6 +2541,26 @@ fn super_call_preserves_checked_default_ordinals_and_source_identity() {
 }
 
 #[test]
+fn constructor_call_keeps_semantic_omission_without_placeholder() {
+    let ir = lower_single_source(
+        "class Pair(val left: String = \"O\", val right: String)\n\
+         fun make(): Pair = Pair(right = \"K\")\n",
+        "SemanticConstructorDefaults",
+    );
+
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::New {
+            internal,
+            args,
+            defaults,
+            default_prefix_count: 0,
+            ..
+        } if internal.matches("Pair") && defaults.as_ref() == [0] && args.len() == 1
+    )));
+}
+
+#[test]
 fn interface_property_accessors_share_source_order_with_functions() {
     let ir = lower_single_source(
         "interface PropFirstI {\n\
@@ -2876,11 +2962,13 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
                 parameters: Box::new([]),
                 annotation: None,
             },
+            context_parameter_count: 0,
             outer_parameter: Some(resolved(Ty::obj("dependency/Outer"))),
             outer_receiver: Some(FirReceiver {
                 value: outer,
                 conversion: None,
             }),
+            external_capture_arguments: None,
             parameter_types: Box::new([]),
             arguments: Box::new([]),
             substitutions: Box::new([]),
@@ -2902,10 +2990,14 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
             ctor_params: Some(parameters),
             ctor_desc: None,
             external_target: Some(target),
+            defaults,
+            default_prefix_count,
         } if internal.matches("dependency/Outer$Inner")
             && args.as_slice() == [0]
-            && parameters.is_empty()
+            && parameters.as_slice() == [Ty::obj("dependency/Outer")]
             && *target == declaration
+            && defaults.is_empty()
+            && *default_prefix_count == 1
     ));
 }
 
@@ -2933,8 +3025,10 @@ fn external_annotation_construction_reaches_common_ir_without_provider_lookup() 
                     defaults: Box::new([None]),
                 })),
             },
+            context_parameter_count: 0,
             outer_parameter: None,
             outer_receiver: None,
+            external_capture_arguments: None,
             parameter_types: Box::new([resolved(Ty::String)]),
             arguments: Box::new([FirCallArgument::Expression {
                 parameter: 0,
@@ -2958,8 +3052,13 @@ fn external_annotation_construction_reaches_common_ir_without_provider_lookup() 
         IrExpr::New {
             internal,
             external_target: Some(target),
+            defaults,
+            default_prefix_count,
             ..
-        } if *internal == interface && *target == declaration
+        } if *internal == interface
+            && *target == declaration
+            && defaults.is_empty()
+            && *default_prefix_count == 0
     ));
     let annotation = ir
         .annotation_constructions
@@ -4027,8 +4126,10 @@ fn constructor_delegation_remains_distinct_from_object_construction() {
         origin,
         kind: FirStatementKind::ConstructorDelegation(FirConstructorCall {
             target: FirConstructorTarget::Module(constructor),
+            context_parameter_count: 0,
             outer_parameter: None,
             outer_receiver: None,
+            external_capture_arguments: None,
             parameter_types: Box::new([resolved(Ty::Int)]),
             arguments: Box::new([FirCallArgument::Expression {
                 parameter: 0,

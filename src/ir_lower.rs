@@ -6979,6 +6979,8 @@ impl<'a> Lower<'a> {
             ctor_params,
             ctor_desc: None,
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
         self.record_annotation_construction(construction, internal)?;
         Some(construction)
@@ -7056,6 +7058,8 @@ impl<'a> Lower<'a> {
             ctor_params: None,
             ctor_desc: Some(ctor_desc.into()),
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
         self.record_annotation_construction(construction, owner)?;
         Some(construction)
@@ -7082,6 +7086,8 @@ impl<'a> Lower<'a> {
                 ctor_params: Some(vec![ty_to_ir(underlying)]),
                 ctor_desc: None,
                 external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
             }));
         }
         let descriptor = if member.descriptor.is_empty() {

@@ -135,15 +135,26 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
                 ));
             }
         };
-        let (classifier, arguments, constructor_parameters) = match ir.expr(construction) {
-            IrExpr::New {
-                internal,
-                args,
-                ctor_params,
-                ..
-            } => (*internal, args.clone(), ctor_params.clone()),
-            _ => unreachable!("construction shape was checked above"),
-        };
+        let (classifier, arguments, constructor_parameters, default_parameters) =
+            match ir.expr(construction) {
+                IrExpr::New {
+                    internal,
+                    args,
+                    ctor_params,
+                    defaults,
+                    default_prefix_count,
+                    ..
+                } => (
+                    *internal,
+                    args.clone(),
+                    ctor_params.clone(),
+                    defaults
+                        .iter()
+                        .map(|parameter| *parameter + *default_prefix_count)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => unreachable!("construction shape was checked above"),
+            };
         let expected_classifier = ir
             .classes
             .get(entry.class as usize)
@@ -173,7 +184,6 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
                 .ok_or(FirFileLoweringFailure::MissingClassifier(entry.declaration))?;
             ir.classes[subclass as usize].enum_entry_of = Some(constructor_parameters);
         }
-        let default_parameters = ir.constructor_default_arguments(construction).to_vec();
         let target = ir
             .classes
             .get_mut(entry.class as usize)

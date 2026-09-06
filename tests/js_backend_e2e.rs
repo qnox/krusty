@@ -127,6 +127,15 @@ fn default_arguments_use_semantic_omissions() {
 }
 
 #[test]
+fn constructor_defaults_use_semantic_omissions() {
+    check(
+        "class Pair(val first: String = \"O\", val second: String)\n\
+         fun box(): String = Pair(second = \"K\").first + Pair(second = \"K\").second",
+        "OK",
+    );
+}
+
+#[test]
 fn body_property_jvm_defaults_remain_semantic_initializers() {
     // JVM storage starts as zero/null and may omit these physical stores. JavaScript fields start as
     // `undefined`, so common IR must retain the Kotlin initializers for this backend to realize.

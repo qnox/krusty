@@ -176,6 +176,8 @@ fn synthesize_components_and_copy(
         ctor_params: None,
         ctor_desc: None,
         external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
     });
     let returned = ir.add_expr(IrExpr::Return(Some(constructed)));
     ir.functions[copy as usize].body = Some(ir.add_expr(IrExpr::Block {

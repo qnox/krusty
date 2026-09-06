@@ -7,6 +7,7 @@ use crate::fir::{
 use crate::ir::{ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFunction};
 use crate::types::{Ty, TypeName};
 
+use super::source_calls::ModuleConstructorRequest;
 use super::{BodyLowering, FirLoweringFailure};
 
 fn unsupported_constructor_reference(
@@ -61,8 +62,9 @@ impl BodyLowering<'_> {
                     value: self.ir.add_expr(IrExpr::GetValue(parameter as u32)),
                 })
                 .collect::<Vec<_>>();
-            let construction =
-                self.constructor_reference_call(target, classifier, parameters, None, &arguments)?;
+            let construction = self.constructor_reference_call(
+                target, classifier, parameters, None, None, &arguments,
+            )?;
             let body =
                 self.callable_reference_adapter_body(construction, result.get(), reference.ret);
             let adapter_name = format!(
@@ -192,6 +194,7 @@ impl BodyLowering<'_> {
             target,
             classifier,
             parameters,
+            outer,
             outer_receiver,
             &arguments,
         )?;
@@ -304,6 +307,8 @@ impl BodyLowering<'_> {
                 ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
                 ctor_desc: None,
                 external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
             }),
             None => self.ir.add_expr(IrExpr::StaticInstance {
                 owner: class,
@@ -318,6 +323,7 @@ impl BodyLowering<'_> {
         target: &crate::fir::FirConstructorTarget,
         classifier: TypeName,
         parameters: &[ResolvedTy],
+        outer_parameter: Option<ResolvedTy>,
         outer_receiver: Option<ExprId>,
         arguments: &[crate::ir::IrCheckedArgument],
     ) -> Result<ExprId, FirLoweringFailure> {
@@ -342,15 +348,17 @@ impl BodyLowering<'_> {
                     .iter()
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
-                self.module_constructor_call(
-                    *target,
+                self.module_constructor_call(ModuleConstructorRequest {
+                    target: *target,
                     classifier,
-                    &parameter_types,
-                    &declaration_parameter_types,
+                    argument_parameter_types: &parameter_types,
+                    declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,
+                    context_parameter_count: 0,
                     outer_receiver,
+                    external_capture_arguments: None,
                     arguments,
-                )
+                })
                 .ok_or(FirLoweringFailure::UnsupportedModuleConstructor(*target))
             }
             crate::fir::FirConstructorTarget::External {
@@ -369,6 +377,8 @@ impl BodyLowering<'_> {
                     *declaration,
                     classifier,
                     parameters,
+                    0,
+                    outer_parameter,
                     outer_receiver,
                     arguments,
                     annotation.as_deref(),

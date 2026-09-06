@@ -25,6 +25,56 @@ impl std::fmt::Display for ExternalDependencyTarget {
     }
 }
 
+fn materialize_omitted_arguments(
+    ir: &mut IrFile,
+    parameters: &[crate::types::Ty],
+    supplied: Vec<crate::ir::ExprId>,
+    omitted: &[u32],
+    target: ExternalCallableId,
+) -> Result<Vec<crate::ir::ExprId>, ExternalCallableId> {
+    if omitted.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(target);
+    }
+    if omitted
+        .last()
+        .is_some_and(|parameter| *parameter as usize >= parameters.len())
+    {
+        return Err(target);
+    }
+    let mut supplied = supplied.into_iter();
+    let mut arguments = Vec::with_capacity(parameters.len());
+    for (parameter, ty) in parameters.iter().copied().enumerate() {
+        if omitted.contains(&(parameter as u32)) {
+            arguments.push(
+                ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
+                    ty.canonical_semantic(),
+                ))),
+            );
+        } else {
+            arguments.push(supplied.next().ok_or(target)?);
+        }
+    }
+    if supplied.next().is_some() {
+        return Err(target);
+    }
+    Ok(arguments)
+}
+
+fn materialize_constructor_defaults(
+    ir: &mut IrFile,
+    parameters: &[crate::types::Ty],
+    supplied: Vec<crate::ir::ExprId>,
+    defaults: &[u32],
+    prefix_count: u32,
+    target: ExternalCallableId,
+) -> Result<Vec<crate::ir::ExprId>, ExternalCallableId> {
+    let omitted = defaults
+        .iter()
+        .map(|parameter| parameter.checked_add(prefix_count).ok_or(target))
+        .collect::<Result<Vec<_>, _>>()?;
+    materialize_omitted_arguments(ir, parameters, supplied, &omitted, target)
+}
+
 pub(super) fn realize(
     ir: &mut IrFile,
     classpath: &Classpath,
@@ -32,7 +82,14 @@ pub(super) fn realize(
     let expression_count = ir.exprs.len();
     for index in 0..expression_count {
         let expression = u32::try_from(index).expect("too many common IR expressions");
-        let defaults = ir.constructor_default_arguments(expression).to_vec();
+        let (defaults, default_prefix_count) = match &ir.exprs[index] {
+            IrExpr::New {
+                defaults,
+                default_prefix_count,
+                ..
+            } => (defaults.to_vec(), *default_prefix_count),
+            _ => (Vec::new(), 0),
+        };
         if let IrExpr::New {
             external_target: Some(target),
             ..
@@ -56,7 +113,7 @@ pub(super) fn realize(
                 }
             ) && callable.name != "<init>"
             {
-                let (owner, name, descriptor, replacements, suffix) = if defaults.is_empty() {
+                let (owner, name, descriptor, real_params, suffix) = if defaults.is_empty() {
                     (
                         callable.owner,
                         callable.name,
@@ -76,17 +133,6 @@ pub(super) fn realize(
                     if default.name == "<init>" || default.mask_count == 0 {
                         return Err(target.into());
                     }
-                    let replacements = defaults
-                        .iter()
-                        .map(|parameter| {
-                            let parameter = *parameter as usize;
-                            let ty = *default.real_params.get(parameter).ok_or(target)?;
-                            let value = ir.add_expr(IrExpr::Const(
-                                crate::ir::IrConst::zero_for_value_type(ty.canonical_semantic()),
-                            ));
-                            Ok((parameter, value))
-                        })
-                        .collect::<Result<Vec<_>, ExternalCallableId>>()?;
                     let mut masks = vec![0i32; default.mask_count];
                     for parameter in &defaults {
                         let parameter = *parameter as usize;
@@ -102,9 +148,25 @@ pub(super) fn realize(
                         default.owner,
                         default.name.clone(),
                         default.descriptor.clone(),
-                        replacements,
+                        default.real_params.clone(),
                         suffix,
                     )
+                };
+                let supplied = match &ir.exprs[index] {
+                    IrExpr::New { args, .. } => args.clone(),
+                    _ => unreachable!(),
+                };
+                let realized_args = if defaults.is_empty() {
+                    supplied
+                } else {
+                    materialize_constructor_defaults(
+                        ir,
+                        &real_params,
+                        supplied,
+                        &defaults,
+                        default_prefix_count,
+                        target,
+                    )?
                 };
                 let IrExpr::New {
                     args,
@@ -114,9 +176,7 @@ pub(super) fn realize(
                 else {
                     unreachable!()
                 };
-                for (parameter, value) in replacements {
-                    *args.get_mut(parameter).ok_or(target)? = value;
-                }
+                *args = realized_args;
                 args.extend(suffix);
                 let args = std::mem::take(args);
                 *external_target = None;
@@ -130,7 +190,6 @@ pub(super) fn realize(
                     dispatch_receiver: None,
                     args,
                 };
-                ir.constructor_default_arguments.remove(&expression);
                 continue;
             }
             let default = if defaults.is_empty() {
@@ -167,15 +226,34 @@ pub(super) fn realize(
             } else {
                 Vec::new()
             };
+            let supplied = match &ir.exprs[index] {
+                IrExpr::New { args, .. } => args.clone(),
+                _ => unreachable!(),
+            };
+            let realized_arguments = if let Some(default) = default {
+                materialize_constructor_defaults(
+                    ir,
+                    &default.real_params,
+                    supplied,
+                    &defaults,
+                    default_prefix_count,
+                    target,
+                )?
+            } else {
+                supplied
+            };
             let IrExpr::New {
                 args,
                 ctor_desc,
                 external_target,
+                defaults,
+                default_prefix_count,
                 ..
             } = &mut ir.exprs[index]
             else {
                 unreachable!()
             };
+            *args = realized_arguments;
             args.extend(realization_operands);
             *ctor_desc = Some(if let Some(default) = default {
                 default.descriptor.clone()
@@ -190,7 +268,8 @@ pub(super) fn realize(
                 callable.descriptor
             });
             *external_target = None;
-            ir.constructor_default_arguments.remove(&expression);
+            *defaults = Box::new([]);
+            *default_prefix_count = 0;
             continue;
         }
         let property = match ir.exprs[index].clone() {
@@ -466,11 +545,9 @@ pub(super) fn realize(
                     .cloned()
                     .ok_or(target)?
             };
-            // Checked FIR carries semantic zero values for omitted arguments. Replace them at this
-            // exact provider boundary with zeros for the selected bridge's physical parameters. A
-            // value class such as `Duration` is a reference semantically but a primitive `long` in
-            // this descriptor; leaving the semantic `null` placeholder makes the bridge unbox null
-            // before its mask can substitute the default.
+            // Reconstruct the selected bridge's complete physical parameter prefix here. Common IR
+            // carries only supplied operands; a value class such as `Duration` may require a `long`
+            // zero even though its semantic type is a reference.
             let extension_receiver = extension_receiver_parameter
                 .map(|parameter| parameter as usize)
                 .or_else(|| {
@@ -481,7 +558,7 @@ pub(super) fn realize(
                 });
             let member_extension =
                 kind == ExternalCallableKind::Member && extension_receiver_parameter.is_some();
-            let replacements = defaults
+            let omitted_parameters = defaults
                 .iter()
                 .map(|default_parameter| {
                     let source_parameter = *default_parameter as usize;
@@ -489,26 +566,31 @@ pub(super) fn realize(
                         + usize::from(
                             extension_receiver.is_some_and(|receiver| source_parameter >= receiver),
                         );
-                    let ty = *default.real_params.get(physical_parameter).ok_or(target)?;
-                    let value = ir.add_expr(IrExpr::Const(
-                        crate::ir::IrConst::zero_for_value_type(ty.canonical_semantic()),
-                    ));
-                    // A member extension's common-IR argument vector already contains the
-                    // extension receiver at its checked parameter position; only the dispatch
-                    // receiver is inserted below. Its default mask excludes the extension slot,
-                    // so translate the mask ordinal back before replacing the placeholder. A
-                    // top-level extension still keeps its receiver in `dispatch_receiver` here and
-                    // therefore writes by the unshifted source ordinal.
-                    Ok((
-                        if member_extension {
-                            physical_parameter
-                        } else {
-                            source_parameter
-                        },
-                        value,
-                    ))
+                    Ok(if member_extension {
+                        physical_parameter
+                    } else {
+                        source_parameter
+                    } as u32)
                 })
                 .collect::<Result<Vec<_>, ExternalCallableId>>()?;
+            let supplied = match &ir.exprs[index] {
+                IrExpr::Call { args, .. } => args.clone(),
+                _ => unreachable!(),
+            };
+            let mut default_parameters = default.real_params.clone();
+            if kind == ExternalCallableKind::Extension {
+                if callable.context_count >= default_parameters.len() {
+                    return Err(target.into());
+                }
+                default_parameters.remove(callable.context_count);
+            }
+            let mut realized_arguments = materialize_omitted_arguments(
+                ir,
+                &default_parameters,
+                supplied,
+                &omitted_parameters,
+                target,
+            )?;
             {
                 let IrExpr::Call {
                     dispatch_receiver,
@@ -518,9 +600,7 @@ pub(super) fn realize(
                 else {
                     unreachable!()
                 };
-                for (parameter, value) in replacements {
-                    *args.get_mut(parameter).ok_or(target)? = value;
-                }
+                *args = std::mem::take(&mut realized_arguments);
                 match realization.kind {
                     ExternalCallableKind::TopLevel => {}
                     ExternalCallableKind::Extension => {

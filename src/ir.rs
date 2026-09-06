@@ -879,12 +879,20 @@ pub enum IrExpr {
     ///   types krusty builds the descriptor from.
     New {
         internal: TypeName,
+        /// Supplied constructor operands in declaration order. Omitted defaulted parameters are
+        /// absent; `defaults` identifies their source-value ordinals.
         args: Vec<ExprId>,
         ctor_params: Option<Vec<Ty>>,
         ctor_desc: Option<String>,
         /// Exact dependency constructor declaration awaiting target realization. Mutually exclusive
         /// with `ctor_desc`; source/module constructions leave it absent.
         external_target: Option<crate::fir::ExternalCallableId>,
+        /// Omitted source-value parameter ordinals. A backend chooses its own default-call
+        /// convention; common IR contains no placeholders, masks, or marker operands.
+        defaults: Box<[u32]>,
+        /// Leading semantic operands that are not source value parameters, such as an inner-class
+        /// outer receiver or local-class captures. Default ordinals begin after this prefix.
+        default_prefix_count: u32,
     },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`. `args[i] =
     /// None` means parameter `i` is omitted and takes its default (`p.copy(y=5)`, `f(a)` of `f(a, b=…)`);
@@ -2484,12 +2492,6 @@ pub struct IrFile {
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
     pub annotation_constructions: std::collections::HashMap<ExprId, IrAnnotationConstruction>,
-    /// Ordinary construction identity → semantic primary-constructor parameter ordinals omitted
-    /// at the checked call site. Common lowering preserves the checker's final argument mapping;
-    /// a backend realizes its own default-constructor ABI without inspecting source or repeating
-    /// overload selection. Ordinals include any leading captured parameters in the physical common
-    /// constructor shape.
-    pub constructor_default_arguments: std::collections::HashMap<ExprId, Vec<u32>>,
     /// Current class identity → semantic superclass-constructor parameter ordinals omitted by its
     /// primary delegation. Kept separate from `super_args` so common IR does not encode a target's
     /// mask/marker ABI.
@@ -3286,6 +3288,8 @@ impl IrFile {
             ctor_params: None,
             ctor_desc: Some(ctor_desc.into()),
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         })
     }
 
@@ -3297,6 +3301,8 @@ impl IrFile {
             ctor_params: Some(params),
             ctor_desc: None,
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         })
     }
 
@@ -3368,24 +3374,6 @@ impl IrFile {
         internal: TypeName,
     ) -> Option<Vec<Option<u32>>> {
         self.class_ctor_defaults.remove(&internal)
-    }
-
-    pub fn insert_constructor_default_arguments(
-        &mut self,
-        construction: ExprId,
-        defaults: Vec<u32>,
-    ) {
-        if !defaults.is_empty() {
-            self.constructor_default_arguments
-                .insert(construction, defaults);
-        }
-    }
-
-    pub fn constructor_default_arguments(&self, construction: ExprId) -> &[u32] {
-        self.constructor_default_arguments
-            .get(&construction)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
     }
 
     pub fn insert_class_signature(&mut self, internal: &str, sig: IrGenericSig) {

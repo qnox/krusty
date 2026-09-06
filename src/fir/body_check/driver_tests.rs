@@ -1473,6 +1473,25 @@ fn enum_entry_inner_class_reads_entry_property_through_outer_enum_receiver() {
         .expect("stable enum-entry property target");
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let info = analysis.types[0].as_ref().expect("checked source");
+    let inner_call = analysis.files[0]
+        .expr_arena
+        .iter()
+        .enumerate()
+        .find_map(|(raw, expression)| {
+            let crate::ast::Expr::Call { callee, .. } = expression else {
+                return None;
+            };
+            matches!(analysis.files[0].expr(*callee), crate::ast::Expr::Name(name) if name == "Inner")
+                .then(|| ExprId(raw as u32))
+        })
+        .expect("enum-entry inner constructor call");
+    assert_eq!(
+        info.implicit_receiver_selections
+            .get(&inner_call)
+            .map(|receiver| receiver.ty),
+        Some(Ty::obj("A")),
+        "the checked constructor must retain the selected enum-entry receiver",
+    );
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_body(
@@ -1513,6 +1532,31 @@ fn enum_entry_inner_class_reads_entry_property_through_outer_enum_receiver() {
         })
         .collect::<Vec<_>>();
     assert_eq!(receiver_paths, [(Ty::obj("A"), 3)]);
+    assert!(sink.0.iter().any(|(_, body)| {
+        (0..body.expression_count()).any(|raw| {
+            let Some(FirExprKind::ConstructorCall(call)) = body
+                .expr(FirExprId::from_raw(raw as u32))
+                .map(|expression| &expression.kind)
+            else {
+                return false;
+            };
+            let FirConstructorTarget::Module(target) = call.target else {
+                return false;
+            };
+            let Some(owner) = index.callable(target).and_then(|callable| {
+                index
+                    .declaration_anchor(callable.declaration)
+                    .and_then(|anchor| anchor.owner)
+            }) else {
+                return false;
+            };
+            index
+                .classifier_header(owner)
+                .is_some_and(|header| header.classifier == crate::types::type_name("A$X$Inner"))
+                && call.outer_receiver.is_some()
+                && call.outer_parameter == Some(ResolvedTy::new(Ty::obj("A")).unwrap())
+        })
+    }));
 }
 
 #[test]

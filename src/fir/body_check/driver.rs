@@ -550,8 +550,10 @@ fn check_and_dispatch_enum_entry(
         ty: signature.result,
         kind: FirExprKind::ConstructorCall(FirConstructorCall {
             target: FirConstructorTarget::Module(constructor.id),
+            context_parameter_count: 0,
             outer_parameter: None,
             outer_receiver: None,
+            external_capture_arguments: None,
             parameter_types: checker
                 .published_parameter_types(Some(entry.span), &params)
                 .map_err(CheckedBodyDriverFailure::Check)?,

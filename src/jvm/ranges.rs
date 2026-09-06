@@ -72,6 +72,8 @@ pub(super) fn realize(
                         ctor_params: None,
                         ctor_desc: Some(construction.through.ctor_desc),
                         external_target: None,
+                        defaults: Box::new([]),
+                        default_prefix_count: 0,
                     }
                 }
             }

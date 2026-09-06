@@ -8,6 +8,7 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFunction,
 };
 
+use super::source_calls::ModuleConstructorRequest;
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
@@ -646,7 +647,7 @@ impl BodyLowering<'_> {
                         dispatch_receiver: None,
                         extension_receiver: None,
                         arguments: &checked,
-                        allow_defaults: true,
+                        defaults: super::source_calls::SelectedDefaultMode::Materialize,
                         preserve_inline_lambdas: false,
                         extension_receiver_parameter: None,
                         mode: super::source_calls::SelectedOperandMode::DirectWhenOrdered,
@@ -803,21 +804,41 @@ impl BodyLowering<'_> {
                     .collect::<Vec<_>>();
                 let arguments = self.arguments(*target, &call.arguments, &parameter_types)?;
                 let outer_receiver = self.receiver(call.outer_receiver)?;
+                let external_capture_arguments = call
+                    .external_capture_arguments
+                    .as_deref()
+                    .map(|arguments| {
+                        arguments
+                            .iter()
+                            .map(|argument| {
+                                let ty = self
+                                    .body
+                                    .expr(*argument)
+                                    .ok_or(FirLoweringFailure::MissingExpression(*argument))?
+                                    .ty
+                                    .get();
+                                Ok((self.expression(*argument)?, ty))
+                            })
+                            .collect::<Result<Vec<_>, FirLoweringFailure>>()
+                    })
+                    .transpose()?;
                 let anchor = self
                     .index
                     .declaration_anchor(callable.declaration)
                     .ok_or(FirLoweringFailure::MissingCallable(*target))?;
                 let primary_in_current_file = anchor.sibling == 0
                     && self.ir.class_id_by_name(classifier.classifier).is_some();
-                self.module_constructor_call(
-                    *target,
-                    classifier.classifier,
-                    &parameter_types,
-                    &declaration_parameter_types,
+                self.module_constructor_call(ModuleConstructorRequest {
+                    target: *target,
+                    classifier: classifier.classifier,
+                    argument_parameter_types: &parameter_types,
+                    declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,
+                    context_parameter_count: call.context_parameter_count,
                     outer_receiver,
-                    &arguments,
-                )
+                    external_capture_arguments: external_capture_arguments.as_deref(),
+                    arguments: &arguments,
+                })
                 .ok_or(FirLoweringFailure::UnsupportedModuleConstructor(*target))
             }
             FirConstructorTarget::External {
@@ -832,6 +853,8 @@ impl BodyLowering<'_> {
                     *declaration,
                     *classifier,
                     parameters,
+                    call.context_parameter_count,
+                    call.outer_parameter,
                     outer_receiver,
                     &arguments,
                     annotation.as_deref(),

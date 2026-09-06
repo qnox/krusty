@@ -1971,6 +1971,8 @@ impl IrPlugin for SerializationPlugin {
                     ctor_params: Some(type_serializers.clone()),
                     ctor_desc: None,
                     external_target: None,
+                    defaults: Box::new([]),
+                    default_prefix_count: 0,
                 });
                 let ret = ir.add_expr(IrExpr::Return(Some(new_ser)));
                 (
@@ -2711,6 +2713,8 @@ impl IrPlugin for SerializationPlugin {
                             ctor_params: None,
                             ctor_desc: None,
                             external_target: None,
+                            defaults: Box::new([]),
+                            default_prefix_count: 0,
                         });
                         let ret = ir.add_expr(IrExpr::Return(Some(new)));
                         let body = ir.add_expr(IrExpr::Block {
@@ -3042,6 +3046,8 @@ impl IrPlugin for SerializationPlugin {
                                 ctor_params: None,
                                 ctor_desc: None,
                                 external_target: None,
+                                defaults: Box::new([]),
+                                default_prefix_count: 0,
                             });
                             stmts.push(ir.add_expr(IrExpr::Return(Some(new))));
                             ir.add_expr(IrExpr::Block { stmts, value: None })
@@ -3067,6 +3073,8 @@ impl IrPlugin for SerializationPlugin {
                                 ctor_params: None,
                                 ctor_desc: None,
                                 external_target: None,
+                                defaults: Box::new([]),
+                                default_prefix_count: 0,
                             });
                             let ret = ir.add_expr(IrExpr::Return(Some(new)));
                             ir.add_expr(IrExpr::Block {
