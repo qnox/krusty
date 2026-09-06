@@ -163,6 +163,9 @@ command here. Do not bury recurring rules only in a review comment or session tr
 
 - Work test-first and compare diagnostics/behavior with kotlinc through the repository harness.
 - Use `./run-tests.sh`; do not use release builds for ordinary validation.
+- `gate` is a Cargo profile: `--profile gate`. Never `--target-dir target/gate` or
+  `CARGO_TARGET_DIR=target/gate`; that builds the dev profile into `target/gate/debug`, which
+  nothing reuses and the harness now deletes.
 - Do not weaken or replace an existing test to make a new path pass. Add distinct tests for
   semantically distinct source forms.
 - Resolver work is complete only when the conformance survey has no resolver-related skips or
