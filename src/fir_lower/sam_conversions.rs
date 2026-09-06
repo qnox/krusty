@@ -15,19 +15,11 @@ impl BodyLowering<'_> {
         conversion: &FirSamConversion,
         function: ExprId,
     ) -> Option<ExprId> {
-        let function_adapter = match self.ir.expr(function) {
-            IrExpr::New { internal, .. } => self
-                .ir
-                .classes
-                .iter()
-                .any(|class| class.fq_name_id() == *internal && class.func_ref.is_some()),
-            IrExpr::StaticInstance { owner, .. } => self
-                .ir
-                .classes
-                .get(*owner as usize)
-                .is_some_and(|class| class.func_ref.is_some()),
-            _ => false,
-        };
+        let function_adapter = matches!(
+            self.ir.expr(function),
+            IrExpr::CallableReference(_)
+                | IrExpr::Checked(crate::ir::IrCheckedOperation::CallableReference { .. })
+        );
         let arity = u8::try_from(conversion.parameters.len()).ok()?;
         let function_type = Ty::fun_with_shape(
             conversion

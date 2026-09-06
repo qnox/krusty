@@ -51,6 +51,68 @@ fun box(): String {\n\
 }
 
 #[test]
+fn local_function_reference_keeps_multiple_captures_and_declaration_equality() {
+    const SRC: &str = r#"
+class Host(private val first: String) {
+    fun run(): String {
+        val second = "K"
+        fun selected(): String = first + second
+        if (::selected != ::selected) return "FAIL: equality"
+        return (::selected)()
+    }
+}
+
+fun box(): String = Host("O").run()
+"#;
+    let out = run(SRC).expect("multi-capture local function reference should compile and run");
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn local_function_reference_equality_ignores_ordinary_capture_values() {
+    const SRC: &str = r#"
+fun make(value: String): () -> String {
+    fun selected(): String = value
+    return ::selected
+}
+
+fun box(): String {
+    val first = make("O")
+    val second = make("X")
+    if (first != second) return "FAIL: equality"
+    return if (first() == "O" && second() == "X") "OK" else "FAIL: invocation"
+}
+"#;
+    let out = run(SRC).expect("ordinary local captures should not become bound receivers");
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn local_extension_reference_separates_captures_from_its_bound_receiver() {
+    const SRC: &str = r#"
+fun make(prefix: String, receiver: String): () -> String {
+    fun String.selected(): String = prefix + this
+    return receiver::selected
+}
+
+fun box(): String {
+    val first = make("A", "O")
+    val sameReceiver = make("B", "O")
+    val otherReceiver = make("A", "X")
+    if (first != sameReceiver) return "FAIL: ordinary capture affected equality"
+    if (first == otherReceiver) return "FAIL: bound receiver ignored"
+    return if (first() == "AO" && sameReceiver() == "BO" && otherReceiver() == "AX") {
+        "OK"
+    } else {
+        "FAIL: invocation"
+    }
+}
+"#;
+    let out = run(SRC).expect("local extension reference should preserve both capture kinds");
+    assert_eq!(out, "OK");
+}
+
+#[test]
 fn suspend_top_level_reference_keeps_identity_and_continuation_shape() {
     const SRC: &str = "import kotlin.coroutines.*\n\
 suspend fun twice(x: Int): Int = x * 2\n\

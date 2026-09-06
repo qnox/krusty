@@ -248,6 +248,31 @@ fn validate_sam(sam: &IrSamTarget) -> Result<(), UndeterminedIrType> {
 fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
     match expression {
         IrExpr::Checked(operation) => validate_checked_operation(operation),
+        IrExpr::CallableReference(reference) => {
+            reject("callable-reference type", reference.function_type)?;
+            reject_all(
+                "callable-reference declaration parameter",
+                reference.declaration_parameters.iter().copied(),
+            )?;
+            reject(
+                "callable-reference declaration result",
+                reference.declaration_result,
+            )?;
+            if let Some(adaptation) = &reference.adaptation {
+                reject_all(
+                    "callable-reference adapted parameter",
+                    adaptation
+                        .parameter_types
+                        .iter()
+                        .map(|parameter| parameter.get()),
+                )?;
+                reject(
+                    "callable-reference adapted result",
+                    adaptation.result_type.get(),
+                )?;
+            }
+            Ok(())
+        }
         IrExpr::KClassLiteral { classifier, .. } => {
             classifier.map_or(Ok(()), |ty| reject("class literal", ty))
         }

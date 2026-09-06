@@ -258,9 +258,6 @@ impl BodyLowering<'_> {
         let crate::types::Ty::Fun(reference) = reference_ty.non_null() else {
             return Ok(None);
         };
-        let Some(arity) = u8::try_from(reference.params.len()).ok() else {
-            return Ok(None);
-        };
         let signature = self
             .index
             .signature(callable.declaration)
@@ -282,20 +279,6 @@ impl BodyLowering<'_> {
             dispatch_capture.is_some(),
             extension_capture.is_some(),
         );
-
-        if adaptation.is_none() {
-            if let Some(reference) = self.materialize_structural_module_function_reference(
-                callable,
-                binding,
-                dispatch_capture,
-                extension_capture,
-                reference,
-                signature,
-                enclosing,
-            )? {
-                return Ok(Some(reference));
-            }
-        }
 
         let mut captures = Vec::new();
         let mut capture_types = Vec::new();
@@ -339,22 +322,21 @@ impl BodyLowering<'_> {
                         .expect("an unbound member has an enclosing classifier")
                         .classifier,
                 );
-                if receiver_ty != expected {
-                    return Ok(None);
-                }
-                dispatch_receiver = Some(self.ir.add_expr(IrExpr::GetValue(own_start)));
+                dispatch_receiver =
+                    Some(self.adapted_reference_argument_read(own_start, receiver_ty, expected));
                 own_parameters.remove(0);
                 own_parameter_slots.remove(0);
             } else if extension_receiver.is_none() {
                 if let Some(expected) = callable.shape.extension_receiver {
                     let position = callable.shape.context_parameter_count as usize;
-                    if own_parameters.get(position).copied() != Some(specialize(expected.get())) {
+                    let Some(source) = own_parameters.get(position).copied() else {
                         return Ok(None);
-                    }
-                    extension_receiver = Some(
-                        self.ir
-                            .add_expr(IrExpr::GetValue(own_start + position as u32)),
-                    );
+                    };
+                    extension_receiver = Some(self.adapted_reference_argument_read(
+                        own_start + position as u32,
+                        source,
+                        specialize(expected.get()),
+                    ));
                     own_parameters.remove(position);
                     own_parameter_slots.remove(position);
                 }
@@ -428,10 +410,16 @@ impl BodyLowering<'_> {
                 .iter()
                 .zip(own_parameter_slots)
                 .enumerate()
-                .map(|(parameter, (_, source))| IrCheckedArgument::Expression {
-                    parameter: parameter as u32,
-                    value: self.ir.add_expr(IrExpr::GetValue(own_start + source)),
-                })
+                .map(
+                    |(parameter, (&source_type, source))| IrCheckedArgument::Expression {
+                        parameter: parameter as u32,
+                        value: self.adapted_reference_argument_read(
+                            own_start + source,
+                            source_type,
+                            signature_parameters[parameter],
+                        ),
+                    },
+                )
                 .collect::<Vec<_>>()
         };
         // The adapter body is a separate JVM method. Its value slots start with the captured
@@ -476,52 +464,30 @@ impl BodyLowering<'_> {
         self.ir.private_methods.insert(function);
         self.ir
             .lambda_own_params_from
-            .insert(function, captures.len() as u32);
-        if let Some(owner) = self
+            .insert(function, parameters.len() as u32);
+        self.attach_generated_static_to_lexical_class(function);
+        let declaration_suspend = self
             .index
-            .enclosing_classifier(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))
-        {
-            if let Some(class) = self
-                .ir
-                .checked_classifier_classes
-                .get(&owner.declaration)
-                .copied()
-            {
-                self.ir.classes[class as usize].methods.push(function);
-            }
-        }
-        if let Some(adaptation) = adaptation {
-            let capture = match captures.as_slice() {
-                [] => None,
-                [capture] => Some(*capture),
-                _ => {
-                    return Err(FirLoweringFailure::UnsupportedCallableReference(
-                        callable.id,
-                    ));
-                }
-            };
-            return self
-                .materialize_structural_adapted_module_reference(
-                    callable,
-                    reference,
-                    &signature_parameters,
-                    signature_result,
-                    adapter_name,
-                    function,
-                    parameters,
-                    capture,
-                    adaptation,
-                    enclosing,
-                )
-                .map(Some);
-        }
-        Ok(Some(self.ir.add_expr(IrExpr::Lambda {
-            impl_fn: function,
-            arity,
-            captures,
-            sam: None,
-            inline_body: None,
-        })))
+            .declaration_header(callable.declaration)
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::SUSPEND));
+        let bound_receiver = match captures.as_slice() {
+            [] => None,
+            [receiver] => Some(*receiver),
+            _ => return Ok(None),
+        };
+        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(
+            crate::ir::IrCallableReference {
+                target: crate::ir::IrCallableReferenceTarget::Module(callable.id),
+                adapter: function,
+                captures: Vec::new(),
+                bound_receiver,
+                function_type: reference_ty,
+                declaration_parameters: signature_parameters.into_boxed_slice(),
+                declaration_result: signature_result,
+                declaration_suspend,
+                adaptation: adaptation.cloned().map(Box::new),
+            },
+        ))))
     }
 
     #[allow(clippy::too_many_arguments)]

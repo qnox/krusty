@@ -118,6 +118,13 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 extension_receiver.iter().for_each(|&receiver| f(receiver));
             }
         },
+        IrExpr::CallableReference(reference) => {
+            reference.captures.iter().for_each(|&capture| f(capture));
+            reference
+                .bound_receiver
+                .iter()
+                .for_each(|&receiver| f(receiver));
+        }
         IrExpr::Block { stmts, value } => {
             stmts.iter().for_each(|&s| f(s));
             value.iter().for_each(|&v| f(v));

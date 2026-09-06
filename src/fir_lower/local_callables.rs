@@ -4,8 +4,8 @@ use crate::fir::{
     FirBody, FirCapture, FirImplicitReceiverCapture, FirLocalCallableRef, FirStatementId,
     FirStatementKind, LocalCallableId,
 };
-use crate::ir::{Callee, ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFunction};
-use crate::types::{type_name, Ty};
+use crate::ir::{Callee, ExprId, IrExpr, IrFunction};
+use crate::types::Ty;
 
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
@@ -447,17 +447,15 @@ impl BodyLowering<'_> {
         let extension_receiver = extension_receiver
             .map(|receiver| self.expression_with_conversion(receiver.value, receiver.conversion))
             .transpose()?;
-        if let Ty::Fun(reference) = reference_ty.non_null() {
-            if let Some(reference) = self.materialize_local_reference(
-                &target,
-                &realization,
-                &captures,
-                extension_receiver,
-                adaptation,
-                reference,
-            )? {
-                return Ok(reference);
-            }
+        if let Some(reference) = self.materialize_local_reference(
+            &target,
+            &realization,
+            &captures,
+            extension_receiver,
+            adaptation,
+            reference_ty,
+        )? {
+            return Ok(reference);
         }
         Err(FirLoweringFailure::UnsupportedLocalCallableReference(
             target,
@@ -471,13 +469,13 @@ impl BodyLowering<'_> {
         bound_captures: &[ExprId],
         bound_extension_receiver: Option<ExprId>,
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
-        reference: &crate::types::FnSig,
+        reference_ty: Ty,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
-        let reference_suspend = realization.suspend
-            || adaptation.is_some_and(|adaptation| adaptation.suspend_conversion);
-        let Some(arity) = u8::try_from(reference.params.len()).ok() else {
+        let Ty::Fun(reference) = reference_ty.non_null() else {
             return Ok(None);
         };
+        let reference_suspend = realization.suspend
+            || adaptation.is_some_and(|adaptation| adaptation.suspend_conversion);
         if !realization.has_extension_receiver && bound_extension_receiver.is_some() {
             return Ok(None);
         }
@@ -607,6 +605,7 @@ impl BodyLowering<'_> {
             );
         }
         parameters.extend(reference.params.iter().copied());
+        let adapter_parameter_count = parameters.len();
         let wrapper = self.ir.add_fun(IrFunction {
             name: format!(
                 "$fir_local_ref_{}_{}",
@@ -635,106 +634,28 @@ impl BodyLowering<'_> {
             self.ir.suspend_funs.push(wrapper);
         }
         self.ir.private_methods.insert(wrapper);
+        self.attach_generated_static_to_lexical_class(wrapper);
         self.ir.lambda_own_params_from.insert(
             wrapper,
-            u32::try_from(capture_count + bound_receiver_count)
-                .expect("too many local reference captures"),
+            u32::try_from(adapter_parameter_count)
+                .expect("too many local reference adapter parameters"),
         );
-        let mut captures = bound_captures.to_vec();
-        captures.extend(bound_extension_receiver);
-        // FunctionReferenceImpl stores one bound receiver. A capture-free local reference is a
-        // singleton; a reference with one lexical capture stores that capture as the bound receiver
-        // and invokes the generated static adapter. Keep the lambda fallback only for the currently
-        // unrepresentable multi-capture carrier shape; it remains executable while the IR grows an
-        // explicit aggregate-capture reference representation.
-        if captures.len() > 1 {
-            return Ok(Some(self.ir.add_expr(IrExpr::Lambda {
-                impl_fn: wrapper,
-                arity,
-                captures,
-                sam: None,
-                inline_body: None,
-            })));
-        }
-        let bound = !captures.is_empty();
-        let simple_name = format!(
-            "$fir$local$fnref${}_{}",
-            self.body.owner().raw(),
-            self.ir.classes.len()
-        );
-        let internal = self.ir.package.as_ref().map_or_else(
-            || type_name(&simple_name),
-            |package| type_name(&format!("{}/{}", package.replace('.', "/"), simple_name)),
-        );
-        let mut class = IrClass::synthetic(internal);
-        class.superclass = type_name("kotlin/jvm/internal/FunctionReferenceImpl");
-        let continuation = Ty::obj("kotlin/coroutines/Continuation");
-        let mut invoke_parameters = reference.params.clone();
-        let mut target_parameters = self.ir.functions[wrapper as usize].params.clone();
-        let mut invoke_result = reference.ret;
-        let mut target_result = self.ir.functions[wrapper as usize].ret;
-        if reference_suspend {
-            invoke_parameters.push(continuation);
-            target_parameters.push(continuation);
-            invoke_result = Ty::obj("kotlin/Any");
-            target_result = Ty::obj("kotlin/Any");
-        }
-        let declaration_suspend = realization.suspend;
-        let mut reflection_parameters = reference.params.clone();
-        let mut reflection_result = selected_result;
-        if declaration_suspend {
-            reflection_parameters.push(continuation);
-            reflection_result = Ty::obj("kotlin/Any");
-        }
-        class.func_ref = Some(FuncRef {
-            adapted: adaptation.is_some(),
-            bound,
-            arity,
-            is_suspend: reference_suspend,
-            module_target: None,
-            local_target: Some(wrapper),
-            owner_class: realization.owner,
-            fn_name: realization.source_name.to_string(),
-            flags: i32::from(realization.owner.is_none()),
-            dispatch: if bound {
-                FrDispatch::StaticBound
-            } else {
-                FrDispatch::Static
+        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(
+            crate::ir::IrCallableReference {
+                target: crate::ir::IrCallableReferenceTarget::Local {
+                    owner: realization.owner,
+                    name: realization.source_name.clone(),
+                },
+                adapter: wrapper,
+                captures: bound_captures.to_vec(),
+                bound_receiver: bound_extension_receiver,
+                function_type: reference_ty,
+                declaration_parameters: reference.params.clone().into_boxed_slice(),
+                declaration_result: selected_result,
+                declaration_suspend: realization.suspend,
+                adaptation: adaptation.cloned().map(Box::new),
             },
-            call_owner: None,
-            call_name: self.ir.functions[wrapper as usize].name.clone(),
-            reflection_name: None,
-            reflection_receiver_parameter: false,
-            reflection_target_ret_ty: Some(reflection_result),
-            reflection_target_param_tys: Some(reflection_parameters),
-            call_interface: false,
-            param_tys: invoke_parameters,
-            ret_ty: invoke_result,
-            target_param_tys: target_parameters,
-            target_ret_ty: target_result,
-            unbox_params: vec![None; arity as usize],
-            unbox_param_nullable: vec![false; arity as usize],
-            box_ret: None,
-            staticbound_recv_unbox: None,
-        });
-        let class = self.ir.add_class(class);
-        Ok(Some(match captures.as_slice() {
-            [capture] => self.ir.add_expr(IrExpr::New {
-                internal,
-                args: vec![*capture],
-                ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
-                ctor_desc: None,
-                external_target: None,
-                defaults: Box::new([]),
-                default_prefix_count: 0,
-            }),
-            [] => self.ir.add_expr(IrExpr::StaticInstance {
-                owner: class,
-                ty: class,
-                field: "INSTANCE",
-            }),
-            _ => unreachable!("multi-capture references returned above"),
-        }))
+        ))))
     }
 
     pub(super) fn local_function(

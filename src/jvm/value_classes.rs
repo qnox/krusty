@@ -1680,7 +1680,7 @@ pub fn lower_value_classes(
         // takes the erased underlying — record it so the emitter unboxes the receiver at `invoke`.
         if staticbound {
             fr.staticbound_recv_unbox = erase_src
-                .first()
+                .get(fr.field_capture_count as usize)
                 .and_then(|t| t.non_null().obj_internal())
                 .filter(|fq| callable_under.contains_key(fq));
         }
