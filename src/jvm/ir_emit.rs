@@ -8142,6 +8142,14 @@ fn emit_func_ref_class(
         .local_target
         .map(|target| jvm_function_params(ir, target))
         .unwrap_or_else(|| jvm_tys(&fr.target_param_tys));
+    let field_capture_count = fr.field_capture_count as usize;
+    let field_capture_tys = target_param_tys
+        .get(..field_capture_count)
+        .expect("callable-reference captures are a prefix of its adapter parameters");
+    let field_capture_descs = field_capture_tys
+        .iter()
+        .map(|capture| type_descriptor(*capture))
+        .collect::<Vec<_>>();
     // A missing `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
     // file facade, whose name isn't known until emit) — resolve it here.
     let owner_class = fr.owner_class_or_facade(facade);
@@ -8173,6 +8181,9 @@ fn emit_func_ref_class(
         // The suspend-conversion adapter also carries kotlinc's suspend-function marker interface.
         cw.add_interface("kotlin/coroutines/jvm/internal/SuspendFunction");
     }
+    for (index, descriptor) in field_capture_descs.iter().enumerate() {
+        cw.add_field(0x0012, &format!("$captured${index}"), descriptor);
+    }
 
     // The call argument param types begin AFTER the receiver for an unbound member ref.
     let first_arg = match fr.dispatch {
@@ -8181,12 +8192,14 @@ fn emit_func_ref_class(
     };
     // For `StaticBound` the captured receiver is target arg 0, so invoke arg `k` maps to
     // `target_param_tys[k + 1]`.
-    let target_offset = match fr.dispatch {
-        FrDispatch::StaticBound => 1usize,
-        _ => 0,
-    };
-    let target_ret_jvm = jvm_declared_ty(&fr.target_ret_ty);
-    let target_returns_void = matches!(fr.target_ret_ty, Ty::Unit | Ty::Nothing);
+    let target_offset =
+        field_capture_tys.len() + usize::from(matches!(fr.dispatch, FrDispatch::StaticBound));
+    let target_ret_ty = fr
+        .local_target
+        .map(|target| ir.functions[target as usize].ret)
+        .unwrap_or(fr.target_ret_ty);
+    let target_ret_jvm = jvm_declared_ty(&target_ret_ty);
+    let target_returns_void = matches!(target_ret_ty, Ty::Unit | Ty::Nothing);
     let coerce_unit = fr.ret_ty == Ty::Unit && !target_returns_void;
     // Reflection records the physical target descriptor without an unbound receiver.
     let mut signature_desc = String::from("(");
@@ -8245,7 +8258,50 @@ fn emit_func_ref_class(
         d
     };
 
-    if fr.bound {
+    if !field_capture_tys.is_empty() {
+        let capture_words: u16 = field_capture_tys.iter().map(|ty| slot_words(*ty)).sum();
+        let ctor_locals = 1 + capture_words + u16::from(fr.bound);
+        let mut ctor = CodeBuilder::new(ctor_locals);
+        let mut slot = 1u16;
+        for (index, ty) in field_capture_tys.iter().copied().enumerate() {
+            ctor.aload(0);
+            load(ty, slot, &mut ctor);
+            let field = cw.fieldref(
+                &fq,
+                &format!("$captured${index}"),
+                &field_capture_descs[index],
+            );
+            ctor.putfield(field, slot_words(ty) as i32 + 1);
+            slot += slot_words(ty);
+        }
+        ctor.aload(0);
+        ctor.push_int(physical_arity as i32, &mut cw);
+        if fr.bound {
+            ctor.aload(slot);
+        }
+        ctor.ldc_class(&owner_class, &mut cw);
+        ctor.push_string(&fr.fn_name, &mut cw);
+        ctor.push_string(&signature, &mut cw);
+        ctor.push_int(fr.flags, &mut cw);
+        let super_descriptor = if fr.bound {
+            "(ILjava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+        } else {
+            "(ILjava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+        };
+        let sup = cw.methodref(&superclass, "<init>", super_descriptor);
+        ctor.invokespecial(sup, if fr.bound { 6 } else { 5 }, 0);
+        ctor.ret_void();
+        let descriptor = format!(
+            "({}{})V",
+            field_capture_descs.concat(),
+            if fr.bound { "Ljava/lang/Object;" } else { "" }
+        );
+        if cross_package || inline_reachable {
+            finish_code::<0x0001>(&mut cw, "<init>", &descriptor, &mut ctor, ctor_locals);
+        } else {
+            finish_code::<0x0000>(&mut cw, "<init>", &descriptor, &mut ctor, ctor_locals);
+        }
+    } else if fr.bound {
         // `<init>(Object)V`: super(arity, receiver, owner.class, name, sig, flags).
         let mut ctor = CodeBuilder::new(2);
         ctor.aload(0);
@@ -8301,6 +8357,15 @@ fn emit_func_ref_class(
     let invoke_desc = jvm_function_invoke_descriptor(physical_arity);
     let invoke_locals = if high_arity { 2 } else { 1 + arity };
     let mut inv = CodeBuilder::new(invoke_locals);
+    for (index, ty) in field_capture_tys.iter().copied().enumerate() {
+        inv.aload(0);
+        let field = cw.fieldref(
+            &fq,
+            &format!("$captured${index}"),
+            &field_capture_descs[index],
+        );
+        inv.getfield(field, slot_words(ty) as i32);
+    }
     // Push the receiver for a member dispatch (`first_arg`, computed above, skips it in the arg loop).
     match fr.dispatch {
         FrDispatch::VirtualBound | FrDispatch::SuspendConvert => {
@@ -8318,7 +8383,7 @@ fn emit_func_ref_class(
         FrDispatch::Static => {}
         FrDispatch::StaticBound => {
             // The captured receiver is the FIRST static argument: load `this.receiver`, cast to the
-            // target receiver type (`target_param_tys[0]`).
+            // target receiver type (after any leading ordinary capture fields).
             inv.aload(0);
             let recv_f = cw.fieldref(&superclass, "receiver", "Ljava/lang/Object;");
             inv.getfield(recv_f, 1);
@@ -8330,7 +8395,7 @@ fn emit_func_ref_class(
                 inv.checkcast(cref);
                 let under = jvm_declared_ty(
                     target_param_tys
-                        .first()
+                        .get(field_capture_count)
                         .copied()
                         .as_ref()
                         .unwrap_or(&Ty::Error),
@@ -8338,13 +8403,13 @@ fn emit_func_ref_class(
                 let m = cw.methodref(&vc, "unbox-impl", &format!("(){}", type_descriptor(under)));
                 inv.invokevirtual(m, 0, slot_words(under) as i32);
             } else if let Some(primitive) = target_param_tys
-                .first()
+                .get(field_capture_count)
                 .map(jvm_declared_ty)
                 .filter(|ty| ty.is_jvm_scalar())
             {
                 unbox_prim(&mut cw, &mut inv, primitive);
             } else if let Some(internal) = target_param_tys
-                .first()
+                .get(field_capture_count)
                 .map(jvm_declared_ty)
                 .and_then(checkcast_internal)
             {
@@ -8354,13 +8419,17 @@ fn emit_func_ref_class(
         }
     };
     // Push the call arguments (cast/unbox each erased `Object`).
-    let mut call_arg_words = match fr.dispatch {
-        // The captured receiver already pushed above occupies one (reference) target slot.
-        FrDispatch::StaticBound => target_param_tys
-            .first()
-            .map_or(0, |t| slot_words(jvm_declared_ty(t)) as i32),
-        _ => 0,
-    };
+    let mut call_arg_words = field_capture_tys
+        .iter()
+        .map(|ty| slot_words(*ty) as i32)
+        .sum::<i32>()
+        + match fr.dispatch {
+            // The captured receiver already pushed above occupies one (reference) target slot.
+            FrDispatch::StaticBound => target_param_tys
+                .get(field_capture_count)
+                .map_or(0, |t| slot_words(jvm_declared_ty(t)) as i32),
+            _ => 0,
+        };
     for (k, pt) in fr.param_tys.iter().enumerate().skip(first_arg) {
         // Suspend conversion: the trailing continuation parameter is NOT forwarded — the wrapped
         // plain function never suspends and takes only the value arguments.
@@ -8402,8 +8471,14 @@ fn emit_func_ref_class(
         }
         if let Some(vc) = value_class_unbox {
             let locals = func_ref_invoke_locals(&mut cw, &fq, arity, high_arity);
-            let stack_prefix =
-                func_ref_call_stack_prefix(&mut cw, &fr.dispatch, &call_owner, &target_param_tys);
+            let stack_prefix = func_ref_call_stack_prefix(
+                &mut cw,
+                &fr.dispatch,
+                &call_owner,
+                &target_param_tys,
+                field_capture_tys,
+                field_capture_count,
+            );
             emit_value_class_unbox_adapter(
                 &mut cw,
                 &mut inv,
@@ -8522,11 +8597,17 @@ fn func_ref_call_stack_prefix(
     dispatch: &crate::ir::FrDispatch,
     call_owner: &str,
     target_param_tys: &[Ty],
+    field_capture_tys: &[Ty],
+    field_capture_count: usize,
 ) -> Vec<VerifType> {
-    match dispatch {
+    let mut prefix = field_capture_tys
+        .iter()
+        .map(|capture| verif_for_jvm_free(cw, ir_ty_to_jvm(capture)))
+        .collect::<Vec<_>>();
+    prefix.extend(match dispatch {
         crate::ir::FrDispatch::Static => Vec::new(),
         crate::ir::FrDispatch::StaticBound => target_param_tys
-            .first()
+            .get(field_capture_count)
             .map(|target| verif_for_jvm_free(cw, ir_ty_to_jvm(target)))
             .into_iter()
             .collect(),
@@ -8535,7 +8616,8 @@ fn func_ref_call_stack_prefix(
         | crate::ir::FrDispatch::SuspendConvert => {
             vec![VerifType::Object(cw.class_ref(call_owner))]
         }
-    }
+    });
+    prefix
 }
 
 fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {

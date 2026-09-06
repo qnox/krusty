@@ -81,6 +81,12 @@ fn publish_callable(
         target,
         IrModuleCallable {
             source: declaration_source,
+            name: index
+                .callable_name(target)
+                .ok_or(FirFileLoweringFailure::MissingCallable(
+                    callable.declaration,
+                ))?
+                .into(),
             owner,
             flags,
             parameters: parameters.into_boxed_slice(),
@@ -266,6 +272,11 @@ pub(super) fn publish_referenced(
                 FirPropertyReferenceTarget::Classifier { .. }
                 | FirPropertyReferenceTarget::External { .. } => {}
             },
+            IrExpr::CallableReference(reference) => {
+                if let crate::ir::IrCallableReferenceTarget::Module(target) = reference.target {
+                    callables.insert(target);
+                }
+            }
             IrExpr::SingletonValue { classifier } => {
                 if index.classifier_declaration(*classifier).is_some() {
                     classifiers.insert(*classifier);

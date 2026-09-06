@@ -14885,6 +14885,7 @@ impl<'a> Lower<'a> {
             func_ref: Some(crate::ir::FuncRef {
                 adapted: false,
                 bound,
+                field_capture_count: 0,
                 arity,
                 is_suspend,
                 module_target: None,

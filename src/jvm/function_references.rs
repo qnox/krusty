@@ -16,7 +16,173 @@ use crate::types::{type_name, Ty};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FunctionReferenceRealizationTarget {
     External(ExternalCallableId),
+    Module(crate::fir::CallableId),
+    Adapter(crate::ir::FunId),
     Invalid,
+}
+
+fn adapted_flags(adaptation: &crate::fir::FirReferenceAdaptation, declaration_result: Ty) -> i32 {
+    let vararg_conversion = adaptation.arguments.iter().any(|argument| {
+        matches!(
+            argument,
+            crate::fir::FirAdaptedReferenceArgument::Vararg {
+                whole_array: false,
+                ..
+            }
+        )
+    });
+    let unit_conversion =
+        adaptation.result_type.get() == Ty::Unit && declaration_result != Ty::Unit;
+    i32::from(vararg_conversion)
+        | (i32::from(adaptation.suspend_conversion) << 1)
+        | (i32::from(unit_conversion) << 2)
+}
+
+fn realize_adapter_reference(
+    ir: &mut IrFile,
+    current_facade: &str,
+    expression: usize,
+    adapter_owner: Option<crate::types::TypeName>,
+    reference: crate::ir::IrCallableReference,
+) -> Result<(), FunctionReferenceRealizationTarget> {
+    let function = ir
+        .functions
+        .get(reference.adapter as usize)
+        .ok_or(FunctionReferenceRealizationTarget::Adapter(
+            reference.adapter,
+        ))?
+        .clone();
+    let Ty::Fun(function_type) = reference.function_type.non_null() else {
+        return Err(FunctionReferenceRealizationTarget::Invalid);
+    };
+    let arity = u8::try_from(function_type.params.len())
+        .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?;
+    let capture_types = function
+        .params
+        .get(..reference.captures.len())
+        .ok_or(FunctionReferenceRealizationTarget::Adapter(
+            reference.adapter,
+        ))?
+        .to_vec();
+    if adapter_owner.is_some() {
+        // The carrier is a separate JVM class. A class-owned common adapter therefore crosses a
+        // classfile access boundary even though both artifacts represent one Kotlin lexical scope.
+        // The adapter has no source declaration or metadata entry, so expose it only physically and
+        // mark it synthetic rather than leaking an access-bridge decision into common lowering.
+        ir.private_methods.remove(&reference.adapter);
+        ir.synthetic_methods.insert(reference.adapter);
+    }
+    let adaptation_flags = reference.adaptation.as_deref().map_or(0, |adaptation| {
+        adapted_flags(adaptation, reference.declaration_result)
+    });
+    let (owner_class, name, top_level) = match reference.target {
+        crate::ir::IrCallableReferenceTarget::Module(target) => {
+            let declaration = ir
+                .referenced_module_callables
+                .get(&target)
+                .ok_or(FunctionReferenceRealizationTarget::Module(target))?;
+            (
+                declaration.owner,
+                declaration.name.to_string(),
+                declaration.owner.is_none(),
+            )
+        }
+        crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
+            (Some(classifier), "<init>".to_string(), false)
+        }
+        crate::ir::IrCallableReferenceTarget::Local { owner, name } => {
+            (owner, name.into(), owner.is_none())
+        }
+    };
+    let adapted = reference.adaptation.is_some();
+    let bound = reference.bound_receiver.is_some();
+    let continuation = Ty::obj("kotlin/coroutines/Continuation");
+    let mut invoke_parameters = function_type.params.clone();
+    let mut target_parameters = function.params.clone();
+    let mut invoke_result = function_type.ret;
+    let mut target_result = function.ret;
+    if function_type.suspend {
+        invoke_parameters.push(continuation);
+        target_parameters.push(continuation);
+        invoke_result = Ty::obj("kotlin/Any");
+        target_result = Ty::obj("kotlin/Any");
+    }
+    let mut reflection_parameters = reference.declaration_parameters.into_vec();
+    let mut reflection_result = reference.declaration_result;
+    if reference.declaration_suspend {
+        reflection_parameters.push(continuation);
+        reflection_result = Ty::obj("kotlin/Any");
+    }
+    let internal = type_name(&format!(
+        "{current_facade}$fir$function${}",
+        ir.classes.len()
+    ));
+    let mut class = IrClass::synthetic(internal);
+    class.superclass = type_name(if adapted {
+        "kotlin/jvm/internal/AdaptedFunctionReference"
+    } else {
+        "kotlin/jvm/internal/FunctionReferenceImpl"
+    });
+    class.func_ref = Some(FuncRef {
+        adapted,
+        bound,
+        field_capture_count: u32::try_from(reference.captures.len())
+            .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
+        arity,
+        is_suspend: function_type.suspend,
+        module_target: None,
+        local_target: Some(reference.adapter),
+        owner_class,
+        fn_name: name,
+        flags: i32::from(top_level) | (adaptation_flags << 1),
+        dispatch: if bound {
+            FrDispatch::StaticBound
+        } else {
+            FrDispatch::Static
+        },
+        call_owner: adapter_owner,
+        call_name: function.name,
+        reflection_name: None,
+        reflection_receiver_parameter: false,
+        reflection_target_ret_ty: Some(reflection_result),
+        reflection_target_param_tys: Some(reflection_parameters),
+        call_interface: false,
+        param_tys: invoke_parameters,
+        ret_ty: invoke_result,
+        target_param_tys: target_parameters,
+        target_ret_ty: target_result,
+        unbox_params: vec![None; function_type.params.len()],
+        unbox_param_nullable: vec![false; function_type.params.len()],
+        box_ret: None,
+        staticbound_recv_unbox: None,
+    });
+    let class = ir.add_class(class);
+    let mut constructor_arguments = reference.captures;
+    constructor_arguments.extend(reference.bound_receiver);
+    ir.exprs[expression] = match constructor_arguments.as_slice() {
+        arguments if !arguments.is_empty() => {
+            let mut constructor_parameters = capture_types;
+            if bound {
+                constructor_parameters.push(Ty::obj("kotlin/Any"));
+            }
+            IrExpr::New {
+                internal,
+                args: arguments.to_vec(),
+                ctor_params: Some(constructor_parameters),
+                ctor_desc: None,
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
+            }
+        }
+        [] => IrExpr::StaticInstance {
+            owner: class,
+            ty: class,
+            field: "INSTANCE",
+        },
+        _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
+    };
+    Ok(())
 }
 
 /// Materialize the physical target for an exact provider-selected member intrinsic that has no JVM
@@ -97,8 +263,24 @@ pub(super) fn realize(
     classpath: &Classpath,
     current_facade: &str,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
+    let adapter_owners = ir
+        .classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .methods
+                .iter()
+                .copied()
+                .map(|function| (function, class.fq_name_id()))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
+        if let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() {
+            let adapter_owner = adapter_owners.get(&reference.adapter).copied();
+            realize_adapter_reference(ir, current_facade, raw, adapter_owner, reference)?;
+            continue;
+        }
         let IrExpr::Checked(IrCheckedOperation::CallableReference {
             target,
             binding,
@@ -301,6 +483,7 @@ pub(super) fn realize(
         class.func_ref = Some(FuncRef {
             adapted: false,
             bound,
+            field_capture_count: 0,
             arity,
             is_suspend: reference.suspend,
             module_target: None,

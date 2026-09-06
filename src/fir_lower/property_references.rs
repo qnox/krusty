@@ -196,19 +196,7 @@ impl BodyLowering<'_> {
         self.ir
             .lambda_own_params_from
             .insert(function, captures.len() as u32);
-        if let Some(owner) = self
-            .index
-            .enclosing_classifier(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))
-        {
-            if let Some(class) = self
-                .ir
-                .checked_classifier_classes
-                .get(&owner.declaration)
-                .copied()
-            {
-                self.ir.classes[class as usize].methods.push(function);
-            }
-        }
+        self.attach_generated_static_to_lexical_class(function);
         Ok(Some(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: function,
             arity,

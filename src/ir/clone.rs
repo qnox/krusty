@@ -162,6 +162,13 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 map_option(extension_receiver, &mut map);
             }
         },
+        IrExpr::CallableReference(reference) => {
+            reference
+                .captures
+                .iter_mut()
+                .for_each(|capture| *capture = map(*capture));
+            map_option(&mut reference.bound_receiver, &mut map);
+        }
         IrExpr::Block { stmts, value } => {
             stmts.iter_mut().for_each(|value| *value = map(*value));
             map_option(value, &mut map);

@@ -151,6 +151,7 @@ pub(super) fn realize(
                 | IrCheckedOperation::PropertyReference { .. },
             )
             | IrExpr::Checked(IrCheckedOperation::RangeConstruction { .. })
+            | IrExpr::CallableReference(_)
             | IrExpr::Const(_)
             | IrExpr::ClassConst { .. }
             | IrExpr::KClassLiteral { .. }
