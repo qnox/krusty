@@ -50,3 +50,47 @@ fun box(): String {
 "#;
     common::expect_box_ok_with_stdlib(src, "S");
 }
+
+#[test]
+fn safe_call_property_increment_keeps_receiver_temporary_scoped() {
+    let src = r#"
+var reads = 0
+var writes = 0
+var memberIncrements = 0
+var extensionIncrements = 0
+
+class Holder {
+    private var stored: Holder = this
+
+    var value: Holder
+        get() { reads++; return stored }
+        set(value) { writes++; stored = value }
+
+    operator fun inc(): Holder {
+        memberIncrements++
+        return this
+    }
+}
+
+operator fun Holder?.inc(): Holder {
+    extensionIncrements++
+    return this!!
+}
+
+fun update(holder: Holder?) {
+    holder?.value++
+}
+
+fun box(): String {
+    update(null)
+    if (reads != 0 || writes != 0 || memberIncrements != 0 || extensionIncrements != 0) {
+        return "null receiver was evaluated"
+    }
+
+    update(Holder())
+    return if (reads == 1 && writes == 1 && memberIncrements == 1 && extensionIncrements == 0) "OK"
+           else "counts: $reads/$writes/$memberIncrements/$extensionIncrements"
+}
+"#;
+    common::expect_box_ok_with_stdlib(src, "SafePropertyIncrement");
+}

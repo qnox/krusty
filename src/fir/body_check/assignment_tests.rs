@@ -213,6 +213,66 @@ fn access_increment_publishes_one_checked_runtime_receiver_value() {
 }
 
 #[test]
+fn safe_property_increment_guards_the_complete_member_update() {
+    let (body, index) = checked_function_body(
+        "class Holder(var value: Holder) { operator fun inc(): Holder = this }\n\
+         operator fun Holder?.inc(): Holder = this!!\n\
+         fun update(holder: Holder?) { holder?.value++ }\n",
+        "update",
+    );
+    let then_branch = (0..body.expression_count())
+        .find_map(|raw| {
+            let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+            match expression.kind {
+                FirExprKind::Conditional { then_branch, .. } => Some(then_branch),
+                _ => None,
+            }
+        })
+        .expect("safe increment must retain one guarded branch");
+    let FirExprKind::Block { statements, .. } = &body
+        .expr(then_branch)
+        .expect("safe increment branch must exist")
+        .kind
+    else {
+        panic!("safe increment branch must contain the complete update")
+    };
+    assert!(statements.iter().any(|statement| {
+        let Some(FirStatement {
+            kind: FirStatementKind::Expression(expression),
+            ..
+        }) = body.statement(*statement)
+        else {
+            return false;
+        };
+        matches!(
+            body.expr(*expression).map(|expression| &expression.kind),
+            Some(FirExprKind::PropertyWrite { .. })
+        )
+    }));
+
+    let increment = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("inc")).then_some(target)
+        })
+        .expect("safe increment must retain its selected inc declaration");
+    let declaration = index
+        .callable(increment)
+        .expect("selected increment must be published")
+        .declaration;
+    assert!(
+        index
+            .declaration_header(declaration)
+            .and_then(|header| header.owner)
+            .is_some(),
+        "the non-null safe branch must select Holder.inc, not Holder?.inc"
+    );
+}
+
+#[test]
 fn smart_cast_increment_publishes_read_and_write_representation_boundaries() {
     let (body, _) = checked_function_body(
         "fun update() { var number: Int?; number = 4; number++ }\n",
