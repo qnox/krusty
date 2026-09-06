@@ -9,6 +9,7 @@ use super::*;
 
 pub(super) struct PostponedCallableFamily {
     callables: crate::libraries::Callables,
+    arguments: Vec<crate::symbol_resolver::CallArgKind>,
     bindings: Vec<(
         crate::libraries::FunctionInfo,
         crate::symbol_resolver::GSigBinds,
@@ -18,6 +19,10 @@ pub(super) struct PostponedCallableFamily {
 impl PostponedCallableFamily {
     pub(super) fn callables(&self) -> &crate::libraries::Callables {
         &self.callables
+    }
+
+    pub(super) fn arguments(&self) -> &[crate::symbol_resolver::CallArgKind] {
+        &self.arguments
     }
 
     pub(super) fn selected_bindings(
@@ -42,6 +47,30 @@ fn same_callable(
         && left.callable.owner == right.callable.owner
         && left.callable.name == right.callable.name
         && left.callable.descriptor == right.callable.descriptor
+}
+
+fn merge_active_constraints(
+    bindings: &mut crate::symbol_resolver::GSigBinds,
+    constraints: crate::symbol_resolver::AssignabilityConstraints,
+    active: &std::collections::HashSet<&str>,
+) {
+    let inferred =
+        constraints
+            .lower
+            .into_iter()
+            .chain(constraints.upper.into_iter().flat_map(|(formal, bounds)| {
+                bounds.into_iter().map(move |bound| (formal.clone(), bound))
+            }));
+    for (formal, actual) in inferred {
+        if active.contains(formal.as_str()) {
+            bindings
+                .entry(formal)
+                .and_modify(|known| {
+                    *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                })
+                .or_insert(actual);
+        }
+    }
 }
 
 pub(super) fn collect_type_parameters(
@@ -140,6 +169,7 @@ impl ProductionSignatureSemantics<'_> {
     pub(super) fn project_postponed_callables(
         &self,
         scope: crate::fir::SignatureScope,
+        receiver: Ty,
         callables: crate::libraries::Callables,
         arguments: &[crate::symbol_resolver::CallArgKind],
     ) -> PostponedCallableFamily {
@@ -159,6 +189,7 @@ impl ProductionSignatureSemantics<'_> {
         if active.is_empty() {
             return PostponedCallableFamily {
                 callables,
+                arguments: arguments.to_vec(),
                 bindings: Vec::new(),
             };
         }
@@ -174,27 +205,69 @@ impl ProductionSignatureSemantics<'_> {
 
         let (mut functions, properties) = callables.into_parts();
         let mut recorded = Vec::new();
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let arguments = arguments
+            .iter()
+            .map(|argument| argument.substitute_types(&known))
+            .collect::<Vec<_>>();
         for candidate in &mut functions.overloads {
             let Some(mut signature) = candidate.generic_sig.clone() else {
                 continue;
             };
-            let value_parameters =
-                &signature.params[candidate.context_count.min(signature.params.len())..];
             let mut bindings = known.clone();
-            for (&parameter, argument) in value_parameters.iter().zip(arguments) {
+            let declared_receiver = signature.receiver.or(candidate.receiver);
+            if let Some(declared_receiver) = declared_receiver {
+                crate::symbol_resolver::unify_inferred_ty_with_source(
+                    &source,
+                    declared_receiver,
+                    receiver,
+                    &mut bindings,
+                );
+            }
+            let value_parameter_start = candidate.context_count.min(signature.params.len());
+            for (parameter, argument) in signature.params[value_parameter_start..]
+                .iter()
+                .copied()
+                .zip(&arguments)
+            {
                 if argument.is_omitted_default() || argument.is_lambda_literal() {
                     continue;
                 }
-                crate::symbol_resolver::unify_inferred_ty(
+                let parameter = crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings);
+                crate::symbol_resolver::unify_inferred_ty_with_source(
+                    &source,
                     parameter,
                     argument.type_for(parameter),
                     &mut bindings,
                 );
+                let constraints =
+                    crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                        &source,
+                        parameter,
+                        argument.type_for(parameter),
+                    );
+                merge_active_constraints(&mut bindings, constraints, &active);
             }
-            bindings.retain(|formal, _| active.contains(formal.as_str()));
-            if bindings.is_empty() {
-                continue;
+            if let Some(declared_receiver) = declared_receiver {
+                let expected_receiver =
+                    crate::symbol_resolver::ty_subst_keep_unbound(declared_receiver, &bindings);
+                let constraints =
+                    crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                        &source,
+                        expected_receiver,
+                        receiver,
+                    );
+                merge_active_constraints(&mut bindings, constraints, &active);
             }
+            let committed = bindings
+                .iter()
+                .filter(|(formal, _)| active.contains(formal.as_str()))
+                .map(|(formal, ty)| (formal.clone(), *ty))
+                .collect();
 
             signature.receiver = signature
                 .receiver
@@ -212,10 +285,11 @@ impl ProductionSignatureSemantics<'_> {
                 .receiver
                 .map(|receiver| crate::symbol_resolver::ty_subst_keep_unbound(receiver, &bindings));
             candidate.generic_sig = Some(signature);
-            recorded.push((candidate.clone(), bindings));
+            recorded.push((candidate.clone(), committed));
         }
         PostponedCallableFamily {
             callables: crate::libraries::Callables::from_parts(functions, properties),
+            arguments,
             bindings: recorded,
         }
     }

@@ -2140,6 +2140,134 @@ struct CallInferenceConstraints {
     upper: std::collections::HashMap<String, Vec<Ty>>,
 }
 
+/// Type-variable constraints implied by one semantic assignability relation (`actual <: expected`).
+/// Unlike call inference, either side may contain variables owned by an enclosing postponed call.
+/// Keeping this relation source-aware is essential for applied supertypes: `Set<String>` flowing to
+/// `Collection<E>` constrains `E`, and `MutableSet<E>` flowing to
+/// `MutableCollection<in String>` constrains that same enclosing `E` in the opposite position.
+pub(crate) struct AssignabilityConstraints {
+    pub lower: GSigBinds,
+    pub upper: std::collections::HashMap<String, Vec<Ty>>,
+}
+
+pub(crate) fn collect_assignability_constraints_from_symbols(
+    source: &dyn SymbolSource,
+    expected: Ty,
+    actual: Ty,
+) -> AssignabilityConstraints {
+    fn actual_side(
+        source: &dyn SymbolSource,
+        expected: Ty,
+        actual: Ty,
+        position: ConstraintPosition,
+        constraints: &mut CallInferenceConstraints,
+    ) {
+        let actual = actual.projection_inner().unwrap_or(actual);
+        match actual {
+            Ty::TyParam(name, _) => {
+                let expected = expected.projection_inner().unwrap_or(expected);
+                constraints.insert(source, name, expected, position, 0);
+            }
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+                actual_side(source, expected.non_null(), *inner, position, constraints)
+            }
+            Ty::Fun(actual) => {
+                let Ty::Fun(expected) = expected.non_null() else {
+                    return;
+                };
+                for (&expected, &actual) in expected.params.iter().zip(&actual.params) {
+                    actual_side(
+                        source,
+                        expected,
+                        actual,
+                        ConstraintPosition::Lower,
+                        constraints,
+                    );
+                }
+                actual_side(
+                    source,
+                    expected.ret,
+                    actual.ret,
+                    ConstraintPosition::Upper,
+                    constraints,
+                );
+            }
+            Ty::Obj(actual_owner, _) => {
+                let Some(expected_owner) = expected.non_null().obj_internal() else {
+                    return;
+                };
+                let applied = if actual_owner == expected_owner {
+                    actual
+                } else {
+                    receiver_hierarchy(source, actual)
+                        .into_iter()
+                        .map(|(ty, _)| ty)
+                        .find(|ty| ty.obj_internal() == Some(expected_owner))
+                        .unwrap_or(actual)
+                };
+                let (Ty::Obj(owner, actual_arguments), Ty::Obj(_, expected_arguments)) =
+                    (applied.non_null(), expected.non_null())
+                else {
+                    return;
+                };
+                if owner != expected_owner {
+                    return;
+                }
+                let variances = source
+                    .classifier(owner)
+                    .map(|classifier| classifier.type_param_variances.clone())
+                    .unwrap_or_default();
+                for (index, (&expected, &actual)) in
+                    expected_arguments.iter().zip(actual_arguments).enumerate()
+                {
+                    let (expected, position) = match expected {
+                        Ty::InProjection(inner) => (*inner, ConstraintPosition::Lower),
+                        Ty::OutProjection(inner) => (*inner, ConstraintPosition::Upper),
+                        Ty::StarProjection(_) => continue,
+                        _ => {
+                            let position = match variances
+                                .get(index)
+                                .copied()
+                                .unwrap_or(crate::types::TypeVariance::Invariant)
+                            {
+                                crate::types::TypeVariance::In => ConstraintPosition::Lower,
+                                crate::types::TypeVariance::Out => ConstraintPosition::Upper,
+                                // Equality supplies a usable lower solution; ordinary
+                                // applicability still enforces the invariant relation.
+                                crate::types::TypeVariance::Invariant => ConstraintPosition::Lower,
+                            };
+                            (expected, position)
+                        }
+                    };
+                    actual_side(source, expected, actual, position, constraints);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut constraints = CallInferenceConstraints::default();
+    collect_call_inference_constraints(
+        source,
+        expected,
+        actual,
+        ConstraintPosition::Lower,
+        0,
+        &mut constraints,
+    );
+    actual_side(
+        source,
+        expected,
+        actual,
+        ConstraintPosition::Upper,
+        &mut constraints,
+    );
+    AssignabilityConstraints {
+        lower: constraints.lower,
+        upper: constraints.upper,
+    }
+}
+
 pub(crate) struct InferredCallBindings {
     pub bindings: GSigBinds,
     /// Every lower constraint before it is approximated to one denotable binding. Callers that
