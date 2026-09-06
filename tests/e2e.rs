@@ -478,6 +478,8 @@ mod duplicate_ctor_param_check_e2e;
 mod duplicate_enum_entry_check_e2e;
 #[path = "duplicate_param_check_e2e.rs"]
 mod duplicate_param_check_e2e;
+#[path = "editor_failed_signature_recovery_e2e.rs"]
+mod editor_failed_signature_recovery_e2e;
 #[path = "elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
 #[path = "elvis_nullability_join_e2e.rs"]
