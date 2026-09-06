@@ -13,6 +13,21 @@
 
 use crate::metadata::protobuf::Pb;
 
+/// The `META-INF/<name>.kotlin_module` path kotlinc writes for `-module-name <name>`: characters a
+/// file name cannot carry (`\ / : * ? " < > |`) become `_`; everything else — including `.`,
+/// `-`, space and the other punctuation — is kept. Measured on kotlinc 2.4.10. Only the FILE name
+/// is sanitised; the module name recorded in `@Metadata` keeps its `:`.
+pub fn kotlin_module_file_name(module_name: &str) -> String {
+    let sanitised = module_name
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            other => other,
+        })
+        .collect::<String>();
+    format!("META-INF/{sanitised}.kotlin_module")
+}
+
 /// `packages`: `(package fq-name, [file-facade short class names])`.
 pub fn build_kotlin_module(packages: &[(String, Vec<String>)]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -38,6 +53,26 @@ pub fn build_kotlin_module(packages: &[(String, Vec<String>)]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// kotlinc names the module file after `-module-name` with the characters a file name cannot
+    /// carry replaced by `_` — measured on 2.4.10: `com.x:y-z w/q.r` → `com.x_y-z w_q.r`, and the
+    /// full punctuation probe kept `, ; = + @ # $ % & ( ) [ ] { } ~ ! ^` and space. The name INSIDE
+    /// `@Metadata` keeps its `:`; only the file name is sanitised.
+    #[test]
+    fn module_file_name_sanitises_like_kotlinc() {
+        assert_eq!(
+            kotlin_module_file_name("com.x:y-z w/q.r"),
+            "META-INF/com.x_y-z w_q.r.kotlin_module"
+        );
+        assert_eq!(
+            kotlin_module_file_name(r#"a*b?c"d<e>f|g\h,i;j=k+l@m#n$o%p&q(r)s[t]u{v}w~x!y^z"#),
+            "META-INF/a_b_c_d_e_f_g_h,i;j=k+l@m#n$o%p&q(r)s[t]u{v}w~x!y^z.kotlin_module"
+        );
+        assert_eq!(
+            kotlin_module_file_name("main"),
+            "META-INF/main.kotlin_module"
+        );
+    }
 
     #[test]
     fn matches_kotlinc_reference_module() {
