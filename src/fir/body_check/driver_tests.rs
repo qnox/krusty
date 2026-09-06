@@ -534,6 +534,99 @@ fn local_class_init_captures_the_nearer_constructor_parameter_value() {
 }
 
 #[test]
+fn sibling_local_function_supplies_the_local_class_shared_capture_operand() {
+    let source = "fun box(): String {\n\
+                      var captured = 0\n\
+                      fun <T> owner(value: T): T {\n\
+                          class Local {\n\
+                              fun identity(input: T): T {\n\
+                                  captured = 1\n\
+                                  return input\n\
+                              }\n\
+                          }\n\
+                          fun apply(): T = Local().identity(value)\n\
+                          return apply()\n\
+                      }\n\
+                      return owner(\"OK\")\n\
+                  }\n";
+    let mut diagnostics = DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("SiblingConstructorCapture")],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let (mut index, mut inline_bodies, _default_arguments, mut sources) =
+        streamed.module.into_parts();
+    let info = analysis.types[0].as_ref().expect("checked source");
+    crate::resolve::publish_checked_local_signatures(
+        &analysis.files[0],
+        SourceFileId::from_raw(0),
+        &analysis.symbols,
+        info,
+        &mut index,
+    )
+    .expect("checked local signatures must publish before FIR body checking");
+    let mut session = BodyCheckSession::default();
+    let mut sink = RecordingSink::default();
+    for work in ordinary {
+        check_and_dispatch_bound_body_in_session(
+            &analysis.files[0],
+            info,
+            SourceFileId::from_raw(0),
+            work,
+            &index,
+            sources.origins_mut(),
+            &mut inline_bodies,
+            &mut sink,
+            &mut session,
+        )
+        .expect("every local body must become checked FIR");
+    }
+
+    fn has_shared_constructor_capture(body: &FirBody) -> bool {
+        let expressions = (0..body.expression_count()).any(|raw| {
+            let Some(expression) = body.expr(FirExprId::from_raw(raw as u32)) else {
+                return false;
+            };
+            match &expression.kind {
+                FirExprKind::ConstructorCall(call) => {
+                    let Some([capture]) = call.external_capture_arguments.as_deref() else {
+                        return false;
+                    };
+                    capture.shared_cell_holder
+                        && matches!(
+                            body.expr(capture.value).map(|expression| &expression.kind),
+                            Some(FirExprKind::CapturedValueRead { .. })
+                        )
+                }
+                FirExprKind::Lambda { body, .. } => has_shared_constructor_capture(body),
+                _ => false,
+            }
+        });
+        expressions
+            || (0..body.statement_count()).any(|raw| {
+                matches!(
+                    body.statement(FirStatementId::from_raw(raw as u32))
+                        .map(|statement| &statement.kind),
+                    Some(FirStatementKind::LocalFunction { body, .. })
+                        if has_shared_constructor_capture(body)
+                )
+            })
+    }
+    assert!(
+        sink.0
+            .iter()
+            .any(|(_, body)| has_shared_constructor_capture(body)),
+        "sibling local constructor call must carry its shared-cell closure operand"
+    );
+}
+
+#[test]
 fn local_class_member_keeps_the_enclosing_body_local_callable_identity() {
     let source = "fun box(): Int {\n\
                       val delta = 2\n\
