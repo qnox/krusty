@@ -171,18 +171,18 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
             .enum_entries
             .get(entry.ordinal as usize)
             .and_then(|entry| entry.subclass);
+        let constructor_parameters = constructor_parameters.unwrap_or_else(|| {
+            ir.classes[entry.class as usize]
+                .ctor_args
+                .iter()
+                .map(|parameter| parameter.ty)
+                .collect()
+        });
         if let Some(subclass) = subclass {
-            let constructor_parameters = constructor_parameters.unwrap_or_else(|| {
-                ir.classes[entry.class as usize]
-                    .ctor_args
-                    .iter()
-                    .map(|parameter| parameter.ty)
-                    .collect()
-            });
             let subclass = ir
                 .class_id_by_name(subclass)
                 .ok_or(FirFileLoweringFailure::MissingClassifier(entry.declaration))?;
-            ir.classes[subclass as usize].enum_entry_of = Some(constructor_parameters);
+            ir.classes[subclass as usize].enum_entry_of = Some(constructor_parameters.clone());
         }
         let target = ir
             .classes
@@ -193,6 +193,7 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
             ))?;
         target.argument_prelude = argument_prelude;
         target.args = arguments;
+        target.constructor_parameter_types = constructor_parameters;
         target.default_parameters = default_parameters;
     }
     Ok(())

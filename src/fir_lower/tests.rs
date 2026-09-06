@@ -3963,6 +3963,29 @@ fn consuming_sink_keeps_class_initializers_and_enum_entry_construction() {
 }
 
 #[test]
+fn enum_entries_keep_the_selected_secondary_constructor_parameters() {
+    let ir = lower_single_source(
+        "enum class Choice {\n\
+             TEXT(\"OK\"), EMPTY;\n\
+             constructor(value: String)\n\
+             constructor()\n\
+         }\n",
+        "EnumSecondaryConstructor",
+    );
+    let class = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name.matches("Choice"))
+        .expect("enum class common IR");
+    assert_eq!(class.enum_entries.len(), 2);
+    assert_eq!(
+        class.enum_entries[0].constructor_parameter_types,
+        [Ty::obj("kotlin/String")]
+    );
+    assert!(class.enum_entries[1].constructor_parameter_types.is_empty());
+}
+
+#[test]
 fn consuming_sink_keeps_sealed_subclasses_from_the_stable_header() {
     let ir = lower_single_source(
         "sealed class Root\n\

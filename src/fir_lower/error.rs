@@ -45,6 +45,7 @@ pub enum FirLoweringFailure {
         owner: crate::fir::DeclarationId,
         field: u32,
     },
+    InvalidConstructorCaptureArgument(FirExprId),
     MissingEnumClassifier(crate::types::TypeName),
     UnsupportedPropertyReferenceTarget,
     MissingParameter {

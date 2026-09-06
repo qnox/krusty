@@ -10201,7 +10201,6 @@ fn emit_enum_class(
     // <clinit>: construct each entry, then `$VALUES = $values()` and
     // `$ENTRIES = EnumEntriesKt.enumEntries($VALUES)`. BUILT here but ADDED last (kotlinc orders it
     // after values/valueOf/getEntries/$values); the linked `CodeBuilder` is self-contained.
-    let ctor_argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     let clinit = {
         let mut e = Emitter::new(
@@ -10246,9 +10245,10 @@ fn emit_enum_class(
             clinit.dup();
             clinit.push_string(&entry.name, e.cw);
             clinit.push_int(i as i32, e.cw);
+            let entry_parameter_types = &entry.constructor_parameter_types;
             if spill {
                 let mut supplied = temps.iter();
-                for (parameter, ty) in all_param_tys.iter().copied().enumerate() {
+                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
                     if entry.default_parameters.contains(&(parameter as u32)) {
                         push_zero(ty, &mut clinit, e.cw);
                     } else {
@@ -10263,7 +10263,7 @@ fn emit_enum_class(
                 }
             } else {
                 let mut supplied = args.iter().copied();
-                for (parameter, ty) in all_param_tys.iter().copied().enumerate() {
+                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
                     if entry.default_parameters.contains(&(parameter as u32)) {
                         push_zero(ty, &mut clinit, e.cw);
                     } else {
@@ -10276,23 +10276,31 @@ fn emit_enum_class(
                     }
                 }
             }
+            let mut entry_ctor_params = vec![Ty::String, Ty::Int];
+            entry_ctor_params.extend(entry_parameter_types.iter().copied());
             let (entry_ctor_desc, entry_ctor_argw) = if entry.default_parameters.is_empty() {
-                (ctor_desc.clone(), ctor_argw)
+                let words = entry_ctor_params
+                    .iter()
+                    .map(|ty| slot_words(*ty) as i32)
+                    .sum();
+                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
             } else {
                 emit_constructor_default_arguments(
                     &entry.default_parameters,
-                    all_param_tys.len(),
+                    entry_parameter_types.len(),
                     &mut clinit,
                     e.cw,
                 );
-                let mut parameters = ctor_params.clone();
-                parameters.extend(std::iter::repeat_n(
+                entry_ctor_params.extend(std::iter::repeat_n(
                     Ty::Int,
-                    default_mask_count(all_param_tys.len()),
+                    default_mask_count(entry_parameter_types.len()),
                 ));
-                parameters.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
-                (method_descriptor(&parameters, Ty::Unit), words)
+                entry_ctor_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                let words = entry_ctor_params
+                    .iter()
+                    .map(|ty| slot_words(*ty) as i32)
+                    .sum();
+                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
             };
             let ctor_ref = e.cw.methodref(&new_class, "<init>", &entry_ctor_desc);
             clinit.invokespecial(ctor_ref, entry_ctor_argw, 0);

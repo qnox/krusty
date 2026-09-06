@@ -1188,6 +1188,10 @@ pub struct IrEnumEntry {
     /// Lowered constructor-argument value ids (`RED(0xFF0000)`); empty for an arg-less entry. Filled in a
     /// later lowering pass — built empty when the entry list is first created.
     pub args: Vec<ExprId>,
+    /// Semantic parameter list of the constructor selected for this entry. Enum entries may target
+    /// secondary constructors whose parameters differ from the primary constructor; a backend
+    /// prepends its own enum ABI operands to this already-resolved call shape.
+    pub constructor_parameter_types: Vec<Ty>,
     /// Selected constructor parameters whose values come from declaration defaults. This is the
     /// frontend's final argument-mapping decision; a backend only realizes its default-argument ABI.
     pub default_parameters: Vec<u32>,

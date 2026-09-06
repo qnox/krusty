@@ -2067,6 +2067,43 @@ fn inner_secondary_constructor_defaults_are_available_to_signature_selection() {
 }
 
 #[test]
+fn inner_constructor_in_an_inner_default_uses_the_enclosing_receiver() {
+    let inputs = [SourceInput::kotlin(
+        "class Outer(val prefix: String) {\n\
+             inner class Argument(val suffix: String)\n\
+             inner class Parameter(val argument: Argument = Argument(\"K\"))\n\
+         }\n\
+         fun result() = Outer(\"O\").Parameter()\n",
+    )
+    .with_file_stem("InnerDefaultOuterReceiver")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("inner default must finalize in Pass 1")
+        .module
+        .index();
+    let result = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("result"))
+        .and_then(|declaration| index.signature(declaration))
+        .expect("resolved result signature");
+    assert!(result
+        .result
+        .get()
+        .obj_internal()
+        .is_some_and(|classifier| classifier.matches("Outer$Parameter")));
+}
+
+#[test]
 fn labeled_and_unlabeled_super_members_use_the_checked_receiver_scope() {
     let inputs = [SourceInput::kotlin(
         "open class Root { fun value() = \"OK\" }\n\

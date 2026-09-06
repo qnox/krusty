@@ -786,6 +786,7 @@ impl<'a> CommonIrBodySink<'a> {
                         name,
                         argument_prelude: Vec::new(),
                         args: Vec::new(),
+                        constructor_parameter_types: Vec::new(),
                         default_parameters: Vec::new(),
                         decl_line: 0,
                         subclass,
