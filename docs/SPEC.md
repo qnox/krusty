@@ -3098,6 +3098,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kinds were affected identically — plain, receiver, `suspend`, `suspend` receiver — which is why the
   failure looked specific to `suspend` receivers. Test:
   `tests/classpath_named_arg_skips_default_e2e.rs`.
+- **Signature-pass argument mapping keeps the slot-map contract, including vararg EXTRAS.** The
+  Pass-1 signature solver (`streaming_signature_bridge::candidate_call_slots`) maps a call's written
+  arguments onto parameter slots through the same `map_call_args` the checker uses. That mapper keeps
+  ONE source per slot: positional vararg elements beyond the first stay unmapped and are the vararg's
+  extras, reconstructed by lowering. The solver used to reject any candidate with an unmapped source,
+  so `"a,b;c".split(",", ";", limit = 2)` and `option("--target", "-t", help = "…")` (two elements,
+  then a named argument) declined in signature position while the same call in a body checked fine.
+  An unmapped positional argument is now admitted as a vararg extra when it carries the SAME element
+  type as the mapped first element (a spread contributes its array's element type; lambdas and
+  postponed arguments never qualify) — the per-slot selection downstream sees only the mapped element,
+  so an extra of another type must keep the candidate inapplicable and let Pass 2 report kotlinc's
+  `argument type mismatch`. Non-public LIBRARY candidates do not vote on the mapping: they can never be
+  selected from another module, and the stdlib's private `split(String, Boolean, Int)` sibling turned
+  the vararg overload's unique mapping into a two-mapping "ambiguity". Separately, a source top-level
+  function's vararg need not be LAST (`fun option(vararg names: String, help: String = "")`);
+  top-level selection expanded varargs with the final-slot assumption and declined every call shape
+  but named-only, so it now expands at the candidate's recorded slot (`candidate_vararg_shape` →
+  `vararg_parameter_shape_at`, defaults sliced past the context parameters). Tests:
+  `tests/vararg_elements_before_named_e2e.rs`.
+- **A Pass-1 signature decline is never silent.** Declining an inferred signature is recoverable by
+  design (`DiagnosticId::NONE`), but nothing downstream recovered it: Pass 2 had no signature to check
+  the declaration's uses against, the batch compiler exited 0 having emitted NOTHING for the file
+  ("emitted 0 class file(s)"), and the editor showed only `unresolved reference` at every use. Every
+  failure with no diagnostic of its own — nor one inherited from a failed dependency
+  (`DiagnosticId::FAILED_DEPENDENCY`) — is kept as a `DeclinedSignature` and reported AFTER Pass 2
+  (`frontend::report_declined_signatures`, from `emit_analyzed`, `check_frontend_only` and the editor
+  path) as `krusty: cannot infer the type of property 'x'; add an explicit type` (return type for a
+  function). The report is per FILE: a file that already carries an error gets no second message,
+  because kotlinc reports only the root cause and the solver cannot link a dependent's decline to the
+  declaration that caused it (`fun use() = a.length` after `val a = missing()`), while a file with no
+  error would otherwise pass as clean with its declarations unchecked and unemitted.
+  Test: `a_vararg_extra_of_another_type_still_declines_in_signature_position` (Pass 2's own message
+  stays the only one) and the editor tests in `tests/editor_failed_signature_recovery_e2e.rs`.
 
 - **A property read is a property read; how it is READ is the target's business.** `Dispatchers.IO` was
   reported as `unresolved reference 'IO'`, and the cause was a category error rather than a missing case:

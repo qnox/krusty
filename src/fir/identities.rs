@@ -35,6 +35,11 @@ u32_id!(DeferredMemberSelectionId);
 u32_id!(DeferredValueSelectionId);
 u32_id!(TypeParameterId);
 u32_id!(DiagnosticId);
+
+impl DiagnosticId {
+    /// A failure that recorded no diagnostic. The production evaluator's sentinel; never an index.
+    pub const NONE: Self = Self::from_raw(0);
+}
 u32_id!(LookupNameId);
 u32_id!(HeaderTypeId);
 u32_id!(HeaderClassifierTypeId);

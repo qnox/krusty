@@ -2592,6 +2592,56 @@ fn vararg_parameter_shape(
     vararg_parameter_shape_at(params, args, vararg_index, &[], fits)
 }
 
+/// The vararg shape of one candidate at ITS declared vararg slot. A source declaration's vararg
+/// is not necessarily last (`fun option(vararg names: String, help: String = "")`), so the
+/// final-slot assumption below only serves candidates whose metadata records no vararg at all.
+/// `params` are the VALUE parameters, so the recorded index is shifted past the context ones.
+fn candidate_vararg_shape(
+    candidate: &FunctionInfo,
+    params: &[Ty],
+    args: &[CallArgKind],
+    fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
+) -> Option<Vec<Ty>> {
+    match candidate.call_sig.vararg_index {
+        Some(vararg) => {
+            let vararg = vararg.saturating_sub(candidate.context_count);
+            // A SLOT-MAPPED call (named or defaulted arguments already placed one per parameter)
+            // keeps the vararg's first element at the vararg slot, so that slot admits the ELEMENT
+            // type: `mid("a", "b", x = 1)` against `mid(vararg s: String, x: Int)`. The extension
+            // and member paths apply the same rule in `build_extension_callable_for_slots`.
+            if args.len() == params.len() {
+                if let (Some(param), Some(argument)) = (params.get(vararg), args.get(vararg)) {
+                    if let Some(element) = param.array_read_elem() {
+                        if !argument.is_spread() && !argument.is_omitted_default() {
+                            let mut shape = params.to_vec();
+                            shape[vararg] = element;
+                            if shape.iter().zip(args).enumerate().all(
+                                |(position, (parameter, argument))| {
+                                    fits(position, parameter, argument)
+                                },
+                            ) {
+                                return Some(shape);
+                            }
+                        }
+                    }
+                }
+            }
+            vararg_parameter_shape_at(
+                params,
+                args,
+                vararg,
+                candidate
+                    .call_sig
+                    .param_defaults
+                    .get(candidate.context_count..)
+                    .unwrap_or_default(),
+                fits,
+            )
+        }
+        None => vararg_parameter_shape(params, args, fits),
+    }
+}
+
 /// Expand positional element-form arguments at an explicitly declared vararg slot. Parameters
 /// after a non-final vararg cannot consume positional arguments in Kotlin; they must be named or
 /// defaulted, so this type-only selector admits the shape only when every trailing parameter has
@@ -5357,7 +5407,7 @@ impl<'a> SymbolResolver<'a> {
         // applicable. Do that once, before specificity, so every exact/literal/default/vararg branch
         // below sees one coherent candidate tier.
         let applicable = |candidate: &(&FunctionInfo, Vec<Ty>, Ty, GSigBinds)| {
-            let (_, params, ..) = candidate;
+            let (o, params, ..) = candidate;
             fixed_parameter_shape(params, args, |_, parameter, argument| {
                 fits(parameter, argument)
             })
@@ -5366,7 +5416,7 @@ impl<'a> SymbolResolver<'a> {
                     fits(parameter, argument) || adapts(parameter, argument, position)
                 })
                 .is_some()
-                || vararg_parameter_shape(params, args, |position, parameter, argument| {
+                || candidate_vararg_shape(o, params, args, |position, parameter, argument| {
                     fits(parameter, argument) || adapts(parameter, argument, position)
                 })
                 .is_some()
@@ -5420,8 +5470,8 @@ impl<'a> SymbolResolver<'a> {
                     CandidateSelection::Selected(entry) => Some(entry),
                     CandidateSelection::Ambiguous => return None,
                     CandidateSelection::None => match unique_most_specific(
-                        parsed.iter().filter_map(|entry @ (_, params, ..)| {
-                            vararg_parameter_shape(params, args, |i, param, arg| {
+                        parsed.iter().filter_map(|entry @ (o, params, ..)| {
+                            candidate_vararg_shape(o, params, args, |i, param, arg| {
                                 fits(param, arg) || adapts(param, arg, i)
                             })
                             .map(|shape| (shape, entry))

@@ -195,11 +195,49 @@ impl ReparseSource {
 pub(crate) struct StreamedPassState {
     pub module: crate::fir::FrontendModule,
     pub diagnostic_recovery: bool,
+    /// Declarations Pass 1 declined without any diagnostic of their own. Reported by
+    /// [`report_declined_signatures`] once Pass 2 has had its say, so a real body diagnostic inside
+    /// the declaration stays the only message.
+    pub declined: Vec<DeclinedSignature>,
+}
+
+/// A declaration whose signature Pass 1 could not finalize and for which nothing was reported.
+///
+/// Left alone, such a declaration vanishes: Pass 2 has no signature to check its uses against, the
+/// batch compiler exits 0 having emitted nothing for its file, and the editor shows only the
+/// cascade at every use. The record keeps the declaration's own coordinates so the report can be
+/// deferred until after Pass 2 and skipped when that pass explained the failure itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclinedSignature {
+    pub file: u32,
+    pub span: Span,
+    pub message: String,
+}
+
+/// Report every declined signature in a file that no error explains.
+///
+/// The granularity is the FILE: a decline usually stems from a failure the solver cannot link
+/// back (a receiver whose own initializer was rejected, a dependency declined earlier), and kotlinc
+/// reports only the root there. A file with an error is already known to be broken and gets no
+/// second message; a file with none would otherwise pass as clean while its declarations went
+/// unchecked and unemitted.
+pub fn report_declined_signatures(declined: &[DeclinedSignature], diags: &mut DiagSink) {
+    for decline in declined {
+        let explained = diags.diags.iter().any(|diagnostic| {
+            diagnostic.severity == Severity::Error && diagnostic.file == decline.file
+        });
+        if explained {
+            continue;
+        }
+        diags.set_file(decline.file);
+        diags.error(decline.span, decline.message.clone());
+    }
 }
 
 fn diagnostic_streamed_state(
     mut index: crate::fir::ResolvedModuleIndex,
     sources: crate::fir::SourceMap,
+    declined: Vec<DeclinedSignature>,
 ) -> StreamedPassState {
     index.release_source_coordinates();
     assert!(
@@ -214,6 +252,7 @@ fn diagnostic_streamed_state(
             sources,
         ),
         diagnostic_recovery: true,
+        declined,
     }
 }
 
@@ -1060,7 +1099,7 @@ where
             }
             None => {
                 let (index, sources, _) = pass1_headers.finish(index);
-                recovery_streamed = Some(diagnostic_streamed_state(index, sources));
+                recovery_streamed = Some(diagnostic_streamed_state(index, sources, Vec::new()));
                 None
             }
         }
@@ -1082,7 +1121,11 @@ where
         // Projection skips declarations without a finalized signature, so nothing failed leaks in.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         let (index, sources, _) = pass1_headers.finish(index);
-        recovery_streamed = Some(diagnostic_streamed_state(index, sources));
+        recovery_streamed = Some(diagnostic_streamed_state(
+            index,
+            sources,
+            streamed_index.declined,
+        ));
         None
     };
     if trim_support_bodies {
@@ -1093,6 +1136,11 @@ where
     let (types, streamed) = if retain_legacy_analysis {
         let types =
             check_source_set_skipping(&files, &mut symbols, &parse_errors, checked_count, diags);
+        // The legacy checker was this path's Pass 2; a decline it could not explain is reported
+        // now, at the declaration, rather than left to surface as a cascade at every use.
+        if let Some(recovery) = &recovery_streamed {
+            report_declined_signatures(&recovery.declined, diags);
+        }
         let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
             inline_preparation::from_checked_analysis(
                 module,
