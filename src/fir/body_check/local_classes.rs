@@ -56,8 +56,12 @@ impl BodyFirChecker<'_> {
         else {
             return Ok(None);
         };
-        let mut required = context
-            .values
+        let value_captures = if context.capture_values.is_empty() {
+            context.values.into_iter().collect::<Vec<_>>()
+        } else {
+            context.capture_values
+        };
+        let mut required = value_captures
             .into_iter()
             .map(|(name, binding)| RequiredConstructorCapture::Value(name, binding))
             .chain(
@@ -102,9 +106,10 @@ impl BodyFirChecker<'_> {
             .map(|required| {
                 let binding = required.binding();
                 let class = self
-                    .class_values
-                    .values()
-                    .copied()
+                    .class_capture_values
+                    .iter()
+                    .map(|(_, binding)| *binding)
+                    .chain(self.class_values.values().copied())
                     .chain(self.class_delegates.values().filter_map(|delegate| {
                         if let DelegateStorage::ClassField(binding) = delegate.storage {
                             Some(binding)
@@ -114,7 +119,28 @@ impl BodyFirChecker<'_> {
                     }))
                     .chain(self.class_receivers.iter().copied())
                     .find(|available| {
-                        available.owner == binding.owner && available.field == binding.field
+                        (available.owner == binding.owner && available.field == binding.field)
+                            || binding.capture_identity.is_some()
+                                && available.capture_identity == binding.capture_identity
+                    })
+                    .or_else(|| match required {
+                        RequiredConstructorCapture::Value(name, _) => {
+                            self.class_values.get(name).copied()
+                        }
+                        RequiredConstructorCapture::Delegate(name, _) => self
+                            .class_delegates
+                            .get(name)
+                            .and_then(|delegate| match delegate.storage {
+                                DelegateStorage::ClassField(binding) => Some(binding),
+                                DelegateStorage::Local(_) => None,
+                            }),
+                        RequiredConstructorCapture::Receiver(required) => {
+                            self.class_receivers.iter().copied().find(|available| {
+                                available.semantic_receiver_depth
+                                    == required.semantic_receiver_depth
+                                    && available.ty == required.ty
+                            })
+                        }
                     })
                     .map(ConstructorCaptureOperand::Class);
                 class.or_else(|| match required {
@@ -177,6 +203,7 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: None,
                         receiver_source: None,
+                        capture_identity: required.capture_identity,
                     },
                     ConstructorCaptureOperand::ImplicitReceiver { .. } => required,
                 };
@@ -293,6 +320,15 @@ impl BodyFirChecker<'_> {
         &self,
     ) -> Result<HashMap<String, ClassCaptureBinding>, BodyCheckFailure> {
         self.class_values
+            .iter()
+            .map(|(name, binding)| Ok((name.clone(), self.nested_class_binding(*binding)?)))
+            .collect()
+    }
+
+    pub(super) fn nested_class_capture_values(
+        &self,
+    ) -> Result<Vec<(String, ClassCaptureBinding)>, BodyCheckFailure> {
+        self.class_capture_values
             .iter()
             .map(|(name, binding)| Ok((name.clone(), self.nested_class_binding(*binding)?)))
             .collect()
@@ -464,6 +500,7 @@ impl BodyFirChecker<'_> {
                 enclosing_depth: 0,
                 semantic_receiver_depth: None,
                 receiver_source,
+                capture_identity: None,
             },
             origin,
         )
@@ -604,6 +641,13 @@ impl BodyFirChecker<'_> {
         captures: &[crate::resolve::AnonymousObjectCapture],
     ) -> Result<Box<[FirLocalClassCapture]>, BodyCheckFailure> {
         let mut checked = Vec::with_capacity(captures.len());
+        let capture_owner = self
+            .index
+            .classifier_header(declaration)
+            .map(|classifier| classifier.classifier)
+            .ok_or_else(|| {
+                self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+            })?;
         let mut context = ClassBodyContext {
             callables: self.nested_outer_callables(),
             enclosing_property: self.enclosing_property_id(),
@@ -611,6 +655,10 @@ impl BodyFirChecker<'_> {
         };
         for (field, capture) in captures.iter().enumerate() {
             let field = u32::try_from(field).expect("too many local-class captures");
+            let capture_identity = capture.capture_dependency.or(Some(ClassCaptureIdentity {
+                owner: capture_owner,
+                field,
+            }));
             let mut ty = self.resolved_type(span, capture.ty)?;
             let source = match capture.source {
                 AnonymousObjectCaptureSource::LexicalValue => {
@@ -646,34 +694,20 @@ impl BodyFirChecker<'_> {
                             enclosing_depth: 0,
                             semantic_receiver_depth: None,
                             receiver_source: None,
+                            capture_identity,
                         });
+                        if let DelegateStorage::ClassField(binding) = delegate.storage {
+                            context.capture_values.push((capture.name.clone(), binding));
+                        }
                         context.delegates.insert(capture.name.clone(), delegate);
                         source
-                    } else if let Some(binding) = self.local_binding(&capture.name) {
-                        context.values.insert(
-                            capture.name.clone(),
-                            ClassCaptureBinding {
-                                owner: declaration,
-                                field,
-                                ty,
-                                shared_cell: capture.shared_cell,
-                                enclosing_depth: 0,
-                                semantic_receiver_depth: None,
-                                receiver_source: None,
-                            },
-                        );
-                        FirLocalClassCaptureSource::Value(binding.value)
-                    } else if let Some((enclosing_depth, binding)) =
-                        self.outer_values.get(&capture.name).copied()
+                    } else if let Some((enclosing_depth, binding)) = self
+                        .binding_source_at_shadow_depth(
+                            &capture.name,
+                            capture.lexical_shadow_depth as usize,
+                        )
                     {
-                        self.body.add_capture(FirCapture {
-                            origin,
-                            enclosing_depth,
-                            source: binding.value,
-                            ty: binding.ty,
-                            shared_cell: false,
-                        });
-                        context.values.insert(
+                        context.record_value(
                             capture.name.clone(),
                             ClassCaptureBinding {
                                 owner: declaration,
@@ -683,14 +717,35 @@ impl BodyFirChecker<'_> {
                                 enclosing_depth: 0,
                                 semantic_receiver_depth: None,
                                 receiver_source: None,
+                                capture_identity,
                             },
                         );
-                        FirLocalClassCaptureSource::Captured {
-                            enclosing_depth,
-                            source: binding.value,
+                        if let Some(enclosing_depth) = enclosing_depth {
+                            self.body.add_capture(FirCapture {
+                                origin,
+                                enclosing_depth,
+                                source: binding.value,
+                                ty: binding.ty,
+                                shared_cell: false,
+                            });
+                            FirLocalClassCaptureSource::Captured {
+                                enclosing_depth,
+                                source: binding.value,
+                            }
+                        } else {
+                            FirLocalClassCaptureSource::Value(binding.value)
                         }
-                    } else if let Some(binding) = self.class_values.get(&capture.name).copied() {
-                        context.values.insert(
+                    } else if let Some(binding) = capture
+                        .capture_dependency
+                        .and_then(|identity| {
+                            self.class_capture_values
+                                .iter()
+                                .map(|(_, binding)| *binding)
+                                .find(|binding| binding.capture_identity == Some(identity))
+                        })
+                        .or_else(|| self.class_values.get(&capture.name).copied())
+                    {
+                        context.record_value(
                             capture.name.clone(),
                             ClassCaptureBinding {
                                 owner: declaration,
@@ -700,6 +755,7 @@ impl BodyFirChecker<'_> {
                                 enclosing_depth: 0,
                                 semantic_receiver_depth: None,
                                 receiver_source: None,
+                                capture_identity,
                             },
                         );
                         if let Some((receiver, path)) =
@@ -726,7 +782,7 @@ impl BodyFirChecker<'_> {
                     field: source_field,
                 } => {
                     let source_binding = self.class_values.get(&capture.name).copied();
-                    context.values.insert(
+                    context.record_value(
                         capture.name.clone(),
                         ClassCaptureBinding {
                             owner: declaration,
@@ -736,6 +792,7 @@ impl BodyFirChecker<'_> {
                             enclosing_depth: 0,
                             semantic_receiver_depth: None,
                             receiver_source: None,
+                            capture_identity,
                         },
                     );
                     if let Some(binding) = source_binding {
@@ -778,6 +835,7 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
+                        capture_identity: None,
                     });
                     if let Some(binding) = self
                         .class_receiver_binding_at(depth)
@@ -832,6 +890,7 @@ impl BodyFirChecker<'_> {
                         enclosing_depth: 0,
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
+                        capture_identity: None,
                     });
                     if let Some(binding) = self
                         .class_receiver_binding_at(depth)
@@ -1098,6 +1157,7 @@ impl BodyFirChecker<'_> {
             enclosing_depth: 0,
             semantic_receiver_depth: Some(selected_depth),
             receiver_source: None,
+            capture_identity: None,
         };
         let kind = self.class_storage_read_kind(binding, origin)?;
         let value = self.body.add_expr(FirExpr {

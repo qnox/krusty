@@ -627,6 +627,130 @@ fn sibling_local_function_supplies_the_local_class_shared_capture_operand() {
 }
 
 #[test]
+fn local_class_recaptures_the_selected_local_constructor_closure() {
+    let source = "fun box(): String {\n\
+                      val captured = \"O\"\n\
+                      class CapturesOuter {\n\
+                          override fun toString(): String = captured\n\
+                      }\n\
+                      if (true) {\n\
+                          val captured = \"K\"\n\
+                          class CapturesInner {\n\
+                              override fun toString(): String = captured\n\
+                          }\n\
+                          class Recaptures {\n\
+                              fun makeOuter(): CapturesOuter = CapturesOuter()\n\
+                              fun makeInner(): CapturesInner = CapturesInner()\n\
+                          }\n\
+                          return Recaptures().makeOuter().toString() +\n\
+                              Recaptures().makeInner().toString()\n\
+                      }\n\
+                      return \"fail\"\n\
+                  }\n";
+    let mut diagnostics = DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("LocalClassRecapture")],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let (mut index, mut inline_bodies, _default_arguments, mut sources) =
+        streamed.module.into_parts();
+    let info = analysis.types[0].as_ref().expect("checked source");
+    crate::resolve::publish_checked_local_signatures(
+        &analysis.files[0],
+        SourceFileId::from_raw(0),
+        &analysis.symbols,
+        info,
+        &mut index,
+    )
+    .expect("checked local signatures must publish before FIR body checking");
+    let mut session = BodyCheckSession::default();
+    let mut sink = RecordingSink::default();
+    for work in ordinary {
+        check_and_dispatch_bound_body_in_session(
+            &analysis.files[0],
+            info,
+            SourceFileId::from_raw(0),
+            work,
+            &index,
+            sources.origins_mut(),
+            &mut inline_bodies,
+            &mut sink,
+            &mut session,
+        )
+        .expect("every local-class body must become checked FIR");
+    }
+
+    let forwarded_fields = ["makeOuter", "makeInner"].map(|name| {
+        let make = sink
+            .0
+            .iter()
+            .find(|(owner, _)| {
+                index.declaration_name(DeclarationId::from_raw(owner.raw())) == Some(name)
+            })
+            .map(|(_, body)| body)
+            .expect("recapturing member body");
+        let operand = (0..make.expression_count())
+            .filter_map(|raw| make.expr(FirExprId::from_raw(raw as u32)))
+            .find_map(|expression| match &expression.kind {
+                FirExprKind::ConstructorCall(call) => call
+                    .external_capture_arguments
+                    .as_deref()
+                    .and_then(|arguments| arguments.first())
+                    .map(|argument| argument.value),
+                _ => None,
+            })
+            .expect("selected local constructor must carry its transitive closure operand");
+        match make.expr(operand).map(|expression| &expression.kind) {
+            Some(FirExprKind::ClassStorageRead { field, .. }) => *field,
+            other => panic!("expected an exact class-storage operand, found {other:?}"),
+        }
+    });
+    assert_ne!(
+        forwarded_fields[0], forwarded_fields[1],
+        "different shadowed closure values need different forwarding fields"
+    );
+
+    let box_body = sink
+        .0
+        .iter()
+        .find(|(owner, _)| {
+            index.declaration_name(DeclarationId::from_raw(owner.raw())) == Some("box")
+        })
+        .map(|(_, body)| body)
+        .expect("enclosing body");
+    let captured_sources = (0..box_body.statement_count())
+        .filter_map(|raw| box_body.statement(FirStatementId::from_raw(raw as u32)))
+        .flat_map(|statement| match &statement.kind {
+            FirStatementKind::LocalDeclaration { captures, .. } => {
+                captures.iter().collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        })
+        .filter_map(|capture| match capture.source {
+            FirLocalClassCaptureSource::Value(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured_sources.len(),
+        4,
+        "source and forwarding classifiers must publish both lexical identities"
+    );
+    assert_eq!(
+        captured_sources[0], captured_sources[2],
+        "the selected constructor must recapture its declaration's binding, not a nearer shadow"
+    );
+    assert_eq!(captured_sources[1], captured_sources[3]);
+    assert_ne!(captured_sources[0], captured_sources[1]);
+}
+
+#[test]
 fn local_class_member_keeps_the_enclosing_body_local_callable_identity() {
     let source = "fun box(): Int {\n\
                       val delta = 2\n\

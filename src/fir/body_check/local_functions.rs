@@ -134,6 +134,7 @@ impl BodyFirChecker<'_> {
         let outer_callables = self.nested_outer_callables();
         let receiver_frame = self.receiver_frame();
         let class_values = self.nested_class_values()?;
+        let class_capture_values = self.nested_class_capture_values()?;
         let class_delegates = self.nested_class_delegates()?;
         let class_receivers = self.nested_class_receivers()?;
         let mut nested = BodyFirChecker {
@@ -148,6 +149,7 @@ impl BodyFirChecker<'_> {
             outer_values: visible,
             outer_delegates: visible_delegates,
             class_values,
+            class_capture_values,
             class_delegates,
             class_receivers,
             enclosing_property: self.enclosing_property,

@@ -39,6 +39,7 @@ mod delegated_properties;
 mod dependency_platform;
 mod finalized_projection;
 mod interface_delegation;
+mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
 mod override_plans;
@@ -3824,6 +3825,13 @@ pub struct AnonymousObjectCapture {
     /// checked in isolation. This is present only for an implicit receiver capture; checked FIR
     /// consumes the semantic receiver coordinate and does not retain the spelling.
     pub receiver_label: Option<Box<str>>,
+    /// Number of distinct same-named lexical bindings nearer than the selected source at this
+    /// construction site. This is a bounded-checker coordinate, not a source location; checked FIR
+    /// consumes it while the active lexical scopes still exist.
+    pub(crate) lexical_shadow_depth: u32,
+    /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
+    /// establish their own identity when checked; transitive captures preserve the upstream field.
+    pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
 }
 
 impl AnonymousObjectCapture {
@@ -21036,6 +21044,9 @@ struct Local {
     /// A local delegated property reads and writes through this immutable storage object. Capturing
     /// a mutable delegated property captures this value, not a mutable plain local.
     delegate_storage_ty: Option<Ty>,
+    /// Ephemeral identity of the runtime lexical value during one resolver check. Narrowing
+    /// shadows copy it; fresh declarations allocate another. It never enters TypeInfo or FIR.
+    lexical_capture_identity: Option<u32>,
 }
 
 /// The per-argument view of a call site used during overload scoring: the argument expressions,
@@ -33483,6 +33494,8 @@ impl<'a> Checker<'a> {
                             storage_ty: None,
                             source,
                             receiver_label: label,
+                            lexical_shadow_depth: 0,
+                            capture_dependency: None,
                         };
                         let mut identities = vec![receiver.identity];
                         if let Some(identity) = class_label_identity {
@@ -33517,17 +33530,29 @@ impl<'a> Checker<'a> {
                             name: captured,
                             source: AnonymousObjectCaptureSource::LexicalValue,
                             receiver_label: None,
+                            lexical_shadow_depth: 0,
+                            capture_dependency: None,
                         });
                     }
                 }
+                let mut capture_bindings =
+                    self.local_capture_binding_identities(scope, &captures.values);
                 if !captures.values.is_empty() {
                     self.discovered_local_class_captures
                         .insert(d, captures.values.clone());
+                    self.discovered_local_class_capture_bindings
+                        .insert(d, capture_bindings.clone());
                 }
                 let saved = self.take_body_state();
                 self.check_class(scope, &cl, d);
                 self.restore_body_state(saved);
-                self.extend_selected_local_callable_captures(scope, &cl, &mut captures.values);
+                self.extend_selected_local_dependency_captures(
+                    scope,
+                    d,
+                    &cl,
+                    &mut captures.values,
+                    &mut capture_bindings,
+                );
                 for (candidate, identities) in receiver_candidates {
                     if !identities.iter().any(|(identity, before)| {
                         self.implicit_receiver_identity_use_count(*identity) > *before
@@ -33539,10 +33564,13 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     captures.values.push(candidate);
+                    capture_bindings.push(None);
                 }
                 if !captures.values.is_empty() {
                     self.discovered_local_class_captures
                         .insert(d, captures.values);
+                    self.discovered_local_class_capture_bindings
+                        .insert(d, capture_bindings);
                 }
             }
         }
@@ -35716,6 +35744,13 @@ impl<'a> Checker<'a> {
             }
         }
         captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
+        let capture_bindings = captured_locals
+            .iter()
+            .map(|(name, _, _)| {
+                self.lookup(scope, name)
+                    .and_then(|binding| binding.lexical_capture_identity)
+            })
+            .collect::<Vec<_>>();
         let captures = captured_locals
             .into_iter()
             .map(|(name, ty, shared_hint)| {
@@ -35737,6 +35772,8 @@ impl<'a> Checker<'a> {
                 }
             })
             .collect();
+        self.local_function_capture_bindings
+            .insert(stmt_id, capture_bindings);
         self.stmt_lowers.insert(
             stmt_id,
             StmtLowering::LocalFunction(Box::new(LocalFunInfo {
@@ -46201,6 +46238,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discover_anonymous_captures: false,
         discovered_anonymous_captures: HashMap::new(),
         discovered_local_class_captures: HashMap::new(),
+        discovered_local_class_capture_bindings: HashMap::new(),
+        local_function_capture_bindings: HashMap::new(),
+        next_lexical_capture_identity: 0,
         checked_local_class_declarations: std::collections::HashSet::new(),
         checked_local_classifier_identities: HashMap::new(),
         checked_local_classifier_type_arguments: HashMap::new(),
@@ -46811,6 +46851,8 @@ fn record_anonymous_construction_captures(
             storage_ty: candidate.delegate_storage,
             source: candidate.source,
             receiver_label: candidate.receiver_label.clone(),
+            lexical_shadow_depth: 0,
+            capture_dependency: None,
         })
         .collect::<Vec<_>>();
     crate::trace_compiler!(
@@ -49604,6 +49646,13 @@ struct Checker<'a> {
     discover_anonymous_captures: bool,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     discovered_local_class_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+    /// Resolver-only binding identities parallel to each local classifier's capture vector.
+    /// These let a selected closure dependency be remapped into the caller's lexical tower without
+    /// publishing parser ids, source ranges, or names as semantic identities.
+    discovered_local_class_capture_bindings: HashMap<DeclId, Vec<Option<u32>>>,
+    /// Resolver-only binding identities parallel to lifted local-function capture vectors.
+    local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,
+    next_lexical_capture_identity: u32,
     checked_local_class_declarations: std::collections::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
     checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
@@ -50478,6 +50527,8 @@ impl<'a> Checker<'a> {
                         depth: 0,
                     },
                     receiver_label: None,
+                    lexical_shadow_depth: 0,
+                    capture_dependency: None,
                 }),
                 None => {
                     result.unsupported.get_or_insert("this".to_string());
@@ -50502,6 +50553,8 @@ impl<'a> Checker<'a> {
                 receiver_label: innermost_label
                     .filter(|(_, _, is_class)| !*is_class)
                     .map(|(label, _, _)| label.clone().into_boxed_str()),
+                lexical_shadow_depth: 0,
+                capture_dependency: None,
             });
         }
         captured.sort();
@@ -50525,94 +50578,11 @@ impl<'a> Checker<'a> {
                 name,
                 source: AnonymousObjectCaptureSource::LexicalValue,
                 receiver_label: None,
+                lexical_shadow_depth: 0,
+                capture_dependency: None,
             });
         }
         result
-    }
-
-    /// Fold the closure ABI of every checker-selected enclosing local callable into a local
-    /// classifier's constructor captures. Member bodies are checked as independent Pass-2 units,
-    /// so calling `local()` from such a body requires both the exact selected callable and every
-    /// value that callable itself closes over. This runs after [`Self::check_class`], when call and
-    /// callable-reference selection is final; syntax spelling alone is not used as a proxy for
-    /// applicability or overload identity.
-    fn extend_selected_local_callable_captures(
-        &self,
-        scope: &CheckerScope<'_>,
-        class: &ClassDecl,
-        captures: &mut Vec<AnonymousObjectCapture>,
-    ) {
-        fn visit_expression(file: &File, expression: ExprId, expressions: &mut Vec<ExprId>) {
-            expressions.push(expression);
-            let mut children = Vec::new();
-            let mut statements = Vec::new();
-            file.any_child_expr(
-                expression,
-                &mut |child| {
-                    children.push(child);
-                    false
-                },
-                &mut |statement| {
-                    statements.push(statement);
-                    false
-                },
-            );
-            for child in children {
-                visit_expression(file, child, expressions);
-            }
-            for statement in statements {
-                file.any_child_stmt(statement, &mut |child| {
-                    visit_expression(file, child, expressions);
-                    false
-                });
-            }
-        }
-
-        let mut expressions = Vec::new();
-        for root in local_class_capture_expressions(class) {
-            visit_expression(self.file, root, &mut expressions);
-        }
-        let selected = expressions.into_iter().filter_map(|expression| {
-            self.resolved_calls
-                .get(&expression)
-                .and_then(|call| match call {
-                    ResolvedCall::LocalFunction(call) => Some(call.stmt_id),
-                    _ => None,
-                })
-                .or_else(|| match self.expr_lowers.get(&expression) {
-                    Some(ExprLowering::LocalFunction { stmt_id, .. }) => Some(*stmt_id),
-                    _ => None,
-                })
-        });
-        let mut selected = selected.collect::<Vec<_>>();
-        selected.sort_by_key(|statement| statement.0);
-        selected.dedup();
-        for statement in selected {
-            let Some(StmtLowering::LocalFunction(function)) = self.stmt_lowers.get(&statement)
-            else {
-                continue;
-            };
-            for required in &function.captures {
-                if let Some(existing) = captures.iter_mut().find(|capture| {
-                    capture.name == required.name
-                        && capture.source == AnonymousObjectCaptureSource::LexicalValue
-                }) {
-                    existing.shared_cell |= required.shared_cell;
-                    continue;
-                }
-                let Some(binding) = self.lookup(scope, &required.name) else {
-                    continue;
-                };
-                captures.push(AnonymousObjectCapture {
-                    name: required.name.clone(),
-                    ty: binding.ty,
-                    shared_cell: required.shared_cell,
-                    storage_ty: binding.delegate_storage_ty,
-                    source: AnonymousObjectCaptureSource::LexicalValue,
-                    receiver_label: None,
-                });
-            }
-        }
     }
 
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
@@ -60395,6 +60365,7 @@ impl<'a> Checker<'a> {
         function_type: Ty,
     ) {
         scope.invalidate_paths_rooted_at(name);
+        let lexical_capture_identity = Some(self.allocate_lexical_capture_identity());
         scope.rebind(
             name,
             Ns::Value,
@@ -60408,6 +60379,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter: false,
                 callable_reference_type: Some(function_type),
                 delegate_storage_ty: None,
+                lexical_capture_identity,
             }),
         );
     }
@@ -61022,6 +60994,8 @@ impl<'a> Checker<'a> {
             ReceiverFnValueOrigin::DispatchProperty { declared_ty, .. } => declared_ty,
             _ => ty,
         };
+        let lexical_capture_identity = matches!(origin, ReceiverFnValueOrigin::Local)
+            .then(|| self.allocate_lexical_capture_identity());
         scope.rebind(
             name,
             Ns::Value,
@@ -61035,8 +61009,17 @@ impl<'a> Checker<'a> {
                 is_context_parameter,
                 callable_reference_type: matches!(ty, Ty::Fun(_)).then_some(ty),
                 delegate_storage_ty: None,
+                lexical_capture_identity,
             }),
         );
+    }
+
+    fn allocate_lexical_capture_identity(&mut self) -> u32 {
+        let identity = self.next_lexical_capture_identity;
+        self.next_lexical_capture_identity = identity
+            .checked_add(1)
+            .expect("too many lexical bindings in one bounded checker");
+        identity
     }
 
     /// Shadow a binding with its flow-narrowed type (`if (x != null) …`). Unlike a fresh
@@ -61055,6 +61038,7 @@ impl<'a> Checker<'a> {
             .unwrap_or(ReceiverFnValueOrigin::Local);
         let callable_reference_type = previous.and_then(|local| local.callable_reference_type);
         let delegate_storage_ty = previous.and_then(|local| local.delegate_storage_ty);
+        let lexical_capture_identity = previous.and_then(|local| local.lexical_capture_identity);
         let declared_ty = previous.map(|local| local.declared_ty).unwrap_or(ty);
         let write_ty = previous.and_then(|local| local.write_ty);
         let is_var = previous.map(|local| local.is_var).unwrap_or(false);
@@ -61075,6 +61059,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter,
                 callable_reference_type,
                 delegate_storage_ty,
+                lexical_capture_identity,
             }),
         );
     }
