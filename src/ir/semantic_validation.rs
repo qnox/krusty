@@ -83,6 +83,19 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
             reject_all("callee parameter", params.iter().copied())?;
             reject("callee result", *ret)
         }
+        Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        } => {
+            reject_all("callee parameter", params.iter().copied())?;
+            reject("callee result", *ret)?;
+            if let Some(receiver) = dispatch_receiver_ty {
+                reject("callee dispatch receiver", *receiver)?;
+            }
+            Ok(())
+        }
         Callee::Virtual { params, .. } => {
             if let Some((params, ret)) = params {
                 reject_all("virtual callee parameter", params.iter().copied())?;
@@ -91,7 +104,9 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
             Ok(())
         }
         Callee::Local(_)
+        | Callee::LocalWithDefaults { .. }
         | Callee::ClassStatic { .. }
+        | Callee::ClassStaticWithDefaults { .. }
         | Callee::ClassStaticDefault { .. }
         | Callee::LocalDefault(_)
         | Callee::Static { .. }

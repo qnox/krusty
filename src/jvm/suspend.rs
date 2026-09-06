@@ -7823,8 +7823,11 @@ fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, 
                     crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
                 }
                 Callee::Intrinsic { .. }
+                | Callee::LocalWithDefaults { .. }
                 | Callee::LocalDefault(_)
+                | Callee::ClassStaticWithDefaults { .. }
                 | Callee::ClassStaticDefault { .. } => return None,
+                Callee::ModuleWithDefaults { .. } => return None,
             };
             zip(args, &params, &mut out)?;
         }

@@ -4,7 +4,7 @@ use crate::fir::{
     FirBody, FirCapture, FirImplicitReceiverCapture, FirLocalCallableRef, FirStatementId,
     FirStatementKind, LocalCallableId,
 };
-use crate::ir::{Callee, ExprId, FrDispatch, FuncRef, IrClass, IrConst, IrExpr, IrFunction};
+use crate::ir::{Callee, ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFunction};
 use crate::types::{type_name, Ty};
 
 use super::checked_arguments::{
@@ -238,9 +238,6 @@ impl BodyLowering<'_> {
         let mut physical = captures.into_iter().map(Some).collect::<Vec<_>>();
         physical.extend(slots);
         let (callee, args) = if omitted {
-            let parameter_types = self.ir.functions[realization.function as usize]
-                .params
-                .clone();
             let defaults = self.ir.param_defaults(realization.function).ok_or(
                 FirLoweringFailure::MissingLocalDefault {
                     function: realization.function,
@@ -260,34 +257,30 @@ impl BodyLowering<'_> {
                     });
                 }
             }
-            let mut masks = vec![0i32; parameter_types.len().div_ceil(32).max(1)];
-            let mut args = Vec::with_capacity(parameter_types.len() + masks.len() + 1);
-            for (parameter, (slot, ty)) in physical
-                .into_iter()
-                .zip(parameter_types.iter().copied())
+            let default_arguments = physical
+                .iter()
                 .enumerate()
-            {
-                args.push(slot.unwrap_or_else(|| {
-                    masks[parameter / 32] |= 1i32 << (parameter % 32);
-                    self.ir
-                        .add_expr(IrExpr::Const(IrConst::zero_for_value_type(ty)))
-                }));
-            }
-            args.extend(
-                masks
-                    .into_iter()
-                    .map(|mask| self.ir.add_expr(IrExpr::Const(IrConst::Int(mask)))),
-            );
-            args.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
+                .filter_map(|(parameter, argument)| {
+                    argument
+                        .is_none()
+                        .then(|| u32::try_from(parameter).ok())
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            let args = physical.into_iter().flatten().collect();
             (
-                realization
-                    .owner
-                    .map_or(Callee::LocalDefault(realization.function), |owner| {
-                        Callee::ClassStaticDefault {
-                            owner,
-                            function: realization.function,
-                        }
-                    }),
+                realization.owner.map_or(
+                    Callee::LocalWithDefaults {
+                        function: realization.function,
+                        defaults: default_arguments.clone(),
+                    },
+                    |owner| Callee::ClassStaticWithDefaults {
+                        owner,
+                        function: realization.function,
+                        defaults: default_arguments,
+                    },
+                ),
                 args,
             )
         } else {

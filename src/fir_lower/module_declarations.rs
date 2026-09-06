@@ -249,7 +249,7 @@ pub(super) fn publish_referenced(
     for expression in &ir.exprs {
         match expression {
             IrExpr::Call {
-                callee: Callee::Module { target, .. },
+                callee: Callee::Module { target, .. } | Callee::ModuleWithDefaults { target, .. },
                 ..
             } => {
                 callables.insert(*target);

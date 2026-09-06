@@ -188,7 +188,9 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
                 collect_obj_names(*array_type, &mut out)
             }
             IrExpr::Call {
-                callee: Callee::CrossFile { params, ret, .. },
+                callee:
+                    Callee::CrossFile { params, ret, .. }
+                    | Callee::ModuleWithDefaults { params, ret, .. },
                 ..
             } => {
                 for parameter in params {
@@ -1292,7 +1294,6 @@ pub fn lower_value_classes(
             .or_default()
             .push((idx, ty));
     }
-    realize_default_call_placeholders(ir, &under);
     // A reference-underlying lambda own-param arrives BOXED (`LX;`) at the REAL implementation's
     // `FunctionN.invoke(Object)` boundary, while its body was lowered against the erased convention
     // (the slot as the underlying). Rewrite every implementation-body read to `unbox-impl` so each use
@@ -1489,17 +1490,38 @@ pub fn lower_value_classes(
             let IrExpr::Call { callee, .. } = e else {
                 continue;
             };
-            let (name, params, ret, module_target, module_default_call) = match callee {
-                Callee::CrossFile {
-                    name,
-                    params,
-                    ret,
-                    module_target,
-                    module_default_call,
-                    ..
-                } => (name, params, ret, *module_target, *module_default_call),
-                _ => continue,
-            };
+            let (name, params, ret, module_target, module_default_call, semantic_default) =
+                match callee {
+                    Callee::CrossFile {
+                        name,
+                        params,
+                        ret,
+                        module_target,
+                        module_default_call,
+                        ..
+                    } => (
+                        name,
+                        params,
+                        ret,
+                        *module_target,
+                        *module_default_call,
+                        false,
+                    ),
+                    Callee::ModuleWithDefaults {
+                        target,
+                        name,
+                        params,
+                        ret,
+                        dispatch_receiver_ty,
+                        ..
+                    } => {
+                        if let Some(receiver) = dispatch_receiver_ty {
+                            *receiver = erase(receiver, &under);
+                        }
+                        (name, params, ret, Some(*target), true, true)
+                    }
+                    _ => continue,
+                };
             if let Some(callable) =
                 module_target.and_then(|target| ir.referenced_module_callables.get(&target))
             {
@@ -1523,7 +1545,7 @@ pub fn lower_value_classes(
                     callable.owner.is_none(),
                     callable.flags.has(crate::fir::DeclarationFlags::SUSPEND),
                 );
-                *name = if module_default_call {
+                *name = if module_default_call && !semantic_default {
                     format!("{mangled}$default")
                 } else {
                     mangled
@@ -3838,7 +3860,10 @@ pub fn lower_value_classes(
                     let mut parameters = orig_params[function as usize].clone();
                     if matches!(
                         callee,
-                        Callee::LocalDefault(_) | Callee::ClassStaticDefault { .. }
+                        Callee::LocalDefault(_)
+                            | Callee::ClassStaticDefault { .. }
+                            | Callee::LocalWithDefaults { .. }
+                            | Callee::ClassStaticWithDefaults { .. }
                     ) {
                         if let Some(boxed) = ir.default_stub_boxed_params.get(&function) {
                             for &(index, ty) in boxed {
@@ -3851,11 +3876,58 @@ pub fn lower_value_classes(
                             }
                         }
                     }
+                    let omitted = match callee {
+                        Callee::LocalWithDefaults { defaults, .. }
+                        | Callee::ClassStaticWithDefaults { defaults, .. } => {
+                            Some(defaults.as_ref())
+                        }
+                        _ => None,
+                    };
                     args.iter()
-                        .zip(parameters)
+                        .zip(
+                            parameters
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(parameter, ty)| {
+                                    omitted
+                                        .is_none_or(|defaults| {
+                                            !defaults.contains(&(parameter as u32))
+                                        })
+                                        .then_some(ty)
+                                }),
+                        )
                         .map(|(argument, parameter)| (*argument, parameter))
                         .collect()
                 }
+                // A semantic sibling-source default call still carries only supplied arguments.
+                // Adapt each one against the selected declaration parameter that remains after
+                // removing omitted ordinals; JVM placeholders are created only after this pass.
+                IrExpr::Call {
+                    callee:
+                        Callee::ModuleWithDefaults {
+                            target, defaults, ..
+                        },
+                    args,
+                    ..
+                } => ir
+                    .referenced_module_callables
+                    .get(target)
+                    .map(|callable| {
+                        args.iter()
+                            .zip(callable.parameters.iter().enumerate().filter_map(
+                                |(parameter, ty)| {
+                                    (!defaults.contains(&(parameter as u32))).then_some(*ty)
+                                },
+                            ))
+                            .map(|(argument, parameter)| {
+                                (
+                                    repr_ctx.through_erased_generic_coercion(*argument).0,
+                                    parameter,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 // A sibling-source call has already crossed from its stable `Module` identity into
                 // the JVM `CrossFile` realization. Its retained finalized declaration signature is
                 // still the authoritative representation boundary: a concrete value class selected
@@ -4525,81 +4597,6 @@ pub fn lower_value_classes(
     }
 
     true
-}
-
-/// Replace the checker-created semantic zero at an omitted source argument with the zero value of
-/// the JVM parameter representation selected above. The exact omitted argument positions come from
-/// common lowering; this pass neither decodes masks nor recognizes `$default` spellings.
-fn realize_default_call_placeholders(ir: &mut IrFile, under: &Under) {
-    let calls = ir
-        .default_call_argument_positions
-        .iter()
-        .map(|(call, positions)| (*call, positions.clone()))
-        .collect::<Vec<_>>();
-    for (call, positions) in calls {
-        let physical = match ir.expr(call) {
-            IrExpr::Call { callee, .. } => {
-                if let Some(function) = callee.source_function() {
-                    ir.functions.get(function as usize).map(|declaration| {
-                        let mut parameters = declaration.params.clone();
-                        if matches!(
-                            callee,
-                            Callee::LocalDefault(_) | Callee::ClassStaticDefault { .. }
-                        ) {
-                            apply_default_stub_boxed_parameters(ir, function, &mut parameters);
-                        }
-                        parameters
-                    })
-                } else {
-                    match callee {
-                        Callee::CrossFile { params, .. } | Callee::Module { params, .. } => Some(
-                            params
-                                .iter()
-                                .map(|parameter| erase(parameter, under))
-                                .collect(),
-                        ),
-                        _ => None,
-                    }
-                }
-            }
-            _ => None,
-        };
-        let Some(physical) = physical else {
-            continue;
-        };
-        let replacements = positions
-            .iter()
-            .filter_map(|position| {
-                let position = *position as usize;
-                physical.get(position).copied().map(|parameter| {
-                    (
-                        position,
-                        ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
-                            parameter.canonical_semantic(),
-                        ))),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        let IrExpr::Call { args, .. } = &mut ir.exprs[call as usize] else {
-            continue;
-        };
-        for (position, replacement) in replacements {
-            if let Some(argument) = args.get_mut(position) {
-                *argument = replacement;
-            }
-        }
-    }
-}
-
-fn apply_default_stub_boxed_parameters(ir: &IrFile, function: u32, parameters: &mut [Ty]) {
-    if let Some(boxed) = ir.default_stub_boxed_params.get(&function) {
-        for &(index, ty) in boxed {
-            if let Some(parameter) = parameters.get_mut(index) {
-                *parameter = ty;
-            }
-        }
-    }
 }
 
 /// Box an unboxed value-class result at every tail position of `id` (recursing `when`/block/return

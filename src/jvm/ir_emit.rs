@@ -4937,7 +4937,11 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                 None => true,
             },
             Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
-            Callee::Module { .. } | Callee::External { .. } => false,
+            Callee::Module { .. }
+            | Callee::ModuleWithDefaults { .. }
+            | Callee::LocalWithDefaults { .. }
+            | Callee::ClassStaticWithDefaults { .. }
+            | Callee::External { .. } => false,
             Callee::Local(_)
             | Callee::LocalDefault(_)
             | Callee::ClassStatic { .. }
@@ -15850,10 +15854,13 @@ impl<'a> Emitter<'a> {
             IrExpr::Call { callee, .. } => match callee {
                 Callee::Local(_)
                 | Callee::LocalDefault(_)
+                | Callee::LocalWithDefaults { .. }
                 | Callee::ClassStatic { .. }
                 | Callee::ClassStaticDefault { .. }
+                | Callee::ClassStaticWithDefaults { .. }
                 | Callee::CrossFile { .. }
-                | Callee::Module { .. } => true,
+                | Callee::Module { .. }
+                | Callee::ModuleWithDefaults { .. } => true,
                 Callee::External { .. } => false,
                 Callee::Special { .. } | Callee::Super { .. } | Callee::Virtual { .. } => true,
                 Callee::Static { inline, .. } => !inline.can_inline(),
@@ -16839,7 +16846,11 @@ impl<'a> Emitter<'a> {
                     };
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
-                Callee::Module { .. } | Callee::External { .. } => {
+                Callee::Module { .. }
+                | Callee::ModuleWithDefaults { .. }
+                | Callee::LocalWithDefaults { .. }
+                | Callee::ClassStaticWithDefaults { .. }
+                | Callee::External { .. } => {
                     unreachable!("stable calls must be realized before JVM emission")
                 }
                 Callee::Static {
