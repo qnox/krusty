@@ -154,6 +154,36 @@ static T_SIGS: AtomicU64 = AtomicU64::new(0);
 static T_CHECK: AtomicU64 = AtomicU64::new(0);
 static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
+/// Peak resident-set size for the current process in KiB.
+///
+/// `getrusage` reports bytes on macOS and KiB on the other Unix targets supported by the test
+/// harness. Keeping this measurement in the harness avoids exposing an OS process-inspection API
+/// from the JVM classpath provider merely to support profiling.
+#[cfg(unix)]
+fn peak_process_rss_kb() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `usage` points to writable storage for exactly one `rusage`; `getrusage` initializes
+    // it on success, which is checked before `assume_init`.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: a successful `getrusage` call initialized the complete value.
+    let bytes_or_kib = u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(bytes_or_kib.div_ceil(1024))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(bytes_or_kib)
+    }
+}
+
+#[cfg(not(unix))]
+fn peak_process_rss_kb() -> Option<u64> {
+    None
+}
+
 #[derive(Clone)]
 struct ActiveBoxCase {
     path: PathBuf,
@@ -1043,6 +1073,15 @@ fn scratch_directory_classpaths_are_not_retained() {
 }
 
 #[test]
+#[cfg(unix)]
+fn peak_process_rss_is_observable() {
+    assert!(
+        peak_process_rss_kb().is_some_and(|rss| rss > 0),
+        "the memory profiler must not silently report zero RSS on a supported host"
+    );
+}
+
+#[test]
 fn kotlin_codegen_box_conformance() {
     eprintln!("box setup: discover corpus");
     let box_dir = discover_box_dir();
@@ -1347,11 +1386,14 @@ fn kotlin_codegen_box_conformance() {
     // per-allocation-site breakdown, run this binary under `dhat`/`heaptrack` or call `Classpath::
     // cache_report()` from a focused profiling test.
     if env("KRUSTY_MEM_REPORT").is_some() {
-        eprintln!(
-            "mem: peak process RSS = {} MiB ({} threads)",
-            krusty::jvm::classpath::process_rss_kb() / 1024,
-            n_threads,
-        );
+        match peak_process_rss_kb() {
+            Some(rss_kb) => eprintln!(
+                "mem: peak process RSS = {:.1} MiB ({} threads)",
+                rss_kb as f64 / 1024.0,
+                n_threads,
+            ),
+            None => eprintln!("mem: peak process RSS unavailable ({} threads)", n_threads),
+        }
     }
     // Cache hit-rate summary: whole-process efficiency of every classpath cache, for sizing the caps.
     // Emitted through the `cache` trace category (build `--features trace`, run `KRUSTY_TRACE=cache`);
