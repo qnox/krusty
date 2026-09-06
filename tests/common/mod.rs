@@ -453,6 +453,20 @@ pub fn compile_in_process_metadata_cp_module(
     cp_jars: &[PathBuf],
     module_name: &str,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    compile_in_process_metadata_cp_module_target(src, stem, cp_jars, module_name, None)
+}
+
+/// [`compile_in_process_metadata_cp_module`] at an explicit class-file major (kotlinc
+/// `-jvm-target`), for byte-identity fixtures whose codegen forks on the target — string
+/// concatenation is `invokedynamic` from JVM 9 (major 53) on.
+#[allow(dead_code)]
+pub fn compile_in_process_metadata_cp_module_target(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    module_name: &str,
+    class_major: Option<u16>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
     use krusty::source::SourceInput;
 
@@ -473,7 +487,7 @@ pub fn compile_in_process_metadata_cp_module(
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(cp),
+        &krusty::jvm::JvmBackend::new(cp).with_class_major(class_major),
         module_name,
         &mut diags,
     );
@@ -3443,22 +3457,52 @@ pub fn byte_diff_against_kotlinc_cp(
     class: &str,
     cp_jars: &[PathBuf],
 ) -> Option<Result<(), String>> {
+    byte_diff_against_kotlinc_cp_target(name, src, class, cp_jars, None)
+}
+
+/// [`byte_diff_against_kotlinc_cp`] compiled by BOTH sides for one kotlinc `-jvm-target`
+/// (`"1.8"`, `"17"`, `"25"`, …). The default target (1.8, major 52) keeps every JVM-9+ codegen
+/// fork (indy string concatenation) on its legacy path, so a fixture that exercises the modern
+/// form must ask for a modern target explicitly.
+#[allow(dead_code)]
+pub fn byte_diff_against_kotlinc_cp_target(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    jvm_target: Option<&str>,
+) -> Option<Result<(), String>> {
     let dir = scratch_dir()?;
     let kref = dir.join("ref");
     std::fs::create_dir_all(&kref).ok()?;
     let src_path = dir.join(format!("{name}.kt"));
     std::fs::write(&src_path, src).ok()?;
-    let args = vec![
-        "-d".to_string(),
-        kref.to_string_lossy().into_owned(),
-        src_path.to_string_lossy().into_owned(),
-    ];
+    let mut args = vec!["-d".to_string(), kref.to_string_lossy().into_owned()];
+    if let Some(target) = jvm_target {
+        args.push("-jvm-target".to_string());
+        args.push(target.to_string());
+    }
+    args.push(src_path.to_string_lossy().into_owned());
     let (code, stderr) = kotlinc_compile(&args)?;
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let ref_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
 
-    let classes = compile_in_process_metadata_cp(src, name, cp_jars)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    // kotlinc's `-jvm-target` → class-file major (the CLI's table; the CLI crate is a binary, so
+    // the mapping is restated here).
+    let class_major = jvm_target.map(|target| match target {
+        "1.6" | "6" => 50,
+        "1.7" | "7" => 51,
+        "1.8" | "8" => 52,
+        other => other
+            .parse::<u16>()
+            .ok()
+            .filter(|n| (9..=99).contains(n))
+            .map(|n| n + 44)
+            .unwrap_or_else(|| panic!("{name}: unknown -jvm-target {other}")),
+    });
+    let classes =
+        compile_in_process_metadata_cp_module_target(src, name, cp_jars, "main", class_major)
+            .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, krusty_bytes) = classes
         .iter()
         .find(|(n, _)| n == class)
