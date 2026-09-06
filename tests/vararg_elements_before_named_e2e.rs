@@ -91,3 +91,47 @@ fn vararg_elements_before_a_named_required_argument_resolve_on_a_module_function
     );
     assert_eq!(d, Vec::<String>::new());
 }
+
+/// The acceptance criterion is bytes: the signature pass selecting the right overload must leave
+/// the emitted class identical to kotlinc's, on the JDK-25 target a Gradle toolchain builds for.
+fn assert_byte_identical(name: &str, src: &str, class: &str) {
+    match common::byte_diff_against_kotlinc_cp_target(
+        name,
+        src,
+        class,
+        &[common::stdlib_jar()],
+        Some("25"),
+    ) {
+        None => eprintln!("skip ({name}: reference toolchain unavailable)"),
+        Some(Ok(())) => {}
+        Some(Err(diff)) => panic!("{name}: class bytes differ from kotlinc:\n{diff}"),
+    }
+}
+
+#[test]
+fn packed_vararg_arrays_are_byte_identical() {
+    // Packing goes through a local, as kotlinc does: `anewarray; astore n; aload n; …; aload n`.
+    // `split(",", ";", limit = 2)` itself is still kept out of the byte test by a separate
+    // residue — kotlinc `checkcast`s a `String` receiver to the `CharSequence` extension
+    // receiver — so the stdlib shapes here are the packing ones.
+    assert_byte_identical(
+        "PackedVarargArrays",
+        "fun names() = listOf(\"a\", \"b\")\n\
+         fun sizes() = intArrayOf(1, 2)\n\
+         fun labels() = arrayOf(\"x\", \"y\")\n\
+         fun count(): Int = names().size + sizes().size + labels().size\n",
+        "PackedVarargArraysKt",
+    );
+}
+
+#[test]
+fn module_vararg_elements_before_named_argument_are_byte_identical() {
+    assert_byte_identical(
+        "VarargElementsNamedModule",
+        "fun option(vararg names: String, help: String = \"\"): String = help + names.size\n\
+         fun target() = option(\"--target\", \"-t\", help = \"Target\")\n\
+         fun plain() = option(\"--plain\", \"-p\")\n\
+         fun count(): Int = target().length + plain().length\n",
+        "VarargElementsNamedModuleKt",
+    );
+}

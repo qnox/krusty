@@ -1859,6 +1859,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A packed array is built through a local, never a `dup` chain.** kotlinc 2.4.10 emits every
+  packed array — a vararg call's elements, `arrayOf`, `intArrayOf`, `listOf(...)` alike, in static and
+  instance bodies — as `anewarray; astore n; aload n; iconst_0; <e0>; aastore; …; aload n`, with `n`
+  the next free local at that point, released again afterwards. krusty used `dup; index; <element>;
+  aastore`, one instruction shorter per element and different on every vararg call site in a real
+  module. The `Vararg` emitter now spills the fresh array into `next_slot` (registered in the frame
+  slot map while the elements are emitted, so a branchy element frames it as live), reloads it for
+  each store and for the final use, and releases the slot when it is the topmost one. Measured
+  byte-identical for a top-level `f("a", "b")`, a non-final vararg with a trailing named argument, an
+  instance method, `arrayOf`/`intArrayOf`/`listOf`, and a parameter used as an element. Still open
+  beside it: kotlinc allocates a `val`'s slot BEFORE evaluating its initializer (`val t = f("a")`
+  gives `t` slot 0 and the packing temp slot 1), and it `checkcast`s a `String` receiver to a
+  `CharSequence` EXTENSION receiver (`"a".split(...)`), neither of which this rule covers. Test:
+  `tests/vararg_elements_before_named_e2e.rs` (`packed_vararg_arrays_are_byte_identical`,
+  `module_vararg_elements_before_named_argument_are_byte_identical`).
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
