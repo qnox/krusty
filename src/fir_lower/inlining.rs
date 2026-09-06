@@ -646,6 +646,18 @@ fn specialize_callee(callee: &mut Callee, bindings: &HashMap<String, Ty>) {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
         }
+        Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+            if let Some(receiver) = dispatch_receiver_ty {
+                specialize_ty(receiver, bindings);
+            }
+        }
         Callee::External {
             params,
             ret,
@@ -666,7 +678,9 @@ fn specialize_callee(callee: &mut Callee, bindings: &HashMap<String, Ty>) {
             specialize_ty(ret, bindings);
         }
         Callee::Local(_)
+        | Callee::LocalWithDefaults { .. }
         | Callee::ClassStatic { .. }
+        | Callee::ClassStaticWithDefaults { .. }
         | Callee::ClassStaticDefault { .. }
         | Callee::LocalDefault(_)
         | Callee::Static { .. }

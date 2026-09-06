@@ -163,6 +163,207 @@ fn realize_declared_function_names(ir: &mut IrFile) -> Result<(), ModuleRealizat
     Ok(())
 }
 
+/// Materialize Kotlin/JVM's default bridge operands from one checked semantic call. Common IR
+/// carries only supplied arguments plus omitted parameter ordinals; mask words, zero placeholders,
+/// and the marker are exclusively JVM ABI.
+fn realize_default_arguments(
+    ir: &mut IrFile,
+    mut parameters: Vec<crate::types::Ty>,
+    arguments: Vec<ExprId>,
+    defaults: &[u32],
+    extension_receiver_parameter: Option<u32>,
+) -> Option<(Vec<crate::types::Ty>, Vec<ExprId>)> {
+    if defaults.is_empty() {
+        return None;
+    }
+    if defaults.windows(2).any(|pair| pair[0] >= pair[1])
+        || defaults
+            .iter()
+            .any(|parameter| *parameter as usize >= parameters.len())
+    {
+        return None;
+    }
+    let logical_count = parameters
+        .len()
+        .checked_sub(usize::from(extension_receiver_parameter.is_some()))?;
+    let mut masks = vec![0i32; logical_count.div_ceil(32).max(1)];
+    let mut supplied = arguments.into_iter();
+    let mut physical = Vec::with_capacity(parameters.len() + masks.len() + 1);
+    for (parameter, ty) in parameters.iter().copied().enumerate() {
+        let parameter = u32::try_from(parameter).ok()?;
+        if defaults.contains(&parameter) {
+            let logical = match extension_receiver_parameter {
+                Some(receiver) if parameter > receiver => parameter - 1,
+                Some(receiver) if parameter == receiver => return None,
+                _ => parameter,
+            } as usize;
+            masks[logical / 32] |= 1i32 << (logical % 32);
+            physical.push(ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty))));
+        } else {
+            physical.push(supplied.next()?);
+        }
+    }
+    if supplied.next().is_some() {
+        return None;
+    }
+    physical.extend(
+        masks
+            .iter()
+            .map(|mask| ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(*mask)))),
+    );
+    physical.push(ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
+    parameters.extend(std::iter::repeat_n(crate::types::Ty::Int, masks.len()));
+    parameters.push(crate::types::Ty::obj("java/lang/Object"));
+    Some((parameters, physical))
+}
+
+fn local_default_parameters(
+    ir: &IrFile,
+    function: crate::ir::FunId,
+) -> Result<Vec<crate::types::Ty>, ModuleRealizationTarget> {
+    let mut parameters = ir
+        .functions
+        .get(function as usize)
+        .ok_or(ModuleRealizationTarget::Function(function))?
+        .params
+        .clone();
+    if let Some(boxed) = ir.default_stub_boxed_params.get(&function) {
+        for &(parameter, ty) in boxed {
+            *parameters
+                .get_mut(parameter)
+                .ok_or(ModuleRealizationTarget::Function(function))? = ty;
+        }
+    }
+    Ok(parameters)
+}
+
+fn realize_local_default_arguments(
+    ir: &mut IrFile,
+    function: crate::ir::FunId,
+    defaults: &[u32],
+    args: Vec<ExprId>,
+) -> Result<Vec<ExprId>, ModuleRealizationTarget> {
+    let parameters = local_default_parameters(ir, function)?;
+    let extension_receiver_parameter = ir.extension_receiver_fns.contains(&function).then(|| {
+        u32::try_from(
+            ir.fn_context_counts
+                .get(&function)
+                .copied()
+                .unwrap_or_default(),
+        )
+        .expect("too many context parameters")
+    });
+    realize_default_arguments(ir, parameters, args, defaults, extension_receiver_parameter)
+        .map(|(_, args)| args)
+        .ok_or(ModuleRealizationTarget::Function(function))
+}
+
+/// Materialize checked default omissions after representation lowering has finalized every JVM
+/// parameter carrier. This is deliberately separate from [`realize`]: stable module containers and
+/// declaration names can be selected before value-class lowering, while masks, zero placeholders,
+/// and marker operands must use the resulting physical parameter types.
+pub(super) fn realize_default_calls(
+    ir: &mut IrFile,
+    stems: &[String],
+) -> Result<(), ModuleRealizationTarget> {
+    for raw in 0..ir.exprs.len() {
+        let replacement = match ir.exprs[raw].clone() {
+            IrExpr::Call {
+                callee: Callee::LocalWithDefaults { function, defaults },
+                dispatch_receiver,
+                args,
+            } => {
+                let args = realize_local_default_arguments(ir, function, &defaults, args)?;
+                Some(IrExpr::Call {
+                    callee: Callee::LocalDefault(function),
+                    dispatch_receiver,
+                    args,
+                })
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::ClassStaticWithDefaults {
+                        owner,
+                        function,
+                        defaults,
+                    },
+                dispatch_receiver,
+                args,
+            } => {
+                let args = realize_local_default_arguments(ir, function, &defaults, args)?;
+                Some(IrExpr::Call {
+                    callee: Callee::ClassStaticDefault { owner, function },
+                    dispatch_receiver,
+                    args,
+                })
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::ModuleWithDefaults {
+                        target,
+                        name,
+                        params,
+                        ret,
+                        defaults,
+                        dispatch_receiver_ty,
+                        extension_receiver_parameter,
+                    },
+                dispatch_receiver,
+                args,
+            } => {
+                let failure = ModuleRealizationTarget::Callable(target);
+                let callable = ir
+                    .referenced_module_callables
+                    .get(&target)
+                    .cloned()
+                    .ok_or(failure)?;
+                if callable.flags.has(crate::fir::DeclarationFlags::INLINE) {
+                    ir.module_inline_calls.insert(raw as ExprId);
+                }
+                let physical_name = header_jvm_name(&callable.annotations)
+                    .map_err(|()| failure)?
+                    .unwrap_or(&name)
+                    .to_owned();
+                let owner = callable
+                    .owner
+                    .or_else(|| facade_for(callable.source, stems))
+                    .ok_or(failure)?;
+                let (mut params, mut args) = realize_default_arguments(
+                    ir,
+                    params,
+                    args,
+                    &defaults,
+                    extension_receiver_parameter,
+                )
+                .ok_or(failure)?;
+                if let Some(receiver) = dispatch_receiver {
+                    params.insert(0, dispatch_receiver_ty.ok_or(failure)?);
+                    args.insert(0, receiver);
+                } else if dispatch_receiver_ty.is_some() {
+                    return Err(failure);
+                }
+                Some(IrExpr::Call {
+                    callee: Callee::CrossFile {
+                        facade: owner,
+                        name: format!("{physical_name}$default"),
+                        params,
+                        ret,
+                        module_target: Some(target),
+                        module_default_call: true,
+                    },
+                    dispatch_receiver: None,
+                    args,
+                })
+            }
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            ir.exprs[raw] = replacement;
+        }
+    }
+    Ok(())
+}
+
 /// Map backend-neutral stable module call targets to JVM file facades. Candidate selection and
 /// argument mapping are already complete; this pass performs only the JVM container/name
 /// realization and therefore never reads imports, scopes, or overload sets.
@@ -362,7 +563,6 @@ pub(super) fn realize(
                         name,
                         params,
                         ret,
-                        default_call,
                     },
                 dispatch_receiver,
                 args,
@@ -380,29 +580,18 @@ pub(super) fn realize(
                     .map_err(|()| failure)?
                     .unwrap_or(&name)
                     .to_owned();
-                let owner = if let Some(classifier) = callable.owner {
-                    // Common IR uses a stable module callable for a sibling-source member default
-                    // bridge. Its JVM container is the declaring classifier; ordinary member calls
-                    // are already represented as virtual/special calls before this realization.
-                    if !default_call {
-                        return Err(failure);
-                    }
-                    classifier
-                } else {
-                    facade_for(callable.source, stems).ok_or(failure)?
-                };
+                if callable.owner.is_some() {
+                    return Err(failure);
+                }
+                let owner = facade_for(callable.source, stems).ok_or(failure)?;
                 Some(IrExpr::Call {
                     callee: Callee::CrossFile {
                         facade: owner,
-                        name: if default_call {
-                            format!("{physical_name}$default")
-                        } else {
-                            physical_name
-                        },
+                        name: physical_name,
                         params,
                         ret,
                         module_target: Some(target),
-                        module_default_call: default_call,
+                        module_default_call: false,
                     },
                     dispatch_receiver,
                     args,

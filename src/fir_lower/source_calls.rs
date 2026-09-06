@@ -1816,97 +1816,54 @@ impl BodyLowering<'_> {
                 })
             }
             Some(receiver) if physical_function.is_none() => {
-                // A sibling-source member's `$default` bridge belongs to its declaring class, not
-                // the caller's file facade. Preserve the stable callable identity on `Module`; the
-                // JVM realization maps that identity to the owner class after common lowering.
-                let logical_count = signature.parameters.len();
-                let mut masks = vec![0i32; logical_count.div_ceil(32)];
-                let mask_count = masks.len();
-                let classifier = self.index.enclosing_classifier(callable.declaration)?;
-                let mut physical = Vec::with_capacity(1 + parameter_types.len() + mask_count + 1);
-                physical.push(receiver);
-                for (parameter, (slot, ty)) in slots
-                    .into_iter()
-                    .zip(parameter_types.iter().copied())
-                    .enumerate()
-                {
-                    physical.push(slot.unwrap_or_else(|| {
-                        let logical = parameter
-                            .checked_sub(usize::from(extension_receiver.is_some()))
-                            .expect("an extension receiver cannot be defaulted");
-                        masks[logical / 32] |= 1i32 << (logical % 32);
-                        self.ir
-                            .add_expr(IrExpr::Const(IrConst::zero_for_value_type(ty)))
-                    }));
-                }
-                physical.extend(
-                    masks
-                        .into_iter()
-                        .map(|value| self.ir.add_expr(IrExpr::Const(IrConst::Int(value)))),
-                );
-                physical.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
-                declaration_parameter_types.insert(0, Ty::obj_name(classifier.classifier));
-                declaration_parameter_types.extend(std::iter::repeat_n(Ty::Int, mask_count));
-                declaration_parameter_types.push(Ty::obj("java/lang/Object"));
+                // Preserve the checked source call. A target backend owns the static bridge, masks,
+                // marker parameter, and dispatch-receiver placement.
                 self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Module {
+                    callee: Callee::ModuleWithDefaults {
                         target,
                         name: self.index.callable_name(target)?.to_owned(),
                         params: declaration_parameter_types,
                         ret: declaration_result,
-                        default_call: true,
+                        defaults: default_argument_positions.clone().into_boxed_slice(),
+                        dispatch_receiver_ty: enclosing_classifier
+                            .map(|classifier| Ty::obj_name(classifier.classifier)),
+                        extension_receiver_parameter: declared_extension_receiver.map(|_| {
+                            u32::try_from(extension_position).expect("too many source parameters")
+                        }),
                     },
-                    dispatch_receiver: None,
-                    args: physical,
+                    dispatch_receiver: Some(receiver),
+                    args: slots.into_iter().flatten().collect(),
                 })
             }
             Some(_) => return None,
             None if has_defaults => {
-                let logical_count = signature.parameters.len();
-                let mut masks = vec![0i32; logical_count.div_ceil(32)];
-                let mask_count = masks.len();
-                let mut physical = Vec::with_capacity(parameter_types.len() + masks.len() + 1);
-                for (parameter, (slot, ty)) in slots
-                    .into_iter()
-                    .zip(parameter_types.iter().copied())
-                    .enumerate()
-                {
-                    physical.push(slot.unwrap_or_else(|| {
-                        let logical = parameter
-                            .checked_sub(usize::from(extension_receiver.is_some()))
-                            .expect("an extension receiver cannot be defaulted");
-                        masks[logical / 32] |= 1i32 << (logical % 32);
-                        self.ir
-                            .add_expr(IrExpr::Const(IrConst::zero_for_value_type(ty)))
-                    }));
-                }
-                physical.extend(
-                    masks
-                        .into_iter()
-                        .map(|value| self.ir.add_expr(IrExpr::Const(IrConst::Int(value)))),
-                );
-                physical.push(self.ir.add_expr(IrExpr::Const(IrConst::Null)));
                 if physical_function.is_none() {
-                    declaration_parameter_types.extend(std::iter::repeat_n(Ty::Int, mask_count));
-                    declaration_parameter_types.push(Ty::obj("java/lang/Object"));
                     self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::Module {
+                        callee: Callee::ModuleWithDefaults {
                             target,
                             name: self.index.callable_name(target)?.to_owned(),
                             params: declaration_parameter_types,
                             ret: declaration_result,
-                            default_call: true,
+                            defaults: default_argument_positions.clone().into_boxed_slice(),
+                            dispatch_receiver_ty: None,
+                            extension_receiver_parameter: declared_extension_receiver.map(|_| {
+                                u32::try_from(extension_position)
+                                    .expect("too many source parameters")
+                            }),
                         },
                         dispatch_receiver: None,
-                        args: physical,
+                        args: slots.into_iter().flatten().collect(),
                     })
                 } else {
                     let function =
                         physical_function.expect("same-file default callable realization");
                     self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::LocalDefault(function),
+                        callee: Callee::LocalWithDefaults {
+                            function,
+                            defaults: default_argument_positions.clone().into_boxed_slice(),
+                        },
                         dispatch_receiver: None,
-                        args: physical,
+                        args: slots.into_iter().flatten().collect(),
                     })
                 }
             }
@@ -1925,23 +1882,12 @@ impl BodyLowering<'_> {
                     name: self.index.callable_name(target)?.to_owned(),
                     params: declaration_parameter_types,
                     ret: declaration_result,
-                    default_call: false,
                 },
                 dispatch_receiver: None,
                 args: slots.into_iter().collect::<Option<Vec<_>>>()?,
             }),
             None => return None,
         };
-        if matches!(self.ir.expr(call), IrExpr::Call { .. }) {
-            let receiver_prefix = u32::from(dispatch_receiver.is_some());
-            self.ir.insert_default_call_argument_positions(
-                call,
-                default_argument_positions
-                    .into_iter()
-                    .map(|position| position + receiver_prefix)
-                    .collect(),
-            );
-        }
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.

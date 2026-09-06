@@ -1368,7 +1368,6 @@ fn delegated_call(
                         .to_owned(),
                     params: parameters,
                     ret: signature.result.get(),
-                    default_call: false,
                 },
             };
             let expression = ir.add_expr(IrExpr::Call {
