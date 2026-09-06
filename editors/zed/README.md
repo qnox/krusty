@@ -63,6 +63,13 @@ Zed extensions are event-driven and cannot poll on a timer, so a long-lived sess
 restarts the server will not pick up a new release on its own. To refresh mid-session run
 `editor: restart language server` from the command palette (or reopen the project).
 
+Each download is finished off with a `.krusty-install-ok` stamp inside its version directory, written
+only after the binary has been extracted *and* marked executable. A download that dies mid-transfer
+leaves no stamp, so the next server start discards the partial directory and fetches the release
+again instead of handing Zed a truncated binary. If you place a `krusty-lsp-<tag>/` directory under
+`…/Zed/extensions/work/krusty/` by hand to skip the download, add an empty `.krusty-install-ok` next
+to the binary or it will be re-downloaded.
+
 ## Local development override
 
 To run your own build instead of the downloaded one — e.g. when hacking on the compiler — build the
