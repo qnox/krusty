@@ -3041,7 +3041,15 @@ pub struct StreamedHeaderModule {
     annotation_strings: HeaderAnnotationStringArena,
     annotation_policies: HeaderAnnotationPolicyArena,
     visibility_suppressions: HeaderVisibilitySuppressionArena,
+    /// Read freely; append through [`StreamedHeaderModule::push_stub`] so the identity index below
+    /// covers the new stub (a direct push is still found — by a scan of the un-indexed tail).
     pub stubs: Vec<DeclarationStub>,
+    /// Position in `stubs` of each inventoried declaration. Signature resolution asks for one stub
+    /// by identity per type reference it resolves; scanning `stubs` for it was quadratic in module
+    /// size.
+    stub_positions: std::collections::HashMap<DeclarationId, usize>,
+    /// How many leading entries of `stubs` the position table covers.
+    indexed_stubs: usize,
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
@@ -3065,6 +3073,70 @@ pub struct StreamedHeaderModule {
 }
 
 impl StreamedHeaderModule {
+    fn index_stubs(stubs: &[DeclarationStub]) -> std::collections::HashMap<DeclarationId, usize> {
+        stubs
+            .iter()
+            .enumerate()
+            .map(|(position, stub)| (stub.id, position))
+            .collect()
+    }
+
+    fn reindex_stubs(&mut self) {
+        self.stub_positions = Self::index_stubs(&self.stubs);
+        self.indexed_stubs = self.stubs.len();
+    }
+
+    /// Append a stub and index it by identity.
+    pub fn push_stub(&mut self, stub: DeclarationStub) {
+        if self.indexed_stubs == self.stubs.len() {
+            self.stub_positions.insert(stub.id, self.stubs.len());
+            self.indexed_stubs += 1;
+        }
+        self.stubs.push(stub);
+    }
+
+    /// The inventoried stub of one declaration, if it has one (excluded subtrees have none).
+    pub fn stub(&self, declaration: DeclarationId) -> Option<&DeclarationStub> {
+        self.stub_position(declaration)
+            .map(|position| &self.stubs[position])
+    }
+
+    /// Position in `stubs` of one declaration's inventoried stub.
+    fn stub_position(&self, declaration: DeclarationId) -> Option<usize> {
+        if let Some(position) = self
+            .stub_positions
+            .get(&declaration)
+            .copied()
+            .filter(|position| {
+                self.stubs
+                    .get(*position)
+                    .is_some_and(|stub| stub.id == declaration)
+            })
+        {
+            return Some(position);
+        }
+        let tail = self.indexed_stubs.min(self.stubs.len());
+        self.stubs[tail..]
+            .iter()
+            .position(|stub| stub.id == declaration)
+            .map(|offset| tail + offset)
+    }
+
+    /// The inventoried stubs anchored directly under `owner`, in INVENTORY order — the order a
+    /// scan of `stubs` observes, which is source order within a file. Identity order differs:
+    /// a primary-constructor property is interned after the class body's, yet both carry
+    /// sibling 0, and the ordinal lookups that read this take the FIRST match.
+    pub fn owned_stubs(&self, owner: DeclarationId) -> impl Iterator<Item = &DeclarationStub> + '_ {
+        let mut positions = self
+            .declarations
+            .owned(owner)
+            .iter()
+            .filter_map(|declaration| self.stub_position(*declaration))
+            .collect::<Vec<_>>();
+        positions.sort_unstable();
+        positions.into_iter().map(|position| &self.stubs[position])
+    }
+
     /// Stable declaration-stream order captured while the bounded source unit is active. Signature
     /// solving may compare declaration order through these identities; it must never recover that
     /// order from text offsets or parser arena coordinates.
@@ -3169,6 +3241,7 @@ impl StreamedHeaderModule {
             .collect::<Vec<_>>();
         self.excluded.extend(excluded);
         self.stubs.retain(|stub| !self.excluded.contains(&stub.id));
+        self.reindex_stubs();
         // `source_declarations` is positional with the transient parser's `File::decls` array.
         // Keep excluded identities in that positional map; consumers cross-check `stubs`, where
         // exclusion is authoritative. Removing an element here would shift every later source
@@ -3189,6 +3262,8 @@ impl StreamedHeaderModule {
             + self.annotation_policies.storage_payload_bytes()
             + self.visibility_suppressions.storage_payload_bytes()
             + self.stubs.len() * std::mem::size_of::<DeclarationStub>()
+            + self.stub_positions.len()
+                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<usize>())
             + self.inventory.len() * std::mem::size_of::<DeclarationId>()
             + self
                 .source_declarations
@@ -3814,7 +3889,11 @@ impl HeaderInventoryBuilder {
     }
 
     pub fn finish(self) -> StreamedHeaderModule {
+        let stub_positions = StreamedHeaderModule::index_stubs(&self.stubs);
+        let indexed_stubs = self.stubs.len();
         StreamedHeaderModule {
+            stub_positions,
+            indexed_stubs,
             sources: self.sources,
             signature_origins: self.signature_origins,
             declarations: self.declarations,

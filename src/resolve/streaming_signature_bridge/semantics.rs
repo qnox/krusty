@@ -963,9 +963,8 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(declaration) = member.member.stable_declaration {
             if self
                 .headers
-                .stubs
-                .iter()
-                .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                .stub(declaration)
+                .is_some_and(|stub| stub.signature_inference.is_some())
             {
                 let signature = demand(declaration)?;
                 return self
@@ -1347,9 +1346,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         result: crate::fir::ResolvedTy,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         if result.get() == Ty::Nothing
-            && self.headers.stubs.iter().any(|stub| {
-                stub.id == declaration && stub.kind == crate::fir::DeclarationKind::Property
-            })
+            && self
+                .headers
+                .stub(declaration)
+                .is_some_and(|stub| stub.kind == crate::fir::DeclarationKind::Property)
         {
             return Err(self.record_missing_signature(declaration));
         }
@@ -1702,12 +1702,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(receiver) = self.enclosing_enum_entry_receiver(scope, label) {
                 return crate::fir::ResolvedTy::new(receiver).map_err(|_| Self::failure());
             }
-            let labels_current_extension = self.headers.stubs.iter().any(|stub| {
-                stub.id == scope.owner
-                    && stub
-                        .lookup_name
-                        .and_then(|name| self.headers.lookup_names.get(name))
-                        == Some(label)
+            let labels_current_extension = self.headers.stub(scope.owner).is_some_and(|stub| {
+                stub.lookup_name
+                    .and_then(|name| self.headers.lookup_names.get(name))
+                    == Some(label)
             });
             if labels_current_extension {
                 if let Some(receiver) = self.declaration_extension_receiver(scope.owner) {
@@ -1818,9 +1816,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 if let Some(declaration) = declaration {
                     if self
                         .headers
-                        .stubs
-                        .iter()
-                        .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                        .stub(declaration)
+                        .is_some_and(|stub| stub.signature_inference.is_some())
                     {
                         return demand(declaration).map(|signature| signature.result);
                     }
@@ -2275,9 +2272,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 self.commit_postponed_bindings(scope, postponed_bindings);
                 if let Some(member) = member.as_ref() {
                     if let Some(declaration) = member.stable_declaration {
-                        if self.headers.stubs.iter().any(|stub| {
-                            stub.id == declaration && stub.signature_inference.is_some()
-                        }) {
+                        if self
+                            .headers
+                            .stub(declaration)
+                            .is_some_and(|stub| stub.signature_inference.is_some())
+                        {
                             let signature = demand(declaration)?;
                             let parameters = signature
                                 .parameters
@@ -2436,9 +2435,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 if let Some(declaration) = declaration {
                     if self
                         .headers
-                        .stubs
-                        .iter()
-                        .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                        .stub(declaration)
+                        .is_some_and(|stub| stub.signature_inference.is_some())
                     {
                         return demand(declaration).map(|signature| signature.result);
                     }
@@ -4057,9 +4055,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         if let Some(property) = property {
             let result = match property.stable_declaration {
                 Some(declaration)
-                    if self.headers.stubs.iter().any(|stub| {
-                        stub.id == declaration && stub.signature_inference.is_some()
-                    }) =>
+                    if self
+                        .headers
+                        .stub(declaration)
+                        .is_some_and(|stub| stub.signature_inference.is_some()) =>
                 {
                     demand(declaration)?.result.get()
                 }
@@ -4274,9 +4273,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let is_lateinit = |declaration: Option<crate::fir::DeclarationId>| {
             declaration.is_some_and(|declaration| {
-                self.headers.stubs.iter().any(|stub| {
-                    stub.id == declaration && stub.flags.has(crate::fir::DeclarationFlags::LATEINIT)
-                })
+                self.headers
+                    .stub(declaration)
+                    .is_some_and(|stub| stub.flags.has(crate::fir::DeclarationFlags::LATEINIT))
             })
         };
         let property_on_receiver = |receiver: Ty| {
@@ -4671,9 +4670,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(declaration) = declaration {
                 if self
                     .headers
-                    .stubs
-                    .iter()
-                    .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                    .stub(declaration)
+                    .is_some_and(|stub| stub.signature_inference.is_some())
                 {
                     return demand(declaration).map(|signature| signature.result);
                 }
@@ -4887,9 +4885,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         continue;
                     };
                     if let Some(declaration) = declaration {
-                        if self.headers.stubs.iter().any(|stub| {
-                            stub.id == declaration && stub.signature_inference.is_some()
-                        }) {
+                        if self
+                            .headers
+                            .stub(declaration)
+                            .is_some_and(|stub| stub.signature_inference.is_some())
+                        {
                             return demand(declaration).map(|signature| {
                                 crate::fir::ResolvedMemberCall {
                                     ty: Some(signature.result),
@@ -4989,9 +4989,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(declaration) = member.stable_declaration {
                 if self
                     .headers
-                    .stubs
-                    .iter()
-                    .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                    .stub(declaration)
+                    .is_some_and(|stub| stub.signature_inference.is_some())
                 {
                     let signature = demand(declaration)?;
                     let parameters = signature
@@ -5424,9 +5423,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(declaration) = declaration {
                 if self
                     .headers
-                    .stubs
-                    .iter()
-                    .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                    .stub(declaration)
+                    .is_some_and(|stub| stub.signature_inference.is_some())
                 {
                     return demand(declaration).map(|signature| signature.result);
                 }
@@ -5653,9 +5651,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     });
                 match selected {
                     Some((_result, Some(declaration)))
-                        if self.headers.stubs.iter().any(|stub| {
-                            stub.id == declaration && stub.signature_inference.is_some()
-                        }) =>
+                        if self
+                            .headers
+                            .stub(declaration)
+                            .is_some_and(|stub| stub.signature_inference.is_some()) =>
                     {
                         demand(declaration)?.result
                     }
@@ -5718,9 +5717,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         continue;
                     };
                     if let Some(declaration) = declaration {
-                        if self.headers.stubs.iter().any(|stub| {
-                            stub.id == declaration && stub.signature_inference.is_some()
-                        }) {
+                        if self
+                            .headers
+                            .stub(declaration)
+                            .is_some_and(|stub| stub.signature_inference.is_some())
+                        {
                             return demand(declaration).map(|signature| signature.result);
                         }
                     }

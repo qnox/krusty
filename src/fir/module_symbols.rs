@@ -241,16 +241,10 @@ impl<'a> StreamedModuleSymbols<'a> {
                 });
         projected.constants.clear();
         projected.enum_entries.clear();
-        for raw in 0..self.index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable module declarations"),
-            );
+        for declaration in self.index.owned_declarations(owner).iter().copied() {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
-            if header.owner != Some(owner) {
-                continue;
-            }
             match header.kind {
                 DeclarationKind::Property => {
                     if flags.has(DeclarationFlags::VALUE)
@@ -323,14 +317,14 @@ impl<'a> StreamedModuleSymbols<'a> {
             .classifier_own_type_parameter_count(owner)
             .unwrap_or_default() as usize;
 
-        let mut declarations = (0..self.index.declaration_count())
-            .filter_map(|raw| {
-                let declaration = DeclarationId::from_raw(
-                    u32::try_from(raw).expect("too many stable module declarations"),
-                );
-                let anchor = self.index.declaration_anchor(declaration)?;
-                (anchor.kind == DeclarationKind::Constructor && anchor.owner == Some(owner))
-                    .then_some((anchor.sibling, declaration))
+        let mut declarations = self
+            .index
+            .owned_declarations(owner)
+            .iter()
+            .filter_map(|declaration| {
+                let anchor = self.index.declaration_anchor(*declaration)?;
+                (anchor.kind == DeclarationKind::Constructor)
+                    .then_some((anchor.sibling, *declaration))
             })
             .collect::<Vec<_>>();
         declarations.sort_unstable_by_key(|(sibling, _)| *sibling);
@@ -397,17 +391,17 @@ impl<'a> StreamedModuleSymbols<'a> {
             .iter()
             .any(|constructor| constructor.call_sig.required == 0);
 
-        let mut direct = (0..self.index.declaration_count())
-            .filter_map(|raw| {
-                let declaration = DeclarationId::from_raw(
-                    u32::try_from(raw).expect("too many stable module declarations"),
-                );
+        let mut direct = self
+            .index
+            .owned_declarations(owner)
+            .iter()
+            .filter_map(|declaration| {
+                let declaration = *declaration;
                 let header = self.index.declaration_header(declaration)?;
-                (header.owner == Some(owner)
-                    && matches!(
-                        header.kind,
-                        DeclarationKind::Function | DeclarationKind::Property
-                    ))
+                matches!(
+                    header.kind,
+                    DeclarationKind::Function | DeclarationKind::Property
+                )
                 .then_some((
                     self.index.source_order(declaration).unwrap_or(u32::MAX),
                     header.kind,
@@ -761,11 +755,23 @@ impl<'a> StreamedModuleSymbols<'a> {
     ) -> (Vec<FunctionInfo>, Vec<LibraryMember>) {
         let mut functions = Vec::new();
         let mut members = Vec::new();
-        for &declaration in self.index.declarations_named(name) {
+        // Both tables answer; walk the shorter one. A common spelling (`toString`, `get`) is
+        // declared module-wide, an owner declares a bounded member list.
+        let named = self.index.declarations_named(name);
+        let owned = self.index.owned_declarations(owner);
+        let candidates = if owned.len() < named.len() {
+            owned
+        } else {
+            named
+        };
+        for &declaration in candidates {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
-            if header.kind != DeclarationKind::Function || header.owner != Some(owner) {
+            if header.kind != DeclarationKind::Function
+                || header.owner != Some(owner)
+                || self.index.declaration_name(declaration) != Some(name)
+            {
                 continue;
             }
             let Some(callable_header) = self.index.callable_for_declaration(declaration) else {
@@ -1092,21 +1098,10 @@ impl<'a> StreamedModuleSymbols<'a> {
     }
 
     fn companion_classifier(&self, owner: DeclarationId) -> Option<(DeclarationId, TypeName)> {
-        (0..self.index.declaration_count()).find_map(|raw| {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable module declarations"),
-            );
-            let header = self.index.declaration_header(declaration)?;
-            (header.kind == DeclarationKind::Classifier
-                && header.owner == Some(owner)
-                && header.flags.has(DeclarationFlags::COMPANION))
-            .then(|| {
-                self.index
-                    .classifier_header(declaration)
-                    .map(|classifier| (declaration, classifier.classifier))
-            })
-            .flatten()
-        })
+        let declaration = self.index.companion_declaration(owner)?;
+        self.index
+            .classifier_header(declaration)
+            .map(|classifier| (declaration, classifier.classifier))
     }
 
     /// Project declarations accessed through a classifier value (`Limits.MAX`, `C.make()`) from

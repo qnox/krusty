@@ -2823,3 +2823,266 @@ fn larger_inferred_expression_lives_only_in_the_temporary_graph() {
         "signature-expression growth must disappear with the consumed graph"
     );
 }
+
+/// Owner-scoped lookups must not rescan the whole declaration inventory: a module with tens of
+/// thousands of classes asks for a classifier's companion on every classifier-namespace symbol
+/// lookup, and a linear scan there is quadratic in module size. Ownership is recorded once, with
+/// the declaration identities, in declaration-id order (the order the scans it replaces observed).
+#[test]
+fn owned_declarations_are_indexed_by_owner() {
+    let source = SourceFileId::from_raw(0);
+    let mut declarations = DeclarationIds::default();
+    let outer = declarations.intern(anchor(source, 0, DeclarationKind::Classifier));
+    let member = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(5, 6),
+        owner: Some(outer),
+        kind: DeclarationKind::Function,
+        sibling: 0,
+    });
+    let companion = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(7, 8),
+        owner: Some(outer),
+        kind: DeclarationKind::Classifier,
+        sibling: 1,
+    });
+    let unrelated = declarations.intern(anchor(source, 20, DeclarationKind::Classifier));
+    assert_eq!(declarations.owned(outer), &[member, companion]);
+    assert_eq!(declarations.owned(unrelated), &[]);
+
+    let header = |kind, owner, flags| ResolvedDeclarationHeader {
+        kind,
+        owner,
+        name: None,
+        visibility: Visibility::Public,
+        flags,
+        initialization_order: None,
+    };
+    let mut index = ResolvedModuleIndex::default();
+    index.publish_declarations(declarations);
+    // Headers may publish out of id order; the table is keyed by identity, not by publication.
+    index.publish_declaration_header(
+        companion,
+        header(
+            DeclarationKind::Classifier,
+            Some(outer),
+            DeclarationFlags::default().with(DeclarationFlags::COMPANION, true),
+        ),
+        Some("Companion"),
+    );
+    index.publish_declaration_header(
+        outer,
+        header(
+            DeclarationKind::Classifier,
+            None,
+            DeclarationFlags::default(),
+        ),
+        Some("Outer"),
+    );
+    index.publish_declaration_header(
+        member,
+        header(
+            DeclarationKind::Function,
+            Some(outer),
+            DeclarationFlags::default(),
+        ),
+        Some("member"),
+    );
+
+    assert_eq!(index.owned_declarations(outer), &[member, companion]);
+    assert_eq!(index.owned_declarations(unrelated), &[]);
+    assert_eq!(index.companion_declaration(outer), Some(companion));
+    assert_eq!(index.companion_declaration(unrelated), None);
+}
+
+/// The sibling lookup (`owned_declaration`) reads the same owner table, so a constructor is found
+/// by `(owner, kind, sibling)` without a scan; a declaration interned late (a checked local
+/// declaration) joins its owner's list.
+#[test]
+fn owned_declaration_by_sibling_reads_the_owner_table() {
+    let source = SourceFileId::from_raw(0);
+    let mut declarations = DeclarationIds::default();
+    let outer = declarations.intern(anchor(source, 0, DeclarationKind::Classifier));
+    let primary = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(1, 2),
+        owner: Some(outer),
+        kind: DeclarationKind::Constructor,
+        sibling: 0,
+    });
+    let secondary = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(3, 4),
+        owner: Some(outer),
+        kind: DeclarationKind::Constructor,
+        sibling: 1,
+    });
+    let mut index = ResolvedModuleIndex::default();
+    index.publish_declarations(declarations);
+
+    assert_eq!(
+        index.owned_declaration(outer, DeclarationKind::Constructor, 0),
+        Some(primary)
+    );
+    assert_eq!(
+        index.owned_declaration(outer, DeclarationKind::Constructor, 1),
+        Some(secondary)
+    );
+    assert_eq!(
+        index.owned_declaration(outer, DeclarationKind::Constructor, 2),
+        None
+    );
+
+    let capture = index.intern_checked_local_declaration(
+        DeclarationAnchor {
+            source,
+            range: Span::new(3, 4),
+            owner: Some(outer),
+            kind: DeclarationKind::Property,
+            sibling: u32::MAX,
+        },
+        ResolvedDeclarationHeader {
+            kind: DeclarationKind::Property,
+            owner: Some(outer),
+            name: None,
+            visibility: Visibility::Private,
+            flags: DeclarationFlags::default().with(DeclarationFlags::LOCAL_CLASS, true),
+            initialization_order: None,
+        },
+        "captured",
+    );
+    assert_eq!(
+        index.owned_declarations(outer),
+        &[primary, secondary, capture]
+    );
+}
+
+/// Signature resolution asks for one stub by identity, and for the stubs a classifier owns, on
+/// every type reference it resolves. Both must be indexed: a scan of the whole stub inventory per
+/// reference made the pass quadratic in module size (a 16k-class module spent most of its build
+/// there).
+#[test]
+fn streamed_header_stubs_are_indexed_by_id_and_owner() {
+    let sources = [SourceInput::kotlin(
+        "class Outer {\n    class Nested\n    companion object { fun make() = 1 }\n}\nfun top() = 2\n",
+    )
+    .with_file_stem("Outer")];
+    let mut diagnostics = DiagSink::new();
+    let module = stream_file_stub_inventory(
+        &sources,
+        &LangFeatures::new(),
+        &mut diagnostics,
+        |_, _, _| {},
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+
+    for stub in &module.stubs {
+        assert_eq!(
+            module.stub(stub.id).map(|found| found.id),
+            Some(stub.id),
+            "every inventoried stub is reachable by id"
+        );
+    }
+    let absent = DeclarationId::from_raw(u32::try_from(module.declarations.len()).unwrap() + 7);
+    assert!(module.stub(absent).is_none());
+
+    let outer = module
+        .stubs
+        .iter()
+        .find(|stub| {
+            stub.kind == DeclarationKind::Classifier
+                && module.declarations.anchor(stub.id).unwrap().owner.is_none()
+        })
+        .expect("Outer stub")
+        .id;
+    let owned = module
+        .owned_stubs(outer)
+        .map(|stub| stub.kind)
+        .collect::<Vec<_>>();
+    let positions = module
+        .owned_stubs(outer)
+        .map(|stub| module.stubs.iter().position(|s| s.id == stub.id).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "owned stubs read in inventory order: {positions:?}"
+    );
+    assert_eq!(
+        owned
+            .iter()
+            .filter(|kind| **kind == DeclarationKind::Classifier)
+            .count(),
+        2,
+        "Nested and the companion are owned classifiers: {owned:?}"
+    );
+    assert!(
+        owned.contains(&DeclarationKind::Constructor),
+        "Outer's primary constructor is owned too: {owned:?}"
+    );
+    let top = module
+        .stubs
+        .iter()
+        .find(|stub| {
+            stub.kind == DeclarationKind::Function
+                && module.declarations.anchor(stub.id).unwrap().owner.is_none()
+        })
+        .expect("top-level function stub")
+        .id;
+    assert_eq!(module.owned_stubs(top).count(), 0);
+}
+
+/// Checked local signatures are published per body group, and each group asked the WHOLE
+/// declaration inventory which of its entries are local classes — linear in the module, once per
+/// body: quadratic. The index lists local-class declarations itself, in declaration-id order.
+#[test]
+fn local_class_declarations_are_listed_by_the_index() {
+    let source = SourceFileId::from_raw(0);
+    let mut declarations = DeclarationIds::default();
+    let function = declarations.intern(anchor(source, 0, DeclarationKind::Function));
+    let first_local = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(1, 2),
+        owner: Some(function),
+        kind: DeclarationKind::Classifier,
+        sibling: 0,
+    });
+    let second_local = declarations.intern(DeclarationAnchor {
+        source,
+        range: Span::new(3, 4),
+        owner: Some(function),
+        kind: DeclarationKind::Classifier,
+        sibling: 1,
+    });
+    let header = |kind, owner, local| ResolvedDeclarationHeader {
+        kind,
+        owner,
+        name: None,
+        visibility: Visibility::Public,
+        flags: DeclarationFlags::default().with(DeclarationFlags::LOCAL_CLASS, local),
+        initialization_order: None,
+    };
+    let mut index = ResolvedModuleIndex::default();
+    index.publish_declarations(declarations);
+    assert_eq!(index.local_class_declarations(), &[]);
+    // Out of id order: the list is by identity, not by publication.
+    index.publish_declaration_header(
+        second_local,
+        header(DeclarationKind::Classifier, Some(function), true),
+        Some("Second"),
+    );
+    index.publish_declaration_header(
+        function,
+        header(DeclarationKind::Function, None, false),
+        Some("f"),
+    );
+    index.publish_declaration_header(
+        first_local,
+        header(DeclarationKind::Classifier, Some(function), true),
+        Some("First"),
+    );
+    assert_eq!(
+        index.local_class_declarations(),
+        &[first_local, second_local]
+    );
+}

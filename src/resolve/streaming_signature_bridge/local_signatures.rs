@@ -604,9 +604,11 @@ fn publish_checked_local_signatures_selected(
         true
     }
 
-    let local_declarations = (0..index.declaration_count())
-        .filter_map(|raw| {
-            let declaration = DeclarationId::from_raw(raw as u32);
+    let local_declarations = index
+        .local_class_declarations()
+        .iter()
+        .copied()
+        .filter_map(|declaration| {
             let header = index.declaration_header(declaration)?;
             let selected_owner = match (inline_owners, exact_declarations) {
                 (None, None) => true,
@@ -642,7 +644,6 @@ fn publish_checked_local_signatures_selected(
             });
             (selected_owner
                 && selected_active
-                && header.flags.has(DeclarationFlags::LOCAL_CLASS)
                 && index
                     .declaration_anchor(declaration)
                     .is_some_and(|anchor| anchor.source == source))

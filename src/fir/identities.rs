@@ -116,6 +116,10 @@ pub struct DeclarationIds {
     /// Same-pass coordinates parallel to `anchors`. Finalization clears this vector and the
     /// coordinate-keyed map before constructing the production Pass-2 state.
     ranges: Vec<TextRange>,
+    /// Declarations anchored under each owner, in declaration-id order. Owner-scoped lookups
+    /// (a class's constructors by sibling ordinal) read this instead of scanning the inventory:
+    /// a scan is linear in the MODULE, and it is asked once per class, so it was quadratic.
+    owned: HashMap<DeclarationId, Vec<DeclarationId>>,
 }
 
 impl DeclarationIds {
@@ -131,7 +135,19 @@ impl DeclarationIds {
         self.anchors.push(anchor.into());
         self.ranges.push(anchor.range);
         self.by_anchor.insert(anchor, id);
+        if let Some(owner) = anchor.owner {
+            // Ids are allocated in increasing order, so pushing keeps each list id-ordered.
+            self.owned.entry(owner).or_default().push(id);
+        }
         id
+    }
+
+    /// Every declaration whose anchor names `owner`, in declaration-id order.
+    pub fn owned(&self, owner: DeclarationId) -> &[DeclarationId] {
+        self.owned
+            .get(&owner)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     pub fn anchor(&self, id: DeclarationId) -> Option<DeclarationAnchor> {
@@ -181,5 +197,12 @@ impl DeclarationIds {
             + self.ranges.len() * std::mem::size_of::<TextRange>()
             + self.by_anchor.len()
                 * (std::mem::size_of::<DeclarationAnchor>() + std::mem::size_of::<DeclarationId>())
+            + self.owned.len()
+                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Vec<DeclarationId>>())
+            + self
+                .owned
+                .values()
+                .map(|owned| owned.len() * std::mem::size_of::<DeclarationId>())
+                .sum::<usize>()
     }
 }
