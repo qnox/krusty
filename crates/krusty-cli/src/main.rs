@@ -157,6 +157,11 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         sources.push(src);
     }
 
+    // Say so BEFORE an entry is silently dropped by the reader: a missing or unopenable jar
+    // otherwise surfaces only as unresolved references with nothing pointing at the jar.
+    for problem in cli::classpath_entry_problems(&opts.classpath) {
+        eprintln!("{problem}");
+    }
     let effective_classpath = opts
         .effective_classpath()
         .map_err(|error| format!("krusty: {error}\n"))?;
