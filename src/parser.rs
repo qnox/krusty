@@ -11,6 +11,7 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod declaration_stream;
+mod incdec;
 mod lexical_type_parameters;
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use lexical_type_parameters::LexicalTypeParameters;
@@ -5846,18 +5847,6 @@ impl<'a> Parser<'a> {
         self.file.add_expr(e, span)
     }
 
-    /// Desugar `name++`/`name--`/`++name`/`--name` (statement) to `name = name ± 1`.
-    fn parse_incdec(
-        &mut self,
-        name: String,
-        dec: bool,
-        prefix: bool,
-        start: Span,
-        target: Span,
-    ) -> StmtId {
-        self.finish_assignment_stmt(Stmt::IncDec { name, dec, prefix }, start, target)
-    }
-
     /// Expand a member/index increment into an `Expr::Block`, letting it retain its value in an
     /// initializer, argument, return, or larger expression. Receiver and index operands are saved
     /// left-to-right before the read, so calls and custom access paths are evaluated exactly once.
@@ -5871,6 +5860,11 @@ impl<'a> Parser<'a> {
         start: Span,
     ) -> ExprId {
         let target_span = self.assignment_target_span(target);
+        if let Some(guarded) =
+            self.safe_incdec_access_value_expr(e, target, dec, prefix, start, target_span)
+        {
+            return guarded;
+        }
         let Some((operands, target_read, target_write)) =
             self.share_incdec_access_target(target, target_span)
         else {
@@ -5954,34 +5948,6 @@ impl<'a> Parser<'a> {
         );
         self.file.incdec_access_operands.insert(block, operands);
         block
-    }
-
-    /// Drop the saved old/new result from a generated access increment whose value is discarded by
-    /// its enclosing statement. The receiver/index spill, canonical `Stmt::IncDec`, and write-back
-    /// remain, so statement form still evaluates access operands once and validates the operator
-    /// convention without introducing a dead result local into later lowering passes.
-    fn discard_incdec_access_value(&mut self, expression: ExprId) -> bool {
-        if !self.file.incdec_access_operands.contains_key(&expression) {
-            return false;
-        }
-        let original = match self.file.expr(expression) {
-            Expr::Block { stmts, .. } => stmts.iter().position(|&statement| {
-                matches!(
-                    self.file.stmt(statement),
-                    Stmt::Local { name, .. } if name == "$$incDecOriginal"
-                )
-            }),
-            _ => return false,
-        };
-        let Expr::Block { stmts, trailing } = &mut self.file.expr_arena[expression.0 as usize]
-        else {
-            return false;
-        };
-        if let Some(original) = original {
-            stmts.remove(original);
-        }
-        *trailing = None;
-        true
     }
 
     /// Share the receiver/index expression IDs between the read and write halves of a value-producing
