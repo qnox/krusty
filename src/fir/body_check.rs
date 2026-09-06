@@ -82,24 +82,24 @@ use super::coverage::{ExpressionForm, StatementForm};
 use super::{
     dispatch_checked_body, ActiveSourceDeclarations, BodyKind, BodyLocalCallableDeclarationId,
     BodyOwnerId, BodyWorkItem, CheckedBodySink, ClassBodyContext, ClassCaptureBinding,
-    ClassReceiverCaptureSource, ControlTargetId, DeclarationId, DeclarationKind,
-    DefaultArgumentProvider, DelegateStorage, ExternalCallableId, FirAdaptedReferenceArgument,
-    FirAnnotationConstruction, FirAnnotationDefaultValue, FirAnonymousObject, FirArrayElement,
-    FirBinaryOperation, FirBody, FirBuiltinIterableKind, FirCall, FirCallArgument, FirCallTarget,
-    FirCallableReferenceBinding, FirCallableReferenceTarget, FirCapture, FirCatch,
-    FirClassifierProperty, FirConstant, FirConstructorCall, FirConstructorCaptureArgument,
-    FirConstructorTarget, FirControlTarget, FirControlTargetKind, FirConversion, FirConversionKind,
-    FirConvertedValue, FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver,
-    FirDestructureEntry, FirExpr, FirExprId, FirExprKind, FirExpressionDebugLines,
-    FirImplicitReceiverCapture, FirIndexedAccessKind, FirInterfaceDelegateArgument, FirIntrinsic,
-    FirJumpKind, FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource,
-    FirLoopHeader, FirPlatformNarrowing, FirPluginOperand, FirPropertyDelegatePlan,
-    FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation, FirReceiver,
-    FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId, FirStatementKind,
-    FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution, FirUnaryOperation,
-    FirValueParameter, FirVarargElement, FirWhenBranch, FirWhenCondition, InlineBodyStore,
-    LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore,
-    PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
+    ClassCaptureIdentity, ClassReceiverCaptureSource, ControlTargetId, DeclarationId,
+    DeclarationKind, DefaultArgumentProvider, DelegateStorage, ExternalCallableId,
+    FirAdaptedReferenceArgument, FirAnnotationConstruction, FirAnnotationDefaultValue,
+    FirAnonymousObject, FirArrayElement, FirBinaryOperation, FirBody, FirBuiltinIterableKind,
+    FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
+    FirCallableReferenceTarget, FirCapture, FirCatch, FirClassifierProperty, FirConstant,
+    FirConstructorCall, FirConstructorCaptureArgument, FirConstructorTarget, FirControlTarget,
+    FirControlTargetKind, FirConversion, FirConversionKind, FirConvertedValue, FirDefaultValue,
+    FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr, FirExprId,
+    FirExprKind, FirExpressionDebugLines, FirImplicitReceiverCapture, FirIndexedAccessKind,
+    FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind, FirLocalCallableRef,
+    FirLocalClassCapture, FirLocalClassCaptureSource, FirLoopHeader, FirPlatformNarrowing,
+    FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget,
+    FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement,
+    FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
+    FirUnaryOperation, FirValueParameter, FirVarargElement, FirWhenBranch, FirWhenCondition,
+    InlineBodyStore, LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId,
+    OriginStore, PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
     SyntheticOriginKind, UnpublishableType,
 };
 
@@ -491,6 +491,7 @@ struct BodyFirChecker<'a> {
     outer_values: HashMap<String, (u32, LocalBinding)>,
     outer_delegates: HashMap<String, (u32, LocalDelegateBinding)>,
     class_values: HashMap<String, ClassCaptureBinding>,
+    class_capture_values: Vec<(String, ClassCaptureBinding)>,
     class_delegates: HashMap<String, LocalDelegateBinding>,
     class_receivers: Vec<ClassCaptureBinding>,
     /// Stable property whose accessor lexically contains this body, propagated through local-class
@@ -930,6 +931,20 @@ impl BodyFirChecker<'_> {
                             ..*binding
                         });
                 }
+                class_context
+                    .capture_values
+                    .extend(outer.capture_values.iter().map(|(name, binding)| {
+                        (
+                            name.clone(),
+                            ClassCaptureBinding {
+                                enclosing_depth: binding
+                                    .enclosing_depth
+                                    .checked_add(enclosing_depth)
+                                    .expect("too many enclosing local classifiers"),
+                                ..*binding
+                            },
+                        )
+                    }));
                 for (statement, (depth, callable)) in &outer.callables {
                     class_context.callables.entry(*statement).or_insert((
                         depth
@@ -984,6 +999,7 @@ impl BodyFirChecker<'_> {
             outer_values: HashMap::new(),
             outer_delegates: HashMap::new(),
             class_values: class_context.values,
+            class_capture_values: class_context.capture_values,
             class_delegates: class_context.delegates,
             class_receivers: class_context.receivers,
             enclosing_property,

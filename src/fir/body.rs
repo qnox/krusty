@@ -524,6 +524,16 @@ pub(crate) struct ClassCaptureBinding {
     /// captured receiver. `None` for ordinary captured values/delegates.
     pub(crate) semantic_receiver_depth: Option<u32>,
     pub(crate) receiver_source: Option<ClassReceiverCaptureSource>,
+    /// Original classifier field whose closure value this field forwards. A directly captured
+    /// value has its own `(owner, field)` identity; a transitive recapture preserves the upstream
+    /// identity so independently streamed members never join closure operands by source spelling.
+    pub(crate) capture_identity: Option<ClassCaptureIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ClassCaptureIdentity {
+    pub(crate) owner: TypeName,
+    pub(crate) field: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -539,6 +549,10 @@ pub(crate) struct ClassReceiverCaptureSource {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ClassBodyContext {
     pub(crate) values: HashMap<String, ClassCaptureBinding>,
+    /// Every captured value keyed by semantic closure identity. `values` is only the nearest
+    /// source-name view used for ordinary reads; two forwarded closures may legitimately capture
+    /// different shadowed bindings with the same spelling.
+    pub(crate) capture_values: Vec<(String, ClassCaptureBinding)>,
     pub(crate) delegates: HashMap<String, LocalDelegateBinding>,
     pub(crate) callables: HashMap<BodyLocalCallableDeclarationId, (u32, LocalCallableId)>,
     pub(crate) receivers: Vec<ClassCaptureBinding>,
@@ -546,8 +560,14 @@ pub(crate) struct ClassBodyContext {
 }
 
 impl ClassBodyContext {
+    pub(crate) fn record_value(&mut self, name: String, binding: ClassCaptureBinding) {
+        self.capture_values.push((name.clone(), binding));
+        self.values.insert(name, binding);
+    }
+
     pub(crate) fn merge(&mut self, context: Self) {
         self.values.extend(context.values);
+        self.capture_values.extend(context.capture_values);
         self.delegates.extend(context.delegates);
         self.callables.extend(context.callables);
         self.receivers.extend(context.receivers);
@@ -3083,6 +3103,14 @@ impl FirBody {
                     context.values.len()
                         * (std::mem::size_of::<String>()
                             + std::mem::size_of::<ClassCaptureBinding>())
+                        + context.capture_values.len()
+                            * (std::mem::size_of::<String>()
+                                + std::mem::size_of::<ClassCaptureBinding>())
+                        + context
+                            .capture_values
+                            .iter()
+                            .map(|(name, _)| name.capacity())
+                            .sum::<usize>()
                         + context.delegates.len()
                             * (std::mem::size_of::<String>()
                                 + std::mem::size_of::<LocalDelegateBinding>())
