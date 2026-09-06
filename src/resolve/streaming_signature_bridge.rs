@@ -176,13 +176,13 @@ impl ProductionSignatureSemantics<'_> {
         else {
             return Ok(None);
         };
-        let primary = self.headers.stubs.iter().find(|stub| {
+        let primary = self.headers.owned_stubs(owner).find(|stub| {
             stub.kind == crate::fir::DeclarationKind::Constructor
                 && self
                     .headers
                     .declarations
                     .anchor(stub.id)
-                    .is_some_and(|anchor| anchor.owner == Some(owner) && anchor.sibling == 0)
+                    .is_some_and(|anchor| anchor.sibling == 0)
         });
         if let Some(primary) = primary {
             let signature = demand(primary.id)?;
@@ -205,10 +205,8 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
     ) -> Option<crate::fir::DeclarationId> {
         let entry = self.enclosing_enum_entry(scope)?;
-        self.headers.stubs.iter().find_map(|stub| {
-            let anchor = self.headers.declarations.anchor(stub.id)?;
+        self.headers.owned_stubs(entry).find_map(|stub| {
             (stub.kind == crate::fir::DeclarationKind::Property
-                && anchor.owner == Some(entry)
                 && stub
                     .lookup_name
                     .and_then(|name| self.headers.lookup_names.get(name))
@@ -264,7 +262,7 @@ impl ProductionSignatureSemantics<'_> {
         label: &str,
     ) -> Option<Ty> {
         let entry = self.enclosing_enum_entry(scope)?;
-        let stub = self.headers.stubs.iter().find(|stub| stub.id == entry)?;
+        let stub = self.headers.stub(entry)?;
         if stub
             .lookup_name
             .and_then(|name| self.headers.lookup_names.get(name))
@@ -343,31 +341,8 @@ impl ProductionSignatureSemantics<'_> {
     }
 
     fn callable_signature(&self, declaration: crate::fir::DeclarationId) -> Option<&Signature> {
-        self.table
-            .funs
-            .values()
-            .flatten()
-            .chain(
-                self.table
-                    .ext_funs
-                    .values()
-                    .flat_map(HashMap::values)
-                    .flatten(),
-            )
-            .chain(
-                self.table
-                    .classes
-                    .values()
-                    .flat_map(|class| class.methods.values().flatten()),
-            )
-            .chain(
-                self.table
-                    .classes
-                    .values()
-                    .flat_map(|class| class.member_ext_funs.values().flatten())
-                    .map(|function| function.signature()),
-            )
-            .find(|signature| signature.stable_declaration == Some(declaration))
+        stable_function_signature(self.table, self.headers, self.classifier_types, declaration)
+            .map(|(signature, _)| signature)
     }
 
     fn declaration_extension_receiver(&self, declaration: crate::fir::DeclarationId) -> Option<Ty> {
@@ -515,12 +490,7 @@ impl ProductionSignatureSemantics<'_> {
         {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
-        let Some(stub) = self
-            .headers
-            .stubs
-            .iter()
-            .find(|stub| stub.id == declaration)
-        else {
+        let Some(stub) = self.headers.stub(declaration) else {
             return Self::failure();
         };
         let span = self
@@ -552,12 +522,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> crate::fir::DiagnosticId {
-        let Some(stub) = self
-            .headers
-            .stubs
-            .iter()
-            .find(|stub| stub.id == declaration)
-        else {
+        let Some(stub) = self.headers.stub(declaration) else {
             return Self::failure();
         };
         if stub.kind != crate::fir::DeclarationKind::Property {
@@ -583,7 +548,7 @@ impl ProductionSignatureSemantics<'_> {
         target: crate::fir::DeclarationId,
         origin: crate::fir::OriginId,
     ) -> crate::fir::DiagnosticId {
-        let Some(stub) = self.headers.stubs.iter().find(|stub| stub.id == target) else {
+        let Some(stub) = self.headers.stub(target) else {
             return Self::failure();
         };
         let spelling = stub
@@ -628,9 +593,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> crate::fir::DiagnosticId {
         let fallback = self
             .headers
-            .stubs
-            .iter()
-            .find(|stub| stub.id == declaration)
+            .stub(declaration)
             .map(|stub| (stub.source.raw(), stub.range));
         let location = match self.headers.signature_origins.get(origin) {
             Some(crate::fir::Origin::Source { file, span }) => Some((file.raw(), span)),
@@ -1961,12 +1924,8 @@ impl ProductionSignatureSemantics<'_> {
             return Ok(None);
         };
         if let Some(from) = from {
-            let source_stub = self.headers.stubs.iter().find(|stub| stub.id == from.owner);
-            let target_stub = self
-                .headers
-                .stubs
-                .iter()
-                .find(|stub| stub.id == declaration);
+            let source_stub = self.headers.stub(from.owner);
+            let target_stub = self.headers.stub(declaration);
             let eager_forward_reference =
                 source_stub
                     .zip(target_stub)
@@ -2085,9 +2044,8 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(declaration) = property.stable_declaration {
                 if self
                     .headers
-                    .stubs
-                    .iter()
-                    .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                    .stub(declaration)
+                    .is_some_and(|stub| stub.signature_inference.is_some())
                 {
                     let result = self
                         .apply_dispatch_owner(
@@ -2175,11 +2133,7 @@ impl ProductionSignatureSemantics<'_> {
             .map(crate::libraries::SourceMember::file)
             .or_else(|| {
                 member.stable_declaration.and_then(|declaration| {
-                    self.headers
-                        .stubs
-                        .iter()
-                        .find(|stub| stub.id == declaration)
-                        .map(|stub| stub.source.raw())
+                    self.headers.stub(declaration).map(|stub| stub.source.raw())
                 })
             })
             .unwrap_or(0);
@@ -2827,9 +2781,8 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(declaration) = member.stable_declaration {
             if self
                 .headers
-                .stubs
-                .iter()
-                .any(|stub| stub.id == declaration && stub.signature_inference.is_some())
+                .stub(declaration)
+                .is_some_and(|stub| stub.signature_inference.is_some())
             {
                 let signature = demand(declaration)?;
                 return self.apply_demanded_member(
@@ -3157,9 +3110,8 @@ impl ProductionSignatureSemantics<'_> {
                         // recover that lexical rung from source containment. Add only the nearest
                         // enclosing non-local classifier; its own nominal `inner_of` chain supplies
                         // any further visible outer instances.
-                        let is_local = self.headers.stubs.iter().any(|stub| {
-                            stub.id == owner
-                                && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                        let is_local = self.headers.stub(owner).is_some_and(|stub| {
+                            stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
                         });
                         if is_local {
                             let lexical = self.lexical_class_names(scope);
@@ -3178,11 +3130,9 @@ impl ProductionSignatureSemantics<'_> {
                                         .class_by_type_name(enclosing)
                                         .and_then(|classifier| classifier.stable_declaration)
                                         .is_some_and(|declaration| {
-                                            self.headers.stubs.iter().any(|stub| {
-                                                stub.id == declaration
-                                                    && stub.flags.has(
-                                                        crate::fir::DeclarationFlags::LOCAL_CLASS,
-                                                    )
+                                            self.headers.stub(declaration).is_some_and(|stub| {
+                                                stub.flags
+                                                    .has(crate::fir::DeclarationFlags::LOCAL_CLASS)
                                             })
                                         });
                                     if !enclosing_is_local {
@@ -3721,7 +3671,7 @@ pub(crate) fn install_streamed_anonymous_capture_declarations(
                 sibling,
             });
             let name = headers.lookup_names.intern(&capture.name);
-            headers.stubs.push(DeclarationStub {
+            headers.push_stub(DeclarationStub {
                 id: declaration,
                 source: crate::fir::SourceFileId::from_raw(source),
                 range: class.span,
@@ -3765,12 +3715,11 @@ pub(crate) fn install_streamed_plugin_declarations(
         (0..=u32::MAX)
             .rev()
             .find(|candidate| {
-                !headers.stubs.iter().any(|stub| {
-                    headers.declarations.anchor(stub.id).is_some_and(|anchor| {
-                        anchor.owner == Some(owner)
-                            && anchor.kind == kind
-                            && anchor.sibling == *candidate
-                    })
+                !headers.owned_stubs(owner).any(|stub| {
+                    headers
+                        .declarations
+                        .anchor(stub.id)
+                        .is_some_and(|anchor| anchor.kind == kind && anchor.sibling == *candidate)
                 })
             })
             .expect("a declaration owner exhausted its structural ordinals")
@@ -3823,11 +3772,12 @@ pub(crate) fn install_streamed_plugin_declarations(
                     kind: DeclarationKind::Classifier,
                     sibling: unused_sibling(headers, outer, DeclarationKind::Classifier),
                 });
-                headers.stubs.push(DeclarationStub {
+                let lookup_name = Some(headers.lookup_names.intern("Companion"));
+                headers.push_stub(DeclarationStub {
                     id: declaration,
                     source,
                     range,
-                    lookup_name: Some(headers.lookup_names.intern("Companion")),
+                    lookup_name,
                     body: None,
                     signature_inference: None,
                     initialization_order: None,
@@ -3845,7 +3795,7 @@ pub(crate) fn install_streamed_plugin_declarations(
                     kind: DeclarationKind::Constructor,
                     sibling: 0,
                 });
-                headers.stubs.push(DeclarationStub {
+                headers.push_stub(DeclarationStub {
                     id: constructor,
                     source,
                     range,
@@ -3921,11 +3871,12 @@ pub(crate) fn install_streamed_plugin_declarations(
                         .with(DeclarationFlags::COMPILER_GENERATED, true),
                 )
             };
-            headers.stubs.push(DeclarationStub {
+            let lookup_name = Some(headers.lookup_names.intern(&name));
+            headers.push_stub(DeclarationStub {
                 id: declaration,
                 source: owner_anchor.source,
                 range: owner_anchor.range,
-                lookup_name: Some(headers.lookup_names.intern(&name)),
+                lookup_name,
                 body: None,
                 signature_inference: None,
                 initialization_order: None,
@@ -3940,6 +3891,129 @@ pub(crate) fn install_streamed_plugin_declarations(
 pub(crate) struct StreamedSignatureIndex {
     pub(crate) index: crate::fir::ResolvedModuleIndex,
     pub(crate) failures: Vec<crate::fir::DeclarationId>,
+}
+
+/// The receiver a member extension's signature carries: its generic receiver when the signature
+/// is generic, else the declared receiver type.
+fn member_extension_receiver(function: &super::MemberExtFunSig) -> Ty {
+    function
+        .signature()
+        .generic_sig
+        .as_ref()
+        .and_then(|generic| generic.receiver)
+        .unwrap_or_else(|| function.receiver_ty())
+}
+
+/// The Pass-1 signature published for a stable FUNCTION declaration, with the receiver a member
+/// extension carries.
+///
+/// Narrowed by the declaration's spelling and owner — its class's method tables, or the
+/// top-level tables under its name — before the whole-table scan, which stays the fallback for
+/// what the narrowing cannot place (an enum-entry body member, a spelling the table keys
+/// differently). A declaration that can never own a `Signature` (a property, a classifier, …)
+/// answers `None` at once. The scan alone was linear in the module and asked once per type
+/// reference resolved, i.e. quadratic in module size.
+fn stable_function_signature<'a>(
+    table: &'a SymbolTable,
+    headers: &crate::fir::StreamedHeaderModule,
+    classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
+    declaration: crate::fir::DeclarationId,
+) -> Option<(&'a Signature, Option<Ty>)> {
+    use crate::fir::DeclarationKind;
+    let owns = |signature: &&Signature| signature.stable_declaration == Some(declaration);
+    let owns_member = |function: &&super::MemberExtFunSig| {
+        function.signature().stable_declaration == Some(declaration)
+    };
+    if let Some(stub) = headers.stub(declaration) {
+        match stub.kind {
+            DeclarationKind::Function => {}
+            // Not placed by the narrowing below; the scan decides.
+            DeclarationKind::Constructor | DeclarationKind::Accessor => {}
+            DeclarationKind::Property
+            | DeclarationKind::Classifier
+            | DeclarationKind::EnumEntry
+            | DeclarationKind::TypeAlias
+            | DeclarationKind::Initializer
+            | DeclarationKind::Script => return None,
+        }
+        if let Some(name) = stub
+            .lookup_name
+            .and_then(|name| headers.lookup_names.get(name))
+        {
+            let owner_class = headers
+                .declarations
+                .anchor(declaration)
+                .and_then(|anchor| anchor.owner)
+                .and_then(|owner| classifier_types.get(&owner))
+                .and_then(|classifier| table.class_by_type_name(*classifier));
+            match owner_class {
+                Some(class) => {
+                    if let Some(signature) =
+                        class.methods.get(name).into_iter().flatten().find(owns)
+                    {
+                        return Some((signature, signature.source_receiver));
+                    }
+                    if let Some(function) = class
+                        .member_ext_funs
+                        .get(name)
+                        .into_iter()
+                        .flatten()
+                        .find(owns_member)
+                    {
+                        return Some((
+                            function.signature(),
+                            Some(member_extension_receiver(function)),
+                        ));
+                    }
+                }
+                None => {
+                    if let Some(signature) = table
+                        .funs
+                        .get(name)
+                        .into_iter()
+                        .flatten()
+                        .chain(
+                            table
+                                .ext_funs
+                                .get(name)
+                                .into_iter()
+                                .flat_map(HashMap::values)
+                                .flatten(),
+                        )
+                        .find(owns)
+                    {
+                        return Some((signature, signature.source_receiver));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(signature) = table
+        .funs
+        .values()
+        .flatten()
+        .chain(table.ext_funs.values().flat_map(HashMap::values).flatten())
+        .chain(
+            table
+                .classes
+                .values()
+                .flat_map(|class| class.methods.values().flatten()),
+        )
+        .find(owns)
+    {
+        return Some((signature, signature.source_receiver));
+    }
+    table
+        .classes
+        .values()
+        .flat_map(|class| class.member_ext_funs.values().flatten())
+        .find(owns_member)
+        .map(|function| {
+            (
+                function.signature(),
+                Some(member_extension_receiver(function)),
+            )
+        })
 }
 
 pub(crate) fn finalized_streamed_signature_index(
@@ -4007,37 +4081,11 @@ pub(crate) fn finalized_streamed_signature_index(
 
     fn stable_function<'a>(
         table: &'a SymbolTable,
+        headers: &crate::fir::StreamedHeaderModule,
+        classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
         declaration: crate::fir::DeclarationId,
     ) -> Option<(&'a Signature, Option<Ty>)> {
-        if let Some(signature) = table
-            .funs
-            .values()
-            .flatten()
-            .chain(table.ext_funs.values().flat_map(HashMap::values).flatten())
-            .chain(
-                table
-                    .classes
-                    .values()
-                    .flat_map(|class| class.methods.values().flatten()),
-            )
-            .find(|signature| signature.stable_declaration == Some(declaration))
-        {
-            return Some((signature, signature.source_receiver));
-        }
-        table
-            .classes
-            .values()
-            .flat_map(|class| class.member_ext_funs.values().flatten())
-            .find(|function| function.signature().stable_declaration == Some(declaration))
-            .map(|function| {
-                let receiver = function
-                    .signature()
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|generic| generic.receiver)
-                    .unwrap_or_else(|| function.receiver_ty());
-                (function.signature(), Some(receiver))
-            })
+        stable_function_signature(table, headers, classifier_types, declaration)
     }
 
     fn stable_property(
@@ -4220,35 +4268,17 @@ pub(crate) fn finalized_streamed_signature_index(
 
     fn generated_function<'a>(
         table: &'a SymbolTable,
+        headers: &crate::fir::StreamedHeaderModule,
+        classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
         stub: &crate::fir::DeclarationStub,
     ) -> Option<(&'a Signature, Option<Ty>)> {
-        if let Some(signature) = table
-            .classes
-            .values()
-            .flat_map(|class| class.methods.values().flatten())
-            .find(|signature| signature.stable_declaration == Some(stub.id))
-        {
-            return Some((signature, signature.source_receiver));
-        }
-        table
-            .classes
-            .values()
-            .flat_map(|class| class.member_ext_funs.values().flatten())
-            .find(|function| function.signature().stable_declaration == Some(stub.id))
-            .map(|function| {
-                let receiver = function
-                    .signature()
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|generic| generic.receiver)
-                    .unwrap_or_else(|| function.receiver_ty());
-                (function.signature(), Some(receiver))
-            })
+        stable_function_signature(table, headers, classifier_types, stub.id)
     }
 
     fn generated_data_object_method_is_suppressed(
         headers: &crate::fir::StreamedHeaderModule,
         table: &SymbolTable,
+        classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
         stub: &crate::fir::DeclarationStub,
     ) -> bool {
         if stub.kind != crate::fir::DeclarationKind::Function
@@ -4272,14 +4302,14 @@ pub(crate) fn finalized_streamed_signature_index(
         else {
             return false;
         };
-        let Some(class) = table
-            .classes
-            .values()
-            .find(|class| class.stable_declaration == Some(owner))
+        let Some(class) = classifier_types
+            .get(&owner)
+            .and_then(|classifier| table.class_by_type_name(*classifier))
         else {
             return false;
         };
-        let Some((generated, _)) = generated_function(table, stub) else {
+        let Some((generated, _)) = generated_function(table, headers, classifier_types, stub)
+        else {
             return false;
         };
         let mut current = class.super_internal;
@@ -4334,7 +4364,9 @@ pub(crate) fn finalized_streamed_signature_index(
     let suppressed_generated_callables = headers
         .stubs
         .iter()
-        .filter(|stub| generated_data_object_method_is_suppressed(headers, table, stub))
+        .filter(|stub| {
+            generated_data_object_method_is_suppressed(headers, table, &classifier_types, stub)
+        })
         .map(|stub| stub.id)
         .collect::<HashSet<_>>();
     for class in table.classes.values_mut() {
@@ -4476,13 +4508,15 @@ pub(crate) fn finalized_streamed_signature_index(
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
         {
-            generated_function(table, stub).map(|(signature, receiver)| {
-                (
-                    semantic_parameters(signature),
-                    semantic_result(signature),
-                    receiver,
-                )
-            })
+            generated_function(table, headers, &classifier_types, stub).map(
+                |(signature, receiver)| {
+                    (
+                        semantic_parameters(signature),
+                        semantic_result(signature),
+                        receiver,
+                    )
+                },
+            )
         } else {
             match stub.kind {
                 DeclarationKind::Function => {
@@ -4496,13 +4530,15 @@ pub(crate) fn finalized_streamed_signature_index(
                     if enum_entry.is_some() {
                         compact_header_seed(headers, stub.id)
                     } else {
-                        stable_function(table, stub.id).map(|(signature, receiver)| {
-                            (
-                                semantic_parameters(signature),
-                                semantic_result(signature),
-                                receiver,
-                            )
-                        })
+                        stable_function(table, headers, &classifier_types, stub.id).map(
+                            |(signature, receiver)| {
+                                (
+                                    semantic_parameters(signature),
+                                    semantic_result(signature),
+                                    receiver,
+                                )
+                            },
+                        )
                     }
                 }
                 DeclarationKind::Property => {
@@ -4941,15 +4977,16 @@ pub(crate) fn finalized_streamed_signature_index(
         if inferred_parameters.contains_key(&constraint.declaration) {
             continue;
         }
-        let Some(stub) = headers.stubs.iter().find(|stub| {
-            stub.id == constraint.declaration
-                && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-        }) else {
+        let Some(stub) = headers
+            .stub(constraint.declaration)
+            .filter(|stub| stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS))
+        else {
             continue;
         };
         let parameters = match stub.kind {
             DeclarationKind::Function => {
-                stable_function(table, stub.id).map(|(signature, _)| semantic_parameters(signature))
+                stable_function(table, headers, &classifier_types, stub.id)
+                    .map(|(signature, _)| semantic_parameters(signature))
             }
             DeclarationKind::Property => {
                 stable_property(table, stub.id).map(|(parameters, _, _)| parameters)
@@ -5158,8 +5195,10 @@ pub(crate) fn finalized_streamed_signature_index(
                 .and_then(|name| headers.lookup_names.get(name)),
         );
         let annotations = match stub.kind {
-            DeclarationKind::Function => stable_function(table, stub.id)
-                .map(|(signature, _)| signature.annotations.as_slice()),
+            DeclarationKind::Function => {
+                stable_function(table, headers, &classifier_types, stub.id)
+                    .map(|(signature, _)| signature.annotations.as_slice())
+            }
             DeclarationKind::Property => stable_property_annotations(table, stub.id),
             DeclarationKind::Constructor => stable_constructor_annotations(table, stub.id),
             DeclarationKind::Classifier => table
@@ -5555,7 +5594,8 @@ pub(crate) fn finalized_streamed_signature_index(
             && headers.syntax.declaration(stub.id).is_none()
             && !suppressed_generated_callables.contains(&stub.id)
     }) {
-        let Some((signature, _)) = stable_function(table, stub.id) else {
+        let Some((signature, _)) = stable_function(table, headers, &classifier_types, stub.id)
+        else {
             stop_with_failure!(stub.id);
         };
         let Some(generic) = signature.generic_sig.as_ref() else {
@@ -5874,7 +5914,9 @@ pub(crate) fn finalized_streamed_signature_index(
                     .flags
                     .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
                 {
-                    let Some((signature, receiver)) = generated_function(table, stub) else {
+                    let Some((signature, receiver)) =
+                        generated_function(table, headers, &classifier_types, stub)
+                    else {
                         stop_with_failure!(stub.id);
                     };
                     let extension_receiver =
@@ -5996,8 +6038,8 @@ pub(crate) fn finalized_streamed_signature_index(
                     },
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE),
                 );
-                let stable_signature =
-                    stable_function(table, stub.id).map(|(signature, _)| signature);
+                let stable_signature = stable_function(table, headers, &classifier_types, stub.id)
+                    .map(|(signature, _)| signature);
                 let parameters = headers
                     .syntax
                     .parameters(parameters)
@@ -6220,7 +6262,9 @@ pub(crate) fn finalized_streamed_signature_index(
         if index.signature(stub.id).is_some() {
             continue;
         }
-        let Some((signature, receiver)) = stable_function(table, stub.id) else {
+        let Some((signature, receiver)) =
+            stable_function(table, headers, &classifier_types, stub.id)
+        else {
             continue;
         };
         let parameters = semantic_parameters(signature);

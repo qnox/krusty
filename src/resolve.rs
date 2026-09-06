@@ -1942,14 +1942,11 @@ fn streamed_declared_callable_order(
     headers: &crate::fir::StreamedHeaderModule,
     classifier: crate::fir::DeclarationId,
 ) -> Vec<String> {
-    let declarations = headers.stubs.iter().filter_map(|stub| {
-        (matches!(
+    let declarations = headers.owned_stubs(classifier).filter_map(|stub| {
+        matches!(
             stub.kind,
             crate::fir::DeclarationKind::Function | crate::fir::DeclarationKind::Property
-        ) && headers
-            .declarations
-            .stable_anchor(stub.id)
-            .is_some_and(|anchor| anchor.owner == Some(classifier)))
+        )
         .then(|| {
             headers
                 .lookup_names
@@ -1992,13 +1989,11 @@ fn compact_generated_member_declaration(
 ) -> Option<crate::fir::DeclarationId> {
     let headers = headers?;
     let owner = owner?;
-    headers.stubs.iter().find_map(|stub| {
-        let anchor = headers.declarations.stable_anchor(stub.id)?;
+    headers.owned_stubs(owner).find_map(|stub| {
         (stub.kind == crate::fir::DeclarationKind::Function
             && stub
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
-            && anchor.owner == Some(owner)
             && stub
                 .lookup_name
                 .and_then(|lookup| headers.lookup_names.get(lookup))
@@ -7404,7 +7399,7 @@ fn compact_declaration_lexical_class_names(
 
     let mut classes = Vec::new();
     for candidate in stable_chain {
-        let Some(stub) = headers.stubs.iter().find(|stub| stub.id == candidate) else {
+        let Some(stub) = headers.stub(candidate) else {
             continue;
         };
         let Some((_, internal)) = compact_classifier_identity(headers, stub) else {
@@ -8501,7 +8496,7 @@ fn collect_signatures_with_cp_impl(
                 let declaration = *headers
                     .source_declarations(crate::fir::SourceFileId::from_raw(i as u32))
                     .get(declaration_sibling)?;
-                headers.stubs.iter().find(|stub| stub.id == declaration)
+                headers.stub(declaration)
             });
             if compact_headers.is_some() && compact_declaration.is_none() {
                 continue;
@@ -17234,7 +17229,7 @@ fn streamed_function_conflict_display(
     declaration: crate::fir::DeclarationId,
     max_bytes: usize,
 ) -> Option<String> {
-    let stub = headers.stubs.iter().find(|stub| stub.id == declaration)?;
+    let stub = headers.stub(declaration)?;
     let header = streamed_callable_header_by_declaration(headers, declaration)?;
     let name = headers.lookup_names.get(stub.lookup_name?)?;
     let mut bounds = header.bounds.iter().peekable();
@@ -68269,13 +68264,13 @@ impl<'a> Checker<'a> {
             .and_then(|index| {
                 let owner = index.classifier_declaration(owner)?;
                 Some(
-                    (0..index.declaration_count())
-                        .filter_map(|raw| {
-                            let declaration =
-                                crate::fir::DeclarationId::from_raw(u32::try_from(raw).ok()?);
+                    index
+                        .owned_declarations(owner)
+                        .iter()
+                        .filter_map(|declaration| {
+                            let declaration = *declaration;
                             let header = index.declaration_header(declaration)?;
-                            (header.owner == Some(owner)
-                                && header.kind == crate::fir::DeclarationKind::Property
+                            (header.kind == crate::fir::DeclarationKind::Property
                                 && header
                                     .flags
                                     .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER))

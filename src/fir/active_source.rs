@@ -1094,6 +1094,29 @@ fn bind_retained_parser_declarations(
     selected: &std::collections::HashSet<DeclarationId>,
 ) -> Result<Vec<Option<DeclarationId>>, ActiveSourceBindingError> {
     let mut parser_to_stable = vec![None; parser_ids.len()];
+    // Selected stable declarations of this source, bucketed by the structural key a parser stub
+    // matches on. A file of a few thousand declarations matched each stub against every stable
+    // candidate, and asked the whole binding vector whether each was already bound — cubic in
+    // the file. The buckets and the bound set make each stub's search proportional to its
+    // structural siblings.
+    let mut structural: std::collections::HashMap<(DeclarationKind, u32), Vec<DeclarationId>> =
+        std::collections::HashMap::new();
+    for candidate in stable.iter().copied() {
+        if !selected.contains(&candidate) {
+            continue;
+        }
+        let Some(anchor) = index.declaration_anchor(candidate) else {
+            continue;
+        };
+        if anchor.source != source {
+            continue;
+        }
+        structural
+            .entry((anchor.kind, anchor.sibling))
+            .or_default()
+            .push(candidate);
+    }
+    let mut bound = std::collections::HashSet::new();
     loop {
         let before = parser_to_stable.iter().flatten().count();
         for parser in parser_stubs {
@@ -1111,24 +1134,17 @@ fn bind_retained_parser_declarations(
                     .and_then(|owner| owner.map(Some)),
             };
             let parser_name = parser.lookup_name.and_then(|name| parser_names.get(name));
-            let mut matches = stable.iter().copied().filter(|candidate| {
-                if !selected.contains(candidate)
-                    || parser_to_stable
-                        .iter()
-                        .flatten()
-                        .any(|bound| bound == candidate)
-                {
+            let candidates = structural
+                .get(&(parser_anchor.kind, parser_anchor.sibling))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let mut matches = candidates.iter().copied().filter(|candidate| {
+                if bound.contains(candidate) {
                     return false;
                 }
                 let Some(anchor) = index.declaration_anchor(*candidate) else {
                     return false;
                 };
-                if anchor.source != source
-                    || anchor.kind != parser_anchor.kind
-                    || anchor.sibling != parser_anchor.sibling
-                {
-                    return false;
-                }
                 let header = index.declaration_header(*candidate);
                 let local_classifier = header.is_some_and(|header| {
                     header.kind == DeclarationKind::Classifier
@@ -1160,20 +1176,21 @@ fn bind_retained_parser_declarations(
                 continue;
             }
             parser_to_stable[raw] = Some(candidate);
+            bound.insert(candidate);
         }
         bind_auxiliary_parser_declarations(source, index, parser_ids, &mut parser_to_stable);
+        // The auxiliary pass binds through the vector directly; fold its additions into the set.
+        bound.extend(parser_to_stable.iter().flatten().copied());
         if parser_to_stable.iter().flatten().count() == before {
             break;
         }
     }
 
-    if let Some(missing) = stable.iter().copied().find(|candidate| {
-        selected.contains(candidate)
-            && !parser_to_stable
-                .iter()
-                .flatten()
-                .any(|bound| bound == candidate)
-    }) {
+    if let Some(missing) = stable
+        .iter()
+        .copied()
+        .find(|candidate| selected.contains(candidate) && !bound.contains(candidate))
+    {
         crate::trace_compiler!(
             "fir",
             "retained fragment has no structural parser declaration stable={missing:?} anchor={:?} name={:?}",
