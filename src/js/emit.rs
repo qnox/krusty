@@ -342,7 +342,6 @@ fn emit_constructor_args_with_defaults(
         .collect::<Vec<_>>()
         .join(", ")
 }
-
 fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
     match node {
         IrExpr::Const(c) => match c {
