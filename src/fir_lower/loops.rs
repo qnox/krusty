@@ -490,6 +490,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::MissingCallable(*target)),
             crate::fir::FirCallTarget::External {
                 declaration,
+                default_provider,
                 receiver,
                 declared_receiver,
                 parameters,
@@ -500,22 +501,23 @@ impl BodyLowering<'_> {
                 inline_plan,
                 extension_receiver_parameter,
             } => self
-                .external_call(
-                    *declaration,
-                    *receiver,
-                    *declared_receiver,
+                .external_call(super::source_calls::ExternalCallRequest {
+                    target: *declaration,
+                    default_provider: *default_provider,
+                    receiver_ty: *receiver,
+                    declared_receiver: *declared_receiver,
                     parameters,
-                    *result,
-                    *declared_result,
-                    *suspend,
-                    *can_inline,
-                    inline_plan.as_deref(),
-                    &[],
-                    *extension_receiver_parameter,
+                    result: *result,
+                    declared_result: *declared_result,
+                    suspend: *suspend,
+                    can_inline: *can_inline,
+                    inline_plan: inline_plan.as_deref(),
+                    substitutions: &[],
+                    extension_receiver_parameter: *extension_receiver_parameter,
                     dispatch_receiver,
                     extension_receiver,
-                    &arguments,
-                )
+                    arguments: &arguments,
+                })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration)),
             crate::fir::FirCallTarget::Intrinsic {
                 operation,

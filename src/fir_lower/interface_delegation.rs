@@ -392,6 +392,7 @@ fn delegated_call(
         ResolvedDelegatedCallTarget::External(target) => (
             Callee::External {
                 target: *target,
+                default_provider: None,
                 params: semantic_parameters.clone(),
                 ret: call.result.get(),
                 substitutions: Vec::new(),

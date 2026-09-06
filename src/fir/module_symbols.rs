@@ -483,6 +483,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let declared_params = Some(parameters.clone().into_boxed_slice());
         LibraryCallable {
             external_identity: None,
+            external_default_provider: None,
             external_property_identity: None,
             owner: TypeName::ROOT,
             name: name.to_owned(),

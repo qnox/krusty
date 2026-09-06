@@ -649,6 +649,48 @@ fn a_krusty_disable_consumer_uses_the_enable_dependency_defaults() {
     let _ = std::fs::remove_dir_all(work);
 }
 
+#[test]
+fn delegated_dependency_member_uses_the_sibling_interface_default() {
+    let work = common::scratch_dir().expect("allocate delegated-default fixture");
+    let library = work.join("library");
+    let application = work.join("application");
+    compile_module_to(
+        JvmDefaultMode::Enable,
+        r#"package dep
+            interface Body {
+                fun run(value: String): String = value
+            }
+            interface Contract {
+                fun run(value: String = "OK"): String
+            }
+            class Combined(body: Body) : Body by body, Contract
+        "#,
+        "Library",
+        &library,
+        None,
+    );
+    compile_module_to(
+        JvmDefaultMode::Enable,
+        r#"package app
+            import dep.Body
+            import dep.Combined
+            class Implementation : Body
+            fun box(): String = Combined(Implementation()).run()
+        "#,
+        "Application",
+        &application,
+        Some(&library),
+    );
+    let mut classes = Vec::new();
+    collect_classes(&library, &library, &mut classes);
+    collect_classes(&application, &application, &mut classes);
+    let box_class = common::find_box_class(&classes).expect("delegated-default box class");
+    let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+        .expect("JVM unavailable for delegated-default test");
+    assert_eq!(result, "OK");
+    let _ = std::fs::remove_dir_all(work);
+}
+
 /// The mode intellij-community builds with (`-Xjvm-default=all`). kotlinc emits NO `$DefaultImpls`
 /// at all — a build that links against these classes would resolve a holder that should not exist.
 #[test]

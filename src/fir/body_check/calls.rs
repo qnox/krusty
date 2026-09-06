@@ -1215,6 +1215,7 @@ impl BodyFirChecker<'_> {
                         declaration: selected.member.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        default_provider: selected.member.external_default_provider,
                         receiver: Some(resolved(selected.receiver)?),
                         declared_receiver: None,
                         parameters: selected
@@ -1279,6 +1280,7 @@ impl BodyFirChecker<'_> {
                         declaration: selected.callable.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        default_provider: selected.callable.external_default_provider,
                         receiver: Some(resolved(selected.receiver)?),
                         declared_receiver: selected
                             .callable
@@ -1332,6 +1334,7 @@ impl BodyFirChecker<'_> {
             Some(ResolvedCall::MemberExtension {
                 stable_declaration,
                 external_identity,
+                external_default_provider,
                 dispatch_receiver,
                 extension_receiver,
                 params,
@@ -1370,6 +1373,7 @@ impl BodyFirChecker<'_> {
                         declaration: external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
                         parameters: target_parameters
@@ -1494,7 +1498,7 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::MissingStableCallTarget,
             )
         })?;
-        self.external_call_target_with_identity(
+        let (mut target, substitutions) = self.external_call_target_with_identity(
             expression,
             ExternalCallTarget {
                 declaration,
@@ -1508,7 +1512,15 @@ impl BodyFirChecker<'_> {
                 inline_plan: callable.inline_body_plan.as_deref(),
                 inline_receiver_parameter,
             },
-        )
+        )?;
+        let FirCallTarget::External {
+            default_provider, ..
+        } = &mut target
+        else {
+            unreachable!("external target builder must produce an external call")
+        };
+        *default_provider = callable.external_default_provider;
+        Ok((target, substitutions))
     }
 
     /// Publish one already-selected member-extension call without branching on provider origin in
@@ -1522,6 +1534,7 @@ impl BodyFirChecker<'_> {
         let ResolvedCall::MemberExtension {
             stable_declaration,
             external_identity,
+            external_default_provider,
             owner,
             name,
             dispatch_receiver,
@@ -1629,12 +1642,14 @@ impl BodyFirChecker<'_> {
             )
         })?;
         let FirCallTarget::External {
+            default_provider,
             extension_receiver_parameter,
             ..
         } = &mut target
         else {
             unreachable!("an external member extension must produce an external FIR target")
         };
+        *default_provider = *external_default_provider;
         *extension_receiver_parameter = Some(extension_parameter);
         Ok(MemberExtensionFirTarget {
             target,
@@ -1744,6 +1759,7 @@ impl BodyFirChecker<'_> {
         Ok((
             FirCallTarget::External {
                 declaration,
+                default_provider: None,
                 receiver: receiver.map(resolved).transpose()?,
                 declared_receiver: declared_receiver.map(resolved).transpose()?,
                 parameters: parameters.clone().into_boxed_slice(),
@@ -2365,7 +2381,7 @@ impl BodyFirChecker<'_> {
             selected.member.params,
             selected.ret,
         );
-        self.external_call_target_with_identity(
+        let (mut target, substitutions) = self.external_call_target_with_identity(
             expression,
             ExternalCallTarget {
                 declaration,
@@ -2379,7 +2395,15 @@ impl BodyFirChecker<'_> {
                 inline_plan: selected.member.inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
             },
-        )
+        )?;
+        let FirCallTarget::External {
+            default_provider, ..
+        } = &mut target
+        else {
+            unreachable!("external member builder must produce an external call")
+        };
+        *default_provider = selected.member.external_default_provider;
+        Ok((target, substitutions))
     }
 
     pub(super) fn source_member_operator_call(

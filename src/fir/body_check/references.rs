@@ -106,6 +106,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_external(
                     expression,
                     reference.target.external_identity,
+                    reference.target.external_default_provider,
                     reference.target.compiler_intrinsic,
                     None,
                     false,
@@ -217,6 +218,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_external(
                     expression,
                     target.external_identity,
+                    target.external_default_provider,
                     target.compiler_intrinsic,
                     None,
                     false,
@@ -615,6 +617,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         member.external_identity,
+                        member.external_default_provider,
                         None,
                         Some(receiver_ty),
                         false,
@@ -672,6 +675,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         callable.external_identity,
+                        callable.external_default_provider,
                         callable.compiler_intrinsic,
                         receiver_ty,
                         extension_target,
@@ -738,6 +742,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         member.external_identity,
+                        member.external_default_provider,
                         None,
                         None,
                         false,
@@ -987,6 +992,7 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         declaration: Option<ExternalCallableId>,
+        default_provider: Option<ExternalCallableId>,
         compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
         receiver: Option<Ty>,
         extension_receiver_target: bool,
@@ -1070,6 +1076,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::CallableReference {
             target: FirCallableReferenceTarget::External {
                 declaration,
+                default_provider,
                 receiver: receiver.map(resolved).transpose()?,
                 extension_receiver: extension_receiver_target,
                 parameters: parameters.into_boxed_slice(),

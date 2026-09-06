@@ -49,6 +49,24 @@ pub(super) struct SelectedOperandRequest<'a> {
     pub(super) mode: SelectedOperandMode,
 }
 
+pub(super) struct ExternalCallRequest<'a> {
+    pub(super) target: ExternalCallableId,
+    pub(super) default_provider: Option<ExternalCallableId>,
+    pub(super) receiver_ty: Option<ResolvedTy>,
+    pub(super) declared_receiver: Option<ResolvedTy>,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) result: ResolvedTy,
+    pub(super) declared_result: Option<ResolvedTy>,
+    pub(super) suspend: bool,
+    pub(super) can_inline: bool,
+    pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
+    pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
+    pub(super) extension_receiver_parameter: Option<u32>,
+    pub(super) dispatch_receiver: Option<ExprId>,
+    pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+}
+
 struct ExternalInlineCallRequest<'a> {
     plan: &'a crate::fir::FirInlineBodyPlan,
     receiver_ty: Option<ResolvedTy>,
@@ -301,23 +319,24 @@ impl BodyLowering<'_> {
     /// Materialize a checked dependency call without exposing its physical owner or descriptor.
     /// Argument ordinals were selected by the checker; this routine only preserves source
     /// evaluation order and lays the already-mapped values into semantic parameter order.
-    pub(super) fn external_call(
-        &mut self,
-        target: ExternalCallableId,
-        receiver_ty: Option<ResolvedTy>,
-        declared_receiver: Option<ResolvedTy>,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
-        declared_result: Option<ResolvedTy>,
-        suspend: bool,
-        can_inline: bool,
-        inline_plan: Option<&crate::fir::FirInlineBodyPlan>,
-        substitutions: &[crate::fir::FirTypeSubstitution],
-        extension_receiver_parameter: Option<u32>,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> Option<ExprId> {
+    pub(super) fn external_call(&mut self, request: ExternalCallRequest<'_>) -> Option<ExprId> {
+        let ExternalCallRequest {
+            target,
+            default_provider,
+            receiver_ty,
+            declared_receiver,
+            parameters,
+            result,
+            declared_result,
+            suspend,
+            can_inline,
+            inline_plan,
+            substitutions,
+            extension_receiver_parameter,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+        } = request;
         // Preserve the checked SOURCE receiver across dependency realization. An extension records
         // its declaration receiver (a generic `T` deliberately records nothing); a member records
         // its selected dispatch type. The JVM realization may turn either into argument zero of a
@@ -372,6 +391,7 @@ impl BodyLowering<'_> {
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::External {
                 target,
+                default_provider,
                 params: parameter_types,
                 ret: result.get(),
                 substitutions: super::checked::lower_substitutions(substitutions),
@@ -675,6 +695,7 @@ impl BodyLowering<'_> {
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::External {
                 target: plan.declaration,
+                default_provider: None,
                 params: plan
                     .parameters
                     .iter()
@@ -975,6 +996,7 @@ impl BodyLowering<'_> {
         let append_call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::External {
                 target: append,
+                default_provider: None,
                 params: vec![append_parameter.get()],
                 ret: append_result.get(),
                 substitutions: Vec::new(),

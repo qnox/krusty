@@ -1752,6 +1752,7 @@ pub struct MemberExtFunSig {
     /// Stable provider identity for a dependency declaration. Current-module declarations use
     /// `signature.stable_declaration` instead; exactly one identity is present after selection.
     external_identity: Option<crate::fir::ExternalCallableId>,
+    external_default_provider: Option<crate::fir::ExternalCallableId>,
     declared_ret: Option<Ty>,
     inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
 }
@@ -10799,6 +10800,7 @@ fn collect_signatures_with_cp_impl(
                                     signature,
                                     physical_name: method_header.name.clone(),
                                     external_identity: None,
+                                    external_default_provider: None,
                                     declared_ret: None,
                                     inline_body_plan: None,
                                 });
@@ -17849,6 +17851,7 @@ fn declared_member_callable_headers(
                     signature,
                     physical_name: header.name.clone(),
                     external_identity: None,
+                    external_default_provider: None,
                     declared_ret: None,
                     inline_body_plan: None,
                 });
@@ -18956,6 +18959,7 @@ pub enum ResolvedCall {
     MemberExtension {
         stable_declaration: Option<crate::fir::DeclarationId>,
         external_identity: Option<crate::fir::ExternalCallableId>,
+        external_default_provider: Option<crate::fir::ExternalCallableId>,
         owner: TypeName,
         /// Exact implicit dispatch receiver selected by the checker. The extension receiver is the
         /// explicit call-site value; this binding identifies the class/object instance that owns the
@@ -19692,6 +19696,7 @@ pub enum DelegateGetValueTarget {
         declared_ret: Ty,
         stable_declaration: Option<crate::fir::DeclarationId>,
         external_identity: Option<crate::fir::ExternalCallableId>,
+        external_default_provider: Option<crate::fir::ExternalCallableId>,
         owner: TypeName,
         name: String,
         params: Vec<Ty>,
@@ -19708,6 +19713,7 @@ pub enum DelegateGetValueTarget {
     MemberExtension {
         stable_declaration: Option<crate::fir::DeclarationId>,
         external_identity: Option<crate::fir::ExternalCallableId>,
+        external_default_provider: Option<crate::fir::ExternalCallableId>,
         owner: TypeName,
         name: String,
         extension_receiver: Ty,
@@ -39339,6 +39345,7 @@ fun box(): String {
                 let companion = if internal.matches("test/Factory") {
                     let member = |second, descriptor: &str| crate::libraries::LibraryMember {
                         external_identity: None,
+                        external_default_provider: None,
                         external_property_identity: None,
                         singleton_dispatch: None,
                         name: "make".to_string(),
@@ -45797,6 +45804,7 @@ pub(crate) fn member_extension_function_with(
         candidates.push(MemberExtensionFunctionCandidate {
             stable_declaration: shape.function.signature.stable_declaration,
             external_identity: shape.function.external_identity,
+            external_default_provider: shape.function.external_default_provider,
             priority: shape.priority,
             dispatch_receiver: shape.dispatch_receiver,
             score: instantiated.score,
@@ -48992,6 +49000,7 @@ pub enum ResolvedContextArgument {
 pub(crate) struct MemberExtensionFunctionCandidate {
     stable_declaration: Option<crate::fir::DeclarationId>,
     external_identity: Option<crate::fir::ExternalCallableId>,
+    external_default_provider: Option<crate::fir::ExternalCallableId>,
     priority: MemberExtensionPriority,
     dispatch_receiver: ImplicitReceiver,
     score: (usize, std::cmp::Reverse<usize>, bool),
@@ -49028,6 +49037,7 @@ impl MemberExtensionFunctionCandidate {
         ResolvedCall::MemberExtension {
             stable_declaration: self.stable_declaration,
             external_identity: self.external_identity,
+            external_default_provider: self.external_default_provider,
             owner: self.owner,
             dispatch_receiver,
             extension_receiver,
@@ -88451,6 +88461,7 @@ impl<'a> Checker<'a> {
                 .clone()
                 .unwrap_or_else(|| member.name.clone()),
             external_identity: member.external_identity,
+            external_default_provider: member.external_default_provider,
             declared_ret: member.declared_ret,
             inline_body_plan: member.inline_body_plan.clone(),
         })

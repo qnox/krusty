@@ -901,6 +901,7 @@ fn fn_info(
     let declared_params = Some(params.clone().into_boxed_slice());
     let callable = LibraryCallable {
         external_identity: None,
+        external_default_provider: None,
         external_property_identity: None,
         owner,
         name: name.to_string(),
@@ -1016,6 +1017,7 @@ fn source_callable(
     let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
         external_identity: None,
+        external_default_provider: None,
         external_property_identity: None,
         owner,
         reflection_name: Some(name.clone()),

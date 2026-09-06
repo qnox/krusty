@@ -1046,6 +1046,7 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
         if implementation.call_sig.param_defaults.is_empty() {
             implementation.call_sig.param_defaults = vec![false; parameter_count];
         }
+        let mut inherited_any_default = false;
         for parameter in 0..parameter_count {
             if implementation.call_sig.param_defaults[parameter] {
                 continue;
@@ -1059,6 +1060,7 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
                     .unwrap_or(false)
             }) {
                 implementation.call_sig.param_defaults[parameter] = true;
+                inherited_any_default = true;
                 if implementation
                     .default_values
                     .get(parameter)
@@ -1079,6 +1081,24 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
             parameter_count,
             &implementation.call_sig.param_defaults,
         );
+        if inherited_any_default && implementation.callable.external_default_provider.is_none() {
+            implementation.callable.external_default_provider = inherited
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .call_sig
+                        .param_defaults
+                        .iter()
+                        .any(|default| *default)
+                })
+                .min_by_key(|candidate| candidate.receiver_rank)
+                .and_then(|candidate| {
+                    candidate
+                        .callable
+                        .external_default_provider
+                        .or(candidate.callable.external_identity)
+                });
+        }
         if implementation.callable.default_realization.is_none() {
             implementation.callable.default_realization = inherited
                 .iter()
@@ -9948,6 +9968,7 @@ mod tests {
     fn top_level_default_uint_info() -> FunctionInfo {
         let callable = LibraryCallable {
             external_identity: None,
+            external_default_provider: None,
             external_property_identity: None,
             owner: "kotlin/UIntKt".into(),
             name: "make$default".to_string(),

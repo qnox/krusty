@@ -140,6 +140,9 @@ pub enum Callee {
     /// backend-neutral passes without exposing an owner or descriptor.
     External {
         target: crate::fir::ExternalCallableId,
+        /// Dependency declaration that supplies inherited defaults for this selected target.
+        /// Present only as an opaque checked identity; a backend owns its physical realization.
+        default_provider: Option<crate::fir::ExternalCallableId>,
         params: Vec<Ty>,
         ret: Ty,
         /// Final checked type substitutions, keyed by the provider-owned declaration parameter.
