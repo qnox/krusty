@@ -5905,6 +5905,10 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<LibraryCallable> {
         // Direct scope resolution, not `resolve_symbol(TopLevel)`: runs inside `pick_top_level` (see
         // `select_top_level_default_callable`) — routing back through `resolve_symbol` would recurse.
+        // Keep the shared namespace records alive and borrow their declaration families below.
+        // Materializing a `FunctionSet` here deep-cloned every callable (including its descriptor,
+        // generic signature, defaults, and parameter vectors) once per `$default` candidate.
+        let base_records = self.symbols_in_scope(name);
         let try_default = |o: &FunctionInfo| -> Option<LibraryCallable> {
             let c = &o.callable;
             if !o.public() && !o.flags.inline.must_inline() {
@@ -5925,8 +5929,10 @@ impl<'a> SymbolResolver<'a> {
             // lossy `Ty` values (`Byte`/`Short` both appear as `Int`).
             let base_spelling = c.name.strip_suffix("$default");
             let base = base_spelling.and_then(|spelling| {
-                function_set_from_symbols(self.symbols_in_scope(name))
-                    .into_top_level()
+                base_records
+                    .iter()
+                    .flat_map(|record| record.callables.functions())
+                    .filter(|candidate| candidate.kind == FnKind::TopLevel)
                     .find(|candidate| {
                         candidate.callable.name == spelling
                             && candidate.callable.params.as_slice() == c.params.as_slice()
@@ -5995,7 +6001,7 @@ impl<'a> SymbolResolver<'a> {
             );
             let ret_ty = base.ret.apply(ret_ty);
             let mut callable =
-                callable_with_return(&selected_default_callable(&base)?, ret_ty, true);
+                callable_with_return(&selected_default_callable(base)?, ret_ty, true);
             // The bridge's descriptor exposes erased parameters (`Any`, `Any`, …), but argument
             // checking belongs to the selected SOURCE declaration. Retain the base generic shapes
             // specialized by this call's constraints; otherwise an omitted-default call such as
@@ -6019,7 +6025,7 @@ impl<'a> SymbolResolver<'a> {
             // signature would specialize the body against the wrong names. `sourceName-<hash>$default`
             // belongs to `sourceName-<hash>`, and only that one.
             if callable.signature.is_none() {
-                callable.signature = base.callable.signature;
+                callable.signature = base.callable.signature.clone();
             }
             record_default_vararg_slot(
                 &mut callable,
@@ -6055,11 +6061,18 @@ impl<'a> SymbolResolver<'a> {
                 resolution_subtype(&self.src, left, right)
             })
         };
-        let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
+        let default_name = format!("{name}$default");
+        let default_records = self.symbols_in_scope(&default_name);
+        let default_candidates = || {
+            default_records
+                .iter()
+                .flat_map(|record| record.callables.functions())
+                .filter(|candidate| candidate.kind == FnKind::TopLevel)
+        };
         crate::trace_compiler!(
             "default_semantics",
             "top-level default candidates name={name} args={args:?}: {:?}",
-            fsd.top_level()
+            default_candidates()
                 .map(|candidate| (
                     candidate.callable.owner,
                     candidate.callable.name.as_str(),
@@ -6070,7 +6083,7 @@ impl<'a> SymbolResolver<'a> {
                 ))
                 .collect::<Vec<_>>()
         );
-        match select_realized(fsd.top_level().collect()) {
+        match select_realized(default_candidates().collect()) {
             CandidateSelection::Selected(callable) => return Some(callable),
             CandidateSelection::Ambiguous => return None,
             CandidateSelection::None => {}
@@ -6081,8 +6094,12 @@ impl<'a> SymbolResolver<'a> {
         // facade package. Probed LAST: an unmangled name never reaches this (the common case pays no
         // extra scope query).
         let mut seen_spellings = std::collections::HashSet::new();
-        let mut mangled_defaults = Vec::new();
-        for base in function_set_from_symbols(self.symbols_in_scope(name)).into_top_level() {
+        let mut mangled_default_records = Vec::new();
+        for base in base_records
+            .iter()
+            .flat_map(|record| record.callables.functions())
+            .filter(|candidate| candidate.kind == FnKind::TopLevel)
+        {
             let spelling = base.callable.name.clone();
             if spelling == name || !seen_spellings.insert(spelling.clone()) {
                 continue;
@@ -6094,10 +6111,14 @@ impl<'a> SymbolResolver<'a> {
             let record = self
                 .src
                 .symbols(SymbolNamespace::Package(pkg), &default_name);
-            let fs = function_set_from_symbols(std::iter::once(record));
-            mangled_defaults.extend(fs.into_top_level());
+            mangled_default_records.push(record);
         }
-        match select_realized(mangled_defaults.iter().collect()) {
+        let mangled_defaults = mangled_default_records
+            .iter()
+            .flat_map(|record| record.callables.functions())
+            .filter(|candidate| candidate.kind == FnKind::TopLevel)
+            .collect();
+        match select_realized(mangled_defaults) {
             CandidateSelection::Selected(callable) => Some(callable),
             CandidateSelection::None | CandidateSelection::Ambiguous => None,
         }
