@@ -1385,6 +1385,7 @@ fn delegated_call(
         }
         FirCallTarget::External {
             declaration,
+            default_provider,
             receiver: _,
             declared_receiver,
             parameters,
@@ -1436,6 +1437,7 @@ fn delegated_call(
             let expression = ir.add_expr(IrExpr::Call {
                 callee: Callee::External {
                     target: *declaration,
+                    default_provider: *default_provider,
                     params: parameters.iter().map(|ty| ty.get()).collect(),
                     ret: result.get(),
                     substitutions: Vec::new(),

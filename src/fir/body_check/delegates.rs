@@ -508,6 +508,7 @@ fn selected_delegate_call(
         DelegateGetValueTarget::Member {
             stable_declaration,
             external_identity,
+            external_default_provider,
             params,
             ret,
             ..
@@ -543,6 +544,7 @@ fn selected_delegate_call(
             Ok(FirDelegateCall {
                 target: FirCallTarget::External {
                     declaration,
+                    default_provider: *external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: None,
                     parameters: parameters.clone(),
@@ -591,6 +593,7 @@ fn selected_delegate_call(
             Ok(FirDelegateCall {
                 target: FirCallTarget::External {
                     declaration,
+                    default_provider: callable.external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
                     parameters: parameters.clone(),
@@ -613,6 +616,7 @@ fn selected_delegate_call(
         DelegateGetValueTarget::MemberExtension {
             stable_declaration,
             external_identity,
+            external_default_provider,
             extension_receiver,
             dispatch_receiver,
             context_count,
@@ -648,6 +652,7 @@ fn selected_delegate_call(
                 parameters.insert(extension_parameter, *extension_receiver);
                 FirCallTarget::External {
                     declaration,
+                    default_provider: *external_default_provider,
                     receiver: Some(resolved(dispatch_receiver.ty)?),
                     declared_receiver: None,
                     parameters: parameters

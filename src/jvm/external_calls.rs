@@ -258,6 +258,7 @@ pub(super) fn realize(
             ir.exprs[index] = IrExpr::Call {
                 callee: Callee::External {
                     target,
+                    default_provider: None,
                     params: parameters,
                     ret: result,
                     substitutions: Vec::new(),
@@ -274,6 +275,7 @@ pub(super) fn realize(
         }
         let (
             target,
+            default_provider,
             semantic_params,
             semantic_ret,
             substitutions,
@@ -284,6 +286,7 @@ pub(super) fn realize(
                 callee:
                     Callee::External {
                         target,
+                        default_provider,
                         params,
                         ret,
                         substitutions,
@@ -293,6 +296,7 @@ pub(super) fn realize(
                 ..
             } => (
                 *target,
+                *default_provider,
                 params.clone(),
                 *ret,
                 substitutions.clone(),
@@ -443,13 +447,25 @@ pub(super) fn realize(
         if !defaults.is_empty() {
             crate::trace_compiler!(
                 "default_semantics",
-                "realize external default target={target:?} kind={kind:?} owner={} name={} descriptor={} omitted={defaults:?} bridge={:?}",
+                "realize external default target={target:?} provider={default_provider:?} kind={kind:?} owner={} name={} descriptor={} omitted={defaults:?} bridge={:?}",
                 callable.owner,
                 callable.name,
                 callable.descriptor,
                 callable.default_realization,
             );
-            let default = callable.default_realization.as_deref().ok_or(target)?;
+            let default = if let Some(provider) = default_provider {
+                classpath
+                    .external_callable(provider)
+                    .and_then(|realization| realization.callable.default_realization)
+                    .map(|realization| *realization)
+                    .ok_or(provider)?
+            } else {
+                callable
+                    .default_realization
+                    .as_deref()
+                    .cloned()
+                    .ok_or(target)?
+            };
             // Checked FIR carries semantic zero values for omitted arguments. Replace them at this
             // exact provider boundary with zeros for the selected bridge's physical parameters. A
             // value class such as `Duration` is a reference semantically but a primitive `long` in

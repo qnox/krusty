@@ -3412,6 +3412,7 @@ impl Classpath {
                     };
                     crate::libraries::LibraryMember {
                         external_identity: None,
+                        external_default_provider: None,
                         external_property_identity: None,
                         singleton_dispatch: None,
                         name: member_name,

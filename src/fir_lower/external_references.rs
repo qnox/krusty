@@ -22,6 +22,7 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let FirCallableReferenceTarget::External {
             declaration,
+            default_provider,
             receiver,
             extension_receiver: target_is_extension,
             parameters,
@@ -166,22 +167,23 @@ impl BodyLowering<'_> {
         let enclosing_temporary = self.next_temporary;
         self.next_temporary = u32::try_from(captures.len() + reference.params.len())
             .expect("too many external callable-reference adapter parameters");
-        let call = self.external_call(
-            declaration,
-            receiver,
-            None,
-            &parameters,
+        let call = self.external_call(super::source_calls::ExternalCallRequest {
+            target: declaration,
+            default_provider,
+            receiver_ty: receiver,
+            declared_receiver: None,
+            parameters: &parameters,
             result,
-            None,
-            false,
-            false,
-            None,
-            &[],
-            None,
+            declared_result: None,
+            suspend: false,
+            can_inline: false,
+            inline_plan: None,
+            substitutions: &[],
+            extension_receiver_parameter: None,
             dispatch_receiver,
             extension_receiver,
-            &arguments,
-        );
+            arguments: &arguments,
+        });
         self.next_temporary = enclosing_temporary;
         let call = call.ok_or(FirLoweringFailure::UnsupportedExternalCallableReference(
             declaration,

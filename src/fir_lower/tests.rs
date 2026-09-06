@@ -840,6 +840,7 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
         kind: FirExprKind::Call(FirCall {
             target: crate::fir::FirCallTarget::External {
                 declaration,
+                default_provider: None,
                 receiver: None,
                 declared_receiver: None,
                 parameters: Box::new([]),
@@ -1118,6 +1119,7 @@ fn external_unbound_reference_trusts_the_checked_receiver_widening() {
         kind: FirExprKind::CallableReference {
             target: FirCallableReferenceTarget::External {
                 declaration,
+                default_provider: None,
                 receiver: Some(resolved(Ty::nullable(Ty::String))),
                 extension_receiver: true,
                 parameters: Box::new([]),

@@ -341,6 +341,9 @@ pub enum FirCallTarget {
     Module(CallableId),
     External {
         declaration: ExternalCallableId,
+        /// Exact dependency declaration supplying inherited defaults. The selected implementation
+        /// remains `declaration`; this provider is consulted only for checked omitted arguments.
+        default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
         declared_receiver: Option<ResolvedTy>,
         parameters: Box<[ResolvedTy]>,
@@ -1153,6 +1156,7 @@ pub enum FirCallableReferenceTarget {
     },
     External {
         declaration: ExternalCallableId,
+        default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
         extension_receiver: bool,
         parameters: Box<[ResolvedTy]>,

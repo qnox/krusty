@@ -136,6 +136,7 @@ impl BodyFirChecker<'_> {
                     })?;
                     FirCallTarget::External {
                         declaration,
+                        default_provider: member.member.external_default_provider,
                         receiver: Some(resolved(member.receiver)?),
                         declared_receiver: None,
                         parameters: member
@@ -184,6 +185,7 @@ impl BodyFirChecker<'_> {
                         declaration: callable.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        default_provider: callable.external_default_provider,
                         receiver: Some(resolved(extension.receiver)?),
                         declared_receiver: callable.source_receiver.map(resolved).transpose()?,
                         parameters: extension
@@ -218,6 +220,7 @@ impl BodyFirChecker<'_> {
             ResolvedCall::MemberExtension {
                 stable_declaration,
                 external_identity,
+                external_default_provider,
                 dispatch_receiver,
                 extension_receiver: declared_extension_receiver,
                 params,
@@ -252,6 +255,7 @@ impl BodyFirChecker<'_> {
                     parameters.insert(0, declared_extension_receiver);
                     FirCallTarget::External {
                         declaration,
+                        default_provider: external_default_provider,
                         receiver: Some(resolved(dispatch_ty)?),
                         declared_receiver: None,
                         parameters: parameters

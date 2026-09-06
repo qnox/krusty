@@ -421,6 +421,7 @@ impl Checker<'_> {
                 return Some(DelegateGetValueTarget::MemberExtension {
                     stable_declaration: selected.stable_declaration,
                     external_identity: selected.external_identity,
+                    external_default_provider: selected.external_default_provider,
                     owner: selected.owner,
                     name: selected.physical_name,
                     extension_receiver: selected.extension_receiver,
@@ -472,6 +473,7 @@ impl Checker<'_> {
             declared_ret,
             stable_declaration: resolved.member.stable_declaration,
             external_identity: resolved.member.external_identity,
+            external_default_provider: resolved.member.external_default_provider,
             owner,
             name: resolved
                 .member

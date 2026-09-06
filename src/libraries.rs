@@ -261,6 +261,10 @@ pub enum MemberRealization {
 pub struct LibraryMember {
     /// Stable provider identity copied from the normalized callable candidate after selection.
     pub external_identity: Option<crate::fir::ExternalCallableId>,
+    /// Stable dependency declaration that supplies inherited default expressions for this selected
+    /// override. The selected callable remains [`Self::external_identity`]; a target consumes this
+    /// second opaque identity only when the checked call omits an argument.
+    pub external_default_provider: Option<crate::fir::ExternalCallableId>,
     /// Semantic property owning this member when it is being used as an accessor.
     pub external_property_identity: Option<crate::fir::ExternalPropertyId>,
     /// Exact singleton instance that dispatches this selected object member. This is a semantic
@@ -857,6 +861,7 @@ impl LibraryMember {
     pub fn new(name: String, params: Vec<Ty>, ret: Ty, descriptor: String) -> Self {
         LibraryMember {
             external_identity: None,
+            external_default_provider: None,
             external_property_identity: None,
             singleton_dispatch: None,
             name,
@@ -1009,6 +1014,7 @@ impl LibraryCallable {
     ) -> Self {
         LibraryCallable {
             external_identity: None,
+            external_default_provider: None,
             external_property_identity: None,
             owner: owner.into(),
             name: name.into(),
@@ -1064,6 +1070,7 @@ impl LibraryCallable {
         callable.physical_params = member.physical_params.clone();
         callable.member_realization = member.realization;
         callable.default_realization = member.default_realization.clone();
+        callable.external_default_provider = member.external_default_provider;
         callable.constructor_realization = member.constructor_realization.clone();
         callable
     }
@@ -1109,6 +1116,10 @@ pub struct LibraryCallable {
     /// [`crate::fir::CallableId`] instead; a dependency provider assigns this once and keeps the
     /// target-specific realization in its backend-owned table.
     pub external_identity: Option<crate::fir::ExternalCallableId>,
+    /// Stable dependency declaration supplying defaults inherited by this selected override. This
+    /// never participates in lookup or selection; it is retained only for target realization after
+    /// checked arguments identify omitted parameter slots.
+    pub external_default_provider: Option<crate::fir::ExternalCallableId>,
     /// Semantic property declaration owning this accessor, when this callable was exposed through
     /// a Kotlin property. Explicit calls still use `external_identity`; property reads/writes carry
     /// this distinct identity so the target backend alone chooses field versus accessor realization.
@@ -2177,6 +2188,7 @@ impl FunctionInfo {
         callable.owner_is_interface = member.is_interface();
         callable.member_realization = member.realization;
         callable.default_realization = member.default_realization.clone();
+        callable.external_default_provider = member.external_default_provider;
         callable.constructor_realization = member.constructor_realization.clone();
         callable.declared_ret = member.declared_ret;
         callable.context_count = member.context_count;
@@ -2239,6 +2251,7 @@ impl FunctionInfo {
         member.signature = self.callable.signature.clone();
         member.default_values = self.default_values.clone();
         member.default_realization = self.callable.default_realization.clone();
+        member.external_default_provider = self.callable.external_default_provider;
         member.constructor_realization = self.callable.constructor_realization.clone();
         member.generic_sig = self.generic_sig.clone();
         member.projected_return_hazard = self.projected_return_hazard;

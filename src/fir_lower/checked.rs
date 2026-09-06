@@ -587,6 +587,7 @@ impl BodyLowering<'_> {
             }
             FirCallTarget::External {
                 declaration,
+                default_provider,
                 receiver,
                 declared_receiver,
                 parameters,
@@ -598,22 +599,23 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter,
             } => {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
-                self.external_call(
-                    *declaration,
-                    *receiver,
-                    *declared_receiver,
+                self.external_call(super::source_calls::ExternalCallRequest {
+                    target: *declaration,
+                    default_provider: *default_provider,
+                    receiver_ty: *receiver,
+                    declared_receiver: *declared_receiver,
                     parameters,
-                    *result,
-                    *declared_result,
-                    *suspend,
-                    *can_inline,
-                    inline_plan.as_deref(),
-                    &call.substitutions,
-                    *extension_receiver_parameter,
+                    result: *result,
+                    declared_result: *declared_result,
+                    suspend: *suspend,
+                    can_inline: *can_inline,
+                    inline_plan: inline_plan.as_deref(),
+                    substitutions: &call.substitutions,
+                    extension_receiver_parameter: *extension_receiver_parameter,
                     dispatch_receiver,
                     extension_receiver,
-                    &arguments,
-                )
+                    arguments: &arguments,
+                })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
             FirCallTarget::Super {

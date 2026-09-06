@@ -120,6 +120,7 @@ pub(super) fn realize(
             extension_receiver: target_is_extension,
             parameters,
             result,
+            ..
         } = target
         else {
             return Err(FunctionReferenceRealizationTarget::Invalid);
