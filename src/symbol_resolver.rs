@@ -1701,23 +1701,17 @@ fn specialized_constructor_params(
     let mut bindings = seeded_gsig_binds(&signature, type_args);
     let inference_inputs = signature.params.iter().zip(args).enumerate().filter_map(
         |(parameter_index, (&parameter, argument))| {
-            let materialized_lambda = argument.is_lambda_literal()
-                && !argument.ty().mentions_error()
-                && !argument.ty().mentions_pending();
             let mapped_whole_vararg_array = member.call_sig.vararg_index == Some(parameter_index)
                 && argument.ty().array_elem().is_some()
                 && parameter.array_elem().is_some()
                 && !argument.is_spread();
-            ((!argument.is_lambda_literal() || materialized_lambda)
-                && !argument.is_omitted_default()
-                && !mapped_whole_vararg_array)
-                .then(|| {
-                    (
-                        parameter_index,
-                        argument.inference_type(src, parameter),
-                        argument.is_spread(),
-                    )
-                })
+            (argument.contributes_type_to_inference() && !mapped_whole_vararg_array).then(|| {
+                (
+                    parameter_index,
+                    argument.inference_type(src, parameter),
+                    argument.is_spread(),
+                )
+            })
         },
     );
     let inferred = infer_generic_call_bindings_from_symbols(
@@ -2138,6 +2132,43 @@ fn bind_ext_ret_tracking(
     args: &[Ty],
     targs: &[Ty],
 ) -> (Ty, GSigBinds) {
+    let mut binds = extension_receiver_bindings(gsig, receiver, targs);
+    for (parameter, argument) in gsig.params.iter().zip(args.iter().copied()) {
+        unify_ty(*parameter, argument, &mut binds);
+    }
+    finish_extension_return_bindings(source, gsig, binds, targs)
+}
+
+fn bind_ext_ret_from_call_arguments(
+    source: &dyn SymbolSource,
+    gsig: &GenericSig,
+    call_sig: &CallSig,
+    receiver: Ty,
+    parameter_start: usize,
+    args: &[CallArgKind],
+    targs: &[Ty],
+) -> Ty {
+    let mut binds = extension_receiver_bindings(gsig, receiver, targs);
+    for (index, (&parameter, argument)) in gsig.params[parameter_start.min(gsig.params.len())..]
+        .iter()
+        .zip(args)
+        .enumerate()
+    {
+        if call_sig.parameter_contributes_to_inference(parameter_start + index)
+            && argument.contributes_type_to_inference()
+        {
+            unify_inferred_ty_with_source(
+                source,
+                parameter,
+                argument.inference_type(source, parameter),
+                &mut binds,
+            );
+        }
+    }
+    finish_extension_return_bindings(source, gsig, binds, targs).0
+}
+
+fn extension_receiver_bindings(gsig: &GenericSig, receiver: Ty, targs: &[Ty]) -> GSigBinds {
     let mut binds = seeded_gsig_binds(gsig, targs);
     if let Some(recv_sig) = gsig.receiver {
         unify_ty(recv_sig, receiver, &mut binds);
@@ -2148,9 +2179,15 @@ fn bind_ext_ret_tracking(
         // inside a postponed `buildMap<K, V>` lambda then incorrectly returns `Any`).
         preserve_receiver_identity_bindings(recv_sig, receiver, &mut binds);
     }
-    for (ps, a) in gsig.params.iter().zip(args.iter().copied()) {
-        unify_ty(*ps, a, &mut binds);
-    }
+    binds
+}
+
+fn finish_extension_return_bindings(
+    source: &dyn SymbolSource,
+    gsig: &GenericSig,
+    mut binds: GSigBinds,
+    targs: &[Ty],
+) -> (Ty, GSigBinds) {
     complete_bottom_constraint_bindings(gsig, &mut binds, targs.len());
     // A projection is a generic-argument constraint, never an expression value. Consume it while
     // materializing the selected callable's output: `Iterable<out Range>.first()` returns `Range`,
@@ -4156,22 +4193,16 @@ impl<'a> SymbolResolver<'a> {
             _ => receiver,
         };
         let ret = if selected.is_extension() {
-            selected.generic_sig.as_ref().map_or(
-                selected.ret.apply(selected.callable.ret),
-                |signature| {
-                    specialized_extension_return(
-                        self.lib,
-                        &selected,
-                        bind_ext_ret(
-                            &self.src,
-                            signature,
-                            binding_receiver,
-                            &args.iter().map(CallArgKind::ty).collect::<Vec<_>>(),
-                            type_args,
-                        ),
-                    )
-                },
-            )
+            let inferred = bind_ext_ret_from_call_arguments(
+                &self.src,
+                &semantic,
+                &selected.call_sig,
+                binding_receiver,
+                selected.context_count,
+                args,
+                type_args,
+            );
+            specialized_extension_return(self.lib, &selected, inferred)
         } else {
             let provider = resolved_member_from_info(
                 self.lib,
@@ -7703,10 +7734,7 @@ fn generic_function_call_admits(
             {
                 return None;
             }
-            if argument.is_lambda_literal()
-                || argument.is_expected_type_callable()
-                || argument.is_omitted_default()
-            {
+            if !argument.contributes_type_to_inference() {
                 return None;
             }
             Some((
