@@ -55,7 +55,7 @@ jobs:
           # environment raises it — with enough headroom that a hung binary still fails fast.
           KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 600
           # Coverage uses an isolated target, so the following plain conformance command rebuilds
-          # before running. Its deadline covers both phases; GitHub needs 31s build + ~89s execution.
+          # before running. The harness builds first; this deadline bounds only test execution.
           KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: 180
         run: just ci
 

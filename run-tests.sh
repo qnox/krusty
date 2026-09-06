@@ -94,7 +94,13 @@ if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
   elif [ "$test_target" = "conformance" ]; then
     focused_timeout="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS"
   fi
-  echo "run-tests.sh: focused test timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
+  # Compile before starting the process deadline. A cold CI worker can spend close to a minute
+  # building this profile; charging that time to the test process made a healthy conformance run
+  # time out while the same already-built binary passed. The second Cargo invocation is a cached
+  # executable lookup, so the deadline now measures the behavior it is intended to bound.
+  echo "run-tests.sh: building focused test: cargo test $profile_arg --no-run $*" >&2
+  cargo test $profile_arg --no-run "$@"
+  echo "run-tests.sh: focused test execution timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
   focused_log="$(mktemp)"
   trap 'rm -f "$focused_log"' EXIT
   set +e
