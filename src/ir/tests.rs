@@ -466,6 +466,8 @@ fn default_stub_uses_external_value_class_metadata_without_a_source_class() {
         ctor_params: Some(vec![Ty::Int]),
         ctor_desc: None,
         external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
     });
     f.fn_params.insert(
         fid,

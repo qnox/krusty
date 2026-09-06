@@ -203,6 +203,8 @@ fn synthesize_delegated(
         ctor_params: None,
         ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string()),
         external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
     })
 }
 
@@ -223,6 +225,8 @@ fn local_property_reference(ir: &mut IrFile, name: Box<str>, property_type: Ty) 
         ctor_params: None,
         ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string()),
         external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
     }
 }
 
@@ -487,6 +491,8 @@ fn synthesize(
             ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
             ctor_desc: None,
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         },
         None => IrExpr::StaticInstance {
             owner: class,

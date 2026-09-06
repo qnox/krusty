@@ -218,6 +218,22 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
     out
 }
 
+fn supplied_constructor_parameters<'a>(
+    parameters: &'a [Ty],
+    defaults: &'a [u32],
+    prefix_count: u32,
+) -> impl Iterator<Item = &'a Ty> {
+    let prefix_count = prefix_count as usize;
+    parameters
+        .iter()
+        .enumerate()
+        .filter_map(move |(parameter, ty)| {
+            (parameter < prefix_count
+                || !defaults.contains(&u32::try_from(parameter - prefix_count).ok()?))
+            .then_some(ty)
+        })
+}
+
 /// Kotlin override declarations remain overridable unless explicitly final. Pass 1 already
 /// published their exact declaration edges, so this representation pass marks the corresponding
 /// IR methods without searching supertypes or comparing names.
@@ -2433,6 +2449,8 @@ pub fn lower_value_classes(
             internal,
             args,
             ctor_params,
+            defaults,
+            default_prefix_count,
             ..
         } = &ir.exprs[i]
         {
@@ -2444,7 +2462,11 @@ pub fn lower_value_classes(
                 }
                 _ => ctor_params.as_deref().unwrap_or(&[]),
             };
-            for (&argument, parameter) in args.iter().zip(params) {
+            for (&argument, parameter) in args.iter().zip(supplied_constructor_parameters(
+                params,
+                defaults,
+                *default_prefix_count,
+            )) {
                 let Target::UnboxedX(value_class) = target(parameter, &under) else {
                     continue;
                 };
@@ -2556,16 +2578,17 @@ pub fn lower_value_classes(
                 ctor_params,
                 ctor_desc: None,
                 external_target: _,
+                defaults,
+                default_prefix_count,
             } if under.contains_key(internal) => {
                 let owner = *internal;
                 let u = under
                     .get(&owner)
                     .map(|t| erase(t, &under))
                     .unwrap_or(Ty::Error);
-                // A krusty-unboxed value class has one underlying parameter. Checked common lowering
-                // materializes an omitted argument as a semantic zero and records its exact ordinal;
-                // consume that fact instead of guessing omission from an empty argument vector.
-                if args.len() == 1 && ir.constructor_default_arguments(id) == [0] {
+                // A krusty-unboxed value class has one underlying parameter. Common IR retains the
+                // checked omission directly and carries no placeholder value.
+                if args.is_empty() && defaults.as_ref() == [0] && *default_prefix_count == 0 {
                     Some(Rw::VcCtorDefault { owner, u })
                 } else {
                     let ret = desc(&u);
@@ -3838,6 +3861,8 @@ pub fn lower_value_classes(
                     internal,
                     args,
                     ctor_params,
+                    defaults,
+                    default_prefix_count,
                     ..
                 } => {
                     let fields;
@@ -3849,7 +3874,11 @@ pub fn lower_value_classes(
                         _ => ctor_params.as_deref().unwrap_or(&[]),
                     };
                     args.iter()
-                        .zip(targets.iter())
+                        .zip(supplied_constructor_parameters(
+                            targets,
+                            defaults,
+                            *default_prefix_count,
+                        ))
                         .map(|(a, p)| (*a, p.clone()))
                         .collect()
                 }
@@ -6623,6 +6652,8 @@ fn synth_value_members(
             ctor_params: Some(vec![u_ir]),
             ctor_desc: None,
             external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
         let body = ret_block(ir, new);
         let fid = add_static(ir, "box-impl", vec![u_ir], x_ir, body);

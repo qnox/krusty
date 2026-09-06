@@ -2523,7 +2523,11 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
         .class_ctor_defaults(fq_name)
         .filter(|defaults| defaults.iter().any(Option::is_some))
         .map(|defaults| {
-            let masks = "I".repeat(defaults.len().div_ceil(32).max(1));
+            let source_parameter_count = defaults
+                .len()
+                .checked_sub(c.constructor_prefix_count as usize)
+                .expect("constructor default prefix exceeds its parameters");
+            let masks = "I".repeat(default_mask_count(source_parameter_count));
             crate::jvm::classfile::SeedCtorDefaults {
                 marker_desc: format!(
                     "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
@@ -2560,7 +2564,7 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
                         args,
                         ctor_params,
                         ctor_desc,
-                        external_target: _,
+                        ..
                     } => {
                         let owner = internal.render();
                         entries.push(SeedSuperArg::Class(owner.clone()));
@@ -6612,13 +6616,23 @@ fn emit_class(
         if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
             // (The stub emits its own LineNumberTable — class line, per-fill parameter lines, the
             // ctor's closing-`)` line at `return` — collapsed for single-line declarations.)
-            emit_ctor_default_stub(
+            let prefix_count = c.constructor_prefix_count as usize;
+            let (prefix_params, source_params) = param_tys
+                .split_at_checked(prefix_count)
+                .expect("constructor default prefix exceeds its parameters");
+            let source_defaults = defaults
+                .get(prefix_count..)
+                .expect("constructor default prefix exceeds its defaults");
+            emit_ctor_default_stub_with_prefix(
                 ir,
                 &fq_name,
                 facade,
-                &param_tys,
-                defaults,
+                prefix_params,
+                prefix_count,
+                source_params,
+                source_defaults,
                 c.primary_ctor_annotations.deprecated(),
+                0x1001,
                 &mut cw,
                 env,
             );
@@ -10233,15 +10247,33 @@ fn emit_enum_class(
             clinit.push_string(&entry.name, e.cw);
             clinit.push_int(i as i32, e.cw);
             if spill {
-                for &(slot, t, _) in &temps {
-                    load(t, slot, &mut clinit);
+                let mut supplied = temps.iter();
+                for (parameter, ty) in all_param_tys.iter().copied().enumerate() {
+                    if entry.default_parameters.contains(&(parameter as u32)) {
+                        push_zero(ty, &mut clinit, e.cw);
+                    } else {
+                        let (slot, ty, _) = supplied
+                            .next()
+                            .expect("checked enum constructor supplied-argument count");
+                        load(*ty, *slot, &mut clinit);
+                    }
                 }
                 for &(_, _, key) in &temps {
                     e.slots.remove(&key);
                 }
             } else {
-                for &a in args {
-                    e.emit_value(a, &mut clinit);
+                let mut supplied = args.iter().copied();
+                for (parameter, ty) in all_param_tys.iter().copied().enumerate() {
+                    if entry.default_parameters.contains(&(parameter as u32)) {
+                        push_zero(ty, &mut clinit, e.cw);
+                    } else {
+                        e.emit_value(
+                            supplied
+                                .next()
+                                .expect("checked enum constructor supplied-argument count"),
+                            &mut clinit,
+                        );
+                    }
                 }
             }
             let (entry_ctor_desc, entry_ctor_argw) = if entry.default_parameters.is_empty() {
@@ -10249,12 +10281,15 @@ fn emit_enum_class(
             } else {
                 emit_constructor_default_arguments(
                     &entry.default_parameters,
-                    args.len(),
+                    all_param_tys.len(),
                     &mut clinit,
                     e.cw,
                 );
                 let mut parameters = ctor_params.clone();
-                parameters.extend(std::iter::repeat_n(Ty::Int, default_mask_count(args.len())));
+                parameters.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    default_mask_count(all_param_tys.len()),
+                ));
                 parameters.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
                 let words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
                 (method_descriptor(&parameters, Ty::Unit), words)
@@ -16164,64 +16199,76 @@ impl<'a> Emitter<'a> {
                 ctor_params,
                 ctor_desc,
                 external_target: _,
+                defaults: default_parameters,
+                default_prefix_count,
             } => {
                 let owner = internal.render();
                 let args = args.clone();
-                let default_parameters = self.ir.constructor_default_arguments(e);
                 // The constructor descriptor + its argument-word count come from ONE source, identified by
                 // the owner NAME (no same-file/other-file/classpath control-flow split):
                 //  - a verbatim descriptor (`ctor_desc`) for a classpath ctor whose signature isn't modeled
                 //    as `Ty`s — arg words come from each argument's own value type; OR
                 //  - the known parameter types: the node's `ctor_params`, else the named in-IR class's
                 //    primary-ctor field types.
-                let (desc, use_accessor) = if let Some(d) = ctor_desc {
-                    (d.clone(), false)
-                } else {
-                    let mut field_tys: Vec<Ty> = match ctor_params {
-                        Some(ps) => jvm_tys(ps),
-                        None => self
-                            .ir
-                            .class_id_by_name(*internal)
-                            .map(|c| class_ctor_jvm_tys(&self.ir.classes[c as usize]))
-                            .unwrap_or_default(),
-                    };
-                    // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
-                    // PUBLIC|SYNTHETIC accessor `(…args, DefaultConstructorMarker)`. Construction from
-                    // ANOTHER class routes through the accessor (a trailing `null`) — JVM `private` is
-                    // a per-CLASS boundary (independent of file/package), so the test is `self.owner !=
-                    // owner`. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
-                    // A SECONDARY ctor with value-class params has the same private+marker ABI —
-                    // the checker-selected `ctor_params` identify it by erased shape.
-                    let vc_secondary = ctor_params.as_ref().is_some_and(|ps| {
-                        let want = jvm_tys(ps);
-                        self.ir
-                            .class_id_by_name(*internal)
-                            .map(|cid| &self.ir.classes[cid as usize])
-                            .is_some_and(|target| {
-                                target.secondary_ctors.iter().any(|sc| {
-                                    sc.vc_params
-                                        && jvm_tys(&sc.prefix_params)
-                                            .into_iter()
-                                            .chain(jvm_tys(&sc.params))
-                                            .eq(want.iter().copied())
+                let (desc, use_accessor, base_parameter_count, source_parameter_count) =
+                    if let Some(d) = ctor_desc {
+                        debug_assert!(default_parameters.is_empty());
+                        (d.clone(), false, args.len(), args.len())
+                    } else {
+                        let mut field_tys: Vec<Ty> = match ctor_params {
+                            Some(ps) => jvm_tys(ps),
+                            None => self
+                                .ir
+                                .class_id_by_name(*internal)
+                                .map(|c| class_ctor_jvm_tys(&self.ir.classes[c as usize]))
+                                .unwrap_or_default(),
+                        };
+                        // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
+                        // PUBLIC|SYNTHETIC accessor `(…args, DefaultConstructorMarker)`. Construction from
+                        // ANOTHER class routes through the accessor (a trailing `null`) — JVM `private` is
+                        // a per-CLASS boundary (independent of file/package), so the test is `self.owner !=
+                        // owner`. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
+                        // A SECONDARY ctor with value-class params has the same private+marker ABI —
+                        // the checker-selected `ctor_params` identify it by erased shape.
+                        let vc_secondary = ctor_params.as_ref().is_some_and(|ps| {
+                            let want = jvm_tys(ps);
+                            self.ir
+                                .class_id_by_name(*internal)
+                                .map(|cid| &self.ir.classes[cid as usize])
+                                .is_some_and(|target| {
+                                    target.secondary_ctors.iter().any(|sc| {
+                                        sc.vc_params
+                                            && jvm_tys(&sc.prefix_params)
+                                                .into_iter()
+                                                .chain(jvm_tys(&sc.params))
+                                                .eq(want.iter().copied())
+                                    })
                                 })
-                            })
-                    });
-                    let use_accessor = self.owner != owner
-                        && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
-                            || vc_secondary);
-                    if use_accessor {
-                        field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                    }
-                    if !default_parameters.is_empty() {
-                        field_tys.extend(std::iter::repeat_n(
-                            Ty::Int,
-                            default_mask_count(field_tys.len()),
-                        ));
-                        field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                    }
-                    (method_descriptor(&field_tys, Ty::Unit), use_accessor)
-                };
+                        });
+                        let use_accessor = self.owner != owner
+                            && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
+                                || vc_secondary);
+                        let base_parameter_count = field_tys.len();
+                        let source_parameter_count = base_parameter_count
+                            .checked_sub(*default_prefix_count as usize)
+                            .expect("constructor default prefix exceeds its parameters");
+                        if use_accessor {
+                            field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                        }
+                        if !default_parameters.is_empty() {
+                            field_tys.extend(std::iter::repeat_n(
+                                Ty::Int,
+                                default_mask_count(source_parameter_count),
+                            ));
+                            field_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+                        }
+                        (
+                            method_descriptor(&field_tys, Ty::Unit),
+                            use_accessor,
+                            base_parameter_count,
+                            source_parameter_count,
+                        )
+                    };
                 let physical_params =
                     parse_descriptor_params(&desc).expect("constructor descriptor must be valid");
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
@@ -16232,9 +16279,35 @@ impl<'a> Emitter<'a> {
                     let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
                     code.dup();
-                    for (i, &(slot, t, _)) in temps.iter().enumerate() {
-                        load(t, slot, code);
-                        self.adapt_physical_operand_for(args[i], t, physical_params[i], code);
+                    let mut supplied = temps.iter().zip(args.iter());
+                    for (parameter, physical) in physical_params
+                        .iter()
+                        .copied()
+                        .take(base_parameter_count)
+                        .enumerate()
+                    {
+                        let omitted = parameter >= *default_prefix_count as usize
+                            && default_parameters.contains(
+                                &u32::try_from(parameter - *default_prefix_count as usize)
+                                    .expect("too many constructor parameters"),
+                            );
+                        if omitted {
+                            push_zero(physical, code, self.cw);
+                        } else {
+                            let ((slot, ty, _), argument) = supplied
+                                .next()
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "checked constructor supplied-argument count: owner={owner} \
+                                         supplied={} physical={base_parameter_count} defaults={default_parameters:?} \
+                                         prefix={default_prefix_count} expression={e} origin={:?}",
+                                        args.len(),
+                                        self.ir.fir_origins.get(&e),
+                                    )
+                                });
+                            load(*ty, *slot, code);
+                            self.adapt_physical_operand_for(*argument, *ty, physical, code);
+                        }
                     }
                     for &(_, _, key) in &temps {
                         self.slots.remove(&key);
@@ -16244,7 +16317,7 @@ impl<'a> Emitter<'a> {
                     }
                     emit_constructor_default_arguments(
                         default_parameters,
-                        args.len(),
+                        source_parameter_count,
                         code,
                         self.cw,
                     );
@@ -16254,21 +16327,47 @@ impl<'a> Emitter<'a> {
                     let ci = self.cw.class_ref(&owner);
                     code.new_obj(ci);
                     code.dup();
-                    for (i, &a) in args.iter().enumerate() {
-                        self.emit_value(a, code);
-                        self.adapt_physical_operand_for(
-                            a,
-                            self.value_ty(a),
-                            physical_params[i],
-                            code,
-                        );
+                    let mut supplied = args.iter().copied();
+                    for (parameter, physical) in physical_params
+                        .iter()
+                        .copied()
+                        .take(base_parameter_count)
+                        .enumerate()
+                    {
+                        let omitted = parameter >= *default_prefix_count as usize
+                            && default_parameters.contains(
+                                &u32::try_from(parameter - *default_prefix_count as usize)
+                                    .expect("too many constructor parameters"),
+                            );
+                        if omitted {
+                            push_zero(physical, code, self.cw);
+                        } else {
+                            let argument = supplied
+                                .next()
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "checked constructor supplied-argument count: owner={owner} \
+                                         supplied={} physical={base_parameter_count} defaults={default_parameters:?} \
+                                         prefix={default_prefix_count} expression={e} origin={:?}",
+                                        args.len(),
+                                        self.ir.fir_origins.get(&e),
+                                    )
+                                });
+                            self.emit_value(argument, code);
+                            self.adapt_physical_operand_for(
+                                argument,
+                                self.value_ty(argument),
+                                physical,
+                                code,
+                            );
+                        }
                     }
                     if use_accessor {
                         code.aconst_null();
                     }
                     emit_constructor_default_arguments(
                         default_parameters,
-                        args.len(),
+                        source_parameter_count,
                         code,
                         self.cw,
                     );

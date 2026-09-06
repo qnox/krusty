@@ -768,11 +768,19 @@ impl FirConstructorTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FirConstructorCall {
     pub target: FirConstructorTarget,
+    /// Leading classifier context parameters already present in `parameter_types` and
+    /// `arguments`. They are physical constructor inputs but do not participate in source value-
+    /// parameter default-mask ordinals.
+    pub context_parameter_count: u32,
     /// Semantic type of the compiler-supplied enclosing-instance parameter. This is separate from
     /// source value parameters, so default-mask ordinals and source argument mapping remain stable.
     /// It is present exactly when `outer_receiver` supplies an `inner` constructor receiver.
     pub outer_parameter: Option<ResolvedTy>,
     pub outer_receiver: Option<FirReceiver>,
+    /// Compiler capture operands that must cross a separately streamed body boundary. `None`
+    /// means the construction is in the FIR body that declares the local classifier, whose
+    /// checked `LocalDeclaration` supplies the same capture prefix.
+    pub external_capture_arguments: Option<Box<[FirExprId]>>,
     /// Final call-site-applied source value-parameter types. Constructor lowering consumes these
     /// directly; the stable declaration signature remains available separately for target ABI.
     pub parameter_types: Box<[ResolvedTy]>,
@@ -791,6 +799,12 @@ impl FirConstructorCall {
         self.target.storage_payload_bytes()
             + self.parameter_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.arguments.len() * std::mem::size_of::<FirCallArgument>()
+            + self
+                .external_capture_arguments
+                .as_ref()
+                .map_or(0, |arguments| {
+                    arguments.len() * std::mem::size_of::<FirExprId>()
+                })
             + self
                 .arguments
                 .iter()

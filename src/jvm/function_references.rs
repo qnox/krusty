@@ -340,6 +340,8 @@ pub(super) fn realize(
                 ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
                 ctor_desc: None,
                 external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
             },
             None => IrExpr::StaticInstance {
                 owner: class,

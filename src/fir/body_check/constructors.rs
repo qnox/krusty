@@ -255,6 +255,8 @@ impl BodyFirChecker<'_> {
         omitted: Vec<usize>,
         vararg: Option<usize>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let context_parameter_count = u32::try_from(context_args.len())
+            .map_err(|_| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
         if argument_slots.len() != arguments.len() {
             return Err(self.failure(
                 self.file.expr_span(expression),
@@ -298,14 +300,15 @@ impl BodyFirChecker<'_> {
             checked_arguments,
         )?;
         let outer_receiver = self.constructor_outer_receiver(expression, outer)?;
+        let origin = self.expression_origin(expression)?;
+        let external_capture_arguments =
+            self.external_constructor_capture_arguments(declaration, origin)?;
         let outer_parameter =
             if outer_receiver.is_some() {
                 let outer = self
                     .index
                     .classifier_declaration(owner)
-                    .and_then(|declaration| self.index.declaration_anchor(declaration))
-                    .and_then(|anchor| anchor.owner)
-                    .and_then(|outer| self.index.classifier_header(outer))
+                    .and_then(|declaration| self.index.enclosing_owner_classifier(declaration))
                     .ok_or_else(|| {
                         self.failure(
                             self.file.expr_span(expression),
@@ -323,8 +326,10 @@ impl BodyFirChecker<'_> {
             };
         Ok(FirExprKind::ConstructorCall(FirConstructorCall {
             target: FirConstructorTarget::Module(target),
+            context_parameter_count,
             outer_parameter,
             outer_receiver,
+            external_capture_arguments,
             parameter_types: self
                 .published_parameter_types(self.file.expr_span(expression), &parameters)?,
             arguments: checked_arguments,
@@ -345,6 +350,8 @@ impl BodyFirChecker<'_> {
         omitted: Vec<usize>,
         annotation: Option<ResolvedAnnotationConstruction>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let context_parameter_count = u32::try_from(context_args.len())
+            .map_err(|_| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
         if argument_slots.len() != arguments.len() {
             return Err(self.failure(
                 self.file.expr_span(expression),
@@ -404,8 +411,10 @@ impl BodyFirChecker<'_> {
                     .transpose()?
                     .map(Box::new),
             },
+            context_parameter_count,
             outer_parameter,
             outer_receiver,
+            external_capture_arguments: None,
             parameter_types: parameters.into_boxed_slice(),
             arguments: checked_arguments,
             substitutions: Box::new([]),
@@ -875,8 +884,12 @@ fn add_constructor_delegation(
         origin,
         kind: FirStatementKind::ConstructorDelegation(FirConstructorCall {
             target,
+            context_parameter_count: u32::try_from(resolved.context_args.len()).map_err(|_| {
+                checker.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+            })?,
             outer_parameter,
             outer_receiver,
+            external_capture_arguments: None,
             parameter_types: checker
                 .published_parameter_types(Some(span), resolved.target.params())?,
             arguments,

@@ -2535,6 +2535,17 @@ impl ResolvedModuleIndex {
         }
     }
 
+    /// The nearest classifier that owns `declaration`, excluding the declaration itself when it
+    /// is a classifier. Stable enum-entry declarations are transparent in this ownership walk:
+    /// classifiers declared in an entry body are semantically enclosed by the entry's parent enum.
+    pub fn enclosing_owner_classifier(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&ResolvedClassifierHeader> {
+        let owner = self.declaration_anchor(declaration)?.owner?;
+        self.enclosing_classifier(owner)
+    }
+
     /// Whether a declaration belongs to a classifier introduced inside an executable body. Stable
     /// anchors for those classifiers deliberately do not encode their parser statement owner, but
     /// their resolved declaration flag and every owned child edge remain sufficient to keep them

@@ -15,7 +15,7 @@ use super::BodyLowering;
 #[derive(Clone, Copy)]
 enum CheckedArgumentPolicy<'a> {
     Selected {
-        allow_defaults: bool,
+        defaults: SelectedDefaultMode,
         preserve_inline_lambdas: bool,
     },
     SameFileInline {
@@ -37,13 +37,20 @@ pub(super) enum SelectedOperandMode {
     Materialized,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum SelectedDefaultMode {
+    Reject,
+    Omit,
+    Materialize,
+}
+
 pub(super) struct SelectedOperandRequest<'a> {
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) parameter_types: &'a [Ty],
     pub(super) dispatch_receiver: Option<ExprId>,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
-    pub(super) allow_defaults: bool,
+    pub(super) defaults: SelectedDefaultMode,
     pub(super) preserve_inline_lambdas: bool,
     pub(super) extension_receiver_parameter: Option<u32>,
     pub(super) mode: SelectedOperandMode,
@@ -64,6 +71,18 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) extension_receiver_parameter: Option<u32>,
     pub(super) dispatch_receiver: Option<ExprId>,
     pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+}
+
+pub(super) struct ModuleConstructorRequest<'a> {
+    pub(super) target: CallableId,
+    pub(super) classifier: crate::types::TypeName,
+    pub(super) argument_parameter_types: &'a [Ty],
+    pub(super) declaration_parameter_types: &'a [Ty],
+    pub(super) primary_in_current_file: bool,
+    pub(super) context_parameter_count: u32,
+    pub(super) outer_receiver: Option<ExprId>,
+    pub(super) external_capture_arguments: Option<&'a [(ExprId, Ty)]>,
     pub(super) arguments: &'a [IrCheckedArgument],
 }
 
@@ -271,7 +290,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-                allow_defaults: false,
+                defaults: SelectedDefaultMode::Reject,
                 preserve_inline_lambdas: false,
                 extension_receiver_parameter,
                 mode: SelectedOperandMode::DirectWhenOrdered,
@@ -369,7 +388,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-                allow_defaults: true,
+                defaults: SelectedDefaultMode::Omit,
                 preserve_inline_lambdas: can_inline,
                 extension_receiver_parameter,
                 mode: SelectedOperandMode::DirectWhenOrdered,
@@ -527,7 +546,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-                allow_defaults: false,
+                defaults: SelectedDefaultMode::Reject,
                 preserve_inline_lambdas: false,
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::Materialized,
@@ -598,7 +617,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-                allow_defaults: true,
+                defaults: SelectedDefaultMode::Materialize,
                 preserve_inline_lambdas: false,
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::Materialized,
@@ -846,7 +865,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-                allow_defaults: false,
+                defaults: SelectedDefaultMode::Reject,
                 preserve_inline_lambdas: false,
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::Materialized,
@@ -939,6 +958,8 @@ impl BodyLowering<'_> {
             ctor_params: Some(Vec::new()),
             ctor_desc: None,
             external_target: Some(factory),
+            defaults: Box::new([]),
+            default_prefix_count: 0,
         });
         let accumulator_slot = self.allocate_temporary();
         statements.push(self.ir.add_expr(IrExpr::Variable {
@@ -1053,7 +1074,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-                allow_defaults: false,
+                defaults: SelectedDefaultMode::Reject,
                 preserve_inline_lambdas: false,
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::Materialized,
@@ -1219,7 +1240,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-                allow_defaults: false,
+                defaults: SelectedDefaultMode::Reject,
                 preserve_inline_lambdas: false,
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::DirectWhenOrdered,
@@ -1243,7 +1264,7 @@ impl BodyLowering<'_> {
             dispatch_receiver,
             extension_receiver,
             arguments,
-            allow_defaults,
+            defaults,
             preserve_inline_lambdas,
             extension_receiver_parameter,
             mode,
@@ -1297,7 +1318,7 @@ impl BodyLowering<'_> {
             parameter_types,
             arguments,
             CheckedArgumentPolicy::Selected {
-                allow_defaults,
+                defaults,
                 preserve_inline_lambdas,
             },
             direct,
@@ -1310,7 +1331,16 @@ impl BodyLowering<'_> {
             }
             slots[parameter] = Some(extension_receiver);
         }
-        let args = slots.into_iter().collect::<Option<Vec<_>>>()?;
+        let args = if defaults == SelectedDefaultMode::Omit {
+            if slots.iter().enumerate().any(|(parameter, slot)| {
+                slot.is_none() && !normalized.defaults.contains(&(parameter as u32))
+            }) {
+                return None;
+            }
+            slots.into_iter().flatten().collect()
+        } else {
+            slots.into_iter().collect::<Option<Vec<_>>>()?
+        };
         Some((statements, receiver, args, normalized.defaults))
     }
 
@@ -1330,6 +1360,8 @@ impl BodyLowering<'_> {
         declaration: ExternalCallableId,
         classifier: crate::types::TypeName,
         parameters: &[ResolvedTy],
+        context_parameter_count: u32,
+        outer_parameter: Option<ResolvedTy>,
         outer_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
         annotation: Option<&FirAnnotationConstruction>,
@@ -1338,35 +1370,48 @@ impl BodyLowering<'_> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let (statements, receiver, mut args, defaults) =
+        let (statements, receiver, mut args, mut defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty: None,
                 parameter_types: &parameter_types,
                 dispatch_receiver: None,
                 extension_receiver: None,
                 arguments,
-                allow_defaults: true,
+                defaults: SelectedDefaultMode::Omit,
                 preserve_inline_lambdas: false,
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::DirectWhenOrdered,
             })?;
         debug_assert!(receiver.is_none());
+        if context_parameter_count as usize > parameter_types.len() {
+            return None;
+        }
+        for parameter in &mut defaults {
+            *parameter = parameter.checked_sub(context_parameter_count)?;
+        }
         // An `inner` constructor's enclosing instance is an explicit checked FIR receiver, but is
         // not one of its source value parameters. Put it before those arguments, matching the JVM
         // constructor realization already interned by the provider. Default-mask ordinals remain
         // source-parameter ordinals, so they deliberately are not shifted here.
-        if let Some(outer_receiver) = outer_receiver {
+        if outer_receiver.is_some() != outer_parameter.is_some() {
+            return None;
+        }
+        let mut physical_parameter_types = parameter_types;
+        let mut default_prefix_count = context_parameter_count;
+        if let Some((outer_receiver, outer_parameter)) = outer_receiver.zip(outer_parameter) {
             args.insert(0, outer_receiver);
+            physical_parameter_types.insert(0, outer_parameter.get());
+            default_prefix_count = default_prefix_count.checked_add(1)?;
         }
         let construction = self.ir.add_expr(IrExpr::New {
             internal: classifier,
             args,
-            ctor_params: Some(parameter_types),
+            ctor_params: Some(physical_parameter_types),
             ctor_desc: None,
             external_target: Some(declaration),
+            defaults: defaults.into_boxed_slice(),
+            default_prefix_count,
         });
-        self.ir
-            .insert_constructor_default_arguments(construction, defaults);
         self.record_external_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -1435,14 +1480,19 @@ impl BodyLowering<'_> {
 
     pub(super) fn module_constructor_call(
         &mut self,
-        target: CallableId,
-        classifier: crate::types::TypeName,
-        argument_parameter_types: &[Ty],
-        declaration_parameter_types: &[Ty],
-        primary_in_current_file: bool,
-        outer_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
+        request: ModuleConstructorRequest<'_>,
     ) -> Option<ExprId> {
+        let ModuleConstructorRequest {
+            target,
+            classifier,
+            argument_parameter_types,
+            declaration_parameter_types,
+            primary_in_current_file,
+            context_parameter_count,
+            outer_receiver,
+            external_capture_arguments,
+            arguments,
+        } = request;
         let mut declaration_parameter_types = declaration_parameter_types.to_vec();
         let selected = self.selected_semantic_operands(SelectedOperandRequest {
             receiver_ty: None,
@@ -1450,7 +1500,7 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             extension_receiver: None,
             arguments,
-            allow_defaults: true,
+            defaults: SelectedDefaultMode::Omit,
             preserve_inline_lambdas: false,
             extension_receiver_parameter: None,
             mode: SelectedOperandMode::DirectWhenOrdered,
@@ -1462,27 +1512,31 @@ impl BodyLowering<'_> {
         );
         let (statements, receiver, mut args, mut defaults) = selected?;
         debug_assert!(receiver.is_none());
+        if context_parameter_count as usize > argument_parameter_types.len() {
+            return None;
+        }
+        for parameter in &mut defaults {
+            *parameter = parameter.checked_sub(context_parameter_count)?;
+        }
+        let mut default_prefix_count = context_parameter_count;
         if let Some(outer_receiver) = outer_receiver {
             let declaration = self.index.classifier_declaration(classifier)?;
-            let outer = self
-                .index
-                .declaration_anchor(declaration)?
-                .owner
-                .and_then(|owner| self.index.classifier_header(owner))?;
+            let outer = self.index.enclosing_owner_classifier(declaration)?;
             args.insert(0, outer_receiver);
             let outer = Ty::obj_name(outer.classifier);
             declaration_parameter_types.insert(0, outer);
-            for parameter in &mut defaults {
-                *parameter += 1;
-            }
+            default_prefix_count += 1;
         }
-        if let Some(captures) = self.local_class_captures.get(&classifier) {
+        if let Some(captures) = external_capture_arguments {
             let capture_count = captures.len() as u32;
             args.splice(0..0, captures.iter().map(|(value, _)| *value));
             declaration_parameter_types.splice(0..0, captures.iter().map(|(_, ty)| *ty));
-            for parameter in &mut defaults {
-                *parameter += capture_count;
-            }
+            default_prefix_count += capture_count;
+        } else if let Some(captures) = self.local_class_captures.get(&classifier) {
+            let capture_count = captures.len() as u32;
+            args.splice(0..0, captures.iter().map(|(value, _)| *value));
+            declaration_parameter_types.splice(0..0, captures.iter().map(|(_, ty)| *ty));
+            default_prefix_count += capture_count;
         }
         let construction = self.ir.add_expr(IrExpr::New {
             internal: classifier,
@@ -1490,9 +1544,9 @@ impl BodyLowering<'_> {
             ctor_params: (!primary_in_current_file).then_some(declaration_parameter_types),
             ctor_desc: None,
             external_target: None,
+            defaults: defaults.into_boxed_slice(),
+            default_prefix_count,
         });
-        self.ir
-            .insert_constructor_default_arguments(construction, defaults);
         self.record_module_annotation_construction(construction, target, classifier)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -2024,17 +2078,22 @@ impl BodyLowering<'_> {
                 CheckedArgumentSlot::Expression(value) => Some(Some(value)),
                 CheckedArgumentSlot::Default(ordinal) => match policy {
                     CheckedArgumentPolicy::Selected {
-                        allow_defaults: true,
+                        defaults:
+                            mode @ (SelectedDefaultMode::Omit | SelectedDefaultMode::Materialize),
                         ..
                     } => {
-                        let parameter_ty = *parameter_types.get(parameter)?;
                         defaults.push(ordinal);
-                        Some(Some(self.ir.add_expr(IrExpr::Const(
-                            IrConst::zero_for_value_type(parameter_ty),
-                        ))))
+                        if mode == SelectedDefaultMode::Omit {
+                            Some(None)
+                        } else {
+                            let parameter_ty = *parameter_types.get(parameter)?;
+                            Some(Some(self.ir.add_expr(IrExpr::Const(
+                                IrConst::zero_for_value_type(parameter_ty),
+                            ))))
+                        }
                     }
                     CheckedArgumentPolicy::Selected {
-                        allow_defaults: false,
+                        defaults: SelectedDefaultMode::Reject,
                         ..
                     } => None,
                     CheckedArgumentPolicy::SameFileInline { .. } => Some(None),
