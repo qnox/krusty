@@ -348,6 +348,10 @@ fn implicit_context_argument_contributes_to_generic_inference() {
 
 #[test]
 fn explicit_context_parameter_does_not_take_a_positional_value_slot() {
+    // The signature pass still declines `box` (an explicit context argument beside a generic
+    // value slot), and until it does not, the batch compiler emitted NOTHING for this file while
+    // reporting success. The decline is reported now; the expectation below documents that gap
+    // rather than the empty diagnostic list that used to hide it. kotlinc compiles this.
     const SRC: &str = r#"
         // LANGUAGE: +ContextParameters +ExplicitContextArguments
         context(transform: (T) -> T)
@@ -360,7 +364,10 @@ fn explicit_context_parameter_does_not_take_a_positional_value_slot() {
             std::slice::from_ref(&common::stdlib_jar()),
             Some(common::jdk_modules().as_path()),
         ),
-        Vec::<String>::new()
+        vec![
+            "krusty: cannot infer the return type of 'box'; add an explicit return type"
+                .to_string()
+        ]
     );
 }
 

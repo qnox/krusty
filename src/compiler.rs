@@ -231,9 +231,11 @@ pub fn emit_analyzed<B: Backend>(
     let crate::frontend::StreamedPassState {
         module,
         diagnostic_recovery,
+        declined,
     } = streamed;
     if diagnostic_recovery || diags.has_errors() {
         recover_pass_two_diagnostics(&reparse_sources, &mut symbols, module, diags);
+        crate::frontend::report_declined_signatures(&declined, diags);
         return Vec::new();
     }
     debug_assert!(
@@ -997,20 +999,37 @@ pub fn check_frontend_only(
         .iter()
         .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
         .map(|diagnostic| (diagnostic.file, diagnostic.span, diagnostic.msg.clone()));
-    if first_error.is_some() {
+    // A signature Pass 1 declined without a diagnostic is a frontend failure as much as a
+    // reported error is: the same recovery pass runs, and whatever it leaves unexplained is
+    // reported at the declaration, so a decline never reads as a clean compile.
+    let silent_decline = first_error.is_none()
+        && streamed
+            .as_ref()
+            .is_some_and(|streamed| streamed.diagnostic_recovery);
+    if first_error.is_some() || silent_decline {
         // A failed stable signature cannot enter checked FIR, but it also must not prevent the
         // normal second source pass from finding independent body diagnostics. Consume the compact
         // partial module exactly as emission does, and discard every reparsed unit immediately;
         // this is recovery inside Pass 2, not another source pass or a second checker.
         if let Some(streamed) = streamed {
             recover_pass_two_diagnostics(&reparse_sources, &mut symbols, streamed.module, diags);
+            crate::frontend::report_declined_signatures(&streamed.declined, diags);
         }
-        let (source, span, message) = diags
+        let Some((source, span, message)) = diags
             .diags
             .iter()
             .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
             .map(|diagnostic| (diagnostic.file, diagnostic.span, diagnostic.msg.clone()))
-            .expect("the preexisting frontend error remains after diagnostic recovery");
+        else {
+            census.failures.push(FrontendFailure {
+                stage: FrontendStage::Signatures,
+                source: 0,
+                span: None,
+                kind: "MissingSignatureDiagnostic".to_string(),
+                detail: "signature recovery module had no reported source diagnostic".to_string(),
+            });
+            return census;
+        };
         census.failures.push(FrontendFailure {
             stage: if message.starts_with("internal error:") {
                 FrontendStage::Signatures
@@ -1042,6 +1061,7 @@ pub fn check_frontend_only(
     let crate::frontend::StreamedPassState {
         module,
         diagnostic_recovery,
+        declined: _,
     } = streamed;
     if diagnostic_recovery {
         census.failures.push(FrontendFailure {

@@ -1859,6 +1859,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A packed array is built through a local, never a `dup` chain.** kotlinc 2.4.10 emits every
+  packed array — a vararg call's elements, `arrayOf`, `intArrayOf`, `listOf(...)` alike, in static and
+  instance bodies — as `anewarray; astore n; aload n; iconst_0; <e0>; aastore; …; aload n`, with `n`
+  the next free local at that point, released again afterwards. krusty used `dup; index; <element>;
+  aastore`, one instruction shorter per element and different on every vararg call site in a real
+  module. The `Vararg` emitter now spills the fresh array into `next_slot` (registered in the frame
+  slot map while the elements are emitted, so a branchy element frames it as live), reloads it for
+  each store and for the final use, and releases the slot when it is the topmost one. Measured
+  byte-identical for a top-level `f("a", "b")`, a non-final vararg with a trailing named argument, an
+  instance method, `arrayOf`/`intArrayOf`/`listOf`, and a parameter used as an element. Still open
+  beside it: kotlinc allocates a `val`'s slot BEFORE evaluating its initializer (`val t = f("a")`
+  gives `t` slot 0 and the packing temp slot 1), and it `checkcast`s a `String` receiver to a
+  `CharSequence` EXTENSION receiver (`"a".split(...)`), neither of which this rule covers. Test:
+  `tests/vararg_elements_before_named_e2e.rs` (`packed_vararg_arrays_are_byte_identical`,
+  `module_vararg_elements_before_named_argument_are_byte_identical`).
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
@@ -3098,6 +3113,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kinds were affected identically — plain, receiver, `suspend`, `suspend` receiver — which is why the
   failure looked specific to `suspend` receivers. Test:
   `tests/classpath_named_arg_skips_default_e2e.rs`.
+- **Signature-pass argument mapping keeps the slot-map contract, including vararg EXTRAS.** The
+  Pass-1 signature solver (`streaming_signature_bridge::candidate_call_slots`) maps a call's written
+  arguments onto parameter slots through the same `map_call_args` the checker uses. That mapper keeps
+  ONE source per slot: positional vararg elements beyond the first stay unmapped and are the vararg's
+  extras, reconstructed by lowering. The solver used to reject any candidate with an unmapped source,
+  so `"a,b;c".split(",", ";", limit = 2)` and `option("--target", "-t", help = "…")` (two elements,
+  then a named argument) declined in signature position while the same call in a body checked fine.
+  An unmapped positional argument is now admitted as a vararg extra when it carries the SAME element
+  type as the mapped first element (a spread contributes its array's element type; lambdas and
+  postponed arguments never qualify) — the per-slot selection downstream sees only the mapped element,
+  so an extra of another type must keep the candidate inapplicable and let Pass 2 report kotlinc's
+  `argument type mismatch`. Non-public LIBRARY candidates do not vote on the mapping: they can never be
+  selected from another module, and the stdlib's private `split(String, Boolean, Int)` sibling turned
+  the vararg overload's unique mapping into a two-mapping "ambiguity". Separately, a source top-level
+  function's vararg need not be LAST (`fun option(vararg names: String, help: String = "")`);
+  top-level selection expanded varargs with the final-slot assumption and declined every call shape
+  but named-only, so it now expands at the candidate's recorded slot (`candidate_vararg_shape` →
+  `vararg_parameter_shape_at`, defaults sliced past the context parameters). Tests:
+  `tests/vararg_elements_before_named_e2e.rs`.
+- **A Pass-1 signature decline is never silent.** Declining an inferred signature is recoverable by
+  design (`DiagnosticId::NONE`), but nothing downstream recovered it: Pass 2 had no signature to check
+  the declaration's uses against, the batch compiler exited 0 having emitted NOTHING for the file
+  ("emitted 0 class file(s)"), and the editor showed only `unresolved reference` at every use. Every
+  failure with no diagnostic of its own — nor one inherited from a failed dependency
+  (`DiagnosticId::FAILED_DEPENDENCY`) — is kept as a `DeclinedSignature` and reported AFTER Pass 2
+  (`frontend::report_declined_signatures`, from `emit_analyzed`, `check_frontend_only` and the editor
+  path) as `krusty: cannot infer the type of property 'x'; add an explicit type` (return type for a
+  function). The report is per FILE: a file that already carries an error gets no second message,
+  because kotlinc reports only the root cause and the solver cannot link a dependent's decline to the
+  declaration that caused it (`fun use() = a.length` after `val a = missing()`), while a file with no
+  error would otherwise pass as clean with its declarations unchecked and unemitted.
+  Test: `a_vararg_extra_of_another_type_still_declines_in_signature_position` (Pass 2's own message
+  stays the only one) and the editor tests in `tests/editor_failed_signature_recovery_e2e.rs`.
 
 - **A property read is a property read; how it is READ is the target's business.** `Dispatchers.IO` was
   reported as `unresolved reference 'IO'`, and the cause was a category error rather than a missing case:

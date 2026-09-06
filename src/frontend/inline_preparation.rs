@@ -682,5 +682,6 @@ fn finish(
     Some(StreamedPassState {
         module: crate::fir::FrontendModule::new(index, inline_bodies, default_arguments, sources),
         diagnostic_recovery: false,
+        declined: Vec::new(),
     })
 }

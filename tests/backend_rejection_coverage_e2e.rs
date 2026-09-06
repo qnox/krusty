@@ -260,30 +260,50 @@ fn owner_generic_member_value_class_operand_specialization_runs() {
 
 #[test]
 fn generic_member_extension_value_class_receiver_specialization_rejected() {
-    assert!(rejects(
-        "class Scope {\n\
-             fun <T, R> T.mapResult(\n\
-                 transform: suspend (T) -> R\n\
-             ): suspend () -> R = { transform(this) }\n\
-             fun trigger() = Result.success(\"OK\").mapResult { \"OK\" }\n\
-         }\n\
-         fun box(): String = \"unreachable\"\n"
-    ));
+    // `rejects` used to answer true here only because the signature pass declined `trigger`
+    // SILENTLY and the module produced neither classes nor diagnostics. The decline is reported
+    // now, at the declaration, so the backend gate is never reached; pin the honest outcome.
+    assert_eq!(
+        common::front_end_diagnostics(
+            "class Scope {\n\
+                 fun <T, R> T.mapResult(\n\
+                     transform: suspend (T) -> R\n\
+                 ): suspend () -> R = { transform(this) }\n\
+                 fun trigger() = Result.success(\"OK\").mapResult { \"OK\" }\n\
+             }\n\
+             fun box(): String = \"unreachable\"\n",
+            std::slice::from_ref(&common::stdlib_jar()),
+            Some(common::jdk_modules().as_path()),
+        ),
+        vec![
+            "krusty: cannot infer the return type of 'trigger'; add an explicit return type"
+                .to_string()
+        ]
+    );
 }
 
 #[test]
 fn owner_generic_member_extension_value_class_receiver_specialization_rejected() {
-    assert!(rejects(
-        "class Scope<T> {\n\
-             fun <R> T.mapResult(\n\
-                 transform: suspend (T) -> R\n\
-             ): suspend () -> R = { transform(this) }\n\
-         }\n\
-         fun trigger() = with(Scope<Result<String>>()) {\n\
-             Result.success(\"OK\").mapResult { \"OK\" }\n\
-         }\n\
-         fun box(): String = \"unreachable\"\n"
-    ));
+    // Same as above: the reported decline replaces a silent no-output "rejection".
+    assert_eq!(
+        common::front_end_diagnostics(
+            "class Scope<T> {\n\
+                 fun <R> T.mapResult(\n\
+                     transform: suspend (T) -> R\n\
+                 ): suspend () -> R = { transform(this) }\n\
+             }\n\
+             fun trigger() = with(Scope<Result<String>>()) {\n\
+                 Result.success(\"OK\").mapResult { \"OK\" }\n\
+             }\n\
+             fun box(): String = \"unreachable\"\n",
+            std::slice::from_ref(&common::stdlib_jar()),
+            Some(common::jdk_modules().as_path()),
+        ),
+        vec![
+            "krusty: cannot infer the return type of 'trigger'; add an explicit return type"
+                .to_string()
+        ]
+    );
 }
 
 #[test]

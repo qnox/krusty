@@ -484,7 +484,10 @@ fn member_extension_property_resolution() {
                     fun read(token: String): String = token.marker
                 }
             ",
-            None,
+            // The signature pass declines this inferred getter (overload planning with a
+            // lambda), and the recovery pass then cannot resolve the read; the file used to
+            // produce neither classes nor diagnostics. Pinned as the surfaced gap.
+            Some(&["unresolved reference 'marker'."]),
         ),
         (
             "block getter requires an explicit return type",

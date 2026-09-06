@@ -18268,18 +18268,38 @@ impl<'a> Emitter<'a> {
                 let box_elem = reference_array
                     .then(|| reference_array_scalar_adapter(et))
                     .flatten();
-                // `[array, array, index]` stays live across each element — a branchy one must frame
+                // kotlinc packs through a LOCAL, not a `dup` chain: the fresh array is stored into
+                // the next free slot and reloaded before every element store and for the final use
+                // (`anewarray; astore n; aload n; iconst_0; …; aastore; aload n`). Measured on
+                // kotlinc 2.4.10 for vararg calls, `arrayOf`, `intArrayOf` and `listOf` alike, in
+                // static and instance bodies. The slot is registered while the elements are
+                // emitted, so a branchy element's frames see it as live, and released afterwards
+                // when it is the topmost slot, so the locals a later declaration takes keep
+                // kotlinc's numbering.
+                let array_ty = ir_ty_to_jvm(array_type);
+                let slot = self.next_slot;
+                let words = slot_words(array_ty);
+                self.next_slot += words;
+                store(array_ty, slot, code);
+                let key = 2_000_000 + slot as u32;
+                self.slots.insert(key, (slot, array_ty));
+                // `[array, index]` stays live across each element — a branchy one must frame
                 // them (see `emit_value_over`).
-                let array_v = self.verif_single(ir_ty_to_jvm(array_type));
-                let held = [array_v.clone(), array_v, VerifType::Integer];
+                let array_v = self.verif_single(array_ty);
+                let held = [array_v, VerifType::Integer];
                 for (i, &el) in elements.iter().enumerate() {
-                    code.dup();
+                    load(array_ty, slot, code);
                     code.push_int(i as i32, self.cw);
                     self.emit_value_over(el, &held, code);
                     if let Some(p) = box_elem {
                         box_prim_free(self.cw, code, p);
                     }
                     code.array_store(op, w);
+                }
+                load(array_ty, slot, code);
+                self.slots.remove(&key);
+                if self.next_slot == slot + words {
+                    self.next_slot = slot;
                 }
             }
             IrExpr::NewArray { array_type, size } => {

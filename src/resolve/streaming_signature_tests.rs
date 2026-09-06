@@ -624,7 +624,17 @@ fun merge(map: java.util.HashMap<String, Int>) = map.merge("a", 2, Int::plus)
         &mut diagnostics,
     );
 
-    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    // The signature pass declines `merge` (a provider member taking a callable reference); the
+    // legacy checker this entry point runs as Pass 2 then reports the decline at the declaration,
+    // since nothing else in the file explains it.
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["krusty: cannot infer the return type of 'merge'; add an explicit return type"],
+    );
     assert!(
         analysis
             .symbols

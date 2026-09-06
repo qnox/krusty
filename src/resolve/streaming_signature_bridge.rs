@@ -107,7 +107,7 @@ const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursiv
 
 impl ProductionSignatureSemantics<'_> {
     fn failure() -> crate::fir::DiagnosticId {
-        crate::fir::DiagnosticId::from_raw(0)
+        crate::fir::DiagnosticId::NONE
     }
 
     fn classifier_signature(&self, declaration: crate::fir::DeclarationId) -> Option<&ClassSig> {
@@ -518,6 +518,32 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
+    /// Pass 1 declined this declaration's signature and no other diagnostic explains why. The
+    /// message names what the author can do — write the type — because whatever inference gap
+    /// caused the decline is krusty's, not a Kotlin error; the `krusty:` prefix keeps that visible.
+    fn declined_signature(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<crate::frontend::DeclinedSignature> {
+        let stub = self.headers.stub(declaration)?;
+        let name = stub
+            .lookup_name
+            .and_then(|name| self.headers.lookup_names.get(name))
+            .unwrap_or("<anonymous>");
+        let message = match stub.kind {
+            crate::fir::DeclarationKind::Property => super::cannot_infer_property_message(name),
+            crate::fir::DeclarationKind::Function => format!(
+                "krusty: cannot infer the return type of '{name}'; add an explicit return type"
+            ),
+            _ => format!("krusty: cannot finalize the signature of '{name}'; add explicit types"),
+        };
+        Some(crate::frontend::DeclinedSignature {
+            file: stub.source.raw(),
+            span: stub.range,
+            message,
+        })
+    }
+
     fn record_missing_signature(
         &self,
         declaration: crate::fir::DeclarationId,
@@ -777,11 +803,15 @@ impl ProductionSignatureSemantics<'_> {
                 .iter()
                 .map(|argument| argument.name.map(str::to_owned))
                 .collect::<Vec<_>>();
+            let extra_admitted = |first: usize, extra: usize| {
+                Self::same_vararg_element(&arguments[first], &arguments[extra])
+            };
             if let Some(mapping) = Self::mapped_call_slots(
                 std::slice::from_ref(candidate),
                 &names,
                 arguments.len(),
                 trailing_lambda,
+                &extra_admitted,
             ) {
                 if let Some((argument_origin, expected, actual)) =
                     mapping.iter().enumerate().find_map(|(parameter, source)| {
@@ -1356,9 +1386,16 @@ impl ProductionSignatureSemantics<'_> {
             .iter()
             .map(|argument| argument.name.map(str::to_owned))
             .collect::<Vec<_>>();
-        let Some(mapping) =
-            Self::mapped_call_slots(candidates, &names, arguments.len(), trailing_lambda)
-        else {
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element(&arguments[first], &arguments[extra])
+        };
+        let Some(mapping) = Self::mapped_call_slots(
+            candidates,
+            &names,
+            arguments.len(),
+            trailing_lambda,
+            &extra_admitted,
+        ) else {
             return (!has_named).then(ordinary);
         };
         let reordered = mapping
@@ -1568,11 +1605,20 @@ impl ProductionSignatureSemantics<'_> {
         })
     }
 
+    /// Map source arguments onto this candidate's parameter slots.
+    ///
+    /// The slot map keeps ONE source per parameter; positional vararg ELEMENTS beyond the first are
+    /// left unmapped by `map_call_args` and are that vararg's extras (`split(",", ";", limit = 2)`,
+    /// `option("--a", "-b", help = "…")`). The per-slot selection downstream sees only the mapped
+    /// element, so an extra is admitted only when `extra_admitted(first, extra)` says it carries
+    /// the same element type as the mapped one — then dropping it cannot change which overload
+    /// applies. Any other unmapped source makes the candidate structurally inapplicable.
     fn candidate_call_slots(
         candidate: &crate::libraries::FunctionInfo,
         names: &[Option<String>],
         argument_count: usize,
         trailing_lambda: bool,
+        extra_admitted: &dyn Fn(usize, usize) -> bool,
     ) -> Option<Vec<Option<usize>>> {
         let source_indices = (0..argument_count).collect::<Vec<_>>();
         let slots = crate::libraries::map_call_args(
@@ -1586,10 +1632,55 @@ impl ProductionSignatureSemantics<'_> {
             trailing_lambda,
         )
         .ok()?;
+        let vararg_first = candidate
+            .call_sig
+            .vararg_index
+            .and_then(|vararg| slots.get(vararg).copied().flatten())
+            .filter(|first| names.get(*first).is_some_and(Option::is_none));
         source_indices
             .iter()
-            .all(|source| slots.iter().any(|slot| slot == &Some(*source)))
+            .all(|source| {
+                slots.iter().any(|slot| slot == &Some(*source))
+                    || vararg_first.is_some_and(|first| {
+                        first < *source
+                            && names.get(*source).is_some_and(Option::is_none)
+                            && extra_admitted(first, *source)
+                    })
+            })
             .then_some(slots)
+    }
+
+    /// Two typed arguments carry the same vararg element type: a plain element by its own type, a
+    /// spread by its array's element type. Lambdas and postponed arguments are never admitted.
+    fn same_vararg_element(
+        first: &crate::fir::ResolvedSigCallArgument<'_>,
+        extra: &crate::fir::ResolvedSigCallArgument<'_>,
+    ) -> bool {
+        let element = |argument: &crate::fir::ResolvedSigCallArgument<'_>| {
+            if argument.lambda || argument.contextual_call {
+                return None;
+            }
+            let ty = argument.ty.get();
+            if argument.spread {
+                ty.array_read_elem()
+            } else {
+                Some(ty)
+            }
+        };
+        matches!((element(first), element(extra)), (Some(a), Some(b)) if a == b)
+    }
+
+    fn same_vararg_element_probe(
+        first: &crate::fir::SigCallArgumentProbe<'_>,
+        extra: &crate::fir::SigCallArgumentProbe<'_>,
+    ) -> bool {
+        match (first, extra) {
+            (
+                crate::fir::SigCallArgumentProbe::Typed(first),
+                crate::fir::SigCallArgumentProbe::Typed(extra),
+            ) => Self::same_vararg_element(first, extra),
+            _ => false,
+        }
     }
 
     /// Keep only declarations whose own parameter names/defaults/vararg shape can consume the
@@ -1626,11 +1717,25 @@ impl ProductionSignatureSemantics<'_> {
         names: &[Option<String>],
         argument_count: usize,
         trailing_lambda: bool,
+        extra_admitted: &dyn Fn(usize, usize) -> bool,
     ) -> Option<Vec<Option<usize>>> {
+        // A non-public LIBRARY declaration can never be the selected callable from this module,
+        // so it must not vote on the argument mapping either: the stdlib's private
+        // `split(String, Boolean, Int)` sibling of `split(vararg String, …)` would otherwise turn
+        // `split(",", ";", limit = 2)` into two distinct mappings and an ambiguity.
         let mut mappings = candidates
             .iter()
+            .filter(|candidate| {
+                candidate.public() || candidate.callable.origin != crate::libraries::Origin::Library
+            })
             .filter_map(|candidate| {
-                Self::candidate_call_slots(candidate, names, argument_count, trailing_lambda)
+                Self::candidate_call_slots(
+                    candidate,
+                    names,
+                    argument_count,
+                    trailing_lambda,
+                    extra_admitted,
+                )
             })
             .collect::<Vec<_>>();
         mappings.sort_unstable();
@@ -1662,9 +1767,18 @@ impl ProductionSignatureSemantics<'_> {
                 }
             })
             .collect::<Vec<_>>();
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
+        };
         let mut matching = candidates.iter().filter(|candidate| {
-            Self::candidate_call_slots(candidate, &names, arguments.len(), trailing_lambda)
-                .is_some()
+            Self::candidate_call_slots(
+                candidate,
+                &names,
+                arguments.len(),
+                trailing_lambda,
+                &extra_admitted,
+            )
+            .is_some()
         });
         let selected = matching.next()?.clone();
         matching.next().is_none().then_some(selected)
@@ -1700,8 +1814,17 @@ impl ProductionSignatureSemantics<'_> {
             })
             .collect::<Vec<_>>();
         let requires_mapping = trailing_lambda || names.iter().any(Option::is_some);
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
+        };
         let slots = if requires_mapping {
-            Self::mapped_call_slots(candidates, &names, arguments.len(), trailing_lambda)?
+            Self::mapped_call_slots(
+                candidates,
+                &names,
+                arguments.len(),
+                trailing_lambda,
+                &extra_admitted,
+            )?
         } else {
             (0..arguments.len()).map(Some).collect()
         };
@@ -3891,6 +4014,8 @@ pub(crate) fn install_streamed_plugin_declarations(
 pub(crate) struct StreamedSignatureIndex {
     pub(crate) index: crate::fir::ResolvedModuleIndex,
     pub(crate) failures: Vec<crate::fir::DeclarationId>,
+    /// Failures no diagnostic explains, reported after Pass 2 unless that pass explains them.
+    pub(crate) declined: Vec<crate::frontend::DeclinedSignature>,
 }
 
 /// The receiver a member extension's signature carries: its generic receiver when the signature
@@ -4340,6 +4465,7 @@ pub(crate) fn finalized_streamed_signature_index(
     let mut backing_field_declarations = Vec::new();
     let mut explicit_backing_field_types = HashMap::new();
     let mut resolved_receivers = HashMap::new();
+    let mut declined = Vec::new();
     let mut failed = extraction_failures
         .into_iter()
         .map(|failure| {
@@ -5153,6 +5279,26 @@ pub(crate) fn finalized_streamed_signature_index(
             }
             emit_production_signature_diagnostic(diags, diagnostic);
         }
+        // A failure that carries a real diagnostic (its own, or the dependency's it was declined
+        // through) has been reported above. Everything else is a declaration Pass 1 declined
+        // WITHOUT saying so, and nothing downstream would: Pass 2 has no signature to check its
+        // uses against, the batch compiler exits 0 having emitted nothing for the file, and the
+        // editor shows only the cascade at every use. Say it at the declaration instead.
+        // Explained: a real diagnostic of its own (a dependent inherits its dependency's).
+        let explained = finalization_failures
+            .iter()
+            .filter(|(_, diagnostic)| {
+                diagnostic.is_some_and(|diagnostic| diagnostic != crate::fir::DiagnosticId::NONE)
+            })
+            .map(|(declaration, _)| *declaration)
+            .chain(
+                semantics
+                    .diagnostics
+                    .borrow()
+                    .iter()
+                    .map(|diagnostic| diagnostic.declaration),
+            )
+            .collect::<std::collections::HashSet<_>>();
         failed.extend(
             finalization_failures
                 .into_iter()
@@ -5160,6 +5306,14 @@ pub(crate) fn finalized_streamed_signature_index(
         );
         failed.sort_by_key(|declaration| declaration.raw());
         failed.dedup();
+        for declaration in failed.iter().copied() {
+            if explained.contains(&declaration) {
+                continue;
+            }
+            if let Some(decline) = semantics.declined_signature(declaration) {
+                declined.push(decline);
+            }
+        }
     }
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
@@ -5169,6 +5323,7 @@ pub(crate) fn finalized_streamed_signature_index(
             return StreamedSignatureIndex {
                 index,
                 failures: failed,
+                declined,
             };
         }};
     }
@@ -6554,6 +6709,7 @@ pub(crate) fn finalized_streamed_signature_index(
             return StreamedSignatureIndex {
                 index,
                 failures: failed,
+                declined,
             };
         }
     };
@@ -6572,5 +6728,6 @@ pub(crate) fn finalized_streamed_signature_index(
     StreamedSignatureIndex {
         index,
         failures: failed,
+        declined,
     }
 }
