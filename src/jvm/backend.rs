@@ -1050,7 +1050,7 @@ impl Backend for JvmBackend {
         let packages: Vec<(String, Vec<String>)> = state.module_packages.into_iter().collect();
         let module_bytes = crate::metadata::module::build_kotlin_module(&packages);
         vec![(
-            format!("META-INF/{module_name}.kotlin_module"),
+            crate::metadata::module::kotlin_module_file_name(module_name),
             module_bytes,
         )]
     }
