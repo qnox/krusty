@@ -93,6 +93,57 @@ fn version_dir_of(binary_path: &str) -> Option<&str> {
     binary_path.rsplit_once('/').map(|(dir, _)| dir)
 }
 
+/// Compare release directory names by their digit runs instead of bytewise. Release build numbers
+/// are not zero-padded, so a plain string sort incorrectly puts `build.99` after `build.100`.
+fn natural_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let (mut left_at, mut right_at) = (0, 0);
+    while left_at < left.len() && right_at < right.len() {
+        if left[left_at].is_ascii_digit() && right[right_at].is_ascii_digit() {
+            let left_end = left[left_at..]
+                .iter()
+                .position(|byte| !byte.is_ascii_digit())
+                .map_or(left.len(), |offset| left_at + offset);
+            let right_end = right[right_at..]
+                .iter()
+                .position(|byte| !byte.is_ascii_digit())
+                .map_or(right.len(), |offset| right_at + offset);
+            let left_number = &left[left_at..left_end];
+            let right_number = &right[right_at..right_end];
+            let left_significant = left_number
+                .iter()
+                .position(|byte| *byte != b'0')
+                .map_or(&left_number[left_number.len()..], |first| {
+                    &left_number[first..]
+                });
+            let right_significant = right_number
+                .iter()
+                .position(|byte| *byte != b'0')
+                .map_or(&right_number[right_number.len()..], |first| {
+                    &right_number[first..]
+                });
+            let numeric = left_significant
+                .len()
+                .cmp(&right_significant.len())
+                .then_with(|| left_significant.cmp(right_significant));
+            if numeric != std::cmp::Ordering::Equal {
+                return numeric;
+            }
+            left_at = left_end;
+            right_at = right_end;
+            continue;
+        }
+        let order = left[left_at].cmp(&right[right_at]);
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+        left_at += 1;
+        right_at += 1;
+    }
+    left.len().cmp(&right.len())
+}
+
 /// Highest-versioned *complete* install under `root`, as a `dir/binary` path
 /// relative to it. Partial downloads are ignored rather than handed to Zed.
 fn newest_complete_install(root: &std::path::Path, windows: bool) -> Option<String> {
@@ -104,7 +155,7 @@ fn newest_complete_install(root: &std::path::Path, windows: bool) -> Option<Stri
             (name.starts_with("krusty-lsp-") && entry.path().is_dir()).then_some(name)
         })
         .collect();
-    dirs.sort();
+    dirs.sort_by(|left, right| natural_version_cmp(left, right).then_with(|| left.cmp(right)));
     dirs.into_iter().rev().find_map(|dir| {
         let full = root.join(&dir);
         install_is_complete(full.to_str()?, windows)
@@ -175,9 +226,14 @@ impl KrustyExtension {
                 zed::set_language_server_installation_status(id, &Status::Failed(err.clone()));
                 format!("failed to download krusty-lsp: {err}")
             })?;
-            zed::make_file_executable(&binary_path)
-                .map_err(|err| format!("failed to mark krusty-lsp executable: {err}"))?;
-            mark_install_complete(&version_dir, &release.version)?;
+            zed::make_file_executable(&binary_path).map_err(|err| {
+                let message = format!("failed to mark krusty-lsp executable: {err}");
+                zed::set_language_server_installation_status(id, &Status::Failed(message.clone()));
+                message
+            })?;
+            mark_install_complete(&version_dir, &release.version).inspect_err(|err| {
+                zed::set_language_server_installation_status(id, &Status::Failed(err.clone()));
+            })?;
             remove_stale_versions(&version_dir);
         }
 
@@ -474,6 +530,18 @@ mod tests {
         assert_eq!(
             newest_complete_install(&root, false),
             Some("krusty-lsp-v2.4.10-build.516/krusty-lsp".to_string())
+        );
+    }
+
+    #[test]
+    fn newest_complete_install_compares_unpadded_build_numbers_numerically() {
+        let root = scratch("offline-numeric-version");
+        install(&root, "v2.4.10-build.99", true, true);
+        install(&root, "v2.4.10-build.100", true, true);
+
+        assert_eq!(
+            newest_complete_install(&root, false),
+            Some("krusty-lsp-v2.4.10-build.100/krusty-lsp".to_string())
         );
     }
 
