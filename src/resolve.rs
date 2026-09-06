@@ -73128,6 +73128,21 @@ impl<'a> Checker<'a> {
             "commit selected argument={argument:?} probed={probed_actual:?} expected={expected:?} syntax={:?}",
             self.file.expr(argument),
         );
+        // An argument whose recorded type already EQUALS the selected parameter has nothing left
+        // for the expectation to bind: re-entering it recomputes the same type. Nested generic
+        // literals (`mapOf("k" to mapOf("k" to …))`) infer each level from their arguments, so
+        // every selected parameter equals the recorded type; re-entering anyway redid the whole
+        // subtree for `to` and again for `mapOf`, exponential in the nesting depth — six levels
+        // took minutes and stalled the editor's analysis worker on an ordinary test file. The
+        // recorded type is the committed one: `probed_actual` may be an older encoding of the same
+        // shape that a re-entry used to replace.
+        // Only a CALL: a lambda whose probe happens to match the selected shape must still be
+        // committed under it (that commit is what records its checked body for FIR).
+        if matches!(self.file.expr(argument), Expr::Call { .. })
+            && self.expr_types[argument.0 as usize] == expected
+        {
+            return expected;
+        }
         if self
             .postponed_context_sensitive_name(scope, argument)
             .is_some_and(|name| self.context_sensitive_name_matches(name, expected))
@@ -73196,13 +73211,30 @@ impl<'a> Checker<'a> {
         }
         if self.call_result_can_bind_expected(argument, expected) {
             self.expr_expected(scope, argument, expected)
-        } else {
+        } else if self.generic_call_probe_is_provisional(probed_actual) {
             // The enclosing parameter does not constrain this generic result (for example,
             // `"a" to listOf(1)` initially presents `Any?` as `to`'s value parameter). The probe's
             // erased upper bound is not the expression's type: finish the nested call from its own
             // arguments, then let the selected outer callable consume that concrete result.
             self.expr(scope, argument)
+        } else {
+            // A concrete probe already came from the call's own arguments; finishing it again
+            // recomputes the same type. Doing so anyway at every level of a nested generic
+            // literal (`mapOf("k" to mapOf(…))`) doubled the work twice per level.
+            probed_actual
         }
+    }
+
+    /// Whether a nested generic call's probe type is still an erased upper bound rather than the
+    /// call's own result: a formal, an error slot, or the top type a `<T>` parameter presents.
+    fn generic_call_probe_is_provisional(&self, probed: Ty) -> bool {
+        probed.mentions_ty_param()
+            || probed.mentions_error()
+            || probed.mentions_pending()
+            || probed
+                .non_null()
+                .obj_internal()
+                .is_some_and(|owner| owner.matches("kotlin/Any"))
     }
 
     fn lambda_parameters_are_contextual(&self, expression: ExprId) -> bool {
@@ -73388,7 +73420,11 @@ impl<'a> Checker<'a> {
         // well. Callable references retain a nominal reflection shell until the selected parameter
         // supplies the exact function shape. Nullable function parameters still contextually type a
         // non-null callable value.
-        let actual = if self.file.collection_literal_calls.contains(&argument.0)
+        let actual = if actual == expected && matches!(self.file.expr(argument), Expr::Call { .. })
+        {
+            // A call already committed to exactly this type (see `selected_argument_type`).
+            actual
+        } else if self.file.collection_literal_calls.contains(&argument.0)
             || (self.postponed_empty_reference_array_factory(scope, argument)
                 && expected.non_null().is_reference_array()
                 && expected.non_null().array_elem().is_some())
@@ -75522,6 +75558,17 @@ impl<'a> Checker<'a> {
     /// transformations have been preserved. The declaration supplies the generic result shape, but
     /// a safe call adds nullability outside that shape and contextual inference cannot erase it.
     fn call_result_can_bind_expected(&self, expression: ExprId, expected: Ty) -> bool {
+        // `Any`/`Any?` cannot bind anything: every result is already a subtype, so the
+        // expectation carries no constraint for a result variable. A literal declared
+        // `Map<String, Any?>` hands `Any?` to every nested value and used to re-enter each level
+        // once more for it (see `selected_argument_type` for the equal-type case).
+        if expected
+            .non_null()
+            .obj_internal()
+            .is_some_and(|owner| owner.matches("kotlin/Any"))
+        {
+            return false;
+        }
         if let Expr::Elvis { lhs, rhs } = self.file.expr(expression) {
             // An Elvis carries the selected generic-result decision of either branch. Treating only
             // a syntactic CALL as contextual made `null ?: emptyList()` opaque to an enclosing
