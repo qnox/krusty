@@ -1075,6 +1075,12 @@ where
         // graph/header syntax is consumed here before the second source pass begins.
         let mut index = streamed_index.index;
         pass1_headers.publish_declaration_inventory(&mut index);
+        // The declarations that DID finalize are still the module's facts. The legacy Pass-2
+        // checker reads them only through this projection, so skipping it here left every
+        // inferred property and return type unresolved beside one genuine signature error — an
+        // editor's steady state — and reported each use of them as a further unresolved reference.
+        // Projection skips declarations without a finalized signature, so nothing failed leaks in.
+        crate::resolve::project_finalized_signatures(&index, &mut symbols);
         let (index, sources, _) = pass1_headers.finish(index);
         recovery_streamed = Some(diagnostic_streamed_state(index, sources));
         None
