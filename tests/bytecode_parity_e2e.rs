@@ -865,8 +865,8 @@ fn safe_call_elvis_primitive_does_not_box() {
         "`s?.length ?: -1` must not box the member to Integer:\n{d}"
     );
     assert!(
-        d.contains("ifnull") && d.contains("String.length"),
-        "expected a fused ifnull + primitive String.length:\n{d}"
+        (d.contains("ifnull") || d.contains("ifnonnull")) && d.contains("String.length"),
+        "expected one fused null branch plus primitive String.length:\n{d}"
     );
 }
 

@@ -4,6 +4,54 @@ These are repository invariants, not suggestions. Read this file before changing
 resolver, checker, symbol providers, common lowering, or backends. Reviewers should reject a change
 that violates one of them even when its focused regression test passes.
 
+## Rust module structure
+
+- Organize modules by one semantic responsibility or ownership boundary, not by chronology, file
+  size alone, or arbitrary line ranges. Prefer names such as `signature_graph`, `body_check`, and
+  `overload_selection`; do not create numbered shards such as `calls_1.rs` or `part_2.rs`.
+- Use Rust's module system (`mod`, private items, and narrow `pub(super)`/`pub(crate)` APIs) for
+  source organization. `include!` is reserved for generated code from `OUT_DIR`; it is not a
+  substitute for modules and must not be used to make a monolith look split.
+- Keep a module root (`foo.rs` or `foo/mod.rs`) as a small facade: declare child modules, re-export
+  the intended surface, and contain only genuinely shared orchestration or types. Do not put the
+  implementation back into the facade.
+- Keep data types with the code that owns their invariants. Put cross-phase contracts in a small
+  boundary module; put phase-specific algorithms in their owning modules. A dependency cycle is a
+  signal to move the shared contract upward, not to widen visibility across unrelated modules.
+- Default to private. Expose the smallest interface that an adjacent phase needs. Do not make
+  fields or helper methods `pub(crate)` merely to enable a file split; define an explicit boundary
+  type or operation instead.
+- Prefer cohesive free functions and small responsibility-focused types over one type with an
+  enormous inherent `impl`. Split a large implementation by extracting collaborators (for example,
+  candidate collection, argument mapping, data-flow, or diagnostics), not by scattering arbitrary
+  groups of inherent methods across files.
+- Avoid generic `util`, `helpers`, `common`, and `misc` modules. Name the domain operation they own;
+  if unrelated callers need it, identify the actual shared abstraction first.
+- Production Rust files should normally remain below 2,000 lines. At 3,000 lines, split the module
+  before adding another responsibility. No hand-written source or test file may reach 10,000 lines.
+  Existing files above 3,000 lines are migration debt: do not increase them; reduce or extract a
+  coherent responsibility in the same change when touching them substantially.
+- Tests live beside the smallest owning module when they exercise private behavior. Put public,
+  cross-module behavior in `tests/`; put reusable fixtures in a clearly named test-support module.
+  Moving tests out of a production file is useful, but does not count as decomposing production
+  responsibilities.
+- For compiler work, module boundaries should follow the pipeline and lifetime boundaries:
+  parsing, stable header inventory, signature constraints/solving, checked FIR body construction,
+  common lowering, and target emission. Temporary migration adapters belong in explicitly named
+  bridge modules and must shrink as the direct path lands.
+
+Useful structure audit commands:
+
+```text
+find src tests crates -name '*.rs' -type f -print0 | xargs -0 wc -l | sort -nr
+rg -n 'include!\(' src tests crates
+find src tests crates -type f | rg '/[^/]+_[0-9]+\.rs$'
+```
+
+Generated files are exempt from the line guideline. Every other hit at the thresholds, every
+non-generated `include!`, and every numbered shard requires an architectural fix or an explicit
+review explanation tied to an active migration plan.
+
 ## Names and symbols
 
 - Source spelling is lookup input, not symbol identity. The parser retains the spelling and source
@@ -98,7 +146,8 @@ Follow data ownership rather than starting at the changed test:
 2. Scope-tower lookup and normalized candidate collection: `src/resolve/scope.rs`,
    `src/symbol_source.rs`, `src/symbol_resolver.rs`, `src/module_symbols.rs`.
 3. Candidate union, applicability, overload selection, diagnostics, and recorded decisions:
-   `src/resolve.rs`, then `src/assignable.rs` for type compatibility.
+   `src/resolve/` and its small facade in `src/resolve.rs`, then `src/assignable.rs` for type
+   compatibility. Follow the named responsibility module; do not assume the facade owns the logic.
 4. Kotlin metadata normalization: `src/jvm/metadata.rs` and `src/jvm/classpath.rs`. Check that Kotlin
    metadata becomes common semantic structures at this boundary rather than leaking JVM queries into
    resolution.

@@ -45,6 +45,9 @@ pub struct PluginExpressionPlan {
 #[derive(Clone, Debug)]
 pub struct FrontendSelectedCall {
     pub expression: crate::ast::ExprId,
+    /// Explicit source receiver and its final checked type. Plugins consume the parser coordinate
+    /// while the bounded AST is live; checked FIR retains only the resulting operand.
+    pub explicit_receiver: Option<(crate::ast::ExprId, Ty)>,
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,
@@ -97,12 +100,6 @@ pub struct FrontendClassContext<'a> {
     pub annotations: &'a [TypeName],
 }
 
-/// The unqualified tail of an annotation name (`kotlinx/serialization/Serializable` or
-/// `kotlinx.serialization.Serializable` → `Serializable`).
-pub(crate) fn annotation_simple_name(a: &str) -> &str {
-    a.rsplit(['/', '.']).next().unwrap_or(a)
-}
-
 fn annotation_type_simple_name(annotation: TypeName) -> String {
     annotation.segment()
 }
@@ -115,9 +112,9 @@ fn source_annotation_simple_name(annotation: &crate::ast::AnnotationRef) -> &str
         .unwrap_or(&annotation.name)
 }
 
-/// Applied annotations keyed by `ClassId`, plus source and target services required by native
-/// plugins. Production contexts borrow annotation slices from the parsed source; owned annotations
-/// are only for synthetic tests/manual plugin harnesses.
+/// Applied annotations keyed by `ClassId`, plus target services required by native plugins.
+/// Streaming production contexts are built from checked common IR and own their compact annotation
+/// index. `source_file` is a legacy/test adapter only and is never present during streamed emission.
 type ClassNameResolver<'a> = dyn Fn(&str) -> Option<TypeName> + 'a;
 
 pub struct PluginContext<'a> {
@@ -239,6 +236,29 @@ impl<'a> PluginContext<'a> {
         source_class_by_internal(file, &internal)
     }
 
+    fn ir_property_annotations<'ir>(
+        &self,
+        ir: &'ir IrFile,
+        class: ClassId,
+        property: &str,
+    ) -> Option<&'ir crate::ir::DeclarationAnnotations> {
+        ir.classes
+            .get(class as usize)?
+            .property_annotations
+            .iter()
+            .find(|annotations| annotations.property == property)
+            .map(|annotations| &annotations.annotations)
+    }
+
+    fn annotation_named<'ir>(
+        annotations: &'ir crate::ir::DeclarationAnnotations,
+        name: &str,
+    ) -> Option<&'ir crate::ir::AppliedAnnotation> {
+        annotations
+            .applications()
+            .find(|annotation| annotation.internal.segment() == name)
+    }
+
     fn class_literal_internal(
         &self,
         file: &crate::ast::File,
@@ -269,6 +289,18 @@ impl<'a> PluginContext<'a> {
         class: ClassId,
         annotation: &str,
     ) -> Option<String> {
+        if let Some(value) = ir
+            .classes
+            .get(class as usize)
+            .and_then(|class| Self::annotation_named(&class.applied_annotations, annotation))
+            .and_then(|annotation| annotation.values.first())
+            .map(|(_, value)| value)
+        {
+            return match value {
+                crate::ir::AnnoValue::Class(classifier) => Some(classifier.render()),
+                _ => None,
+            };
+        }
         let file = self.source_file?;
         let c = self.source_class(ir, class)?;
         let i = c
@@ -286,6 +318,17 @@ impl<'a> PluginContext<'a> {
         property: &str,
         annotation: &str,
     ) -> Option<String> {
+        if let Some(value) = self
+            .ir_property_annotations(ir, class, property)
+            .and_then(|annotations| Self::annotation_named(annotations, annotation))
+            .and_then(|annotation| annotation.values.first())
+            .map(|(_, value)| value)
+        {
+            return match value {
+                crate::ir::AnnoValue::Class(classifier) => Some(classifier.render()),
+                _ => None,
+            };
+        }
         let file = self.source_file?;
         let p = self
             .source_class(ir, class)?
@@ -307,6 +350,19 @@ impl<'a> PluginContext<'a> {
         property: &str,
         annotation: &str,
     ) -> Option<crate::kt_string::KtString> {
+        if let Some(value) = self
+            .ir_property_annotations(ir, class, property)
+            .and_then(|annotations| Self::annotation_named(annotations, annotation))
+            .and_then(|annotation| annotation.values.first())
+            .map(|(_, value)| value)
+        {
+            return match value {
+                crate::ir::AnnoValue::Const(crate::ir::IrConst::String(value)) => {
+                    Some(value.clone())
+                }
+                _ => None,
+            };
+        }
         let file = self.source_file?;
         let p = self
             .source_class(ir, class)?
@@ -328,6 +384,12 @@ impl<'a> PluginContext<'a> {
         property: &str,
         annotation: &str,
     ) -> bool {
+        if self
+            .ir_property_annotations(ir, class, property)
+            .is_some_and(|annotations| Self::annotation_named(annotations, annotation).is_some())
+        {
+            return true;
+        }
         self.source_class(ir, class)
             .and_then(|c| c.props.iter().find(|p| p.name == property))
             .is_some_and(|p| {
@@ -343,6 +405,19 @@ impl<'a> PluginContext<'a> {
         class: ClassId,
         property: &str,
     ) -> Option<String> {
+        if let Some(ty) = ir
+            .classes
+            .get(class as usize)
+            .and_then(|class| {
+                class
+                    .properties
+                    .iter()
+                    .find(|candidate| candidate.name == property)
+            })
+            .map(|property| property.ty)
+        {
+            return ty.non_null().kotlin_class_internal().map(TypeName::render);
+        }
         let file = self.source_file?;
         let p = self
             .source_class(ir, class)?
@@ -354,15 +429,22 @@ impl<'a> PluginContext<'a> {
 
     pub fn file_annotation_mentions_canonical_type(
         &self,
+        ir: &IrFile,
         annotation: &str,
         canonical_type: &str,
     ) -> bool {
+        if let Some(annotation) = Self::annotation_named(&ir.file_annotations, annotation) {
+            return annotation
+                .values
+                .iter()
+                .any(|(_, value)| annotation_value_mentions_class(value, canonical_type));
+        }
         let Some(file) = self.source_file else {
             return false;
         };
         file.file_annotations
             .iter()
-            .filter(|(ann, _)| annotation_simple_name(&ann.name) == annotation)
+            .filter(|(ann, _)| source_annotation_simple_name(ann) == annotation)
             .flat_map(|(_, args)| args)
             .filter_map(|&arg| class_literal_name(file, arg))
             .map(|name| canonical_type_name(file, name))
@@ -373,6 +455,26 @@ impl<'a> PluginContext<'a> {
     /// fully-qualified internal name.
     pub fn from_source(file: &'a crate::ast::File, ir: &IrFile) -> PluginContext<'a> {
         Self::from_source_with_class_resolver(file, ir, None)
+    }
+
+    /// Build a plugin context exclusively from checked common IR. All annotation arguments have
+    /// already been resolved and folded by the frontend; no parser declaration or source spelling
+    /// is available to plugin realization.
+    pub fn from_ir(ir: &IrFile) -> PluginContext<'static> {
+        let mut context = PluginContext::default();
+        for (class, declaration) in ir.classes.iter().enumerate() {
+            let annotations = declaration
+                .applied_annotations
+                .applications()
+                .map(|annotation| annotation.internal)
+                .collect::<Vec<_>>();
+            if !annotations.is_empty() {
+                context
+                    .class_annotations
+                    .insert(class as u32, AnnotationList::Owned(annotations));
+            }
+        }
+        context
     }
 
     pub fn from_source_with_class_resolver(
@@ -409,6 +511,22 @@ impl<'a> PluginContext<'a> {
             }
         }
         ctx
+    }
+}
+
+fn annotation_value_mentions_class(value: &crate::ir::AnnoValue, canonical_type: &str) -> bool {
+    match value {
+        crate::ir::AnnoValue::Class(classifier) => {
+            classifier.matches(canonical_type) || classifier.render() == canonical_type
+        }
+        crate::ir::AnnoValue::Annotation(annotation) => annotation
+            .values
+            .iter()
+            .any(|(_, value)| annotation_value_mentions_class(value, canonical_type)),
+        crate::ir::AnnoValue::Array(values) => values
+            .iter()
+            .any(|value| annotation_value_mentions_class(value, canonical_type)),
+        crate::ir::AnnoValue::Const(_) | crate::ir::AnnoValue::Enum(_, _) => false,
     }
 }
 
@@ -514,6 +632,21 @@ pub fn run_enabled(
     host.run(ir, &ctx);
 }
 
+/// Run native backend plugins from frontend-checked common IR only. Production streaming emission
+/// uses this entry: annotation names and values have already been resolved and folded, so neither a
+/// reparsed declaration nor source spelling participates in plugin realization.
+pub fn run_enabled_from_ir(
+    ir: &mut IrFile,
+    module_name: &str,
+    target_type_descriptor: fn(Ty) -> Option<String>,
+) {
+    let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
+    if ctx.classes_with_simple("Serializable").is_empty() {
+        return;
+    }
+    enabled_plugins(module_name).run(ir, &ctx);
+}
+
 pub(crate) fn enabled_plugins(module_name: &str) -> PluginHost {
     let mut host = PluginHost::new();
     host.register(Box::new(serialization::SerializationPlugin::new(
@@ -588,58 +721,7 @@ impl PluginHost {
 
 /// Fill all `IrClass` fields with empty defaults for a synthesized class.
 pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
-    let fq_name = fq_name.into();
-    crate::ir::IrClass {
-        fq_name: fq_name.into(),
-        is_source_declared: false,
-        is_anonymous_object: false,
-        enclosing_function: None,
-        is_inner_class: false,
-        is_local_class: false,
-        is_value: false,
-        is_data: false,
-        decl_line: 0,
-        type_param_bounds: Vec::new(),
-        type_params: Vec::new(),
-        captured_type_params: Vec::new(),
-        supertypes: Vec::new(),
-        properties: Vec::new(),
-        fields: Vec::new(),
-        ctor_param_count: 0,
-        ctor_args: Vec::new(),
-        ctor_param_annotations: Vec::new(),
-        init_body: None,
-        pre_super_param_fields: Vec::new(),
-        explicit_param_stores: false,
-        methods: Vec::new(),
-        is_interface: false,
-        is_fun_interface: false,
-        is_annotation: false,
-        annotation_impl_of: None,
-        is_sealed: false,
-        sealed_subclasses: Default::default(),
-        is_abstract: false,
-        is_open: false,
-        superclass: "java/lang/Object".into(),
-        super_args: Vec::new(),
-        super_ctor_params: Vec::new(),
-        enum_entries: Vec::new(),
-        enum_entry_of: None,
-        prop_ref: None,
-        bridges: Vec::new(),
-        interfaces: Default::default(),
-        is_object: false,
-        is_companion: false,
-        companion_class: None,
-        func_ref: None,
-        secondary_ctors: Vec::new(),
-        has_primary_ctor: true,
-        applied_annotations: crate::ir::DeclarationAnnotations::default(),
-        primary_ctor_annotations: crate::ir::DeclarationAnnotations::default(),
-        field_annotations: Vec::new(),
-        property_annotations: Vec::new(),
-        annotation_retention: None,
-    }
+    crate::ir::IrClass::synthetic(crate::types::type_name(&fq_name.into()))
 }
 
 #[cfg(test)]
@@ -728,6 +810,40 @@ mod tests {
             !ctx.has_annotation(other, "Serializable"),
             "annotation must not bleed onto a same-simple-name class in another package"
         );
+    }
+
+    #[test]
+    fn checked_ir_context_needs_no_source_for_class_or_file_annotations() {
+        let retained = |name: &str, values| crate::ir::RetainedAnnotation {
+            retention: crate::types::AnnotationRetention::Runtime,
+            annotation: crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name(name),
+                values,
+            },
+        };
+        let mut ir = IrFile::default();
+        let class = ir.add_class(synthetic_class("demo/Record"));
+        ir.classes[class as usize].applied_annotations = crate::ir::DeclarationAnnotations::new(
+            vec![retained("kotlinx/serialization/Serializable", Vec::new())],
+        );
+        ir.file_annotations = crate::ir::DeclarationAnnotations::new(vec![retained(
+            "kotlinx/serialization/UseContextualSerialization",
+            vec![(
+                "forClasses".to_string(),
+                crate::ir::AnnoValue::Array(vec![crate::ir::AnnoValue::Class(
+                    crate::types::type_name("demo/External"),
+                )]),
+            )],
+        )]);
+
+        let ctx = PluginContext::from_ir(&ir);
+        assert!(ctx.source_file.is_none());
+        assert_eq!(ctx.classes_with_simple("Serializable"), vec![class]);
+        assert!(ctx.file_annotation_mentions_canonical_type(
+            &ir,
+            "UseContextualSerialization",
+            "demo/External"
+        ));
     }
 
     /// A `ClassDecl` with only the fields `from_source` reads (name + annotations) populated.

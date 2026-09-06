@@ -18,6 +18,8 @@ mod abstract_instantiation_check_e2e;
 mod abstract_member_check_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
+#[path = "adapted_callable_reference_equality_e2e.rs"]
+mod adapted_callable_reference_equality_e2e;
 #[path = "annotated_setter_parameter_e2e.rs"]
 mod annotated_setter_parameter_e2e;
 #[path = "annotation_array_literal_e2e.rs"]
@@ -30,6 +32,8 @@ mod annotation_emission_e2e;
 mod annotation_impl_class_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
+#[path = "annotation_nested_const_template_e2e.rs"]
+mod annotation_nested_const_template_e2e;
 #[path = "annotation_target_emission_e2e.rs"]
 mod annotation_target_emission_e2e;
 #[path = "anon_fun_statement_e2e.rs"]
@@ -498,6 +502,8 @@ mod enum_constant_annotation_emit_e2e;
 mod enum_ctor_default_arg_e2e;
 #[path = "enum_entries_e2e.rs"]
 mod enum_entries_e2e;
+#[path = "enum_entry_deferred_val_e2e.rs"]
+mod enum_entry_deferred_val_e2e;
 #[path = "enum_entry_named_arg_e2e.rs"]
 mod enum_entry_named_arg_e2e;
 #[path = "enum_entry_property_e2e.rs"]
@@ -520,6 +526,8 @@ mod expected_type_propagation_e2e;
 mod explicit_backing_field_e2e;
 #[path = "expr_completeness_e2e.rs"]
 mod expr_completeness_e2e;
+#[path = "expression_compound_assignment_e2e.rs"]
+mod expression_compound_assignment_e2e;
 #[path = "ext_on_subtype_receiver_e2e.rs"]
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
@@ -628,6 +636,8 @@ mod function_type_supertype_e2e;
 mod function_typed_property_e2e;
 #[path = "generic_base_member_type_e2e.rs"]
 mod generic_base_member_type_e2e;
+#[path = "generic_constructor_parameter_scope_e2e.rs"]
+mod generic_constructor_parameter_scope_e2e;
 #[path = "generic_ctor_lambda_targs_e2e.rs"]
 mod generic_ctor_lambda_targs_e2e;
 #[path = "generic_ctor_template_prepass_e2e.rs"]
@@ -770,6 +780,8 @@ mod js_backend_coverage_e2e;
 mod js_backend_e2e;
 #[path = "jvm_default_mode_e2e.rs"]
 mod jvm_default_mode_e2e;
+#[path = "jvm_name_e2e.rs"]
+mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
 #[path = "jvmfield_companion_e2e.rs"]
@@ -790,6 +802,8 @@ mod ksp_provision_e2e;
 mod labeled_expression_e2e;
 #[path = "labeled_lambda_return_e2e.rs"]
 mod labeled_lambda_return_e2e;
+#[path = "labeled_receiver_lambda_e2e.rs"]
+mod labeled_receiver_lambda_e2e;
 #[path = "labeled_super_e2e.rs"]
 mod labeled_super_e2e;
 #[path = "labeled_this_e2e.rs"]
@@ -1026,8 +1040,14 @@ mod parser_errors_coverage_e2e;
 mod path_smartcast_e2e;
 #[path = "platform_call_assertions_e2e.rs"]
 mod platform_call_assertions_e2e;
+#[path = "platform_classifier_identity_e2e.rs"]
+mod platform_classifier_identity_e2e;
 #[path = "plugins_e2e.rs"]
 mod plugins_e2e;
+#[path = "postponed_bound_inference_e2e.rs"]
+mod postponed_bound_inference_e2e;
+#[path = "primitive_array_members_e2e.rs"]
+mod primitive_array_members_e2e;
 #[path = "primitive_bound_generic_e2e.rs"]
 mod primitive_bound_generic_e2e;
 #[path = "primitive_box_cast_e2e.rs"]
@@ -1074,6 +1094,8 @@ mod reference_adaptation_e2e;
 mod reference_in_range_e2e;
 #[path = "reference_range_expression_e2e.rs"]
 mod reference_range_expression_e2e;
+#[path = "reified_anonymous_object_e2e.rs"]
+mod reified_anonymous_object_e2e;
 #[path = "reified_class_literal_member_inference_e2e.rs"]
 mod reified_class_literal_member_inference_e2e;
 #[path = "reified_inline_check_e2e.rs"]
@@ -1162,6 +1184,8 @@ mod session_subsystems_e2e;
 mod shadowed_method_tparam_e2e;
 #[path = "short_circuit_e2e.rs"]
 mod short_circuit_e2e;
+#[path = "smart_cast_member_extension_e2e.rs"]
+mod smart_cast_member_extension_e2e;
 #[path = "smartcast_and_e2e.rs"]
 mod smartcast_and_e2e;
 #[path = "source_fallback_companion_props_e2e.rs"]
@@ -1214,6 +1238,8 @@ mod suspend_default_call_chained_receiver_e2e;
 mod suspend_default_param_e2e;
 #[path = "suspend_e2e.rs"]
 mod suspend_e2e;
+#[path = "suspend_fun_interface_e2e.rs"]
+mod suspend_fun_interface_e2e;
 #[path = "suspend_in_try_body_hoist_e2e.rs"]
 mod suspend_in_try_body_hoist_e2e;
 #[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
@@ -1230,6 +1256,8 @@ mod suspend_loop_compound_assign_e2e;
 mod suspend_loop_continue_break_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
+#[path = "suspend_normalization_e2e.rs"]
+mod suspend_normalization_e2e;
 #[path = "suspend_operator_convention_cross_file_e2e.rs"]
 mod suspend_operator_convention_cross_file_e2e;
 #[path = "suspend_receiver_lambda_e2e.rs"]

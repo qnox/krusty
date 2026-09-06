@@ -68,14 +68,21 @@ fn delegated_property_map_accepted() {
 //     exercises a distinct un-handled control-flow construct around a suspension point. ---
 
 #[test]
-fn suspend_try_finally_rejected() {
-    // A NON-suspending finally around a suspending try body IS supported (see
-    // suspend_try_finally_body_e2e). A SUSPENDING finally would itself span coroutine states — still
-    // unmodeled, so it must bail rather than miscompile.
-    assert!(rejects(
-        "suspend fun d() {}\n\
-         suspend fun f() { try { d() } finally { d() }; d() }\n"
-    ));
+fn suspend_try_finally_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         var log = \"\"\n\
+         suspend fun d(value: String): String { log += value; return value }\n\
+         suspend fun f(): String { try { d(\"O\") } finally { d(\"K\") }; return log }\n\
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             val task: suspend () -> String = { f() }\n\
+             task.startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "SuspendTryFinally").as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]
@@ -87,11 +94,21 @@ fn suspend_try_catch_accepted() {
 }
 
 #[test]
-fn suspend_return_in_try_rejected() {
-    assert!(rejects(
-        "suspend fun d(): Int = 1\n\
-         suspend fun f(): Int { try { return d() } finally {} }\n"
-    ));
+fn suspend_return_in_try_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         var log = \"\"\n\
+         suspend fun d(): String = \"O\"\n\
+         suspend fun f(): String { try { return d() } finally { log += \"K\" } }\n\
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             val task: suspend () -> String = { f() }\n\
+             task.startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() + log })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "SuspendReturnInTry").as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]
@@ -110,11 +127,20 @@ fn suspend_try_as_expression_accepted() {
 // Promoted to a round-trip test in `suspend_loop_compound_assign_e2e.rs`.
 
 #[test]
-fn suspend_when_with_multiple_suspensions_rejected() {
-    assert!(rejects(
-        "suspend fun d(): Int = 1\n\
-         suspend fun f(x: Int): Int = when (x) { 0 -> d(); else -> d() + d() }\n"
-    ));
+fn suspend_when_with_multiple_suspensions_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         suspend fun d(value: String): String = value\n\
+         suspend fun f(x: Int): String = when (x) { 0 -> d(\"fail\"); else -> d(\"O\") + d(\"K\") }\n\
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             val task: suspend () -> String = { f(1) }\n\
+             task.startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "SuspendWhenMultiple").as_deref(),
+        Some("OK")
+    );
 }
 
 // A suspend lambda body on a LAZY `Sequence.map` (returns `Sequence`, not `List`) must NOT be inlined
@@ -139,7 +165,7 @@ fn suspend_safe_call_double_suspension_rejected() {
 }
 
 #[test]
-fn cross_file_suspend_generic_value_class_specialization_rejected() {
+fn cross_file_suspend_generic_value_class_specialization_runs() {
     let sources = [
         (
             "Transform",
@@ -156,61 +182,80 @@ fn cross_file_suspend_generic_value_class_specialization_rejected() {
              }\n",
         ),
     ];
-    assert!(
-        common::compile_and_run_files_with_stdlib(&sources).is_none(),
-        "cross-file declaration must not bypass the value-class/suspend ABI gate"
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
+        Some("OK"),
+        "the checked cross-file suspend/value-class specialization must preserve its boxed generic boundary"
     );
 }
 
 #[test]
-fn named_generic_value_class_operand_specialization_rejected() {
-    assert!(rejects(
-        "fun <T, R> mapResult(\n\
+fn named_generic_value_class_operand_specialization_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         fun <T, R> mapResult(\n\
              value: T,\n\
              other: String = \"x\",\n\
              transform: suspend (T) -> R\n\
          ): suspend () -> R = { transform(value) }\n\
-         fun box(): String = \"unreachable\"\n\
-         fun trigger() = mapResult(\n\
-             transform = { \"OK\" },\n\
-             value = Result.success(\"OK\")\n\
-         )\n"
-    ));
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             mapResult(\n\
+                 transform = { it.getOrThrow() },\n\
+                 value = Result.success(\"OK\")\n\
+             ).startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "NamedGenericValueClass").as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]
-fn generic_member_value_class_operand_specialization_rejected() {
-    assert!(rejects(
-        "class Mapper {\n\
+fn generic_member_value_class_operand_specialization_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         class Mapper {\n\
              fun <T, R> mapResult(\n\
                  value: T,\n\
                  other: String = \"x\",\n\
                  transform: suspend (T) -> R\n\
              ): suspend () -> R = { transform(value) }\n\
          }\n\
-         fun box(): String = \"unreachable\"\n\
-         fun trigger() = Mapper().mapResult(\n\
-             transform = { \"OK\" },\n\
-             value = Result.success(\"OK\")\n\
-         )\n"
-    ));
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             Mapper().mapResult(\n\
+                 transform = { it.getOrThrow() },\n\
+                 value = Result.success(\"OK\")\n\
+             ).startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "MemberGenericValueClass").as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]
-fn owner_generic_member_value_class_operand_specialization_rejected() {
-    assert!(rejects(
-        "class Mapper<T> {\n\
+fn owner_generic_member_value_class_operand_specialization_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         class Mapper<T> {\n\
              fun <R> mapResult(\n\
                  value: T,\n\
                  transform: suspend (T) -> R\n\
              ): suspend () -> R = { transform(value) }\n\
          }\n\
-         fun trigger() = Mapper<Result<String>>().mapResult(\n\
-             value = Result.success(\"OK\"),\n\
-             transform = { \"OK\" }\n\
-         )\n\
-         fun box(): String = \"unreachable\"\n"
-    ));
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             Mapper<Result<String>>().mapResult(\n\
+                 value = Result.success(\"OK\"),\n\
+                 transform = { it.getOrThrow() }\n\
+             ).startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "OwnerGenericValueClass").as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]

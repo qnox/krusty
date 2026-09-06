@@ -6,6 +6,7 @@ use super::common;
 
 const LIB: &str = "package lib\n\
                    internal class Hidden(val value: Int)\n\
+                   internal val hiddenProperty: Int = 7\n\
                    internal fun hiddenFun(value: Int): Int = value\n\
                    private fun hiddenPrivate(value: Int): Int = value\n\
                    class Visible(val value: Int) {\n\
@@ -66,6 +67,7 @@ fn reference_diagnostics(output: &str, severity: &str) -> Vec<ObservedDiagnostic
 struct Fixture {
     _roots: Vec<FixtureRoot>,
     classpath: Vec<PathBuf>,
+    friend_output: PathBuf,
     jdk: Option<PathBuf>,
 }
 
@@ -127,7 +129,8 @@ impl Fixture {
         });
         Fixture {
             _roots: vec![root, FixtureRoot(java_root)],
-            classpath: vec![stdlib, output, java_output],
+            classpath: vec![stdlib, output.clone(), java_output],
+            friend_output: output,
             jdk,
         }
     }
@@ -138,6 +141,15 @@ impl Fixture {
 
     fn diagnostics_files(&self, sources: &[&str]) -> Vec<String> {
         common::front_end_diagnostics_files(sources, &self.classpath, self.jdk.as_deref())
+    }
+
+    fn friend_diagnostics(&self, source: &str) -> Vec<String> {
+        common::front_end_diagnostics_with_friend_paths(
+            source,
+            &self.classpath,
+            std::slice::from_ref(&self.friend_output),
+            self.jdk.as_deref(),
+        )
     }
 
     fn run_box(&self, source: &str) -> String {
@@ -155,6 +167,30 @@ impl Fixture {
                 )
             })
     }
+}
+
+#[test]
+fn friend_classpath_grants_internal_visibility_without_relaxing_dependencies() {
+    let fixture = Fixture::new();
+    let source = "import lib.Hidden\nfun use(): Int = Hidden(1).value\n";
+
+    assert_eq!(
+        fixture.diagnostics(source),
+        ["cannot access 'Hidden': it is internal"]
+    );
+    assert_eq!(fixture.friend_diagnostics(source), Vec::<String>::new());
+}
+
+#[test]
+fn friend_classpath_grants_internal_top_level_property_visibility() {
+    let fixture = Fixture::new();
+    let source = "import lib.hiddenProperty\nfun use(): Int = hiddenProperty\n";
+
+    assert_eq!(
+        fixture.diagnostics(source),
+        ["unresolved reference 'hiddenProperty'."]
+    );
+    assert_eq!(fixture.friend_diagnostics(source), Vec::<String>::new());
 }
 
 #[test]
@@ -428,11 +464,13 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
         .iter()
         .map(|(_, source)| *source)
         .collect::<Vec<_>>();
+    let result = common::compiler_diagnostics(&sources, &fixture.classpath);
     assert_eq!(
         fixture.diagnostics_files(&source_texts),
-        Vec::<String>::new()
+        Vec::<String>::new(),
+        "{}",
+        result.krusty_stderr,
     );
-    let result = common::compiler_diagnostics(&sources, &fixture.classpath);
     assert_eq!(
         (
             result.krusty_code,

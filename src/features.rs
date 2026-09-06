@@ -15,8 +15,11 @@ impl Default for LangFeatures {
     fn default() -> Self {
         Self {
             enabled: HashSet::from([
+                "BareArrayClassLiteral".to_string(),
                 "ContextParameters".to_string(),
+                "EnumEntries".to_string(),
                 "MultiDollarInterpolation".to_string(),
+                "PrioritizedEnumEntries".to_string(),
             ]),
         }
     }

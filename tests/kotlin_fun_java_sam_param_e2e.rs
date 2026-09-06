@@ -349,7 +349,7 @@ fn destructured_lambda_does_not_fit_a_two_parameter_sam() {
         [
             "krusty: cannot destructure this type (no operator 'component1')",
             "krusty: cannot destructure this type (no operator 'component2')",
-            "argument type mismatch: actual type is '(Any) -> Unit', but 'BiConsumer<String, Int>' was expected.",
+            "argument type mismatch: actual type is '(String!) -> Unit', but 'BiConsumer<String, Int>' was expected.",
         ]
     );
 }

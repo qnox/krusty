@@ -75,3 +75,17 @@ fn statement_when_value_arm_side_effect_happens() {
         }\n";
     assert_eq!(run(SRC).expect("compiles and runs"), "OK");
 }
+
+#[test]
+fn unit_valued_when_normalizes_void_and_unit_object_arms() {
+    const SRC: &str = "fun update(list: MutableList<Any?>, condition: Boolean): Unit = when {\n\
+        condition -> list[0] = \"OK\"\n\
+        else -> Unit\n\
+    }\n\
+    fun box(): String {\n\
+        val list = mutableListOf<Any?>(\"fail\")\n\
+        update(list, true)\n\
+        return list[0] as String\n\
+    }\n";
+    common::expect_box_ok_with_stdlib(SRC, "C");
+}

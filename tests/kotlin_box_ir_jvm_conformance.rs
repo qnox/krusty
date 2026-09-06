@@ -27,13 +27,8 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
-use krusty::ir_lower::lower_file;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
-use krusty::jvm::ir_emit;
-use krusty::jvm::names::file_class_name;
-use krusty::lexer::lex;
 
 use super::common;
 
@@ -117,7 +112,7 @@ class TestClassLoader extends ClassLoader {
 
 // Backend-applicability, classpath directives, and module splitting are the SINGLE source of truth in
 // `krusty::conformance` (shared with the `survey` bin so the two never drift).
-use krusty::conformance::{backend_applicable, split_modules};
+use krusty::conformance::{backend_applicable, frontend_applicable, split_modules};
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
@@ -206,6 +201,17 @@ fn harness_classpath(paths: Vec<PathBuf>) -> std::rc::Rc<Classpath> {
     })
 }
 
+fn harness_classpath_with_friends(
+    paths: Vec<PathBuf>,
+    friend_paths: Vec<PathBuf>,
+) -> std::rc::Rc<Classpath> {
+    if friend_paths.is_empty() {
+        harness_classpath(paths)
+    } else {
+        std::rc::Rc::new(Classpath::new_with_friend_paths(paths, friend_paths))
+    }
+}
+
 /// In-memory dependency classes applied to the (usually thread-cached, SHARED) `Classpath` for one
 /// compile, and ALWAYS cleared afterward — a stale overlay on the shared instance would leak one
 /// case's classes into the next case on the same worker thread. Passing dependency classes this way
@@ -237,26 +243,8 @@ fn compile_source(
     jdk_modules: Option<&std::path::Path>,
     progress: &dyn Fn(&str),
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    progress("lex");
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
-    let t0 = std::time::Instant::now();
-    let toks = lex(src, &mut diags);
-    T_LEX.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    progress("parse");
-    let t1 = std::time::Instant::now();
-    let mut files = vec![krusty::parser::parse_with_features(
-        src, &toks, &mut diags, &features,
-    )];
-    T_PARSE.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    if diags.has_errors() {
-        return None;
-    }
-    if features.has("MultiPlatformProjects") {
-        krusty::frontend::strip_matched_expects(&mut files);
-    }
-    progress("signatures");
-    let t2 = std::time::Instant::now();
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
     // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
@@ -268,75 +256,31 @@ fn compile_source(
     }
     // Reuse stable jar/jimage classpaths; scratch directory classpaths die with their compile.
     let cp = harness_classpath(cp_paths);
+    progress("two-pass FIR");
+    let started = std::time::Instant::now();
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    T_SIGS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    if diags.has_errors() {
-        return None;
-    }
-    let file = &files[0];
-    let t3 = std::time::Instant::now();
-    progress("check");
-    let info = check_file(file, &mut syms, &mut diags);
-    T_CHECK.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    if diags.has_errors() {
-        return None;
-    }
-
-    let facade_name = file_class_name(stem, file.package.as_deref());
-
-    let t4 = std::time::Instant::now();
-    progress("lower");
-    // Lower the checked file to krusty-ir, then emit JVM bytecode (the sole codegen path).
-    let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-    let mut ir = match lower_file(file, &info, &syms, &runtime) {
-        Some(ir) => ir,
-        None => {
-            T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            return None;
-        }
-    };
-    // The real backend's shared post-lowering pass pipeline (jvm/backend.rs) — one definition, so the
-    // gate compiles exactly what ships. An unlowerable shape → skip, don't miscompile.
-    if krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade_name, "main", &syms).is_err()
-    {
-        T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        return None;
-    }
-    // Emit with the CLI backend's full artifact shape (facade `@Metadata`, verified per-class
-    // `@Metadata` shapes, `SourceFile` = `<stem>.kt`) so the byte-diff mode measures what ships —
-    // and the box run exercises the shipping bytes too.
-    let metadata =
-        krusty::jvm::backend::facade_package_metadata_with_ir(file, 0, &syms, &ir, "main");
-    // Consume the same complete option set as the CLI. Keeping a local partial literal here once
-    // allowed the conformance artifact to diverge whenever the shipping defaults gained a field.
-    // Compile under the `-jvm-default` mode the test pins. Emitting krusty's default shape for a
-    // test that asked for another one grades the wrong artifact: the class set itself differs.
-    let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone())
+    let inputs = [krusty::source::SourceInput::kotlin(src).with_file_stem(stem)];
+    let stems = [stem.to_string()];
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &features,
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let backend = krusty::jvm::JvmBackend::new(cp)
         .with_jvm_default(krusty::conformance::jvm_default_mode(src));
-    let run = ir_emit::EmitRun::default();
-    progress("emit");
-    let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all_with_opts(
-        &ir,
-        &facade_name,
-        &*cp,
-        metadata.as_ref(),
-        &opts,
-        &run,
-        &syms,
-    ) {
-        Some(o) => o,
-        None => {
-            T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            return None;
-        }
-    };
-    T_EMIT.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    if outputs.is_empty() {
-        return None;
-    }
-    Some(outputs)
+    let classes = outputs
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            path.strip_suffix(".class")
+                .map(|internal| (internal.to_string(), bytes))
+        })
+        .collect::<Vec<_>>();
+    (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
 /// The `helpers` package source the Kotlin test infra injects into every `// WITH_COROUTINES` box test
@@ -448,6 +392,7 @@ fn compile_multifile(
     let compiled = compile_blocks(
         &blocks,
         cp_jars,
+        &[],
         jdk_modules,
         &features,
         None,
@@ -458,11 +403,10 @@ fn compile_multifile(
     Some(out)
 }
 
-/// Kotlin-first mixed compilation for a test whose Java references Kotlin declarations
-/// (`docs/JAVA_INTEROP.md` slice 2): generate signature STUBS from the Java sources (no javac —
-/// `krusty::jvm::java_stub`), compile the Kotlin blocks against the stub dir, then javac the REAL
-/// Java against krusty's emitted classes and ship javac's output. Stub-generation or javac failure
-/// (unsupported Java subset, genuinely broken source) → skip, never mis-grade.
+/// Kotlin-first mixed compilation for a test whose Java references Kotlin declarations. Kotlin and
+/// Java files enter the production frontend together, so its JVM provider publishes the Java
+/// declaration headers in Pass 1. Real javac runs only after Kotlin emission and only its classes
+/// ship. Header installation or javac failure means the corpus case failed to compile.
 fn compile_kotlin_first(
     src: &str,
     blocks: &[(String, String)],
@@ -470,51 +414,17 @@ fn compile_kotlin_first(
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    use krusty::ast::Decl;
     let features = krusty::features::LangFeatures::from_source(src);
-    // The stub resolver's world: the Kotlin blocks' own top-level classes (parse only — internal
-    // name = `pkg/Name` with `.`→`$` nesting, as the signature pass derives it)…
-    let mut kotlin_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (_, content) in blocks {
-        let mut diags = DiagSink::new();
-        let toks = lex(content, &mut diags);
-        let file = krusty::parser::parse_with_features(content, &toks, &mut diags, &features);
-        if diags.has_errors() {
-            return None;
-        }
-        let pkg = file
-            .package
-            .as_ref()
-            .map(|p| p.replace('.', "/"))
-            .unwrap_or_default();
-        for &d in &file.decls {
-            if let Decl::Class(c) = file.decl(d) {
-                let mangled = c.name.replace('.', "$");
-                kotlin_names.insert(if pkg.is_empty() {
-                    mangled
-                } else {
-                    format!("{pkg}/{mangled}")
-                });
-            }
-        }
-    }
-    // …plus everything on the classpath (same thread-local warm `Classpath` the compile uses).
-    let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
-    if let Some(p) = jdk_modules {
-        cp_paths.push(p.to_path_buf());
-    }
-    let classpath = harness_classpath(cp_paths);
-    let resolve = |cand: &str| kotlin_names.contains(cand) || classpath.find(cand).is_some();
-    let stubs = krusty::jvm::java_stub::stub_classes(
+    let kotlin_classes = compile_blocks_mixed(
+        blocks,
         java_blocks,
-        krusty::jvm::java_stub::StubMode::Strict,
-        &resolve,
+        cp_jars,
+        &[],
+        jdk_modules,
+        &features,
+        None,
+        &[],
     )?;
-
-    // krusty compiles against the stubs as an in-memory overlay — no scratch stub dir, so a
-    // jar-only classpath stays the shared per-thread instance. (Stubs are plain classes with no
-    // Kotlin facades, exactly what the overlay's class-lookup channels serve.)
-    let kotlin_classes = compile_blocks(blocks, cp_jars, jdk_modules, &features, None, &stubs)?;
 
     static UID: AtomicU64 = AtomicU64::new(0);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
@@ -542,12 +452,33 @@ fn compile_kotlin_first(
 }
 
 /// Compile a set of already-split source blocks `(stem, content)` as ONE krusty module against the
-/// given classpath: parse, collect global signatures, wire the cross-file function/property→facade map
-/// (like the CLI driver), then check + lower + emit each file, returning ALL emitted classes. `None` if
-/// the module uses something the backend can't lower (so the test SKIPS rather than miscompiles).
+/// given classpath through the production two-pass FIR driver, returning all emitted classes.
 fn compile_blocks(
     blocks: &[(String, String)],
     cp_jars: &[std::path::PathBuf],
+    friend_paths: &[std::path::PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    features: &krusty::features::LangFeatures,
+    progress: Option<&dyn Fn(&str)>,
+    overlay: &[(String, Vec<u8>)],
+) -> Option<Vec<(String, Vec<u8>)>> {
+    compile_blocks_mixed(
+        blocks,
+        &[],
+        cp_jars,
+        friend_paths,
+        jdk_modules,
+        features,
+        progress,
+        overlay,
+    )
+}
+
+fn compile_blocks_mixed(
+    blocks: &[(String, String)],
+    java_blocks: &[(String, String)],
+    cp_jars: &[std::path::PathBuf],
+    friend_paths: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
     features: &krusty::features::LangFeatures,
     progress: Option<&dyn Fn(&str)>,
@@ -558,82 +489,52 @@ fn compile_blocks(
             progress(phase);
         }
     };
-    report("module parse");
     let mut diags = DiagSink::new();
-    let mut files: Vec<_> = blocks
-        .iter()
-        .map(|(_, content)| {
-            let toks = lex(content, &mut diags);
-            krusty::parser::parse_with_features(content, &toks, &mut diags, features)
-        })
-        .collect();
-    if diags.has_errors() {
-        return None;
-    }
-    // Multiplatform: a matched `expect` header is replaced by its `actual` across the set.
-    if features.has("MultiPlatformProjects") {
-        krusty::frontend::strip_matched_expects(&mut files);
-    }
-
     report("module classpath");
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
     if let Some(p) = jdk_modules {
         cp_paths.push(p.to_path_buf());
     }
-    let cp = harness_classpath(cp_paths);
+    let cp = harness_classpath_with_friends(cp_paths, friend_paths.to_vec());
     let _overlay = OverlayGuard::set(&cp, overlay);
-    report("module signatures");
+    report("module two-pass FIR");
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    if diags.has_errors() {
-        return None;
-    }
-    // Cross-file maps: each top-level function/property (inline fns with callable bodies
-    // included) → its file's facade. Use the PRODUCTION registration so the harness can't drift
-    // from the CLI (it did: it excluded all inline fns).
-    report("module symbol wiring");
-    let stems: Vec<String> = blocks.iter().map(|(name, _)| name.clone()).collect();
-    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
-
-    let mut all = Vec::new();
-    for (i, file) in files.iter().enumerate() {
-        diags.set_file(i as u32);
-        report("module check");
-        let info =
-            krusty::frontend::check_file_in_source_set(&files, i as u32, &mut syms, &mut diags);
-        if diags.has_errors() {
-            return None;
-        }
-        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-        report("module lower");
-        let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
-        // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip, don't miscompile.
-        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms).ok()?;
-        // Facade `@Metadata` (top-level fn/extension records), as the CLI backend writes — a later
-        // MODULE's compile reads this module's output from the classpath and needs it to resolve
-        // cross-module extensions.
-        let metadata = krusty::jvm::backend::facade_package_metadata_with_ir(
-            file, i as u32, &syms, &ir, "main",
-        );
-        // This is the only gate path where a downstream `// MODULE:` reads an upstream module's
-        // classes. Use the complete shipping configuration rather than duplicating its metadata and
-        // filename fields; the shared constructor also reduces a logical nested source path to the
-        // simple `SourceFile` name required by the class-file attribute.
-        let opts =
-            krusty::jvm::backend::shipping_emit_options(&blocks[i].0, "main", None, cp.clone())
-                .with_jvm_default(krusty::conformance::jvm_default_mode(&blocks[i].1));
-        let run = ir_emit::EmitRun::default();
-        report("module emit");
-        let out =
-            ir_emit::emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run, &syms)?;
-        all.extend(out);
-    }
-    if all.is_empty() {
-        None
-    } else {
-        Some(all)
-    }
+    let stems: Vec<String> = blocks
+        .iter()
+        .chain(java_blocks)
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut inputs = blocks
+        .iter()
+        .map(|(stem, content)| krusty::source::SourceInput::kotlin(content).with_file_stem(stem))
+        .collect::<Vec<_>>();
+    inputs.extend(
+        java_blocks
+            .iter()
+            .map(|(stem, content)| krusty::source::SourceInput::java(content).with_file_stem(stem)),
+    );
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        features,
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut diags,
+    );
+    let jvm_default = blocks
+        .iter()
+        .map(|(_, source)| krusty::conformance::jvm_default_mode(source))
+        .find(|mode| *mode != krusty::jvm::ir_emit::JvmDefaultMode::default())
+        .unwrap_or_default();
+    let backend = krusty::jvm::JvmBackend::new(cp).with_jvm_default(jvm_default);
+    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    let classes = outputs
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            path.strip_suffix(".class")
+                .map(|internal| (internal.to_string(), bytes))
+        })
+        .collect::<Vec<_>>();
+    (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
 /// Write emitted `(internal_name, bytes)` classes under `dir` as `internal/name.class` (package dirs
@@ -680,9 +581,15 @@ fn compile_module_test(
         // dir. FRIEND deps ride the same classpath (their `internal` visibility is the friend
         // part; krusty resolves them like any dependency).
         let mut cp = cp_jars.to_vec();
+        let mut friend_paths = Vec::new();
         for d in &m.deps {
             match dirmap.get(d) {
-                Some(p) => cp.push(p.clone()),
+                Some(p) => {
+                    cp.push(p.clone());
+                    if m.friends.iter().any(|friend| friend == d) {
+                        friend_paths.push(p.clone());
+                    }
+                }
                 None => {
                     ok = false; // a dependency declared out of order / on an unbuilt module — skip
                     break;
@@ -709,7 +616,15 @@ fn compile_module_test(
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
-            compile_blocks(files, &cp, jdk_modules, &features, Some(&report), &[])
+            compile_blocks(
+                files,
+                &cp,
+                &friend_paths,
+                jdk_modules,
+                &features,
+                Some(&report),
+                &[],
+            )
         } else {
             match common::javac_compile(java_files, &cp) {
                 Some((javadir, java_classes)) => {
@@ -725,7 +640,15 @@ fn compile_module_test(
                         // top-level functions resolve through the package catalog, which only
                         // directory/jar entries contribute to — an overlaid dependency module
                         // loses them (measured: -95 box passes).
-                        compile_blocks(files, &cp, jdk_modules, &features, None, &java_classes)
+                        compile_blocks(
+                            files,
+                            &cp,
+                            &friend_paths,
+                            jdk_modules,
+                            &features,
+                            None,
+                            &java_classes,
+                        )
                     };
                     kotlin.map(|mut k| {
                         k.extend(java_classes);
@@ -1298,7 +1221,12 @@ fn kotlin_codegen_box_conformance() {
                 let src = krusty::conformance::prepare_test_source(&src);
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if !backend_applicable(&src, krusty::conformance::BACKENDS) {
+                    let applicable = if no_run {
+                        frontend_applicable(&src, krusty::conformance::BACKENDS)
+                    } else {
+                        backend_applicable(&src, krusty::conformance::BACKENDS)
+                    };
+                    if !applicable {
                         return (file.clone(), TestResult::NotApplicable);
                     }
                     // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's

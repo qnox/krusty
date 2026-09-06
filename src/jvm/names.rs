@@ -2,6 +2,22 @@
 
 use crate::types::{InternalName, Ty};
 
+/// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
+pub(crate) const MAX_NUMBERED_FUNCTION_ARITY: usize = 22;
+
+pub(crate) fn uses_function_n(arity: usize) -> bool {
+    arity > MAX_NUMBERED_FUNCTION_ARITY
+}
+
+/// Physical JVM carrier for a Kotlin function value of the given runtime arity.
+pub(crate) fn function_interface_internal_name(arity: usize) -> String {
+    if uses_function_n(arity) {
+        "kotlin/jvm/functions/FunctionN".to_string()
+    } else {
+        format!("kotlin/jvm/functions/Function{arity}")
+    }
+}
+
 /// The file-facade class internal name for a source file: `Foo.kt` → `FooKt` (package-qualified).
 pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
     // A file-name character illegal in a JVM class name (`.`, `;`, `[`, `/`, `<`, `>`, `:`) becomes
@@ -268,8 +284,8 @@ pub fn type_descriptor(ty: Ty) -> String {
         Ty::Nothing => obj_desc("java/lang/Void"),
         Ty::Null | Ty::Error => obj_desc("kotlin/Any"),
         Ty::Fun(s) => format!(
-            "Lkotlin/jvm/functions/Function{};",
-            s.params.len() + usize::from(s.suspend)
+            "L{};",
+            function_interface_internal_name(s.params.len() + usize::from(s.suspend))
         ),
         Ty::Nullable(inner) => match *inner {
             Ty::Unit => obj_desc("kotlin/Unit"),
@@ -279,9 +295,10 @@ pub fn type_descriptor(ty: Ty) -> String {
             Ty::ULong => obj_desc("kotlin/ULong"),
             other => type_descriptor(other.boxed_ref().unwrap_or(other)),
         },
-        Ty::TyParam(_, bound) | Ty::PlatformNullable(bound) | Ty::OutProjection(bound) => {
-            type_descriptor(*bound)
-        }
+        Ty::TyParam(_, bound)
+        | Ty::PlatformNullable(bound)
+        | Ty::OutProjection(bound)
+        | Ty::StarProjection(bound) => type_descriptor(*bound),
         // An `in X` occurrence says a caller may WRITE an `X` there; a value read back through it
         // is only known to be `Any?`, so it erases to `Object` rather than to `X`.
         Ty::InProjection(_) => obj_desc("java/lang/Object"),
@@ -311,6 +328,15 @@ mod tests {
     fn unit_array_uses_the_unit_reference_descriptor() {
         let array = Ty::obj_args("kotlin/Array", &[Ty::Unit]);
         assert_eq!(type_descriptor(array), "[Lkotlin/Unit;");
+    }
+
+    #[test]
+    fn high_arity_function_descriptor_uses_function_n() {
+        let function = Ty::fun(vec![Ty::Int; 23], Ty::Int);
+        assert_eq!(
+            type_descriptor(function),
+            "Lkotlin/jvm/functions/FunctionN;"
+        );
     }
 
     #[test]

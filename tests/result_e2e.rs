@@ -31,3 +31,11 @@ fn result_success_get_or_null() {
     let out = run(SRC).expect("Result.success + getOrNull should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn result_values_use_value_class_equality() {
+    const SRC: &str =
+        "fun box(): String = if (Result.success(0) == Result.success(0)) \"OK\" else \"FAIL\"\n";
+    let out = run(SRC).expect("Result equality should compile + run");
+    assert_eq!(out, "OK");
+}

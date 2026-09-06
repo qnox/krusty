@@ -556,7 +556,7 @@ fn context_property_accessor_round_trips() {
         "class Scope(val value: String)\n\
          context(scope: Scope)\n\
          val current: Scope get() = scope\n\
-         fun box(): String { val scope = Scope(\"OK\"); return current.value }\n",
+         fun box(): String { val scope = Scope(\"OK\"); return with(scope) { current.value } }\n",
     );
 }
 
@@ -567,7 +567,7 @@ fn member_context_property_accessor_round_trips() {
          class Owner {\n\
              context(scope: Scope)\n\
              val current: Scope get() = scope\n\
-             fun read(scope: Scope): String = current.value\n\
+             fun read(scope: Scope): String = with(scope) { current.value }\n\
          }\n\
          fun box(): String = Owner().read(Scope(\"OK\"))\n",
     );
@@ -592,10 +592,14 @@ fn delegated_property_custom_class_rejected() {
 }
 
 #[test]
-fn local_delegated_val_rejected() {
-    assert!(rejects(
-        "fun f() { val x by lazy { 5 }; println(x) }\nfun main() { f() }\n"
-    ));
+fn local_delegated_val_round_trips() {
+    box_ok(
+        "fun box(): String {\n\
+             var initializations = 0\n\
+             val value by lazy { initializations += 1; 5 }\n\
+             return if (value == 5 && value == 5 && initializations == 1) \"OK\" else \"F\"\n\
+         }\n",
+    );
 }
 
 // --- mixed spread with a leading fixed argument — packed by the reference `SpreadBuilder`, accepted ---

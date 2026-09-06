@@ -18,6 +18,110 @@ return \"OK\"\n\
 }
 
 #[test]
+fn array_factory_references_use_the_selected_compiler_declaration() {
+    const SRC: &str = r#"
+fun collect(factory: (Int, Int) -> Array<Int>): String {
+    val values = factory('O'.toInt(), 'K'.toInt())
+    return "${values[0].toChar()}${values[1].toChar()}"
+}
+
+fun pass(factory: (Array<String>) -> Array<String>): Array<String> =
+    factory(arrayOf("OK"))
+
+fun box(): String {
+    if (collect(::arrayOf) != "OK") return "adapted"
+    val original = arrayOf("OK")
+    val identity: (Array<String>) -> Array<String> = ::arrayOf
+    if (identity(original) !== original) return "vararg identity"
+    if (pass(::arrayOf)[0] != "OK") return "array parameter"
+    val nullable: (Int) -> Array<String?> = ::arrayOfNulls
+    val nulls = nullable(2)
+    if (nulls.size != 2 || nulls[0] != null || nulls[1] != null) return "null factory"
+    return "OK"
+}
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "ArrayFactoryCallableRef");
+}
+
+#[test]
+fn reflective_string_plus_reference_invokes_provider_selected_intrinsic_adapter() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+fun box(): String {
+    if ((String::plus)("O", "K") != "OK") return "plus"
+    return "OK"
+}
+"#,
+        "ReflectiveStringPlusIntrinsicReference",
+    );
+}
+
+#[test]
+fn inline_extension_plan_names_its_receiver_semantically() {
+    const SRC: &str = r#"
+interface T {
+    fun foo() = "OK"
+}
+
+class B : T {
+    inner class C {
+        fun bar() = (T::foo).let { it(this@B) }
+    }
+}
+
+fun box(): String = B().C().bar()
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "InlineExtensionReceiverPlan");
+}
+
+#[test]
+fn callable_reference_above_numbered_jvm_arity_uses_function_n() {
+    const SRC: &str = r#"
+var result = "FAIL"
+
+fun target(
+    a01: Int, a02: Int, a03: Int, a04: Int, a05: Int, a06: Int, a07: Int, a08: Int,
+    a09: Int, a10: Int, a11: Int, a12: Int, a13: Int, a14: Int, a15: Int, a16: Int,
+    a17: Int, a18: Int, a19: Int, a20: Int, a21: Int, a22: Int, a23: Int, a24: Int
+) {
+    if (a01 == 1 && a12 == 12 && a22 == 22 && a24 == 24) result = "OK"
+}
+
+fun box(): String {
+    val reference = ::target
+    reference(
+        1, 2, 3, 4, 5, 6, 7, 8,
+        9, 10, 11, 12, 13, 14, 15, 16,
+        17, 18, 19, 20, 21, 22, 23, 24
+    )
+    return result
+}
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "HighArityCallableRef");
+}
+
+#[test]
+fn inner_constructor_reference_preserves_outer_and_inner_type_arguments() {
+    const SRC: &str = r#"
+var result = "FAIL"
+
+class Outer<T> {
+    inner class Inner<U> {
+        constructor() { result = "OK" }
+    }
+}
+
+fun box(): String {
+    val construct: Outer<*>.() -> Outer<out Any?>.Inner<out String> =
+        Outer<out Any?>::Inner
+    Outer<Int>().construct()
+    return result
+}
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "GenericInnerConstructorRef");
+}
+
+#[test]
 fn expected_type_selects_an_overloaded_toplevel_reference_and_coerces_unit() {
     const SRC: &str = "var result = \"FAIL\"\n\
 fun choose(x: Int, y: Any): Int { result = \"OK\"; return x }\n\

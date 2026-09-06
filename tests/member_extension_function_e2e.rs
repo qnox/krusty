@@ -311,6 +311,18 @@ fn member_extension_function_resolution() {
             None,
         ),
         (
+            "generic member extension override is alpha equivalent",
+            r#"
+                interface BaseMapper<T> {
+                    fun <X> T.render(value: X): String
+                }
+                class Mapper : BaseMapper<String> {
+                    override fun <Y> String.render(value: Y): String = value.toString()
+                }
+            "#,
+            None,
+        ),
+        (
             "private extension remains inaccessible in an external dispatch scope",
             r#"
                 class Item

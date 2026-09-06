@@ -7,14 +7,14 @@ use std::io::{self, Write};
 use crate::compiler_analysis::analyze_standalone_source_set;
 use crate::compiler_analysis::java;
 use crate::compiler_analysis::{
-    analyze_standalone_source_inputs, document_symbol_occurrences, folding_range_occurrences,
-    hover_wire_cost, parsed_file_symbols, CompletionDetails, CompletionKind, CompletionSymbols,
-    DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence,
-    FileAnalysis, FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
-    HoverOccurrence, LibraryRef, SemanticLimits, SignatureCandidate, SignatureHelpCall,
-    SignatureHelpSymbols, FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION,
-    MAX_LIBRARY_DEFINITION_BYTES, TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC,
-    TEXT_PARENTHESES, TEXT_RAW_STRING, TEXT_REGION_LABEL,
+    document_symbol_occurrences, folding_range_occurrences, hover_wire_cost, parsed_file_symbols,
+    CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence, DefinitionSymbols,
+    DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis, FoldingRangeOccurrence,
+    FrontendSymbols, HighlightOccurrence, HighlightSymbols, HoverOccurrence, LibraryRef,
+    SemanticLimits, SignatureCandidate, SignatureHelpCall, SignatureHelpSymbols,
+    FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION, MAX_LIBRARY_DEFINITION_BYTES,
+    TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC, TEXT_PARENTHESES, TEXT_RAW_STRING,
+    TEXT_REGION_LABEL,
 };
 use krusty::diag::{Diagnostic, Span};
 use krusty::source::{SourceInput, SourceKind};
@@ -4012,7 +4012,7 @@ fn analyze_source_inputs_for_lsp(
         .filter(|(_, input)| input.kind == SourceKind::Java)
         .map(|(index, _)| index as u32)
         .collect::<Vec<_>>();
-    let analysis = analyze_standalone_source_inputs(inputs);
+    let analysis = crate::jvm_analysis::analyze_standalone_source_inputs(inputs);
     let highlight_symbols = HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
     let mut definition_symbols = DefinitionSymbols::from_source_set(
         &sources,

@@ -108,6 +108,16 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
                 .join(":"),
         );
     }
+    if !unit.friend_paths.is_empty() {
+        argv.push(format!(
+            "-Xfriend-paths={}",
+            unit.friend_paths
+                .iter()
+                .map(|entry| entry.display().to_string())
+                .collect::<Vec<_>>()
+                .join(":")
+        ));
+    }
     argv.extend(unit.kotlinc_args.iter().cloned());
     argv.extend(unit.sources.iter().map(|path| path.display().to_string()));
 
@@ -150,7 +160,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let effective_classpath = opts
         .effective_classpath()
         .map_err(|error| format!("krusty: {error}\n"))?;
-    let cp = std::rc::Rc::new(Classpath::new(effective_classpath));
+    let cp = std::rc::Rc::new(Classpath::new_with_friend_paths(
+        effective_classpath,
+        opts.friend_paths.clone(),
+    ));
     let platform = Box::new(JvmLibraries::new(cp.clone()));
     let source_inputs = opts
         .sources
@@ -166,11 +179,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             .with_file_stem(stem)
         })
         .collect::<Vec<_>>();
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &source_inputs,
         platform,
         &opts.features,
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
 
@@ -182,15 +194,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .with_lambda_modes(opts.lambda_modes)
         .with_param_assertions(!opts.no_param_assertions)
         .with_call_assertions(!opts.no_call_assertions);
-    let outputs = krusty::compiler::emit_checked(
-        &analysis.files,
-        &stems,
-        &analysis.types,
-        &analysis.symbols,
-        &backend,
-        &opts.module_name,
-        &mut diags,
-    );
+    let outputs =
+        krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);
 
     if diags.has_errors() {
         // Render each diagnostic against ITS OWN source file (by `Diagnostic::file`), once — not the

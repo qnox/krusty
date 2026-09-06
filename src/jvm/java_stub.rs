@@ -24,8 +24,8 @@ use super::classfile::{
     ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SUPER,
 };
 use crate::java_source::{
-    lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx, Member,
-    RawDecl, SrcType, STUB_DEFAULT,
+    lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx,
+    JavaConstant, Member, RawDecl, SrcType, STUB_DEFAULT,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -211,10 +211,27 @@ impl Resolver<'_> {
                 None => return None,
             }
         }
-        for a in &t.args {
+        for a in t.arguments() {
             self.desc(a, tparams)?;
         }
         Some(s)
+    }
+
+    fn append_type_arguments(
+        &self,
+        output: &mut String,
+        arguments: &[SrcType],
+        tparams: &[&str],
+    ) -> Option<()> {
+        if arguments.is_empty() {
+            return Some(());
+        }
+        output.push('<');
+        for argument in arguments {
+            output.push_str(&self.sig(argument, tparams)?);
+        }
+        output.push('>');
+        Some(())
     }
 
     /// JVM generic-`Signature` form of a source type (`LA<TE;>;`, `TE;`, `I`).
@@ -230,14 +247,37 @@ impl Resolver<'_> {
             s.push(';');
             return Some(s);
         }
+        // Find the first source segment that denotes a classifier. Segments before it are package
+        // qualifiers; segments after it are member classifiers and use `.` (not `$`) in the JVMS
+        // generic Signature grammar. Resolve every prefix so strict mode still rejects an unknown
+        // member in the chain.
+        let classifier_start = (0..t.segments.len()).find(|end| {
+            let prefix = t.segments[..=*end]
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            self.internal_of(&prefix).is_some()
+        })?;
+        let root_name = t.segments[..=classifier_start]
+            .iter()
+            .map(|segment| segment.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
         s.push('L');
-        s.push_str(&self.internal_of(&t.name)?);
-        if !t.args.is_empty() {
-            s.push('<');
-            for a in &t.args {
-                s.push_str(&self.sig(a, tparams)?);
-            }
-            s.push('>');
+        s.push_str(&self.internal_of(&root_name)?);
+        self.append_type_arguments(&mut s, &t.segments[classifier_start].args, tparams)?;
+        for segment_index in classifier_start + 1..t.segments.len() {
+            let prefix = t.segments[..=segment_index]
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            self.internal_of(&prefix)?;
+            let segment = &t.segments[segment_index];
+            s.push('.');
+            s.push_str(&segment.name);
+            self.append_type_arguments(&mut s, &segment.args, tparams)?;
         }
         s.push(';');
         Some(s)
@@ -351,7 +391,7 @@ impl Resolver<'_> {
                 || d.superclass
                     .iter()
                     .chain(d.interfaces.iter())
-                    .any(|t| !t.args.is_empty() || tp.contains(&t.name.as_str()));
+                    .any(|t| t.has_type_arguments() || tp.contains(&t.name.as_str()));
             if generic {
                 let default_super = if is_record {
                     "java/lang/Record"
@@ -375,9 +415,9 @@ impl Resolver<'_> {
             );
         }
 
-        for (name, ty, acc) in &d.fields {
+        for (name, ty, acc, constant) in &d.fields {
             let desc = self.desc(ty, &tp)?;
-            let fsig = if !ty.args.is_empty() || tp.contains(&ty.name.as_str()) {
+            let fsig = if ty.has_type_arguments() || tp.contains(&ty.name.as_str()) {
                 match self.sig(ty, &tp) {
                     Some(s) => Some(s),
                     None if self.mode.is_lenient() => None,
@@ -395,13 +435,21 @@ impl Resolver<'_> {
                 } else {
                     0
                 };
-            w.add_field_sig(acc, name, &desc, fsig.as_deref());
+            let constant = (acc & (ACC_STATIC | ACC_FINAL) == (ACC_STATIC | ACC_FINAL))
+                .then(|| constant.as_ref())
+                .flatten()
+                .map(|constant| match constant {
+                    JavaConstant::String(value) => {
+                        crate::ir::IrConst::String(crate::kt_string::KtString::from(value.clone()))
+                    }
+                });
+            w.add_field_late_sig(acc, name, &desc, fsig.as_deref(), constant, None);
         }
 
         if is_record {
             for (name, ty) in &d.record_components {
                 let desc = self.desc(ty, &tp)?;
-                let fsig = if !ty.args.is_empty() || tp.contains(&ty.name.as_str()) {
+                let fsig = if ty.has_type_arguments() || tp.contains(&ty.name.as_str()) {
                     match self.sig(ty, &tp) {
                         Some(s) => Some(s),
                         None if self.mode.is_lenient() => None,
@@ -421,6 +469,7 @@ impl Resolver<'_> {
             ret: None,
             throws: Vec::new(),
             access: ACC_PUBLIC,
+            has_annotation_default: false,
         };
         let enum_default_ctor = Member {
             name: "<init>".into(),
@@ -429,6 +478,7 @@ impl Resolver<'_> {
             ret: None,
             throws: Vec::new(),
             access: ACC_PRIVATE,
+            has_annotation_default: false,
         };
         let record_canonical_ctor = Member {
             name: "<init>".into(),
@@ -442,6 +492,7 @@ impl Resolver<'_> {
                 } else {
                     0
                 },
+            has_annotation_default: false,
         };
         let ctors: Vec<&Member> = if is_record {
             let canonical_descriptor =
@@ -482,6 +533,7 @@ impl Resolver<'_> {
                         ret: Some(ty.clone()),
                         throws: Vec::new(),
                         access: ACC_PUBLIC,
+                        has_annotation_default: false,
                     });
                 }
             }
@@ -542,7 +594,7 @@ impl Resolver<'_> {
             || m.params
                 .iter()
                 .chain(m.ret.iter())
-                .any(|t| !t.args.is_empty() || scope.contains(&t.name.as_str()));
+                .any(|t| t.has_type_arguments() || scope.contains(&t.name.as_str()));
         let sig = if generic {
             match self.build_member_sig(m, &scope) {
                 Some(s) => Some(s),
@@ -572,6 +624,9 @@ impl Resolver<'_> {
             code.aconst_null();
             code.athrow();
             w.add_method_sig(acc, &m.name, &desc, &code, sig.as_deref());
+        }
+        if m.has_annotation_default {
+            w.mark_annotation_default(&m.name, &desc);
         }
         Some(())
     }
@@ -637,6 +692,51 @@ mod tests {
     }
 
     #[test]
+    fn annotation_element_defaults_survive_source_header_stubs() {
+        let out = stubs(
+            "public @interface State { String name(); boolean reloadable() default true; }",
+            &["java/lang/String", "java/lang/Object"],
+        )
+        .expect("annotation stub");
+        let class = parse_class(&out[0].1).expect("parse annotation stub");
+
+        assert!(
+            !class
+                .method("name", "()Ljava/lang/String;")
+                .unwrap()
+                .has_annotation_default
+        );
+        assert!(
+            class
+                .method("reloadable", "()Z")
+                .unwrap()
+                .has_annotation_default
+        );
+    }
+
+    #[test]
+    fn source_string_constant_survives_the_java_header_stub() {
+        let out = stubs(
+            "public class Constants { public static final String VALUE = \"OK\"; }",
+            &["java/lang/String", "java/lang/Object"],
+        )
+        .expect("constant stub");
+        let class = parse_class(&out[0].1).expect("parse constant stub");
+        let value = class
+            .fields
+            .iter()
+            .find(|field| field.name == "VALUE")
+            .and_then(|field| field.const_value.as_ref());
+
+        assert_eq!(
+            value,
+            Some(&crate::jvm::classreader::ConstVal::Str(
+                crate::kt_string::KtString::from("OK")
+            ))
+        );
+    }
+
+    #[test]
     fn generic_class_extends_known_generic_supertype_with_signature() {
         // The kt40180_3 shape: Java abstract class extends a (Kotlin) generic class and
         // implements a (Kotlin) generic interface.
@@ -661,6 +761,28 @@ mod tests {
             Some("<E:Ljava/lang/Object;>LA<TE;>;LL<TE;>;")
         );
         assert!(ci.method("callIndexAdd", "(I)Ljava/lang/String;").is_some());
+    }
+
+    #[test]
+    fn parameterized_inner_return_retains_owner_and_member_arguments() {
+        let out = stubs(
+            "public interface Sam<TO, TI> { Outer<TO>.Inner<TI> get(String s); }",
+            &[
+                "Outer",
+                "Outer$Inner",
+                "java/lang/String",
+                "java/lang/Object",
+            ],
+        )
+        .expect("stub");
+        let ci = parse_class(&out[0].1).expect("parse stub");
+        let method = ci
+            .method("get", "(Ljava/lang/String;)LOuter$Inner;")
+            .expect("generic inner return");
+        assert_eq!(
+            method.signature.as_deref(),
+            Some("(Ljava/lang/String;)LOuter<TTO;>.Inner<TTI;>;")
+        );
     }
 
     #[test]
@@ -1280,7 +1402,7 @@ mod tests {
             .iter()
             .map(|reference| &source[reference.span.lo as usize..reference.span.hi as usize])
             .collect::<Vec<_>>();
-        assert_eq!(referenced, ["java.util.List", "String"]);
+        assert_eq!(referenced, ["java.util.List<String>", "String"]);
     }
 
     #[test]

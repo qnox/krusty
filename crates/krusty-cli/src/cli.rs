@@ -16,7 +16,10 @@ pub struct Options {
     pub dest: PathBuf,
     /// Classpath entries (dirs/jars).
     pub classpath: Vec<PathBuf>,
-    /// `.kt` source files (directories already expanded).
+    /// Classpath entries whose Kotlin `internal` declarations are visible to this module.
+    pub friend_paths: Vec<PathBuf>,
+    /// Batch-compilable Kotlin and Java source inputs (directories already expanded). Java files
+    /// contribute source headers to Kotlin analysis; their executable bodies remain javac's work.
     pub sources: Vec<String>,
     /// Module name → `<module>.kotlin_module` (kotlinc `-module-name`, default `main`).
     pub module_name: String,
@@ -64,6 +67,7 @@ impl Default for Options {
         Options {
             dest: PathBuf::from("krusty-out"),
             classpath: Vec::new(),
+            friend_paths: Vec::new(),
             sources: Vec::new(),
             module_name: "main".to_string(),
             features: LangFeatures::new(),
@@ -166,8 +170,6 @@ fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>)
         out.push(path.to_string());
     } else if krusty::source::kind(p).is_some() {
         ignored.push(format!("{path} (script compilation is not supported yet)"));
-    } else if path.ends_with(".java") {
-        ignored.push(format!("{path} (no Java source front end yet)"));
     }
 }
 
@@ -193,6 +195,12 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                 if let Some(v) = it.next() {
                     opts.classpath.extend(split_classpath(&v));
                 }
+            }
+            flag if flag.starts_with("-Xfriend-paths=") => {
+                let (_, value) = flag
+                    .split_once('=')
+                    .expect("the guard above already matched an `=`");
+                opts.friend_paths.extend(split_classpath(value));
             }
             "-module-name" => {
                 if let Some(v) = it.next() {
@@ -584,15 +592,36 @@ mod tests {
     }
 
     #[test]
+    fn kotlinc_friend_paths_are_preserved_separately_from_the_classpath() {
+        let o = parse_args(&[
+            "-cp",
+            "ordinary.jar:friend/classes",
+            "-Xfriend-paths=friend/classes:second.jar",
+            "x.kt",
+        ]);
+        assert_eq!(
+            o.friend_paths,
+            vec![PathBuf::from("friend/classes"), PathBuf::from("second.jar")]
+        );
+        assert_eq!(
+            o.classpath,
+            vec![
+                PathBuf::from("ordinary.jar"),
+                PathBuf::from("friend/classes")
+            ]
+        );
+    }
+
+    #[test]
     fn source_inputs_follow_shared_batch_capabilities() {
         let o = parse_args(&["main.kt", "script.kts", "Ignored.java"]);
-        assert_eq!(o.sources, vec!["main.kt".to_string()]);
+        assert_eq!(
+            o.sources,
+            vec!["main.kt".to_string(), "Ignored.java".to_string()]
+        );
         assert_eq!(
             o.ignored,
-            vec![
-                "script.kts (script compilation is not supported yet)".to_string(),
-                "Ignored.java (no Java source front end yet)".to_string(),
-            ]
+            vec!["script.kts (script compilation is not supported yet)".to_string()]
         );
     }
 

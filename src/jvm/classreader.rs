@@ -13,6 +13,7 @@ pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
+pub const ACC_FINAL: u16 = 0x0010;
 pub const ACC_BRIDGE: u16 = 0x0040;
 /// The final array parameter accepts Java vararg elements.
 pub const ACC_VARARGS: u16 = 0x0080;
@@ -63,6 +64,9 @@ impl MethodSig {
     }
     pub fn is_abstract(&self) -> bool {
         self.access & 0x0400 != 0
+    }
+    pub fn is_final(&self) -> bool {
+        self.access & ACC_FINAL != 0
     }
     pub fn is_bridge(&self) -> bool {
         self.access & ACC_BRIDGE != 0

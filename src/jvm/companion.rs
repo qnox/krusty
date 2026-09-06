@@ -54,6 +54,15 @@ fn initializer_store(
 }
 
 fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
+    let receiver_is_redundant_companion_value = |receiver: ExprId| {
+        let companion = ir.classes[class as usize].fq_name;
+        match ir.expr(receiver) {
+            IrExpr::SingletonValue { classifier } => *classifier == companion,
+            IrExpr::ExternalStaticInstance { ty, .. } => *ty == companion,
+            IrExpr::StaticInstance { ty, .. } => ir.classes[*ty as usize].fq_name == companion,
+            _ => false,
+        }
+    };
     ir.exprs.iter().all(|expression| match expression {
         IrExpr::GetField {
             receiver,
@@ -64,13 +73,19 @@ fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
             receiver,
             class: target,
             index,
-        } if *target == class && *index == field => crate::ir::expr_runs_no_code(ir, *receiver),
+        } if *target == class && *index == field => {
+            crate::ir::expr_runs_no_code(ir, *receiver)
+                || receiver_is_redundant_companion_value(*receiver)
+        }
         IrExpr::SetField {
             receiver,
             class: target,
             index,
             ..
-        } if *target == class && *index == field => crate::ir::expr_runs_no_code(ir, *receiver),
+        } if *target == class && *index == field => {
+            crate::ir::expr_runs_no_code(ir, *receiver)
+                || receiver_is_redundant_companion_value(*receiver)
+        }
         _ => true,
     })
 }
@@ -127,7 +142,8 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         if !outer_class.enum_entries.is_empty() || outer_class.is_value {
             continue;
         }
-        let outer_is_interface = outer_class.is_interface;
+        // Annotation classes are distinct in common IR but are JVM interfaces for storage rules.
+        let outer_is_interface = outer_class.is_interface || outer_class.is_annotation;
         let Some(companion) = ir.class_id_by_name(companion_name) else {
             continue;
         };
@@ -158,9 +174,9 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         // (non-`@JvmField`) interface-companion properties keep object-style storage on the
         // companion itself. The rule spans the companion's WHOLE property universe: a `const val`
         // is not in `properties` (its declaration is a class static), but it is a companion
-        // property all the same — the checker's uniformity check (`jvm_field_companion_static`)
-        // sees it and declines the field routing, so the pass must decline the hoist WITH it or a
-        // read resolves to an accessor that was never emitted.
+        // property all the same. The frontend rejects a non-uniform source declaration; this
+        // backend-side guard keeps malformed or legacy common IR from selecting an impossible
+        // interface field layout.
         if outer_is_interface {
             let has_const_statics = ir
                 .declared_class_statics
@@ -193,6 +209,8 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             let backing = &companion_class.fields[field as usize];
             let visibility = declaration.visibility;
             let is_jvm_field = jvm_field_eligible(declaration, backing);
+            let inert_receiver = receiver_is_inert(ir, companion, field);
+            let initializer_store = initializer_store(ir, companion, field, initializer);
             if (!visibility.is_public() && !is_jvm_field)
                 || declaration.is_private
                 || declaration.is_open
@@ -203,12 +221,11 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                     .ty
                     .obj_internal()
                     .is_some_and(|name| ir.is_value_class_name(name))
-                || !receiver_is_inert(ir, companion, field)
+                || (!is_jvm_field && !inert_receiver)
             {
                 continue;
             }
-            let Some(initializer_store) = initializer_store(ir, companion, field, initializer)
-            else {
+            let Some(initializer_store) = initializer_store else {
                 continue;
             };
             candidates.push(Candidate {
@@ -304,14 +321,25 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 Some(IrExpr::GetStatic(static_for_field[&(class, index)]))
             }
             IrExpr::SetField {
+                receiver,
                 class,
                 index,
                 value,
-                ..
-            } if static_for_field.contains_key(&(class, index)) => Some(IrExpr::SetStatic {
-                index: static_for_field[&(class, index)],
-                value,
-            }),
+            } if static_for_field.contains_key(&(class, index)) => {
+                let write = IrExpr::SetStatic {
+                    index: static_for_field[&(class, index)],
+                    value,
+                };
+                if crate::ir::expr_runs_no_code(ir, receiver) {
+                    Some(write)
+                } else {
+                    let write = ir.add_expr(write);
+                    Some(IrExpr::Block {
+                        stmts: vec![receiver, write],
+                        value: None,
+                    })
+                }
+            }
             _ => None,
         };
         if let Some(replacement) = replacement {

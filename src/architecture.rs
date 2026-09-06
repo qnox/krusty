@@ -12,11 +12,13 @@ mod tests {
                 "ast",
                 "diag",
                 "features",
+                "fir",
                 "lexer",
                 "libraries",
                 "parser",
                 "resolve",
                 "source",
+                "trace_compiler",
             ],
         );
     }
@@ -69,12 +71,41 @@ mod tests {
 
     #[test]
     fn backend_contract_uses_only_frontend_handoff_dependencies() {
-        assert_allowed_crate_modules("src/backend.rs", &["diag", "frontend"]);
+        // The streaming handoff owns one common-IR unit plus a classifier-only semantic view. The
+        // legacy `lower_file` method still names `CheckedFile`; production `CheckedIrFile` cannot
+        // expose parser arenas, source maps, resolver entry points, or the frontend symbol table.
+        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "frontend", "ir"]);
+        assert_allowed_crate_modules_in_tree(
+            "src/backend",
+            &[
+                "diag",
+                "fir",
+                "frontend",
+                "ir",
+                "libraries",
+                "symbol_source",
+                "types",
+            ],
+        );
     }
 
     #[test]
     fn compiler_driver_uses_only_frontend_and_backend_contracts() {
-        assert_allowed_crate_modules("src/compiler.rs", &["ast", "backend", "diag", "frontend"]);
+        assert_allowed_crate_modules(
+            "src/compiler.rs",
+            &[
+                "ast",
+                "backend",
+                "diag",
+                "fir",
+                "fir_lower",
+                "frontend",
+                "ir",
+                "resolve",
+                "trace_compiler",
+                "types",
+            ],
+        );
     }
 
     #[test]
@@ -98,6 +129,7 @@ mod tests {
                 "ast",
                 "diag",
                 "features",
+                "fir",
                 "frontend",
                 "libraries",
                 "source",
@@ -158,8 +190,14 @@ mod tests {
                 || path.ends_with("project/sync.rs")
                 || path.ends_with("worker.rs")
                 || path.ends_with("parity.rs")
+                || path.ends_with("jvm_analysis.rs")
             {
                 allowed.push("features");
+            }
+            // Standalone analysis has no project model to supply a configured target. Keep JDK
+            // discovery in one explicit JVM adapter; compiler_analysis itself remains target-free.
+            if path.ends_with("jvm_analysis.rs") {
+                allowed.push("toolchain");
             }
             // The worker renders the dev-mode dump. Only the presentation layer is in budget: the
             // lowering its IR section needs lives behind `dump`, so the worker never reaches into
@@ -196,6 +234,7 @@ mod tests {
             "backend",
             "contracts",
             "diag",
+            "fir",
             "frontend",
             "ir",
             "ir_lower",
@@ -249,6 +288,19 @@ mod tests {
                 "types",
             ],
         );
+    }
+
+    #[test]
+    fn jvm_passes_do_not_rebuild_the_checked_classifier_hierarchy() {
+        for path in ["src/jvm/backend.rs", "src/jvm/bridges.rs"] {
+            let text = fs::read_to_string(path).expect("read JVM pass");
+            for forbidden in [".applied_hierarchy(", ".supertype_internal_names_from("] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{path} must consume IrFile::classifier_hierarchies, not call `{forbidden}`"
+                );
+            }
+        }
     }
 
     #[test]
@@ -310,6 +362,44 @@ mod tests {
     }
 
     #[test]
+    fn checked_fir_lowering_uses_only_closed_semantic_handoff_dependencies() {
+        for path in rust_files_under("src/fir_lower") {
+            if path.ends_with("tests.rs") {
+                continue;
+            }
+            assert_allowed_crate_modules_in_file(
+                &path,
+                &["fir", "ir", "names", "trace", "trace_compiler", "types"],
+            );
+        }
+    }
+
+    #[test]
+    fn checked_fir_lowering_has_no_symbol_selection_entry_points() {
+        for path in rust_files_under("src/fir_lower") {
+            if path.ends_with("tests.rs") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).expect("read checked FIR lowerer");
+            for forbidden in [
+                "ModuleSymbols",
+                "SymbolResolver",
+                "fn resolve_",
+                ".resolve_",
+                ".prop_of(",
+                ".method_of_name(",
+                ".fun_by_params(",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} must consume checked FIR selections, not use '{forbidden}'",
+                    path.display(),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn module_symbols_uses_only_frontend_symbol_handoff_dependencies() {
         // `names` is a dependency-free leaf of Kotlin naming conventions (accessor spellings, the
         // package-vs-nesting internal-name split). Surfacing a top-level property needs its accessor
@@ -355,6 +445,7 @@ mod tests {
             "src/libraries.rs",
             &[
                 "contracts",
+                "fir",
                 "kt_string",
                 "name_tree",
                 "spelling",
@@ -418,6 +509,11 @@ mod tests {
             "src/bin/survey.rs",
             &[
                 "ast",
+                // The frontend census drives the PRODUCTION two-pass pipeline
+                // (`compiler::check_frontend_only` over `source::SourceInput`s) rather than a
+                // survey-local imitation of it, so a conformance number cannot drift from what
+                // ships. Emission stays out: the census attaches no backend.
+                "compiler",
                 "conformance",
                 "diag",
                 "features",
@@ -427,6 +523,7 @@ mod tests {
                 "jvm",
                 "lexer",
                 "parser",
+                "source",
                 "toolchain",
                 "trace_compiler",
                 "types",
@@ -455,6 +552,7 @@ mod tests {
                 "metadata",
                 "parser",
                 "plugins",
+                "source",
                 "symbol_resolver",
                 "symbol_source",
                 "toolchain",

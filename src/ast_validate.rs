@@ -137,7 +137,10 @@ fn class(source: &str, file: &File, class: &ClassDecl, label: &str) -> Result<()
     exprs(file, class.base_args.iter().copied(), label)?;
     exprs(
         file,
-        class.delegation_exprs.iter().map(|(_, value)| *value),
+        class
+            .interface_delegations
+            .iter()
+            .map(|delegation| delegation.value),
         label,
     )?;
     for property_decl in &class.body_props {
@@ -335,7 +338,13 @@ impl File {
                 Expr::When { subject, arms } => {
                     exprs(self, subject.iter().copied(), &label)?;
                     for arm in arms {
-                        exprs(self, arm.conditions.iter().copied(), &label)?;
+                        exprs(
+                            self,
+                            arm.conditions
+                                .iter()
+                                .map(|condition| condition.expression()),
+                            &label,
+                        )?;
                         exprs(self, arm.guard.iter().copied(), &label)?;
                         expr(self, arm.body, &label)?;
                     }
@@ -461,6 +470,10 @@ impl File {
         for (statement, declaration) in &self.local_class_decls {
             stmt(self, *statement, "local class map")?;
             decl(self, *declaration, "local class map")?;
+        }
+        for (declaration, enclosing) in &self.local_class_enclosing_declarations {
+            decl(self, *declaration, "local class enclosing declaration")?;
+            decl(self, *enclosing, "local class enclosing declaration")?;
         }
         for (statement, (_, label_span)) in &self.statement_labels {
             stmt(self, *statement, "statement label map")?;

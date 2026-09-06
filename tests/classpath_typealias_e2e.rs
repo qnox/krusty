@@ -34,6 +34,31 @@ fn classpath_typealias_ctor_and_type_position() {
 }
 
 #[test]
+fn pass_two_applies_generic_function_typealias_from_dependency() {
+    let library = "package dependency\n\
+        typealias Transform<T> = (T) -> String\n\
+        class Consumer<T>(private val value: T) {\n\
+        \x20 fun apply(transform: Transform<T>): String = transform(value)\n\
+        }\n";
+    let main = "import dependency.Consumer\n\
+        import dependency.Transform\n\
+        fun box(): String {\n\
+        \x20 val transform: Transform<String> = { \"OK\" }\n\
+        \x20 return Consumer(\"ignored\").apply(transform)\n\
+        }\n";
+    let Some(dependency) = common::compile_lib("generic_function_typealias", library) else {
+        return;
+    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::compile_and_run_box(main, "Main", &[dependency, stdlib], Some(jdk.as_path()))
+            .as_deref(),
+        Some("OK"),
+    );
+}
+
+#[test]
 fn classpath_typealias_visibility_is_enforced() {
     const VISIBILITY_LIB: &str = "package visibility\n\
         class Real\n\

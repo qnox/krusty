@@ -3,8 +3,8 @@
 //! nullability: a `T?` receiver cannot use the builtin operator (it needs a non-null receiver), so
 //! the extension wins; a non-null receiver keeps the builtin. Sound because `Nullable(prim)` keys
 //! apart from the plain primitive in `Ty::erased_recv` (boxed wrapper class), so the two can never
-//! collide. Nullable REFERENCE receivers (`String?.plus`) stay rejected — reference nullability is
-//! not modeled at call sites. Round-tripped on the JVM.
+//! collide. Nullable REFERENCE receivers use the same ordinary operator selection; in particular,
+//! stdlib's `String?.plus(Any?)` remains callable. Round-tripped on the JVM.
 
 use super::common;
 
@@ -90,4 +90,15 @@ fun box(): String {\n\
     return if (a + 2 == 42 && n + 2 == 999) \"OK\" else \"fail: ${a + 2} ${n + 2}\"\n\
 }\n";
     assert_eq!(run(SRC).expect("non-null keeps builtin"), "OK");
+}
+
+#[test]
+fn nullable_string_receiver_selects_stdlib_plus() {
+    const SRC: &str = "fun text(value: String): String? = value\n\
+fun box(): String {\n\
+    val a: String? = text(\"A\")\n\
+    val b: String? = text(\"B\")\n\
+    return if (a + b == \"AB\") \"OK\" else \"fail: ${a + b}\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("String?.plus extension"), "OK");
 }

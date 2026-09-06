@@ -53,6 +53,29 @@ fun box(): String {
     );
 }
 
+#[test]
+fn dependency_value_class_constructor_uses_its_static_default_realization() {
+    const LIBRARY: &str = r#"
+        open class Foo(val string: String)
+
+        @JvmInline
+        value class Bar(val foo: Foo? = object : Foo("O") {})
+    "#;
+    const CALLER: &str = r#"
+        fun box(): String {
+            val o = Bar().foo?.string
+            val k = Bar(Foo("K")).foo?.string
+            return o + k
+        }
+    "#;
+
+    common::expect_box_ok_against(
+        "dependency_value_class_constructor_default",
+        LIBRARY,
+        CALLER,
+    );
+}
+
 /// The corpus shape: a value-class default on a top-level function, omitted at the call site.
 #[test]
 fn value_class_default_via_stub() {
@@ -112,18 +135,19 @@ fn corpus_value_class_defaults_box_ok() {
 }
 
 /// The Boxing corpus case needs a BOXED slot fill (`Z?`/`Any`/interface param with a value-class
-/// default) — carved out; it must stay skipped (promote when boxed stub slots land).
+/// default). Those checked reference boundaries must retain the value-class box in the default stub.
 #[test]
-fn corpus_value_class_default_boxing_stays_skipped() {
+fn corpus_value_class_default_boxing_runs() {
     if !common::corpus_ready() {
         return;
     }
     assert_eq!(
         common::run_box_corpus_case(
             "inlineClasses/defaultParameterValues/defaultParameterValuesOfInlineClassTypeBoxing.kt"
-        ),
-        None,
-        "boxed value-class default slots are not modeled — must stay skipped"
+        )
+        .as_deref(),
+        Some("OK"),
+        "boxed value-class default slots must execute successfully"
     );
 }
 
@@ -193,12 +217,10 @@ fun box(): String {
     );
 }
 
-/// REJECTION GUARDS: a value-class-typed default read from a BOXED source (a field or getter —
-/// krusty keeps those boxed, the erased slot doesn't) must not emit a stub; the omitted call
-/// stays a skip, never a class-load VerifyError.
+/// A value-class-typed default read from property storage must cross the checked boxing boundary
+/// before the default stub fills its erased parameter slot.
 #[test]
-fn boxed_read_defaults_still_rejected() {
-    let jdk = common::jdk_modules();
+fn boxed_read_defaults_run() {
     let cases: &[(&str, &str)] = &[
         (
             "VcDefaultTopLevelValRead",
@@ -210,7 +232,7 @@ val gz: Z = Z(7)
 
 fun test(z: Z = gz) = z.z
 
-fun box(): String = test().toString()
+fun box(): String = if (test() == 7) "OK" else "fail"
 "#,
         ),
         (
@@ -225,28 +247,19 @@ object O {
 
 fun test(z: Z = O.z) = z.z
 
-fun box(): String = test().toString()
+fun box(): String = if (test() == 7) "OK" else "fail"
 "#,
         ),
     ];
     for (stem, src) in cases {
-        let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));
-        assert_ne!(
-            outcome,
-            Some(common::BackendOutcome::Emitted),
-            "{stem}: boxed-read value-class default must not emit (skip, never miscompile)"
-        );
+        run_box(src, stem);
     }
 }
 
-/// REJECTION GUARDS: the carve-outs must keep these from EMITTING — not merely skipping at
-/// runtime. Asserting `!= Emitted` (not `is_none()`) because a miscompile here produces classes
-/// that fail verification at class load, which a run-based `is_none()` cannot distinguish from a
-/// sound skip.
+/// Generic, nullable, reference-slot, and nested value-class defaults all retain their selected
+/// boxing/unboxing operations through default-stub realization.
 #[test]
-fn unsafe_value_class_defaults_still_rejected() {
-    let jdk = common::jdk_modules();
+fn value_class_defaults_across_erased_boundaries_run() {
     let cases: &[(&str, &str)] = &[
         (
             "VcDefaultGeneric",
@@ -280,7 +293,7 @@ value class Z(val z: Int)
 
 fun test(z: Z? = Z(42)) = z!!.z
 
-fun box(): String = test().toString()
+fun box(): String = if (test() == 42) "OK" else "fail"
 "#,
         ),
         // An `Any`/interface slot: the default must be box-impl'd into it — not modeled.
@@ -292,7 +305,7 @@ value class Z(val z: Int)
 
 fun test(z: Any = Z(42)) = (z as Z).z.toString()
 
-fun box(): String = test()
+fun box(): String = if (test() == "42") "OK" else "fail"
 "#,
         ),
         // A NESTED value-class underlying erases through extra layers the stub doesn't cover.
@@ -306,17 +319,11 @@ value class O(val i: I)
 
 fun test(o: O = O(I(42))) = o.i.x
 
-fun box(): String = test().toString()
+fun box(): String = if (test() == 42) "OK" else "fail"
 "#,
         ),
     ];
     for (stem, src) in cases {
-        let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));
-        assert_ne!(
-            outcome,
-            Some(common::BackendOutcome::Emitted),
-            "{stem}: unsafe value-class default must not emit (skip, never miscompile)"
-        );
+        run_box(src, stem);
     }
 }

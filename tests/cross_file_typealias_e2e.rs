@@ -1,7 +1,7 @@
-//! A source `typealias` referenced from ANOTHER file of the same module. A same-file use is
-//! rewritten structurally by the parse seam, so the checker never sees it; a cross-file use
-//! reaches the checker as the bare alias spelling and resolves through the scoped source-alias
-//! channel (`scoped_source_alias_ty`): own package first, then imports — never module-wide.
+//! A source `typealias` referenced from ANOTHER file of the same module. Same-file and cross-file
+//! uses both remain ordinary alias spellings in Pass 2 and resolve through the finalized semantic
+//! index (`scoped_source_alias_ty`): own package first, then imports — never module-wide and never
+//! through a parser alias-rewrite cache.
 //!
 //! The motivating shape is intellij-community's `intellij.kotlin.base.projectModel`:
 //! `typealias KotlinDependencyId = Long` in one file, `Array<KotlinDependencyId>` member
@@ -81,14 +81,10 @@ fn cross_file_generic_alias_substitutes_arguments() {
 }
 
 /// A use-site projection through a cross-file generic alias reaches the emitted JVM generic
-/// signature: `P<out CharSequence>` keeps its `+` marker (byte-identical to kotlinc's
-/// `()Ljava/util/Map<+Ljava/lang/CharSequence;Ljava/lang/Long;>;`), and `P<*>` keeps krusty's
-/// star form — the out-projected upper bound `+Ljava/lang/Object;`, identical to the SAME-FILE
-/// spelling of this alias (kotlinc renders an unbounded star as `*`; that channel-wide rendering
-/// divergence predates this alias work and is consistent across spellings). Before the projection
-/// mapping, the cross-file channel dropped both markers (invariant `Ljava/lang/Object;` /
-/// `Ljava/lang/CharSequence;`), so the same alias produced different signatures same-file vs
-/// cross-file.
+/// signature: `P<out CharSequence>` keeps its `+` marker and `P<*>` keeps the JVM signature's
+/// unbounded `*`, both byte-identical to kotlinc. Before the projection mapping, the cross-file
+/// channel dropped both markers (invariant `Ljava/lang/Object;` / `Ljava/lang/CharSequence;`), so
+/// the same alias produced different signatures same-file vs cross-file.
 #[test]
 fn cross_file_alias_projection_reaches_generic_signature() {
     if !common::stdlib_toolchain_ready() {
@@ -126,7 +122,7 @@ fn cross_file_alias_projection_reaches_generic_signature() {
     };
     assert_eq!(
         signature("getM").as_deref(),
-        Some("()Ljava/util/Map<+Ljava/lang/Object;Ljava/lang/Long;>;"),
+        Some("()Ljava/util/Map<*Ljava/lang/Long;>;"),
         "star projection must survive the cross-file alias substitution"
     );
     assert_eq!(
@@ -171,7 +167,7 @@ fn cross_file_alias_projection_matches_same_file_spelling() {
     };
     assert_eq!(
         signature("getM").as_deref(),
-        Some("()Ljava/util/Map<+Ljava/lang/Object;Ljava/lang/Long;>;")
+        Some("()Ljava/util/Map<*Ljava/lang/Long;>;")
     );
     assert_eq!(
         signature("getN").as_deref(),

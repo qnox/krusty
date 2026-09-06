@@ -50,3 +50,17 @@ fun requireString(value: String): String = value\n\
 fun box(): String = Holder().read()\n";
     assert_eq!(run(SRC).expect("narrowed inside read"), "OK");
 }
+
+#[test]
+fn inferred_top_level_backing_field_is_a_same_file_read_refinement() {
+    const SRC: &str = "// LANGUAGE: +ExplicitBackingFields\n\
+val field: String = \"OK\"\n\
+val answer: Any\n\
+    field = field\n\
+fun box(): String = answer\n";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[SRC],
+        "top-level explicit backing-field read refinement",
+    );
+}

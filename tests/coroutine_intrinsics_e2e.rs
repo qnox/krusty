@@ -53,9 +53,9 @@ fun box(): String { builder { }; return \"OK\" }\n";
     );
 }
 
-/// A reusable `builder { … }` over a named `Continuation` completion (anonymous-object completions hit a
-/// separate property-override gap). Each `box()` declares a LOCAL `var res` the lambda captures and
-/// writes — the pattern the coroutine box corpus uses to observe a coroutine's effect.
+/// A reusable `builder { … }` over a named `Continuation` completion. Each `box()` declares a LOCAL
+/// `var res` the lambda captures and writes — the pattern the coroutine box corpus uses to observe a
+/// coroutine's effect.
 const BUILDER: &str = "import kotlin.coroutines.*\n\
 import kotlin.coroutines.intrinsics.*\n\
 class Done : Continuation<Unit> {\n\
@@ -190,33 +190,53 @@ fun box(): String {{ var r = 0; builder {{ val less = Box(1) < Box(2); r = if (l
 /// classified non-suspend and the file died at emit with NO labelled reason, while the `h!!.get()`
 /// spelling of the very same call compiled and ran.
 ///
-/// The state-machine pass still declines a suspension on a safe-call's short-circuiting branch, so
-/// this shape does not run yet — but it must now decline at its own named boundary instead of
-/// silently falling off the end of emission. Pinning the reason is what distinguishes "we know we
-/// can't do this" from "we never noticed there was a suspension here".
 #[test]
-fn suspend_call_behind_a_safe_call_is_seen_as_a_suspension() {
+fn suspend_call_behind_a_safe_call_runs() {
     let src = format!(
         "{BUILDER}\
 class Holder {{ suspend fun get(): String = \"OK\" }}\n\
 fun box(): String {{ var r: String? = \"FAIL\"; val h: Holder? = Holder(); builder {{ r = h?.get() }}; return r ?: \"NULL\" }}\n"
     );
-    common::assert_inline_source_backend_bail(&src, krusty::jvm::backend::SkipReason::Suspend);
+    assert_eq!(run(&src).as_deref(), Some("OK"));
 }
 
-/// The OTHER boundary the convention entries above are pinned against, in its bare form: a plain
-/// `suspend fun` call, ONE file, no operator convention and no extension anywhere. It reaches the
-/// same labelled `SkipReason::Suspend`, which is what forbids re-attributing the cross-file
-/// comparison skip in `cross_file_inline_call_e2e` to the convention (as it once was, to a
-/// suspending `RefSet`). kotlinc answers `7`.
 #[test]
-fn suspend_in_an_if_expression_into_a_captured_var_skips_without_a_convention() {
+fn suspend_safe_call_elvis_inside_captured_arithmetic_runs() {
+    // Safe-call lowering wraps the selected branch in an evaluation-order block. Suspend
+    // normalization may remove that wrapper, but the checked `Int` result type must stay attached
+    // to the replacement `when` so its conditionally resumed value can be stored before addition.
+    let src = format!(
+        "{BUILDER}\
+class Holder {{\n\
+  suspend fun get(): Int = suspendCoroutineUninterceptedOrReturn {{ continuation ->\n\
+    continuation.resume(14)\n\
+    COROUTINE_SUSPENDED\n\
+  }}\n\
+}}\n\
+fun box(): String {{\n\
+  var result = 0\n\
+  var holder: Holder? = null\n\
+  builder {{ result = 42 + (holder?.get() ?: 0) }}\n\
+  if (result != 42) return \"null: $result\"\n\
+  holder = Holder()\n\
+  builder {{ result = 42 + (holder?.get() ?: 0) }}\n\
+  return if (result == 56) \"OK\" else \"present: $result\"\n\
+}}\n"
+    );
+    assert_eq!(
+        run(&src).expect("suspending safe-call/elvis arithmetic runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn suspend_in_an_if_expression_into_a_captured_var_runs() {
     let src = format!(
         "{BUILDER}\
 suspend fun less(): Boolean = true\n\
 fun box(): String {{ var r = 0; builder {{ r = if (less()) 7 else 9 }}; return if (r == 7) \"OK\" else \"fail: $r\" }}\n"
     );
-    common::assert_inline_source_backend_bail(&src, krusty::jvm::backend::SkipReason::Suspend);
+    assert_eq!(run(&src).as_deref(), Some("OK"));
 }
 
 /// Half one of the disambiguation: the SAME suspending condition, the same captured `var` target,
@@ -308,6 +328,22 @@ fun box(): String {\n\
     return if (c.context == EmptyCoroutineContext) \"OK\" else \"FAIL\"\n\
 }\n";
     assert_eq!(run(src).expect("context bridge dispatches"), "OK");
+}
+
+#[test]
+fn anonymous_inferred_covariant_context_override_gets_supertype_bridge() {
+    // The inferred property signature is checked in the anonymous classifier's live Pass-2 lexical
+    // scope. Its exact semantic override edge must then refresh common IR before backend erasure.
+    let src = "import kotlin.coroutines.*\n\
+fun completion(): Continuation<Any?> = object : Continuation<Any?> {\n\
+    override val context = EmptyCoroutineContext\n\
+    override fun resumeWith(result: Result<Any?>) {}\n\
+}\n\
+fun box(): String {\n\
+    val c: Continuation<Any?> = completion()\n\
+    return if (c.context == EmptyCoroutineContext) \"OK\" else \"FAIL\"\n\
+}\n";
+    assert_eq!(run(src).expect("anonymous context bridge dispatches"), "OK");
 }
 
 #[test]

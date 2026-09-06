@@ -289,7 +289,7 @@ pub fn to_jvm_internal(internal: &str) -> &str {
         return j;
     }
     if crate::types::existing_type_name(internal)
-        .is_some_and(super::jvm_libraries::is_fictitious_kfunction)
+        .is_some_and(super::function_classifiers::is_reflective_function_classifier)
     {
         return crate::types::KFUNCTION_INTERNAL;
     }
@@ -298,12 +298,14 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // metadata-decoded function type into bytecode (a checkcast on an alias-expanded return) must
     // erase it here or reference a class that does not exist (corpus
     // `nestedFunctionTypeAliasExpansion.kt`: NoClassDefFoundError kotlin/Function1).
-    if let Some(mapped) = internal
+    if let Some(arity) = internal
         .strip_prefix("kotlin/Function")
         .and_then(|n| n.parse::<usize>().ok())
-        .and_then(|arity| crate::types::FUNCTION_N_INTERNAL.get(arity).copied())
     {
-        return mapped;
+        return crate::types::FUNCTION_N_INTERNAL
+            .get(arity)
+            .copied()
+            .unwrap_or("kotlin/jvm/functions/FunctionN");
     }
     internal
 }

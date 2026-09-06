@@ -208,12 +208,14 @@ boundary.
   the callee's text, reconstruct overload selection, or maintain separate file/module/classpath tests.
   This is both a consistency rule (the checked overload is the emitted overload) and a privacy rule
   (a rejection reason need not expose the selected declaration's real name).
-- **Physical fields participate in the common declaration model.** A symbol provider records every
-  field declared by a classifier, including static and inaccessible declarations that can hide an
-  inherited field. Resolution walks those records together with properties and supertypes exactly
-  once; providers do not repeat inheritance lookup. When a readable field is selected, its complete
-  owner/name/type and opaque backend token travel with the semantic property read, so lowering never
-  reconstructs a target from a file/module/classpath branch or a receiver's spelling.
+- **Kotlin property access remains a property through common IR.** A provider may discover a Java
+  field or another platform storage declaration, but it normalizes that declaration into the same
+  semantic property candidate shape used by Kotlin accessors. Checked FIR and common IR retain only
+  the selected opaque `ExternalPropertyId`, receiver placement, parameters, and semantic result;
+  they never classify the access as a field read or invent an accessor call. The target backend owns
+  the provider handle and alone chooses the physical field/accessor operation. Providers still expose
+  inaccessible declarations for hiding rules, and inheritance is traversed exactly once by the
+  frontend over normalized declarations rather than repeated by each provider.
 - **Generated classfile overlays preserve declaration structure, not encoded-name guesses.** A Java
   source stub records the parser's syntactic enclosing declaration and simple name, then emits the
   member type's exact `InnerClasses` self entry. Visibility and inherited-classifier lookup consume

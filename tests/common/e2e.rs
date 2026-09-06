@@ -103,10 +103,12 @@ pub fn compiler_diagnostics(
     let (reference_code, reference_stderr) =
         kotlinc_paths_result(&source_paths, &work.join("reference-out"), &reference_args);
     let result = CompilerDiagnosticResult {
-        krusty_code: krusty
-            .status
-            .code()
-            .expect("krusty diagnostic fixture terminated by signal"),
+        krusty_code: krusty.status.code().unwrap_or_else(|| {
+            panic!(
+                "krusty diagnostic fixture terminated by signal: status={:?}, sources={source_paths:?}",
+                krusty.status
+            )
+        }),
         krusty_stdout: String::from_utf8_lossy(&krusty.stdout).into_owned(),
         krusty_stderr: String::from_utf8_lossy(&krusty.stderr).into_owned(),
         reference_code,
@@ -133,13 +135,14 @@ pub fn front_end_diagnostics_inputs(
     let cp = common::cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
     let mut diagnostics = krusty::diag::DiagSink::new();
-    let _ = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         inputs,
         platform,
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
     );
+    let _ = krusty::compiler::check_frontend_only(analysis, &mut diagnostics);
     diagnostics
         .diags
         .iter()

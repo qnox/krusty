@@ -137,7 +137,6 @@ fn predefined_index(classifier: TypeName) -> Option<usize> {
 pub(crate) enum TypeEncodeError {
     MissingTypeParameter(String),
     NonMetadataType(Ty),
-    FunctionArity(usize),
     /// A declaration whose type the resolution engine never determined reached `@Metadata`.
     NotDetermined,
 }
@@ -160,9 +159,6 @@ impl fmt::Display for TypeEncodeError {
                     "semantic type '{}' cannot appear in Kotlin metadata",
                     ty.source_name()
                 )
-            }
-            Self::FunctionArity(arity) => {
-                write!(f, "function type arity {arity} has no metadata classifier")
             }
         }
     }
@@ -190,13 +186,6 @@ pub struct MetadataTypeParameter {
     /// How source spelled each of `upper_bounds` — `<T : Cargo>` records the alias on the bound's
     /// `Type`. Parallel to `upper_bounds`; a short or empty vec leaves the rest unabbreviated.
     pub upper_bound_spellings: Vec<Spelled>,
-}
-
-pub(crate) fn type_parameters<'a>(names: impl Iterator<Item = &'a str>) -> TypeParameters {
-    names
-        .enumerate()
-        .map(|(index, name)| (name.to_owned(), index as u64))
-        .collect()
 }
 
 pub(crate) fn semantic_type_parameters<'a>(
@@ -375,6 +364,9 @@ fn encode_type_with_parameter(
             if nullable {
                 message.field_varint(3, 1);
             }
+            if spelled.definitely_non_null {
+                message.field_varint(1, 2); // Type.flags: DEFINITELY_NOT_NULL_TYPE
+            }
             // `type_parameter` (f7) ALONE for an in-scope parameter — kotlinc writes either the
             // table index or a `type_parameter_name` (f9), never both. A CAPTURED enclosing-class
             // parameter also records f9: the reader has no enclosing-chain context for its bare
@@ -420,9 +412,9 @@ fn encode_type_with_parameter(
         }
         Ty::Fun(signature) => {
             let arity = signature.params.len() + usize::from(signature.suspend);
-            if arity > 22 {
-                return Err(TypeEncodeError::FunctionArity(arity));
-            }
+            // Kotlin metadata has synthesized `kotlin.Function$arity` classifiers beyond the 23
+            // numbered JVM interfaces. The JVM representation becomes `FunctionN`, but metadata
+            // must retain the complete source-level function shape and arity.
             let classifier = crate::types::type_name(&format!("kotlin/Function{arity}"));
             let classifier = strings.class_id(classifier);
             let mut arguments = signature.params.clone();
@@ -467,7 +459,8 @@ fn encode_type_with_parameter(
         | Ty::Nullable(_)
         | Ty::PlatformNullable(_)
         | Ty::InProjection(_)
-        | Ty::OutProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
+        | Ty::OutProjection(_)
+        | Ty::StarProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
     }
     Ok(message)
 }
@@ -497,6 +490,14 @@ fn encode_arguments(
     expansion: Expansion,
 ) -> Result<(), TypeEncodeError> {
     for (index, argument) in arguments.iter().enumerate() {
+        if matches!(argument, Ty::StarProjection(_)) {
+            let mut encoded_argument = Pb::new();
+            // Type.Argument.Projection.STAR. A star has no nested Type message: its bound is a
+            // frontend semantic read fact, not part of the Kotlin metadata wire representation.
+            encoded_argument.field_varint(1, 3);
+            message.repeated_message(2, &encoded_argument);
+            continue;
+        }
         let (projection, argument) = match argument {
             Ty::InProjection(inner) => (Some(0), **inner),
             Ty::OutProjection(inner) => (Some(1), **inner),
@@ -545,6 +546,12 @@ pub(crate) fn encode_alias_reference(
     let alias_id = strings.class_id(alias);
     let mut message = Pb::new();
     for (ty, argument_spelling) in &spelled.alias_args {
+        if matches!(ty, Ty::StarProjection(_)) {
+            let mut encoded_argument = Pb::new();
+            encoded_argument.field_varint(1, 3);
+            message.repeated_message(2, &encoded_argument);
+            continue;
+        }
         let (projection, ty) = match ty {
             Ty::InProjection(inner) => (Some(0), **inner),
             Ty::OutProjection(inner) => (Some(1), **inner),
@@ -701,6 +708,28 @@ mod tests {
     }
 
     #[test]
+    fn source_star_encodes_without_its_frontend_read_bound() {
+        let mut strings = StringTable::default();
+        let hidden_owner_parameter = Ty::ty_param("S", Ty::obj("kotlin/Any"));
+        let ty = Ty::obj_args(
+            "sample/Box",
+            &[Ty::star_projection(Ty::obj_args(
+                "sample/Box",
+                &[hidden_owner_parameter],
+            ))],
+        );
+
+        let encoded = encode_type(&mut strings, ty, &TypeParameters::new()).unwrap();
+        assert_eq!(
+            encoded.as_bytes(),
+            &[
+                0x12, 0x02, 0x08, 0x03, // STAR, deliberately with no nested Type message
+                0x30, 0x00, // sample/Box
+            ]
+        );
+    }
+
+    #[test]
     fn unresolved_type_parameter_is_an_error() {
         let mut strings = StringTable::default();
         let result = encode_type(
@@ -712,6 +741,24 @@ mod tests {
             panic!("an undeclared type parameter was encoded")
         };
         assert_eq!(error, TypeEncodeError::MissingTypeParameter("T".into()));
+    }
+
+    #[test]
+    fn definitely_non_null_type_parameter_sets_the_metadata_type_flag() {
+        let mut strings = StringTable::default();
+        let parameters = semantic_type_parameters(["T"].into_iter(), ["T"].into_iter());
+        let encoded = encode_declared_type(
+            &mut strings,
+            Ty::ty_param("T", Ty::obj("kotlin/Any")),
+            &Spelled {
+                definitely_non_null: true,
+                ..Spelled::default()
+            },
+            &parameters,
+        )
+        .unwrap();
+
+        assert_eq!(encoded.as_bytes(), &[0x08, 0x02, 0x38, 0x00]);
     }
 
     #[test]

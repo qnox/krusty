@@ -99,21 +99,6 @@ public class M {{\n\
     assert_eq!(out.trim(), "OK", "{name}: wrong result; got {out}");
 }
 
-/// Compile a `suspend fun` `src` through the backend pipeline and assert the BACKEND cleanly REJECTS
-/// it — exercising the `src/jvm/suspend.rs` bail branch for suspend-function shapes krusty does not
-/// yet lower. Skips clean when the toolchain is absent.
-fn rejects_suspend(name: &str, src: &str) {
-    let stdlib = common::stdlib_jar();
-    let jdk_modules = common::jdk_modules();
-    let rejected =
-        common::backend_rejects_in_process(src, "S", &[stdlib], Some(jdk_modules.as_path()))
-            .unwrap_or(false);
-    assert!(
-        rejected,
-        "{name}: expected the backend to REJECT this suspend shape, but it compiled"
-    );
-}
-
 // ############################################################################
 // INLINE.RS — rarer splice paths.
 // ############################################################################
@@ -567,17 +552,23 @@ fun box(): String {\n\
 // coroutine pass hoists the suspension to a temp. Promoted to a round-trip test in
 // `suspend_loop_compound_assign_e2e.rs`.
 
-// A suspension inside a `when` arm — declined by the backend.
+// Suspensions in every `when` arm, including two sequential suspensions in the `else` arm.
 #[test]
-fn suspend_in_when_rejected() {
+fn suspend_in_when_executes() {
     let src = "suspend fun a(): Int = 10\n\
 suspend fun b(): Int = 20\n\
 suspend fun choose(n: Int): Int = when (n) {\n\
     0 -> a()\n\
     1 -> b()\n\
     else -> a() + b()\n\
+}\n\
+suspend fun verify(): String {\n\
+    val first = choose(0)\n\
+    val second = choose(1)\n\
+    val third = choose(2)\n\
+    return if (first == 10 && second == 20 && third == 30) \"OK\" else \"Fail\"\n\
 }\n";
-    rejects_suspend("suspend_when", src);
+    run_suspend("suspend_when", src, "verify(k)", "OK");
 }
 
 // A suspend function calling a suspend MEMBER function on a class instance.
@@ -653,16 +644,20 @@ suspend fun raw(): Int = 1\n";
     run_suspend("suspend_nullable", src, "lookup(true, k)", "v1");
 }
 
-// A suspend function returning Unit with a non-tail suspension is not yet lowered — declined.
+// A suspend function returning Unit after two non-tail suspensions, then observed by its caller.
 #[test]
-fn suspend_returns_unit_rejected() {
+fn suspend_returns_unit_executes() {
     let src = "var sink = 0\n\
 suspend fun step(): Int = 21\n\
 suspend fun act(): Unit {\n\
     sink += step()\n\
     sink += step()\n\
+}\n\
+suspend fun verify(): String {\n\
+    act()\n\
+    return if (sink == 42) \"OK\" else \"Fail: $sink\"\n\
 }\n";
-    rejects_suspend("suspend_unit", src);
+    run_suspend("suspend_unit", src, "verify(k)", "OK");
 }
 
 #[test]

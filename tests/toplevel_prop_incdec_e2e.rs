@@ -104,10 +104,7 @@ fun box(): String {\n\
 }
 
 #[test]
-fn toplevel_delegated_var_incdec_skips() {
-    // A top-level delegated `var` has NO writable static/setter storage modeled — `x++` must bail
-    // to a skip (it used to be unreachable; a panic here is a regression). Flips to a real test
-    // when delegated-property writes land.
+fn toplevel_delegated_var_incdec_runs_through_accessors() {
     const SRC: &str = "import kotlin.reflect.KProperty\n\
 class D { var v = 5\n\
     operator fun getValue(t: Any?, p: KProperty<*>): Int = v\n\
@@ -115,22 +112,18 @@ class D { var v = 5\n\
 }\n\
 var x: Int by D()\n\
 fun box(): String { x++; return if (x == 6) \"OK\" else \"FAIL\" }\n";
-    assert!(
-        run(SRC).is_none(),
-        "top-level delegated-var ++ unexpectedly compiled — promote this to a positive test"
-    );
+    assert_eq!(run(SRC).expect("compiles + runs"), "OK");
 }
 
 #[test]
-fn toplevel_unsigned_var_incdec_skips() {
-    // `UInt` stores a value-class-wrapped value; a raw primitive add on the static would
-    // miscompile — must bail to a skip.
+fn toplevel_unsigned_var_incdec() {
+    // `UInt` stores a value-class-wrapped value, so a raw primitive add on the static would
+    // miscompile. The increment goes through the property's getter/setter, which carry the wrapper,
+    // so the boxed representation is preserved — verified against kotlinc, which also prints "OK".
     const SRC: &str = "var u: UInt = 5u\n\
 fun box(): String { u++; return if (u == 6u) \"OK\" else \"FAIL\" }\n";
-    assert!(
-        run(SRC).is_none(),
-        "top-level UInt ++ unexpectedly compiled — promote this to a positive test"
-    );
+    let out = run(SRC).expect("top-level UInt ++ compiles");
+    assert_eq!(out, "OK");
 }
 
 #[test]

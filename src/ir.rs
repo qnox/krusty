@@ -21,10 +21,25 @@ pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrNodeOrigin {
+    Fir(crate::fir::OriginId),
+    Synthetic {
+        cause: crate::fir::OriginId,
+        kind: crate::fir::SyntheticOriginKind,
+    },
+}
+
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
 /// identity, not a library name: backends implement it without recovering signature facts from text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrIntrinsic {
+    /// Kotlin's checked `assert` operation. Arguments are the Boolean condition followed by its
+    /// optional zero-argument message function. A backend must guard/elide the whole operation
+    /// before evaluating either child according to `mode`.
+    Assert {
+        mode: crate::types::AssertionMode,
+    },
     ArrayGet,
     ArraySet,
     ArraySize,
@@ -32,7 +47,39 @@ pub enum IrIntrinsic {
     StringLength,
     StringPlus,
     NullableAnyToString,
-    PrimitiveArrayNew { element: Ty },
+    /// Kotlin's compiler-supplied `enumValueOf<T>(name)`. `classifier` may remain a declaration-owned
+    /// reified type parameter in the emitted inline template; call-site inline specialization turns
+    /// it into the exact enum classifier without reopening resolution.
+    EnumValueOf {
+        classifier: Ty,
+    },
+    /// Result of an exact builtin scalar `compareTo` declaration. `operand` is the semantic common
+    /// carrier selected by the frontend, not a JVM descriptor type.
+    PrimitiveCompare {
+        operand: Ty,
+    },
+    /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
+    /// this operation with the continuation parameter's `Continuation.getContext()` call.
+    CoroutineContext,
+    UnsignedToString {
+        source: Ty,
+    },
+    PrimitiveArrayNew {
+        element: Ty,
+    },
+    /// Kotlin data-class equality for one primary-constructor property. Backends preserve Kotlin's
+    /// scalar, floating-point, nullable, array-reference, and value-class equality semantics.
+    DataClassFieldEquals {
+        ty: Ty,
+    },
+    /// Kotlin data-class hash contribution for one primary-constructor property.
+    DataClassFieldHash {
+        ty: Ty,
+    },
+    /// Kotlin's content rendering for an array stored in a data-class property.
+    DataClassArrayToString {
+        ty: Ty,
+    },
 }
 
 /// The target of an `IrExpr::Call`. `Local` references a function defined in this IR file.
@@ -43,6 +90,11 @@ pub enum Callee {
     /// the file facade, this carries the declaring class explicitly. The `FunId` keeps the call tied
     /// to the function's semantic parameter/return types through backend ABI transformations.
     ClassStatic {
+        owner: TypeName,
+        function: FunId,
+    },
+    /// `$default` companion of a static function owned by a class in this IR file.
+    ClassStaticDefault {
         owner: TypeName,
         function: FunId,
     },
@@ -65,6 +117,45 @@ pub enum Callee {
         name: String,
         params: Vec<Ty>,
         ret: Ty,
+        /// Exact current-module declaration that produced this realized cross-file edge. Legacy
+        /// common lowering may construct a physical cross-file call directly and therefore has no
+        /// stable declaration identity.
+        module_target: Option<crate::fir::CallableId>,
+        /// Whether this edge invokes the declaration's default-argument synthetic. Kept separate
+        /// from the JVM spelling so representation passes never infer semantics from `$default`.
+        module_default_call: bool,
+    },
+    /// A top-level callable in another source unit of the current module. The stable target is
+    /// backend-neutral; a module realization pass maps its declaring [`SourceFileId`](crate::fir::SourceFileId)
+    /// to the target's physical file container without repeating semantic selection.
+    Module {
+        target: crate::fir::CallableId,
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+        default_call: bool,
+    },
+    /// A dependency callable selected by the frontend. The opaque declaration identity is realized
+    /// by the target provider after common lowering; semantic parameters/results remain available to
+    /// backend-neutral passes without exposing an owner or descriptor.
+    External {
+        target: crate::fir::ExternalCallableId,
+        /// Dependency declaration that supplies inherited defaults for this selected target.
+        /// Present only as an opaque checked identity; a backend owns its physical realization.
+        default_provider: Option<crate::fir::ExternalCallableId>,
+        params: Vec<Ty>,
+        ret: Ty,
+        /// Final checked type substitutions, keyed by the provider-owned declaration parameter.
+        /// A target backend may translate the stable ordinal to its physical metadata name; no
+        /// common-IR consumer performs lookup or inference from these values.
+        substitutions: Vec<IrCheckedSubstitution>,
+        /// Final semantic parameter ordinals omitted at the source call site. A target backend uses
+        /// its provider-owned default bridge; common lowering never reconstructs that ABI.
+        defaults: Vec<u32>,
+        /// Checked position of a member-extension receiver in `params`/`args`. Default-mask
+        /// ordinals exclude this receiver; target realization consumes this exact semantic fact
+        /// instead of inferring source shape from a physical provider descriptor.
+        extension_receiver_parameter: Option<u32>,
     },
     /// A resolved classpath static method — `invokestatic owner.name:descriptor`. Used for stdlib
     /// extension/top-level functions resolved from the classpath (`StringsKt.repeat`, `RangesKt.until`),
@@ -98,6 +189,35 @@ pub enum Callee {
     /// A non-virtual instance call — `invokespecial owner.name:descriptor` on the `dispatch_receiver`.
     /// Used for `super.method(…)`, which dispatches to the named base-class method directly (skipping the
     /// receiver's override). `owner` is the base class declaring the method.
+    /// A `super`-qualified call before target realization: the checker fixed one supertype
+    /// declaration and dispatch is non-virtual, but the physical descriptor and whether the body
+    /// lives in a JVM-default holder are target choices. `jvm::module_calls` realizes this into
+    /// [`Callee::Special`].
+    Super {
+        owner: TypeName,
+        /// Exact classifier whose instance supplies the nonvirtual dispatch receiver.
+        dispatch_owner: TypeName,
+        /// The call appears in a different lexical classifier and therefore needs a target-specific
+        /// owner bridge; emitting `invokespecial` directly from the inner class is verifier-invalid.
+        enclosing_dispatch: bool,
+        kind: crate::fir::FirSuperCallKind,
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+        interface: bool,
+        /// Exact provider realization selected before common lowering. Targets consume this opaque
+        /// fact; they do not rediscover a holder/static shape from owner spellings.
+        realization: crate::libraries::MemberRealization,
+        /// Provider-owned physical descriptor when one exists; source declarations leave it empty
+        /// and the target backend derives its ABI from `params`/`ret`.
+        descriptor: String,
+        /// Exact source callable owning checked default expressions, when this super declaration is
+        /// part of the current module.
+        source: Option<crate::fir::CallableId>,
+        /// Final semantic parameter ordinals omitted at the checked call site.
+        defaults: Vec<u32>,
+        source_member: Option<crate::libraries::SourceMember>,
+    },
     Special {
         owner: TypeName,
         name: String,
@@ -109,7 +229,28 @@ pub enum Callee {
         /// may relocate that body according to the requested output mode; dependency realizations
         /// arrive as `Callee::Static` instead and leave this unset.
         source_member: Option<crate::libraries::SourceMember>,
+        /// Stable current-module callable when this special call realizes a source declaration.
+        /// This remains present in compact-header Pass 2 even when the legacy source-member
+        /// coordinate is deliberately absent.
+        source: Option<crate::fir::CallableId>,
     },
+}
+
+impl Callee {
+    /// The function declaration stored in this IR file that owns this call's semantic signature.
+    ///
+    /// Default-dispatch calls still point at the source function; only their emitted entry point is
+    /// synthetic. Keeping that classification here prevents every IR consumer from maintaining its
+    /// own list of local/static and ordinary/default variants.
+    pub(crate) fn source_function(&self) -> Option<FunId> {
+        match self {
+            Callee::Local(function)
+            | Callee::LocalDefault(function)
+            | Callee::ClassStatic { function, .. }
+            | Callee::ClassStaticDefault { function, .. } => Some(*function),
+            _ => None,
+        }
+    }
 }
 
 /// A compile-time constant (`IrConst` in Kotlin IR).
@@ -132,9 +273,335 @@ pub enum IrConst {
     Null,
 }
 
+/// One checker-selected argument after source-order evaluation has been preserved. Parameter
+/// ordinals and omitted/default/vararg decisions are semantic facts; no later phase remaps them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum IrCheckedArgument {
+    Expression {
+        parameter: u32,
+        value: ExprId,
+    },
+    Default {
+        parameter: u32,
+    },
+    Vararg {
+        parameter: u32,
+        array_type: Ty,
+        elements: Vec<(ExprId, bool)>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrCheckedSubstitution {
+    pub parameter: crate::fir::FirTypeParameterRef,
+    pub value: Ty,
+    pub additional_bounds: Vec<Ty>,
+}
+
+/// One source constructor after checked FIR has been consumed. The stable declaration ordinal
+/// distinguishes the primary constructor (`0`) from secondary constructors (`1..`). Delegation is
+/// retained as an already-selected checked operation; no later phase may repeat constructor lookup
+/// or argument mapping.
+#[derive(Clone, Debug)]
+pub struct IrCheckedConstructorBody {
+    pub class: ClassId,
+    pub ordinal: u32,
+    /// Fully checked annotations on this source constructor. The transient Pass-2 declaration
+    /// metadata handoff attaches them by stable declaration identity before finalization turns a
+    /// secondary constructor into its durable common-IR form.
+    pub annotations: DeclarationAnnotations,
+    pub parameters: Vec<(String, Ty)>,
+    pub defaults: Vec<Option<ExprId>>,
+    pub delegation: Option<ExprId>,
+    pub body: Option<ExprId>,
+    /// The ordinary constructor FIR has been consumed. Signature defaults may be attached to the
+    /// predeclared constructor before this becomes true.
+    pub body_attached: bool,
+}
+
+/// One source property declaration and the checked bodies that realize its language semantics.
+/// Storage and accessor naming remain backend choices; stable property/class identities and final
+/// types are already fixed here.
+#[derive(Clone, Debug)]
+pub struct IrCheckedProperty {
+    pub declaration: crate::fir::DeclarationId,
+    /// Source declaration line accepted while the bounded Pass-2 syntax unit is live. This is
+    /// output metadata, not a source locator: property realization copies it to the common-IR
+    /// declarations it creates after the syntax unit has already been dropped.
+    pub decl_line: u32,
+    /// Exact semantic position among the owning class's property initializers and `init` blocks.
+    /// This is copied from the stable FIR declaration header, never reconstructed from source.
+    pub initialization_order: Option<u32>,
+    pub class: Option<ClassId>,
+    pub name: String,
+    pub ty: Ty,
+    /// Checked explicit backing-field type, distinct from the public property/accessor type.
+    pub storage_ty: Option<Ty>,
+    pub visibility: crate::types::Visibility,
+    pub flags: crate::fir::DeclarationFlags,
+    pub initializer: Option<ExprId>,
+    pub delegate: Option<ExprId>,
+    pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
+    pub getter: Option<ExprId>,
+    pub setter: Option<ExprId>,
+}
+
+/// Common-IR declaration layout for a source property. This records which semantic storage and
+/// accessor declarations were materialized, but deliberately does not choose how an ordinary
+/// property access uses them. That choice belongs to the target realization pass.
+#[derive(Clone, Debug)]
+pub enum IrLocalPropertyLayout {
+    TopLevelStorage {
+        storage: u32,
+        getter: Option<FunId>,
+        setter: Option<FunId>,
+        /// Semantic singleton qualifier for a classifier-associated constant. `None` denotes a
+        /// genuinely receiverless package property.
+        qualifier: Option<TypeName>,
+    },
+    TopLevelAccessor {
+        getter: FunId,
+        setter: Option<FunId>,
+        receiver: Option<Ty>,
+        context_parameters: Vec<Ty>,
+    },
+    Member {
+        class: ClassId,
+        owner: TypeName,
+        backing_field: Option<u32>,
+        getter: Option<FunId>,
+        setter: Option<FunId>,
+        interface: bool,
+        name: String,
+        ty: Ty,
+        mutable: bool,
+        private: bool,
+        context_parameters: Vec<Ty>,
+        property: u32,
+    },
+    MemberExtension {
+        owner: TypeName,
+        interface: bool,
+        name: String,
+        getter: FunId,
+        setter: Option<FunId>,
+        receiver: Ty,
+        ty: Ty,
+        context_parameters: Vec<Ty>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct IrCheckedClassInitializer {
+    pub declaration: crate::fir::DeclarationId,
+    pub initialization_order: u32,
+    pub class: ClassId,
+    pub body: ExprId,
+}
+
+#[derive(Clone, Debug)]
+pub struct IrCheckedEnumEntryBody {
+    pub declaration: crate::fir::DeclarationId,
+    pub class: ClassId,
+    pub ordinal: u32,
+    pub name: String,
+    pub construction: ExprId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IrCheckedConstructorTarget {
+    Module(crate::fir::CallableId),
+    External {
+        declaration: crate::fir::ExternalCallableId,
+        classifier: TypeName,
+        parameters: Vec<Ty>,
+    },
+}
+
+/// Exact dependency constructor selected by checked FIR, with an optional backend realization.
+///
+/// `declaration` is provider-neutral and survives common lowering. A target backend fills
+/// `descriptor` from that identity before emission; common lowering never derives a physical ABI
+/// from the call site's specialized semantic parameter types.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrExternalConstructorTarget {
+    pub declaration: crate::fir::ExternalCallableId,
+    pub descriptor: Option<String>,
+}
+
+/// Representation selected for a value-class result crossing a coroutine suspension boundary.
+/// A carrier that cannot preserve the value class's null semantics in an erased `Object` is wrapped;
+/// a directly representable carrier crosses unchanged. This is produced by a target value-class pass
+/// and consumed by its coroutine pass, after common lowering has finished.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrValueClassSuspendResult {
+    Boxed { classifier: TypeName, carrier: Ty },
+    Carrier(Ty),
+}
+
+impl IrValueClassSuspendResult {
+    /// Type physically present in the continuation's erased result slot before the already-lowered
+    /// call-site representation wrapper consumes it.
+    pub fn boundary_ty(self) -> Ty {
+        match self {
+            Self::Boxed { classifier, .. } => Ty::obj_name(classifier),
+            Self::Carrier(carrier) => carrier,
+        }
+    }
+}
+
+/// Semantic behavior of one non-call coroutine suspension point retained through common IR.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrIntrinsicSuspensionKind {
+    /// Invoke the block with the current continuation directly.
+    Unintercepted,
+    /// Invoke the block with Kotlin's one-shot safe, intercepted continuation.
+    Safe,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrIntrinsicSuspensionPoint {
+    pub result: Ty,
+    pub kind: IrIntrinsicSuspensionKind,
+}
+
+impl IrExternalConstructorTarget {
+    pub fn unresolved(declaration: crate::fir::ExternalCallableId) -> Self {
+        Self {
+            declaration,
+            descriptor: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrPropertyDispatch {
+    Ordinary,
+    Super { owner: TypeName, interface: bool },
+}
+
+/// Operations whose semantic target and call shape were finalized in checked FIR. Common lowering
+/// translates body-local operands only; target realization belongs to the backend/module emitter.
+#[derive(Clone, Debug, PartialEq)]
+pub enum IrCheckedOperation {
+    Call {
+        target: crate::fir::CallableId,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        arguments: Vec<IrCheckedArgument>,
+        substitutions: Vec<IrCheckedSubstitution>,
+    },
+    ConstructorDelegation {
+        target: IrCheckedConstructorTarget,
+        outer_parameter: Option<Ty>,
+        outer_receiver: Option<ExprId>,
+        arguments: Vec<IrCheckedArgument>,
+        substitutions: Vec<IrCheckedSubstitution>,
+    },
+    PropertyRead {
+        target: crate::fir::PropertyId,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        context_arguments: Vec<ExprId>,
+        substitutions: Vec<IrCheckedSubstitution>,
+    },
+    PropertyWrite {
+        target: crate::fir::PropertyId,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        context_arguments: Vec<ExprId>,
+        value: ExprId,
+        substitutions: Vec<IrCheckedSubstitution>,
+    },
+    /// Read a dependency property selected by checked FIR. `target` is an opaque provider-owned
+    /// declaration identity; common lowering deliberately does not interpret it as a method or a
+    /// field. The target backend realizes that choice after common IR has been produced.
+    ExternalPropertyRead {
+        target: crate::fir::ExternalPropertyId,
+        dispatch: IrPropertyDispatch,
+        receiver: Option<ExprId>,
+        arguments: Vec<ExprId>,
+        parameters: Vec<Ty>,
+        result: Ty,
+        source_receiver: Option<Ty>,
+    },
+    /// Write a dependency property selected by checked FIR. As with `ExternalPropertyRead`, the
+    /// physical storage/accessor choice belongs exclusively to the target backend.
+    ExternalPropertyWrite {
+        target: crate::fir::ExternalPropertyId,
+        dispatch: IrPropertyDispatch,
+        receiver: Option<ExprId>,
+        arguments: Vec<ExprId>,
+        parameters: Vec<Ty>,
+        result: Ty,
+        source_receiver: Option<Ty>,
+    },
+    LateinitFieldRead {
+        target: crate::fir::PropertyId,
+        dispatch_receiver: Option<ExprId>,
+    },
+    BackingFieldRead {
+        target: crate::fir::PropertyId,
+        dispatch_receiver: Option<ExprId>,
+    },
+    BackingFieldWrite {
+        target: crate::fir::PropertyId,
+        dispatch_receiver: Option<ExprId>,
+        value: ExprId,
+    },
+    RangeConstruction {
+        operation: crate::fir::FirRangeOperation,
+        start: ExprId,
+        start_type: Ty,
+        end: ExprId,
+        end_type: Ty,
+        result: Ty,
+    },
+    RangeContains {
+        operation: crate::fir::FirRangeOperation,
+        value: ExprId,
+        start: ExprId,
+        end: ExprId,
+        negated: bool,
+        counter: Ty,
+    },
+    RangeLoop {
+        variable: u32,
+        counter: Ty,
+        operation: crate::fir::FirRangeOperation,
+        start: ExprId,
+        end: ExprId,
+        body: ExprId,
+        label: String,
+    },
+    CallableReference {
+        target: crate::fir::FirCallableReferenceTarget,
+        binding: crate::fir::FirCallableReferenceBinding,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        function_type: Ty,
+        substitutions: Vec<IrCheckedSubstitution>,
+        adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+    },
+    PropertyReference {
+        target: crate::fir::FirPropertyReferenceTarget,
+        /// This reference is the compiler-generated `KProperty` metadata argument of a delegated
+        /// property, not a source-written callable-reference value. Backends may realize the two
+        /// checked semantic shapes differently; common lowering still retains only the selected
+        /// property identity and never chooses a platform representation.
+        delegated: bool,
+        binding: crate::fir::FirCallableReferenceBinding,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        mutable: bool,
+        substitutions: Vec<IrCheckedSubstitution>,
+        adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+    },
+}
+
 impl IrConst {
     pub fn zero_for_value_type(ty: Ty) -> IrConst {
-        match ty {
+        match ty.canonical_semantic() {
             Ty::Boolean => IrConst::Boolean(false),
             Ty::Byte | Ty::UByte => IrConst::Byte(0),
             Ty::Short | Ty::UShort => IrConst::Short(0),
@@ -165,11 +632,31 @@ pub struct IrAnnotationConstruction {
 #[derive(Clone, Debug)]
 pub enum IrExpr {
     Const(IrConst),
+    /// A frontend-selected semantic operation. Backend realization consumes the stable declaration
+    /// identity; it must not repeat lookup, overload selection, or argument mapping.
+    Checked(IrCheckedOperation),
     /// A class-literal constant — `ldc class <internal>` (a `java.lang.Class`). Used e.g. for the
     /// `PropertyReference0Impl(Class, …)` argument in delegated-property setup. `internal = None`
     /// is the current-facade sentinel for places lowered before the facade name is known.
     ClassConst {
         internal: Option<TypeName>,
+    },
+    /// Kotlin `KClass` literal. An unbound literal carries its resolved classifier; a bound literal
+    /// carries the checked value whose runtime class is requested. The backend chooses the platform
+    /// class-token and reflection representation without repeating frontend lookup.
+    KClassLiteral {
+        classifier: Option<Ty>,
+        value: Option<ExprId>,
+    },
+    /// Backend-neutral reflection value passed to local delegated-property conventions.
+    LocalPropertyReference {
+        name: Box<str>,
+        property_type: Ty,
+    },
+    /// Checked Kotlin singleton value. Its classifier is the semantic identity selected by the
+    /// frontend; a backend decides how that singleton is stored on its target platform.
+    SingletonValue {
+        classifier: TypeName,
     },
     /// Read a value parameter / variable by its declaration index.
     GetValue(u32),
@@ -282,35 +769,39 @@ pub enum IrExpr {
     /// the value the property is read on, and stays an expression the program evaluates even when the
     /// realization takes no receiver.
     PropertyRead {
-        receiver: ExprId,
+        /// Dispatch receiver for an instance property. Receiver-less classifier/top-level
+        /// properties use `None`; that semantic shape does not prescribe a static field or method.
+        receiver: Option<ExprId>,
         owner: TypeName,
         name: String,
         ty: Ty,
         /// Semantic owner shape selected by resolution. A JVM backend normally reads this from the
         /// compiled declaration, but a sibling source file has no classfile in the shared classpath yet.
         interface: bool,
-        /// Exact field declaration selected by resolution, when the property is physically a field.
-        /// The complete target is retained so no backend reconstructs owner/name from receiver origin.
-        field: Option<Box<crate::libraries::InstanceFieldRef>>,
         /// Stable identity assigned by [`IrFile::add_expr`]. Backend passes can move/clone an operation
         /// into a new expression slot; this identity follows the node so side-table realization facts do
         /// not accidentally remain attached to the obsolete arena index.
         operation: Option<u32>,
     },
-    /// Write a property or an already-selected physical field. `ty` is the source type that the assigned
-    /// value is bridged to; `field` carries the complete physical target when resolution selected one.
+    /// Write a property. `ty` is the source type that the assigned value is bridged to. Physical
+    /// storage or accessor realization is selected only by the target backend.
     PropertyWrite {
-        receiver: ExprId,
+        receiver: Option<ExprId>,
         owner: TypeName,
         name: String,
         value: ExprId,
         ty: Ty,
         interface: bool,
-        /// Exact field declaration selected by resolution, when the property is physically a field.
-        /// Mirrors [`IrExpr::PropertyRead::field`]: the backend emits `putfield` for the recorded
-        /// target instead of rediscovering the store form.
-        field: Option<Box<crate::libraries::InstanceFieldRef>>,
         operation: Option<u32>,
+    },
+    /// Follow one language-level enclosing-instance edge of an `inner` classifier. Checked FIR has
+    /// already selected the exact classifier path; this node preserves one edge without choosing a
+    /// storage layout. A JVM backend may realize it with `this$0`, while another target may use a
+    /// closure/environment link or no physical field at all.
+    EnclosingInstance {
+        receiver: ExprId,
+        inner: TypeName,
+        outer: TypeName,
     },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
     GetField {
@@ -359,6 +850,9 @@ pub enum IrExpr {
         args: Vec<ExprId>,
         ctor_params: Option<Vec<Ty>>,
         ctor_desc: Option<String>,
+        /// Exact dependency constructor declaration awaiting target realization. Mutually exclusive
+        /// with `ctor_desc`; source/module constructions leave it absent.
+        external_target: Option<crate::fir::ExternalCallableId>,
     },
     /// A virtual call to a class instance method `methods[index]` of `class` on `receiver`. `args[i] =
     /// None` means parameter `i` is omitted and takes its default (`p.copy(y=5)`, `f(a)` of `f(a, b=…)`);
@@ -370,10 +864,11 @@ pub enum IrExpr {
         receiver: ExprId,
         args: Vec<Option<ExprId>>,
     },
-    /// Read an enum entry constant: `Enum.ENTRY` — `getstatic <class>.<entry>:L<class>;`.
+    /// Read a checked enum entry constant. Classifier plus declaration-owned entry name is the
+    /// backend-neutral semantic identity; a target chooses its physical representation.
     EnumEntry {
-        class: ClassId,
-        index: u32,
+        classifier: TypeName,
+        name: Box<str>,
     },
     /// Read a static field holding a singleton instance (Kotlin IR's `IrGetObjectValue`):
     /// `getstatic <owner>.<field>:L<ty>;`. An `object`'s `INSTANCE` (`owner == ty`), or a
@@ -392,23 +887,16 @@ pub enum IrExpr {
         name: String,
         descriptor: String,
     },
-    /// Write a static field of a class OUTSIDE the file being lowered — `putstatic owner.name:desc`.
-    /// The write counterpart of [`IrExpr::ExternalStaticField`]. A companion property's backing static
-    /// lives on its OWNER, and `IrFile::statics` holds only the file being lowered, so a companion
-    /// declared in a sibling source file has no statics index to write through.
-    SetExternalStaticField {
-        owner: TypeName,
-        name: String,
-        descriptor: String,
-        value: ExprId,
-    },
     /// Call a static method of a class (`Enum.values()`, `Enum.valueOf(s)`).
     EnumValues {
-        class: ClassId,
+        classifier: TypeName,
     },
     EnumValueOf {
-        class: ClassId,
+        classifier: TypeName,
         arg: ExprId,
+    },
+    EnumEntries {
+        classifier: TypeName,
     },
     /// A reified-type-parameter CLASS placeholder inside an EMITTED `inline fun <reified T>` body:
     /// `Intrinsics.reifiedOperationMarker(4, name)` followed by the ERASED class constant — the
@@ -417,6 +905,10 @@ pub enum IrExpr {
     ReifiedClassMarker {
         name: String,
         erased: TypeName,
+        /// Whether the checked expression produces Kotlin `KClass` rather than the raw platform
+        /// class token. The JVM marker pair itself always materializes `java.lang.Class`; this flag
+        /// retains the original expression's result representation for the backend wrapper.
+        kclass: bool,
     },
     /// A reified `is`/`as` inside an EMITTED `inline fun <reified T>` body:
     /// `reifiedOperationMarker(3|1, name)` then `instanceof`/`checkcast` against the erasure —
@@ -431,8 +923,9 @@ pub enum IrExpr {
     /// A lambda literal — emitted as `invokedynamic` + `LambdaMetafactory`. `impl_fn` is the
     /// synthesized static method holding the body; `captures` are the free-variable values bound into
     /// the call site (empty = non-capturing). `sam` is `None` for a plain Kotlin lambda (target
-    /// `kotlin/jvm/functions/Function{arity}.invoke`), or `Some((interface, method, descriptor))`
-    /// for a SAM conversion. Same-module descriptors are derived by the backend.
+    /// `kotlin/jvm/functions/Function{arity}.invoke`) or contains the exact checked functional-
+    /// interface declaration selected by the frontend. Platform descriptors are derived by the
+    /// backend from that semantic declaration shape.
     /// `inline_body` is the lambda's *value-producing* body form (no synthetic `return`), emitted
     /// directly when the lambda is inlined into a stdlib `inline fun` splice — so a user `return` in the
     /// lambda becomes a real return from the *enclosing* method (correct non-local return). `None` for a
@@ -441,7 +934,7 @@ pub enum IrExpr {
         impl_fn: u32,
         arity: u8,
         captures: Vec<ExprId>,
-        sam: Option<(String, String, Option<String>)>,
+        sam: Option<IrSamTarget>,
         inline_body: Option<ExprId>,
     },
     /// The `kotlin.Unit` singleton value (`IrGetObjectValue` of `Unit`). On the JVM, `getstatic
@@ -484,9 +977,9 @@ pub enum IrExpr {
         operand: ExprId,
         name: String,
     },
-    /// Read a static field holding a singleton on a class defined OUTSIDE this compilation (a classpath
-    /// class with no `IrClass`): `getstatic <owner>.<field>:L<ty>;`. Like `StaticInstance` but the owner
-    /// and field type are given by internal name directly, not resolved through `ir.classes`.
+    /// Read the checker-selected static field holding a singleton:
+    /// `getstatic <owner>.<field>:L<ty>;`. The owner and field type are semantic classifier identities;
+    /// this works for both module and dependency singletons without reconstructing storage.
     ExternalStaticInstance {
         owner: TypeName,
         ty: TypeName,
@@ -545,6 +1038,27 @@ pub enum IrExpr {
         finally: Option<ExprId>,
         result: Ty,
     },
+}
+
+/// Checked functional-interface target attached to a lambda after SAM conversion.
+///
+/// Both the call-site-specialized shape and the declaration shape are retained: the former types
+/// the implementation while the latter determines the platform method that the closure implements.
+/// This is frontend semantic data; platform owner spellings and descriptors do not belong here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrSamTarget {
+    pub classifier: TypeName,
+    pub method: String,
+    pub parameters: Vec<Ty>,
+    pub result: Ty,
+    pub declared_parameters: Vec<Ty>,
+    pub declared_result: Ty,
+    pub context_count: u32,
+    pub has_receiver: bool,
+    pub suspend: bool,
+    /// A fun-interface conversion of a callable reference delegates equality/hashCode through
+    /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
+    pub function_adapter: bool,
 }
 
 /// One `catch (var: exc_internal) { body }` clause of an [`IrExpr::Try`].
@@ -627,9 +1141,16 @@ pub struct IrFunction {
 pub struct IrEnumEntry {
     /// Entry name (`RED`).
     pub name: String,
+    /// Checked source-order evaluation that must run before the physical constructor is entered.
+    /// Argument mapping spills operands here so named/reordered arguments preserve Kotlin evaluation
+    /// order without asking a backend to reconstruct the source call.
+    pub argument_prelude: Vec<ExprId>,
     /// Lowered constructor-argument value ids (`RED(0xFF0000)`); empty for an arg-less entry. Filled in a
     /// later lowering pass — built empty when the entry list is first created.
     pub args: Vec<ExprId>,
+    /// Selected constructor parameters whose values come from declaration defaults. This is the
+    /// frontend's final argument-mapping decision; a backend only realizes its default-argument ABI.
+    pub default_parameters: Vec<u32>,
     /// `Some(subclass_internal)` when the entry has a body and is constructed as an instance of a synthesized
     /// anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`); `None` when constructed as the enum
     /// itself.
@@ -761,10 +1282,19 @@ pub struct IrCtorArg {
     /// The parameter type (carries declared nullability — a nullable value-class param erases like its
     /// field).
     pub ty: Ty,
+    /// Declared source-level semantic type before storage/JVM erasure. `None` for synthetic
+    /// parameters. Metadata consumes this shape so nested type-parameter uses such as `KClass<T>`
+    /// do not collapse to `KClass<Any>` merely because the constructor stores an erased value.
+    pub declared_ty: Option<Ty>,
     /// `true` ⇒ a `val`/`var` property whose arg is stored to a field (the property fields are
-    /// `fields[0..]` in the same relative order); `false` ⇒ a plain parameter, an argument only,
-    /// available as a local in `<init>` for property initializers / `init` blocks.
+    /// represented by `field_index`; `false` ⇒ a plain parameter, an argument only, available as a
+    /// local in `<init>` for property initializers / `init` blocks.
     pub is_field: bool,
+    /// Exact backing-field index for a property/capture constructor parameter. This cannot be derived
+    /// from parameter or field order: interface-delegation storage may precede a source property, and
+    /// lexical captures form a distinct constructor prefix. `None` for a plain parameter and for older
+    /// synthesized layouts that deliberately use their complete leading field list.
+    pub field_index: Option<u32>,
     pub has_default: bool,
     /// A `vararg` primary-ctor parameter — class `@Metadata` emits `ValueParameter.vararg_element_type`
     /// (f4) so a consumer admits element-form/omitted arguments instead of demanding a literal array.
@@ -791,16 +1321,24 @@ pub struct MemberExtProp {
     /// Declared property type.
     pub ty: crate::types::Ty,
     pub is_var: bool,
-    /// Getter function id (always present — only `get()`-bodied shapes are lowered).
+    /// Whether this declaration has no accessor implementation and must be realized abstractly.
+    pub is_abstract: bool,
+    /// Getter function id. Abstract properties point at a bodyless common-IR function.
     pub getter: u32,
     /// Setter function id, for a `var`.
     pub setter: Option<u32>,
     pub visibility: crate::types::Visibility,
+    /// Declaration-owned generic parameters. Source names are metadata payload; semantic names are
+    /// the stable identities used by `receiver` and `ty`.
+    pub type_params: Vec<IrTypeParameter>,
 }
 
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    /// Named context parameters in source order. Metadata records these separately from ordinary
+    /// value parameters, and checked call sites supply their operands implicitly.
+    pub context_params: Vec<(String, Ty)>,
     /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
     /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
     pub source_order: u32,
@@ -811,6 +1349,9 @@ pub struct IrProperty {
     /// visibility of an accessor or a target-specific storage realization; they must not recover it
     /// from a rendered owner/property-name key.
     pub visibility: crate::types::Visibility,
+    /// Resolved Kotlin annotation identities. Backends interpret annotations in their own namespace;
+    /// common lowering does not turn them into storage or calling-convention choices.
+    pub annotations: Box<[TypeName]>,
     /// The declaration initializer after common lowering, before any backend chooses storage.
     /// `None` means the declaration has no initializer (or its source shape is not represented),
     /// which is distinct from an explicit nullable initializer lowered to `IrConst::Null`.
@@ -902,6 +1443,11 @@ pub struct IrClass {
     /// properties. NOTE: this is the count of constructor params that BACK A FIELD, not the total
     /// constructor arity (a non-`val`/`var` parameter is an argument only, no field) — see `ctor_args`.
     pub ctor_param_count: u32,
+    /// Compiler-supplied parameters leading every constructor body: enclosing instances and lexical
+    /// captures. They are a language-level closure layout, not source value parameters, so they stay
+    /// out of constructor metadata and default-mask ordinals. The first `constructor_prefix_count`
+    /// entries of `ctor_args` describe their common-IR types and storage.
+    pub constructor_prefix_count: u32,
     /// ALL primary-constructor parameters in declaration order (each an [`IrCtorArg`] with type,
     /// `is_field`, and optional null-check name). Empty for synthesized/enum/object classes (then the
     /// constructor arity is `ctor_param_count`).
@@ -959,6 +1505,7 @@ pub struct IrClass {
     /// Arguments to the base-class constructor (`: A(args)`) — lowered IR value ids, evaluated with
     /// `this`=value 0 and the primary-constructor params as values `1..=ctor_param_count`. Empty
     /// unless `superclass` is a user base class.
+    pub super_arg_prelude: Vec<ExprId>,
     pub super_args: Vec<ExprId>,
     /// Checker-selected semantic parameter types parallel to `super_args`. A backend couples these to
     /// its physical superclass-constructor ABI without resolving the constructor again.
@@ -982,9 +1529,9 @@ pub struct IrClass {
     /// `emit_func_ref_class`. Gives callable references real Kotlin reference EQUALITY (the base class
     /// compares owner/name/signature/boundReceiver) — `::f == ::f`, `a::m != b::m`.
     pub func_ref: Option<FuncRef>,
-    /// Synthetic bridge methods: an override whose erased signature differs from the supertype's
-    /// (a generic/covariant override) needs an `ACC_BRIDGE` method with the supertype's descriptor
-    /// that adapts arguments and delegates to the concrete override.
+    /// JVM declaration adapters. Most are synthetic bridges for generic/covariant overrides; a boxed
+    /// value class also needs ordinary instance entries for interface methods whose implementation is
+    /// realized as a static carrier function.
     pub bridges: Vec<Bridge>,
     /// Implemented interface internal names (`class C : I, J`). The class file lists them as
     /// `implements`; an interface declaration lists its super-interfaces here.
@@ -1165,11 +1712,24 @@ pub enum FrDispatch {
 /// `param_tys[0]` is the receiver); the SAM interface erases them to `Object`, so `invoke` casts.
 #[derive(Clone, Debug)]
 pub struct FuncRef {
+    /// Adapted callable references use Kotlin's `AdaptedFunctionReference` carrier so equality and
+    /// hashing include the checked adaptation arity/flags instead of lambda identity.
+    pub adapted: bool,
     pub bound: bool,
+    /// Kotlin source-level function arity. Backends add any representation parameters, such as a
+    /// suspend continuation, when selecting their callable carrier.
     pub arity: u8,
-    /// The referenced declaration is suspend. Its erased function arity includes the trailing
-    /// continuation and the generated reference carries Kotlin's suspend-function marker.
+    /// The referenced declaration is suspend. The generated reference carries Kotlin's semantic
+    /// suspend-function identity; each backend owns its physical calling convention.
     pub is_suspend: bool,
+    /// Exact current-module declaration selected by the frontend when this carrier invokes a
+    /// source callable directly. A backend uses the stable identity only to realize physical
+    /// naming/layout; reflection continues to expose `fn_name`, the Kotlin declaration name.
+    pub module_target: Option<crate::fir::CallableId>,
+    /// Exact common-IR helper invoked by this carrier when callable-reference adaptation generated
+    /// a local wrapper. This is a stable IR identity, so backend liveness and access-bridge planning
+    /// never rediscover the helper from its synthesized name and arity.
+    pub local_target: Option<FunId>,
     /// Class passed to `super(...)` (the reference's declaring class); `None` = the file facade.
     pub owner_class: Option<TypeName>,
     pub fn_name: String,
@@ -1179,6 +1739,16 @@ pub struct FuncRef {
     pub call_owner: Option<TypeName>,
     pub call_name: String,
     pub reflection_name: Option<String>,
+    /// The physical static bridge takes the original dispatch receiver as parameter zero, while
+    /// reflection still describes the referenced instance declaration without that receiver.
+    pub reflection_receiver_parameter: bool,
+    /// Reflection declaration return when the invoked helper has a different ABI. Constructor
+    /// adapters return the constructed value, while their reflected declaration returns JVM void.
+    pub reflection_target_ret_ty: Option<Ty>,
+    /// Declaration parameters used only for callable-reference identity. An adapted reference
+    /// invokes a generated wrapper whose ABI is in `target_param_tys`, while equality/reflection
+    /// must retain the original declaration descriptor.
+    pub reflection_target_param_tys: Option<Vec<Ty>>,
     /// The target method is declared on an INTERFACE (`invokeinterface`, not `invokevirtual`).
     pub call_interface: bool,
     /// The LOGICAL `invoke` parameter types. For `VirtualUnbound`, `param_tys[0]` is the receiver
@@ -1292,15 +1862,186 @@ impl PropRef {
 }
 
 impl IrClass {
+    /// Minimal backend-neutral shape for a compiler-generated class. The producer sets only the
+    /// semantic payload it owns (for example `prop_ref`); target passes choose representation.
+    pub fn synthetic(fq_name: TypeName) -> Self {
+        Self {
+            fq_name,
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosing_function: None,
+            is_inner_class: false,
+            is_local_class: false,
+            is_value: false,
+            is_data: false,
+            decl_line: 0,
+            type_param_bounds: Vec::new(),
+            type_params: Vec::new(),
+            captured_type_params: Vec::new(),
+            supertypes: Vec::new(),
+            properties: Vec::new(),
+            fields: Vec::new(),
+            ctor_param_count: 0,
+            constructor_prefix_count: 0,
+            ctor_args: Vec::new(),
+            ctor_param_annotations: Vec::new(),
+            init_body: None,
+            pre_super_param_fields: Vec::new(),
+            explicit_param_stores: false,
+            methods: Vec::new(),
+            is_interface: false,
+            is_fun_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
+            is_sealed: false,
+            sealed_subclasses: Default::default(),
+            is_abstract: false,
+            is_open: false,
+            superclass: crate::types::wk::any(),
+            super_arg_prelude: Vec::new(),
+            super_args: Vec::new(),
+            super_ctor_params: Vec::new(),
+            enum_entries: Vec::new(),
+            enum_entry_of: None,
+            prop_ref: None,
+            func_ref: None,
+            bridges: Vec::new(),
+            interfaces: Default::default(),
+            is_object: false,
+            is_companion: false,
+            companion_class: None,
+            secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
+            applied_annotations: DeclarationAnnotations::default(),
+            field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
+            primary_ctor_annotations: DeclarationAnnotations::default(),
+            annotation_retention: None,
+        }
+    }
+
+    /// Build the declaration-only portion available from the pending-free module index. Other
+    /// declaration families enrich this class through their own stable identities; this constructor
+    /// performs no syntax lookup.
+    pub fn source_skeleton(
+        header: &crate::fir::ResolvedClassifierHeader,
+        flags: crate::fir::DeclarationFlags,
+    ) -> Self {
+        let superclass = header
+            .superclass
+            .and_then(|ty| ty.get().non_null().obj_internal())
+            .unwrap_or_else(crate::types::wk::any);
+        let interfaces = header
+            .interfaces
+            .iter()
+            .filter_map(|ty| ty.get().non_null().obj_internal())
+            .collect::<Vec<_>>()
+            .into();
+        let mut supertypes = Vec::with_capacity(1 + header.interfaces.len());
+        if let Some(superclass) = header.superclass {
+            supertypes.push(superclass.get());
+        }
+        supertypes.extend(header.interfaces.iter().map(|interface| interface.get()));
+        let context_fields = header
+            .context_parameters
+            .iter()
+            .enumerate()
+            .map(|(ordinal, parameter)| {
+                IrField::new(
+                    format!("$context_receiver_{ordinal}"),
+                    crate::types::stored_value_ty(parameter.ty.get()),
+                )
+                .with_is_final(true)
+            })
+            .collect::<Vec<_>>();
+        let context_arguments = header
+            .context_parameters
+            .iter()
+            .enumerate()
+            .map(|(field, parameter)| IrCtorArg {
+                name: None,
+                ty: crate::types::stored_value_ty(parameter.ty.get()),
+                declared_ty: Some(parameter.ty.get()),
+                is_field: true,
+                field_index: Some(u32::try_from(field).expect("too many context fields")),
+                has_default: false,
+                is_vararg: false,
+                type_param: None,
+                check: None,
+            })
+            .collect::<Vec<_>>();
+        let context_count =
+            u32::try_from(context_arguments.len()).expect("too many classifier context parameters");
+        Self {
+            fq_name: header.classifier,
+            is_source_declared: true,
+            is_anonymous_object: flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT),
+            enclosing_function: None,
+            is_inner_class: flags.has(crate::fir::DeclarationFlags::INNER),
+            is_local_class: flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS),
+            is_value: flags.has(crate::fir::DeclarationFlags::VALUE),
+            is_data: flags.has(crate::fir::DeclarationFlags::DATA),
+            decl_line: 0,
+            type_param_bounds: Vec::new(),
+            type_params: Vec::new(),
+            captured_type_params: Vec::new(),
+            supertypes,
+            properties: Vec::new(),
+            fields: context_fields,
+            ctor_param_count: context_count,
+            constructor_prefix_count: context_count,
+            ctor_args: context_arguments,
+            ctor_param_annotations: Vec::new(),
+            init_body: None,
+            pre_super_param_fields: Vec::new(),
+            explicit_param_stores: false,
+            methods: Vec::new(),
+            is_interface: flags.has(crate::fir::DeclarationFlags::INTERFACE),
+            is_fun_interface: flags.has(crate::fir::DeclarationFlags::FUN_INTERFACE),
+            is_annotation: flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS),
+            annotation_impl_of: None,
+            is_sealed: flags.has(crate::fir::DeclarationFlags::SEALED),
+            sealed_subclasses: header.sealed_subclasses.to_vec().into(),
+            is_abstract: flags.has(crate::fir::DeclarationFlags::ABSTRACT),
+            is_open: flags.has(crate::fir::DeclarationFlags::OPEN),
+            superclass,
+            super_arg_prelude: Vec::new(),
+            super_args: Vec::new(),
+            super_ctor_params: Vec::new(),
+            enum_entries: Vec::new(),
+            enum_entry_of: None,
+            prop_ref: None,
+            func_ref: None,
+            bridges: Vec::new(),
+            interfaces,
+            is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),
+            is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
+            companion_class: None,
+            secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
+            applied_annotations: DeclarationAnnotations::default(),
+            field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
+            primary_ctor_annotations: DeclarationAnnotations::default(),
+            annotation_retention: None,
+        }
+    }
+
     pub fn fq_name_id(&self) -> TypeName {
         self.fq_name
     }
 
-    /// Whether the property named `name` carries `@JvmField`. The annotation's `@Target` is FIELD,
-    /// so use-site defaulting lands it in [`Self::field_annotations`]; this reads that record — the
-    /// annotation IS the fact, never a re-derivation from the JVM realization.
+    /// Whether the property named `name` carries `@JvmField`. Production common lowering retains the
+    /// resolved annotation identity on [`IrProperty`]; the richer field-annotation record remains the
+    /// legacy metadata path's equivalent source of the same semantic fact.
     pub fn property_has_jvm_field(&self, name: &str) -> bool {
-        self.field_annotations.iter().any(|fa| {
+        self.properties.iter().any(|property| {
+            property.name == name
+                && property
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.matches("kotlin/jvm/JvmField"))
+        }) || self.field_annotations.iter().any(|fa| {
             fa.field == name
                 && fa
                     .annotations
@@ -1357,6 +2098,9 @@ pub struct IrSecondaryCtor {
     /// analogue of [`IrFile::function_annotations`] (a secondary constructor is not an
     /// [`IrFunction`], so it carries them directly).
     pub annotations: DeclarationAnnotations,
+    /// Compiler-supplied leading parameters shared by every constructor of the class. These occupy
+    /// body value slots before `params`, but are absent from Kotlin source metadata and default masks.
+    pub prefix_params: Vec<Ty>,
     pub params: Vec<Ty>,
     /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
@@ -1368,6 +2112,9 @@ pub struct IrSecondaryCtor {
     /// Source-ordered temp declarations for delegation arguments.
     pub delegate_prelude: Vec<ExprId>,
     pub delegate_args: Vec<ExprId>,
+    /// Semantic target-parameter ordinals omitted at this delegation site. A backend derives its
+    /// own default-constructor ABI (for example JVM masks and marker) from these checked ordinals.
+    pub default_parameters: Vec<u32>,
     pub body: Option<ExprId>,
     /// Which `<init>` this constructor delegates to, and whether it runs the class init body.
     pub delegate: CtorDelegateTarget,
@@ -1377,6 +2124,19 @@ pub struct IrSecondaryCtor {
     /// the ctor gets kotlinc's PRIVATE + public synthetic `(…, DefaultConstructorMarker)` ABI, and
     /// its metadata record names the marker form.
     pub vc_params: bool,
+}
+
+/// Semantic declaration metadata retained when the JVM value-class pass replaces a secondary
+/// constructor with a static `constructor-impl` realization. The backend owns the physical handle;
+/// Kotlin metadata must still describe the original source parameters/defaults and link them to that
+/// exact handle for downstream frontend resolution.
+#[derive(Clone, Debug)]
+pub struct IrJvmValueClassSecondaryCtor {
+    pub params: Vec<(String, Ty)>,
+    pub param_defaults: Vec<bool>,
+    pub vararg_index: Option<usize>,
+    pub annotations: DeclarationAnnotations,
+    pub descriptor: String,
 }
 
 /// The delegation target of a secondary constructor.
@@ -1397,14 +2157,32 @@ pub enum CtorDelegateTarget {
     },
 }
 
-/// A synthetic bridge method (`name(erased_params)erased_ret` → `name(concrete_params)concrete_ret`).
+/// A JVM declaration adapter (`name(erased_params)erased_ret` → a selected concrete target).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BridgeKind {
+    Function,
+    PropertyGetter,
+    PropertySetter,
+    /// The ordinary public instance entry through which a boxed value class implements an interface;
+    /// it delegates to the selected static carrier implementation but is not `ACC_BRIDGE|SYNTHETIC`.
+    ValueClassInterfaceEntry,
+}
+
 #[derive(Clone, Debug)]
 pub struct Bridge {
+    pub kind: BridgeKind,
+    /// Exact same-module function this bridge delegates to. Backend realization uses this stable
+    /// identity for representation decisions; `target_name` is emitted spelling, never lookup input.
+    pub target_function: Option<u32>,
     pub name: String,
     pub erased_params: Vec<Ty>,
     pub erased_ret: Ty,
     pub concrete_params: Vec<Ty>,
     pub concrete_ret: Ty,
+    /// Physical return in the delegated target's descriptor when it differs from the value the bridge
+    /// adapts. A suspend target always returns `Object`; a generic bridge may still need to cast that
+    /// object to a reference carrier and box it as a value class for the erased supertype boundary.
+    pub target_ret: Option<Ty>,
     /// Whether incompatible erased arguments return the collection operation's neutral result.
     pub type_safe_barrier: bool,
     /// The method this bridge delegates to, when it differs from `name` — a value-class-returning
@@ -1513,10 +2291,21 @@ impl FnParamInfo {
 /// recovering identity from generated method names or scanning unrelated expression/value tables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrLambdaOrigin {
-    pub source_expression: u32,
+    /// File-local semantic identity assigned while a checked source lambda is consumed. It is not
+    /// an AST id, text offset, or body locator.
+    pub identity: u32,
+    /// Semantic classifier whose lexical code container owns the implementation, or `None` for the
+    /// package facade. Physical method placement may still be changed by a backend pass.
+    pub lexical_owner: Option<TypeName>,
     pub enclosing_name: String,
     pub binding_name: Option<String>,
+    /// Source-lambda ordinal for class-mode naming within the rendered lexical context.
     pub ordinal: u32,
+    /// Backend-neutral source naming stem of the containing executable declaration. A target owns
+    /// the separators and complete physical implementation spelling.
+    pub implementation_name: String,
+    /// Source-lambda implementation ordinal within the enclosing callable name.
+    pub implementation_ordinal: u32,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
@@ -1524,15 +2313,119 @@ pub struct IrLambdaOrigin {
 pub struct IrFile {
     pub package: Option<String>,
     pub source_line_count: u32,
+    /// Checked file-level annotation applications. These are declaration metadata, not syntax;
+    /// backend plugins consume their folded values without retaining or reopening the source AST.
+    pub file_annotations: DeclarationAnnotations,
+    /// Guards the active-unit metadata handoff when a source is checked in several body groups.
+    pub(crate) file_annotations_attached: bool,
     pub functions: Vec<IrFunction>,
+    /// Stable checked-FIR callable identity to its realization in this file's function arena.
+    /// Common lowering publishes the edge once; checked-operation realization consumes it without
+    /// name lookup or overload reconstruction.
+    pub checked_callable_functions: std::collections::HashMap<crate::fir::CallableId, FunId>,
+    /// Frontend-plugin declaration identity to its predeclared common-IR callable. Backend plugin
+    /// realization fills this exact declaration instead of rediscovering a generated member by
+    /// owner/name/descriptor or emitting a duplicate alongside it.
+    pub plugin_declaration_functions:
+        std::collections::HashMap<crate::libraries::PluginExpressionDeclaration, Vec<FunId>>,
+    /// Referenced current-module callables copied from finalized declaration headers. The stable
+    /// identity remains only as an exact edge; the backend consumes this semantic container record
+    /// instead of reopening the frontend module index.
+    pub referenced_module_callables:
+        std::collections::HashMap<crate::fir::CallableId, IrModuleCallable>,
+    /// Referenced current-module properties with their complete checked declaration shape.
+    pub referenced_module_properties:
+        std::collections::HashMap<crate::fir::PropertyId, IrModuleProperty>,
+    /// Referenced current-module singleton classifiers. Backends choose their storage field from
+    /// this semantic singleton/companion shape without querying frontend declarations.
+    pub referenced_module_classifiers: std::collections::HashMap<TypeName, IrModuleClassifier>,
+    /// Complete checked applied hierarchy for every source classifier realized in this file.
+    /// Common lowering copies it from the stable FIR index; target passes may inspect target-specific
+    /// representation rules but must not reconstruct semantic inheritance through frontend lookup.
+    pub classifier_hierarchies: std::collections::HashMap<TypeName, Vec<IrAppliedClassifier>>,
+    /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
+    /// these types and materialize representation bridges, but it must not search declarations.
+    pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,
+    pub function_overrides: std::collections::HashMap<TypeName, Vec<IrFunctionOverride>>,
+    /// Stable checked-FIR classifier declaration to its common-IR class realization. Member bodies
+    /// attach through this edge; neither the sink nor a backend searches by rendered class name.
+    pub checked_classifier_classes: std::collections::HashMap<crate::fir::DeclarationId, ClassId>,
+    /// Stable `(classifier declaration, interface-delegation ordinal)` to its generated storage
+    /// field. Common lowering predeclares this source-ordered layout once and both checked
+    /// constructor initializers and forwarding-plan materialization consume the exact coordinate.
+    pub checked_interface_delegation_fields:
+        std::collections::HashMap<(crate::fir::DeclarationId, u32), u32>,
+    /// Interface-delegation ordinals whose checked constructor-body initializer has been consumed.
+    /// Final forwarding materialization uses this identity edge as a completeness invariant; it
+    /// never searches the constructor IR for a matching field assignment.
+    pub checked_interface_delegation_initializers:
+        std::collections::HashSet<(crate::fir::DeclarationId, u32)>,
+    /// Stable enum-entry declaration to its compiler-generated common-IR subclass. The entry keeps
+    /// the enum classifier as its semantic receiver in FIR; this transient edge only owns where its
+    /// declared methods/properties are physically attached in the active file.
+    pub checked_enum_entry_classes: std::collections::HashMap<crate::fir::DeclarationId, ClassId>,
+    /// Source constructors consumed from checked FIR, keyed by stable declaration identity. This is
+    /// common-IR state, not retained frontend state; every operand belongs to this file's IR arena.
+    pub checked_constructor_bodies:
+        std::collections::HashMap<crate::fir::DeclarationId, IrCheckedConstructorBody>,
+    /// Stable property identity to its source-oriented common-IR declaration.
+    pub checked_properties: std::collections::HashMap<crate::fir::PropertyId, IrCheckedProperty>,
+    /// Stable property identity to the storage/accessor declarations materialized in this file.
+    /// Ordinary reads and writes remain checked semantic operations until a target consumes this
+    /// table and chooses its representation.
+    pub local_property_layouts:
+        std::collections::HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
+    /// Expression identity → the source classifier whose body owns it. Package-level bodies are
+    /// absent. This is a semantic containment edge recorded while consuming FIR; target backends
+    /// use it for representation decisions that depend on crossing a class-file boundary without
+    /// reconstructing ownership from generated function or class names.
+    pub expression_owners: std::collections::HashMap<ExprId, TypeName>,
+    /// Class initialization blocks in source order. Member-property initializers remain attached to
+    /// their declarations so a backend can merge both without consulting syntax.
+    pub checked_class_initializers: Vec<IrCheckedClassInitializer>,
+    pub checked_enum_entry_bodies:
+        std::collections::HashMap<crate::fir::DeclarationId, IrCheckedEnumEntryBody>,
+    pub checked_script_body: Option<ExprId>,
+    /// Lifted function parameter that carries a mutable capture's shared holder, keyed by
+    /// `(function, parameter)`. `Ty` is the logical captured element type; each backend chooses its
+    /// holder representation. Keeping this sparse semantic edge separate prevents JVM `Ref` classes
+    /// from leaking into checked FIR or common function signatures.
+    pub shared_capture_parameters: std::collections::HashMap<(FunId, u32), Ty>,
+    /// A local or anonymous class field that carries a mutable capture's shared holder, keyed by
+    /// `(class, field)`. The stored `Ty` is the logical captured element type; the field and its
+    /// constructor argument deliberately retain that semantic type in common IR. Backends realize
+    /// the holder representation from this exact coordinate without inferring it from a field name,
+    /// constructor position, or expression shape.
+    pub shared_class_capture_fields: std::collections::HashMap<(ClassId, u32), Ty>,
+    /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
+    /// ordinary function marker rather than constructor/value-class markers.
+    pub class_static_local_functions: std::collections::HashSet<FunId>,
     pub classes: Vec<IrClass>,
+    /// Source type aliases declared directly in a classifier, keyed by that classifier's semantic
+    /// identity. These are pending-free declaration headers copied by common lowering; they carry
+    /// no body, parser identity, source range, or backend representation.
+    pub class_type_aliases: std::collections::HashMap<TypeName, Vec<IrTypeAlias>>,
+    /// Source functions declared directly in this file's package. These are complete semantic
+    /// declaration records copied from finalized Pass-1 headers. A backend may combine them with
+    /// the post-pass physical function realization, but must not reopen the frontend index.
+    pub package_functions: Vec<IrPackageFunction>,
+    /// Source properties declared directly in this file's package. Storage/accessor representation
+    /// remains target-owned; this record contains only checked Kotlin declaration semantics.
+    pub package_properties: Vec<IrPackageProperty>,
+    /// Source type aliases declared directly in this file's package. Like classifier aliases, these
+    /// carry a pending-free expansion and metadata spelling without retaining syntax coordinates.
+    pub package_type_aliases: Vec<IrTypeAlias>,
+    /// JVM value-class identity to secondary-constructor declarations consumed into static
+    /// `constructor-impl` methods. Populated only by the JVM representation pass.
+    pub(crate) jvm_value_class_secondary_ctors:
+        std::collections::HashMap<TypeName, Vec<IrJvmValueClassSecondaryCtor>>,
     /// Top-level properties — static fields on the facade, initialized in `<clinit>` in order.
     pub statics: Vec<IrStatic>,
     /// Static indices whose storage was moved from a companion declaration to its outer class by the
     /// JVM companion-storage pass. Common lowering never populates this physical realization table.
     jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
-    /// Statics realized as `@JvmField` public fields (no accessors, no bridges) by the JVM
-    /// companion-storage pass. Always a subset of [`Self::jvm_companion_hoisted_statics`].
+    /// Statics realized as `@JvmField` public fields (no accessors, no bridges) by JVM property
+    /// storage passes. Common lowering never populates this physical realization table.
     jvm_field_statics: std::collections::HashSet<u32>,
     /// Exact companion property declaration → its JVM outer-class static realization. The property
     /// index is stable within its declaring class; backend consumers must not recover this edge by
@@ -1548,10 +2441,42 @@ pub struct IrFile {
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
     pub property_annotation_markers: std::collections::HashMap<(TypeName, String), u32>,
     pub exprs: Vec<IrExpr>,
+    /// Checked source/synthetic origin for every expression produced by FIR lowering. Legacy IR may
+    /// leave this sparse during migration; the consuming FIR path records every generated node.
+    pub fir_origins: std::collections::HashMap<ExprId, IrNodeOrigin>,
+    /// Checked lexical target depth for source returns lowered from FIR. The return node remains an
+    /// ordinary backend-neutral `IrExpr::Return`; inline expansion consumes/decrements this fact as
+    /// lambda bodies cross lexical boundaries, so no source label or AST identity survives.
+    pub checked_return_depths: std::collections::HashMap<ExprId, u32>,
     /// Sparse construction facts keyed by the ordinary [`IrExpr::New`] identity. Common lowering
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
     pub annotation_constructions: std::collections::HashMap<ExprId, IrAnnotationConstruction>,
+    /// Ordinary construction identity → semantic primary-constructor parameter ordinals omitted
+    /// at the checked call site. Common lowering preserves the checker's final argument mapping;
+    /// a backend realizes its own default-constructor ABI without inspecting source or repeating
+    /// overload selection. Ordinals include any leading captured parameters in the physical common
+    /// constructor shape.
+    pub constructor_default_arguments: std::collections::HashMap<ExprId, Vec<u32>>,
+    /// Checked defaulted-call operand positions, keyed by the call expression. The positions refer
+    /// directly to that call's argument vector after receiver insertion and before any target ABI
+    /// suffix. A backend that changes a parameter's representation uses this exact mapping to replace
+    /// the semantic zero placeholder; it must not rediscover omitted parameters from masks or names.
+    pub default_call_argument_positions: std::collections::HashMap<ExprId, Vec<u32>>,
+    /// Current class identity → semantic superclass-constructor parameter ordinals omitted by its
+    /// primary delegation. Kept separate from `super_args` so common IR does not encode a target's
+    /// mask/marker ABI.
+    pub super_constructor_default_arguments: std::collections::HashMap<TypeName, Vec<u32>>,
+    /// Current class → exact dependency constructor selected for its primary `super(…)`
+    /// delegation. The semantic operands/types remain on [`IrClass`]; the backend fills the opaque
+    /// physical descriptor through this provider identity before emission.
+    pub(crate) external_super_constructors:
+        std::collections::HashMap<TypeName, IrExternalConstructorTarget>,
+    /// `(current class, secondary-constructor ordinal)` → exact dependency constructor selected for
+    /// that constructor's `super(…)` delegation. Kept beside, rather than inside, the constructor so
+    /// non-JVM consumers need not carry a physical realization field on every declaration.
+    pub(crate) external_secondary_super_constructors:
+        std::collections::HashMap<(TypeName, u32), IrExternalConstructorTarget>,
     /// Exact `SetField` expression identities that realize a source property declaration's
     /// initializer. A later assignment can target the same field with the same value, so backend
     /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
@@ -1578,6 +2503,10 @@ pub struct IrFile {
     /// `String` types only, where logical = physical representation — by the suspend pass's operand
     /// snapshot typing (`hoisted_value_ty`) for external callees.
     pub logical_types: std::collections::HashMap<u32, Ty>,
+    /// Checked exhaustive `when` expressions without a written `else`, keyed by common-IR identity.
+    /// The value is their final semantic result type. Backends use this to preserve value flow and
+    /// emit the mandatory no-match failure path without re-running exhaustiveness analysis.
+    pub exhaustive_whens: std::collections::HashMap<ExprId, Ty>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
@@ -1596,6 +2525,11 @@ pub struct IrFile {
     /// side table filled at lowering, where the AST member is still in hand. Only members that
     /// actually spell an alias get an entry.
     pub fn_declared_spellings: std::collections::HashMap<u32, crate::spelling::DeclaredSpellings>,
+    /// Source declaration name for a function whose target realization renamed it. Common lowering
+    /// initially keeps the Kotlin name on [`IrFunction`]; a backend records that name here before
+    /// replacing it with a physical spelling such as JVM `@JvmName` or a later value-class mangle.
+    /// Metadata/reflection consume this semantic name while calls use the realized function name.
+    pub fn_source_names: std::collections::HashMap<u32, String>,
     /// The same, for a CLASS HEADER (supertypes, primary-constructor parameters, type-parameter
     /// bounds), keyed by the class's fully-qualified name.
     pub class_declared_spellings:
@@ -1624,6 +2558,23 @@ pub struct IrFile {
     /// NOT a `Function` record for the accessor (kotlinc emits none), or a consumer cannot resolve
     /// `import Tools.doubled` / `5.doubled` from the classpath.
     pub member_ext_props: std::collections::HashMap<TypeName, Vec<MemberExtProp>>,
+    /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
+    /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
+    pub inline_fns: std::collections::HashSet<u32>,
+    /// Call expressions whose stable current-module target is semantically `inline`. Target
+    /// realization may replace the stable [`Callee::Module`] edge with a physical call, so this
+    /// expression-owned fact preserves inline-lambda ownership without asking the backend to recover
+    /// declaration semantics from a facade/name pair.
+    pub module_inline_calls: std::collections::HashSet<ExprId>,
+    /// Ordinary checked call sites whose selected declaration is semantically inline. Unlike a
+    /// target callee handle, this fact survives provider realization and is available even when a
+    /// public inline call legally remains as a non-inlined fallback.
+    pub inline_call_sites: std::collections::HashSet<ExprId>,
+    /// Complete evaluation regions for semantically inline calls, including any source-order
+    /// operand prelude and any consumed inline-body template. This target-neutral fact survives
+    /// provider realization and structural expansion, so backends need not reconstruct an inline
+    /// call from the resulting block/loop shape.
+    pub inline_regions: std::collections::HashSet<ExprId>,
     /// Function ids declared `operator` — `@Metadata` marks `Function.flags` bit 8 (`isOperator`)
     /// so a consumer admits the conventional call form (`recv(args)` for `invoke`, `a[i]` for
     /// `get`, …); the JVM method itself carries no such bit.
@@ -1637,16 +2588,19 @@ pub struct IrFile {
     /// `@Metadata` both read it, so it must not be folded into either representation. Retention stays
     /// SEMANTIC here — the JVM split into visible/invisible attributes belongs to the emitter.
     pub fn_param_annotations: std::collections::HashMap<u32, Vec<DeclarationAnnotations>>,
-    /// Value-class internal name → the lowered default expression of its single primary-constructor
-    /// property, when it has one (`value class ItemId(val value: String = IdGen.next())`).
-    /// Lowered in the STATIC `constructor-impl` frame (the sole param is value-index 0, no `this`); the
-    /// value-class JVM pass registers it as `constructor-impl`'s param default so the backend emits the
-    /// synthetic `constructor-impl$default(U, int, DefaultConstructorMarker)` kotlinc requires.
-    value_ctor_defaults: std::collections::HashMap<TypeName, u32>,
-    /// Regular (non-value) class internal name → per-primary-constructor-parameter default expression
-    /// (`None` = required), when ANY parameter has a default (`data class Wk(val n: String, val s: Int = 5)`).
-    /// Lowered in the INSTANCE `<init>` frame (`this` = value 0, params = 1..=n); the backend emits the
-    /// synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload kotlinc requires.
+    /// Per declared function, whether each PHYSICAL source parameter carries Kotlin's semantic
+    /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
+    /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
+    pub fn_param_no_infer: std::collections::HashMap<u32, Vec<bool>>,
+    /// Function id → semantic strict-equality bound declared on `equals`' value parameter.
+    /// Resolution owns the annotation lookup and class-literal checking; common lowering only
+    /// preserves the resulting type so Kotlin metadata can publish it to dependent modules.
+    pub fn_equality_bounds: std::collections::HashMap<u32, Ty>,
+    /// Class identity → per-primary-constructor-parameter checked default expression (`None` =
+    /// required). This is the target-neutral constructor contract. A target backend consumes it when
+    /// choosing that class's physical default-argument ABI; common lowering does not distinguish value
+    /// classes from ordinary classes here. Expressions use the ordinary constructor frame (`this` =
+    /// value 0, parameters = 1..=n) until a backend deliberately reframes them.
     class_ctor_defaults: std::collections::HashMap<TypeName, Vec<Option<u32>>>,
     /// Instance methods kotlinc leaves NON-`final` even in a final class — currently the data-class
     /// `Object`-overrides (`toString`/`hashCode`/`equals`), which kotlinc emits `public` (open) rather
@@ -1655,6 +2609,9 @@ pub struct IrFile {
     /// Instance methods kotlinc emits `private` — currently a property's `private set` setter. The JVM
     /// backend uses `ACC_PRIVATE` instead of `ACC_PUBLIC` for a `FunId` in this set.
     pub private_methods: std::collections::HashSet<u32>,
+    /// Private instance methods referenced from synthesized callable-reference classes. The JVM
+    /// backend emits one declaration-owned static access bridge for each exact method identity.
+    pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
     /// message lambda, assumed spliced). If emission nonetheless records an `invokedynamic` for one,
     /// the two-pass driver RESCUES it — emits the method after all — so the reference never dangles.
@@ -1675,13 +2632,11 @@ pub struct IrFile {
     /// carrying an `@Metadata` record is decided by its own emit, so a record here cannot assume it does —
     /// unlike a CLASSPATH value class, whose value-class-ness is itself decoded from that record.
     pub module_source_value_classes: std::collections::HashSet<TypeName>,
-    /// `@JvmField` properties of classes this file only SEES (a sibling source file's), keyed by the
-    /// owner named at the use site → `(declaring owner, declared type)`. Such a property has no
-    /// accessor at all, so a backend that fell through to the `get<Name>()` naming convention would
-    /// emit a call to a method the declaration forbids (`NoSuchMethodError`). A class of THIS file
-    /// carries the same fact on its own `IrClass::field_annotations` and needs no entry.
-    pub module_jvm_field_properties:
-        std::collections::HashMap<(TypeName, String), (TypeName, crate::types::Ty)>,
+    /// Current-module source value classes whose stable declaration shape is supported by the class
+    /// metadata writer. This is frozen from Pass-1 headers before bodies stream, allowing one source
+    /// file to publish a signature mentioning a sibling value class without retaining or reopening
+    /// that sibling's body.
+    pub module_readable_value_classes: std::collections::HashSet<TypeName>,
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: std::collections::HashSet<TypeName>,
@@ -1709,6 +2664,10 @@ pub struct IrFile {
     /// would carry the enclosing fn's return type, mismatching the lambda's). The splice reads the
     /// lambda's `inline_body`, not this method, so the backend must NOT emit a `FunId` in this set.
     pub inline_only_fns: std::collections::HashSet<u32>,
+    /// Retained inline declarations from another source unit, materialized only as call-site
+    /// cloning templates in the active common-IR arena. They are never emitted as declarations in
+    /// this file, and a non-inlined fallback keeps its stable module callable edge.
+    pub foreign_inline_templates: std::collections::HashSet<u32>,
     /// Top-level functions declared `inline`. This is a source-semantic fact; each backend decides
     /// how an inline declaration is represented (the JVM emitter, for example, adds kotlinc's
     /// `$i$f$<name>` local marker to emitted non-suspend bodies).
@@ -1745,14 +2704,12 @@ pub struct IrFile {
     /// of these bodies must be public because the body can be spliced into another package/module.
     /// Lowering carries the current [`IrFunctionScope`] rather than recovering this fact from a name.
     pub public_inline_functions: std::collections::HashSet<u32>,
-    /// Each `suspend fun` whose LOGICAL return is a NON-NULL `@JvmInline value class` → that class's
-    /// internal name, recorded by the value-class pass as it boxes the function's tail. A CPS return
-    /// is `Object`, so the value crosses the resume boundary in its BOXED form (`X.box-impl`) — the
-    /// erasure that turns `X` into its underlying type everywhere else would otherwise leave the
-    /// coroutine pass with no way to know which class to `checkcast` + `unbox-impl` on the resume
-    /// side. Value-class knowledge stays in the value-class pass; this records only the erasure it
-    /// deliberately did NOT apply, which the coroutine pass must undo per suspension.
-    pub suspend_boxed_value_class_returns: std::collections::HashMap<u32, TypeName>,
+    /// Each `suspend fun` whose logical return is a non-null value class, mapped to the exact
+    /// representation selected by the target value-class pass for the CPS boundary.
+    pub value_class_suspend_returns: std::collections::HashMap<u32, IrValueClassSuspendResult>,
+    /// Cross-unit counterpart of [`Self::value_class_suspend_returns`], keyed by the exact checked
+    /// suspension call expression.
+    pub value_class_suspend_calls: std::collections::HashMap<ExprId, IrValueClassSuspendResult>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
     /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
     /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath
@@ -1766,7 +2723,7 @@ pub struct IrFile {
     /// use inside the block, while the coroutine pass still needs to split and resume around the block as
     /// one atomic point. Keeping this semantic category separate prevents a structural block from being
     /// mistaken for a cross-unit call merely because both can suspend.
-    pub intrinsic_suspension_points: std::collections::HashMap<u32, Ty>,
+    pub intrinsic_suspension_points: std::collections::HashMap<u32, IrIntrinsicSuspensionPoint>,
     /// A `suspend` LAMBDA's `invokeSuspend` that contains MULTIPLE suspensions / control flow and needs
     /// a state machine with the lambda instance itself as the continuation — `(invokeSuspend FunId,
     /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
@@ -1843,12 +2800,6 @@ pub struct IrFile {
     /// is a bare type parameter (`class Pair<A, B>(val a: A)` → `[("a", "A")]`). The JVM backend formats
     /// each into a field `Signature` (`TA;`). Backend-agnostic: only the type-parameter name is stored.
     field_signatures: std::collections::HashMap<TypeName, Vec<(String, String)>>,
-    /// `(data-class fq-internal-name, field name)` → the JVM owner internal the field's `hashCode()`
-    /// dispatches on, as chosen by `field_hash` (ir_lower, which has the classpath). A concrete-class
-    /// field owns its own `hashCode`; an INTERFACE/collection field (`List`, `Set`, `Map`, …) dispatches
-    /// `java/lang/Object.hashCode`. The pool seeder reads this to intern the SAME methodref the body
-    /// emits — otherwise it would seed `List.hashCode` (an orphan) while the body uses `Object.hashCode`.
-    data_hashcode_owners: std::collections::HashMap<(String, String), String>,
     /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
     /// this file. The JVM value-class pass merges these into its erasure map so a dependency value class
     /// unboxes exactly like a same-file declaration. Populated by ir_lower (which has the classpath);
@@ -1891,6 +2842,14 @@ pub struct IrFile {
     /// declares the type parameter `E` (never recorded, since it is not a class). Only NON-NULL
     /// declared returns are recorded: a nullable value class really is boxed.
     pub call_declared_ret: std::collections::HashMap<u32, Ty>,
+    /// Realized dependency-call `ExprId` → declaration parameter types in the order of the call's
+    /// ordinary argument vector. These are copied from the provider record selected by FIR, never
+    /// reconstructed from a name or descriptor. A backend representation pass needs this sparse fact
+    /// only where source and physical shapes are ambiguous—for example, both a direct `Result<T>`
+    /// parameter and a generic `T` parameter erase to JVM `Object`, but only the latter takes a box.
+    /// Dispatch receivers remain separate; static realizations that consume one prepend its selected
+    /// semantic receiver before publishing this vector.
+    pub call_declared_params: std::collections::HashMap<u32, Box<[Ty]>>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether
@@ -1901,6 +2860,10 @@ pub struct IrFile {
     /// Stable property-operation identity → checker-selected accessor identity and physical return.
     /// This is a semantic selection, distinct from any backend rewrite of its platform spelling.
     pub property_selected_accessors: std::collections::HashMap<u32, (String, Ty)>,
+    /// Stable property-operation identity → the exact provider accessor selected by checked FIR.
+    /// The identity is target-neutral and opaque; only the owning backend may decode it into a
+    /// storage or invocation realization.
+    pub property_external_accessors: std::collections::HashMap<u32, crate::fir::ExternalCallableId>,
     /// Stable property-operation identity → JVM accessor spelling and physical property-value type,
     /// selected by the value-class pass for an owner in another source file. The common node keeps the
     /// Kotlin name and logical type; this backend side table carries the declaration-less target
@@ -1921,6 +2884,12 @@ pub struct IrFile {
     /// underlying — so the lambda's impl method must match whichever the interface actually declares.
     /// The lowerer records the declaration; deciding what erases is the backend pass's job.
     pub lambda_sam_signature: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
+    /// Lifted-lambda function id → JVM-physical SAM method parameters and result after value-class
+    /// representation has been chosen. Common lowering never populates this table: it retains only
+    /// [`Self::lambda_sam_signature`]'s semantic declaration. The JVM value-class pass derives this
+    /// realization so emission does not mistake a value-class spelling (`Token`) for the interface
+    /// slot that actually exists (`String`, `int`, …).
+    pub lambda_sam_jvm_signature: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
 }
 
 /// Exact function body currently owned by lowering. `source_name` is only the naming stem for
@@ -1970,7 +2939,9 @@ pub struct IrGenericSig {
     /// Each declared type parameter with its complete semantic bound shape. Whether that bound is an
     /// interface is declaration metadata, not something a backend may infer from a physical name.
     pub type_params: Vec<IrTypeParameter>,
-    /// Complete semantic value-parameter types for a function signature. Empty for a class signature.
+    /// Complete semantic callable parameters for a function signature. An extension receiver occupies
+    /// its physical context-boundary slot so a backend signature retains its declared generic type;
+    /// declaration metadata separates that slot back into a receiver. Empty for a class signature.
     pub params: Vec<Ty>,
     /// Complete semantic return type for a function signature. `None` for a class signature.
     pub ret: Option<Ty>,
@@ -1988,6 +2959,197 @@ pub struct IrTypeParameter {
     pub semantic_name: String,
     pub bounds: Vec<(Ty, bool)>,
     pub variance: crate::types::TypeVariance,
+    /// Kotlin declaration capability retained for targets that materialize runtime type operations.
+    /// The JVM consumes it when choosing its reified-operation marker representation.
+    pub reified: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrTypeAlias {
+    pub name: String,
+    pub formals: Vec<String>,
+    pub expansion: Ty,
+    pub visibility: crate::types::Visibility,
+    pub expansion_spelling: crate::spelling::Spelled,
+    pub source_order: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrPackageTypeParameter {
+    pub name: String,
+    pub semantic_name: String,
+    pub bounds: Vec<Ty>,
+    pub reified: bool,
+}
+
+/// Backend-neutral package-function declaration metadata. `function` is the exact common-IR
+/// realization; all remaining fields describe the Kotlin declaration before target erasure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrPackageFunction {
+    pub function: FunId,
+    pub name: String,
+    pub params: Vec<(String, Ty)>,
+    pub ret: Ty,
+    pub receiver: Option<Ty>,
+    pub param_defaults: Vec<bool>,
+    pub suspend: bool,
+    pub inline: bool,
+    pub operator: bool,
+    pub infix: bool,
+    pub contract: Option<crate::contracts::ResolvedContract>,
+    pub type_params: Vec<IrPackageTypeParameter>,
+    pub context_count: usize,
+    pub vararg_index: Option<usize>,
+    pub visibility: crate::types::Visibility,
+    pub spellings: crate::spelling::DeclaredSpellings,
+    pub equality_bound: Option<Ty>,
+    pub source_order: u32,
+}
+
+/// Backend-neutral package-property declaration metadata. The checked property table retains its
+/// exact stable identity while bodies stream; this compact record is what survives into backend
+/// metadata formatting after common lowering has finished.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrPackageProperty {
+    /// Stable semantic property identity. This joins the declaration header to the common-IR
+    /// layout selected while its checked body streamed; it is not a source coordinate or a target
+    /// storage identity.
+    pub property: crate::fir::PropertyId,
+    pub name: String,
+    pub ty: Ty,
+    pub mutable: bool,
+    pub type_params: Vec<IrPackageTypeParameter>,
+    pub receiver: Option<Ty>,
+    pub context_parameters: Vec<Ty>,
+    pub context_parameter_names: Vec<String>,
+    pub is_const: bool,
+    pub has_constant: bool,
+    pub visibility: crate::types::Visibility,
+    /// Resolved Kotlin annotation identities. Backends interpret annotations in their own
+    /// namespace; common lowering does not turn them into storage or calling-convention choices.
+    pub annotations: Box<[TypeName]>,
+    /// Final Kotlin declaration modifiers copied from the stable header. Representation passes may
+    /// inspect these semantic restrictions without reopening FIR or recovering a declaration by
+    /// spelling.
+    pub flags: crate::fir::DeclarationFlags,
+    pub spellings: crate::spelling::DeclaredSpellings,
+    pub has_backing_field: bool,
+    pub has_declared_getter: bool,
+    pub source_order: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrModuleSource {
+    pub source: crate::fir::SourceFileId,
+    pub package: TypeName,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrModuleCallable {
+    pub source: IrModuleSource,
+    /// Declaring classifier for a member `$default` bridge. Ordinary member calls are already
+    /// virtual/special common-IR calls and therefore never use this record.
+    pub owner: Option<TypeName>,
+    /// Final source declaration flags needed after stable module calls cross into target realization.
+    pub flags: crate::fir::DeclarationFlags,
+    /// Final declaration signature, including context and extension receiver parameters but never
+    /// a target-specific dispatch receiver, continuation, default mask, or marker. Backends use it
+    /// for representation ABI without reopening FIR or reverse-engineering a synthetic descriptor.
+    pub parameters: Box<[Ty]>,
+    pub result: Ty,
+    /// Resolved declaration annotations with only the compact constant-string payload needed by
+    /// target realization. No source spelling, expression, or parser coordinate survives here.
+    pub annotations: Box<[IrHeaderAnnotation]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrHeaderAnnotation {
+    pub identity: TypeName,
+    pub string_arguments: Box<[Box<str>]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrModuleProperty {
+    pub source: IrModuleSource,
+    pub name: String,
+    pub ty: Ty,
+    pub context_parameters: Vec<Ty>,
+    pub extension_receiver: Option<Ty>,
+    pub mutable: bool,
+    pub owner: Option<TypeName>,
+    /// Source-level kind of `owner`. Common IR retains the Kotlin declaration fact; a target backend
+    /// decides whether that kind uses interface dispatch, singleton storage, or another physical form.
+    pub owner_kind: Option<IrClassifierKind>,
+    pub companion_associated: bool,
+    /// Outer classifier whose companion object owns this declaration. This is the Kotlin
+    /// singleton-association edge; it says nothing about target storage.
+    pub companion_owner: Option<TypeName>,
+    pub visibility: crate::types::Visibility,
+    pub setter_is_private: bool,
+    /// Resolved Kotlin annotation identities. A target backend may interpret annotations in its
+    /// namespace; common lowering never turns one into a physical access kind.
+    pub annotations: Box<[TypeName]>,
+    pub flags: crate::fir::DeclarationFlags,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrClassifierKind {
+    Class,
+    Interface,
+    Annotation,
+    Enum,
+    Object,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrModuleClassifier {
+    pub singleton: bool,
+    pub companion_owner: Option<TypeName>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrAppliedClassifier {
+    pub classifier: TypeName,
+    pub applied: Ty,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrPropertyOverride {
+    pub implementation: crate::fir::ResolvedPropertyOverrideTarget,
+    pub implementation_owner: TypeName,
+    pub overridden: crate::fir::ResolvedPropertyOverrideTarget,
+    pub overridden_owner: TypeName,
+    pub overridden_is_interface: bool,
+    pub name: String,
+    pub declared_type: Ty,
+    pub applied_type: Ty,
+    pub implementation_type: Ty,
+    pub overridden_mutable: bool,
+    pub implementation_mutable: bool,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrFunctionOverride {
+    pub implementation: crate::fir::ResolvedFunctionOverrideTarget,
+    /// Exact common-IR implementation for a compiler-generated declaration such as an interface
+    /// delegation forwarder. Source overrides use their stable callable identity and leave this
+    /// empty; backends consume either edge without matching a method by name.
+    pub implementation_function: Option<FunId>,
+    pub implementation_owner: TypeName,
+    pub overridden: crate::fir::ResolvedFunctionOverrideTarget,
+    pub overridden_owner: TypeName,
+    pub overridden_is_interface: bool,
+    pub name: String,
+    pub declared_parameters: Vec<Ty>,
+    pub declared_result: Ty,
+    pub applied_parameters: Vec<Ty>,
+    pub applied_result: Ty,
+    pub implementation_parameters: Vec<Ty>,
+    pub implementation_result: Ty,
+    pub suspend: bool,
+    pub depth: u32,
 }
 
 impl IrFile {
@@ -2001,12 +3163,26 @@ impl IrFile {
             | IrExpr::Throw { .. }
             | IrExpr::Break { .. }
             | IrExpr::Continue { .. } => true,
-            IrExpr::Block { stmts, value } => match value {
-                Some(value) => self.expr_diverges_by(*value, leaf),
-                None => stmts
+            // A lowering block may retain a syntactic value after a preceding statement has already
+            // transferred control (`{ throw e; unreachableValue }`). Either the statement tail or
+            // the value can therefore make the block divergent.
+            IrExpr::Block { stmts, value } => {
+                stmts
                     .last()
-                    .is_some_and(|stmt| self.expr_diverges_by(*stmt, leaf)),
-            },
+                    .is_some_and(|stmt| self.expr_diverges_by(*stmt, leaf))
+                    || value.is_some_and(|value| self.expr_diverges_by(value, leaf))
+            }
+            // Checked coercions do not restore fallthrough around a divergent operand.
+            IrExpr::TypeOp { arg, .. } => self.expr_diverges_by(*arg, leaf),
+            // Mutation operations evaluate their operands before the write. If either evaluation
+            // transfers control, the store itself cannot fall through and no backend may append
+            // the physical write or a trailing return after it.
+            IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => {
+                self.expr_diverges_by(*value, leaf)
+            }
+            IrExpr::SetField {
+                receiver, value, ..
+            } => self.expr_diverges_by(*receiver, leaf) || self.expr_diverges_by(*value, leaf),
             IrExpr::When { branches } => {
                 branches.iter().any(|(condition, _)| condition.is_none())
                     && branches
@@ -2082,6 +3258,7 @@ impl IrFile {
             args,
             ctor_params: None,
             ctor_desc: Some(ctor_desc.into()),
+            external_target: None,
         })
     }
 
@@ -2092,6 +3269,7 @@ impl IrFile {
             args,
             ctor_params: Some(params),
             ctor_desc: None,
+            external_target: None,
         })
     }
 
@@ -2138,17 +3316,6 @@ impl IrFile {
             .map(Vec::as_slice)
     }
 
-    pub fn insert_value_ctor_default(&mut self, internal: &str, expr: u32) {
-        self.value_ctor_defaults
-            .insert(crate::types::type_name(internal), expr);
-    }
-
-    pub fn value_ctor_default(&self, internal: &str) -> Option<u32> {
-        self.value_ctor_defaults
-            .get(&crate::types::type_name(internal))
-            .copied()
-    }
-
     pub fn insert_class_ctor_defaults(&mut self, internal: &str, defaults: Vec<Option<u32>>) {
         self.insert_class_ctor_defaults_name(crate::types::type_name(internal), defaults);
     }
@@ -2169,9 +3336,43 @@ impl IrFile {
         self.class_ctor_defaults.get(&internal)
     }
 
+    pub fn take_class_ctor_defaults_name(
+        &mut self,
+        internal: TypeName,
+    ) -> Option<Vec<Option<u32>>> {
+        self.class_ctor_defaults.remove(&internal)
+    }
+
+    pub fn insert_constructor_default_arguments(
+        &mut self,
+        construction: ExprId,
+        defaults: Vec<u32>,
+    ) {
+        if !defaults.is_empty() {
+            self.constructor_default_arguments
+                .insert(construction, defaults);
+        }
+    }
+
+    pub fn constructor_default_arguments(&self, construction: ExprId) -> &[u32] {
+        self.constructor_default_arguments
+            .get(&construction)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub fn insert_default_call_argument_positions(&mut self, call: ExprId, positions: Vec<u32>) {
+        if !positions.is_empty() {
+            self.default_call_argument_positions.insert(call, positions);
+        }
+    }
+
     pub fn insert_class_signature(&mut self, internal: &str, sig: IrGenericSig) {
-        self.class_signatures
-            .insert(crate::types::type_name(internal), sig);
+        self.insert_class_signature_name(crate::types::type_name(internal), sig);
+    }
+
+    pub fn insert_class_signature_name(&mut self, internal: TypeName, sig: IrGenericSig) {
+        self.class_signatures.insert(internal, sig);
     }
 
     pub fn class_signature(&self, internal: &str) -> Option<&IrGenericSig> {
@@ -2218,19 +3419,6 @@ impl IrFile {
             })
     }
 
-    /// Record the JVM owner a data-class field's `hashCode()` dispatches on (see `data_hashcode_owners`).
-    pub fn set_data_hashcode_owner(&mut self, class_internal: &str, field: &str, owner: String) {
-        self.data_hashcode_owners
-            .insert((class_internal.to_string(), field.to_string()), owner);
-    }
-
-    /// The JVM `hashCode()` owner recorded for a data-class field, if any.
-    pub fn data_hashcode_owner(&self, class_internal: &str, field: &str) -> Option<&str> {
-        self.data_hashcode_owners
-            .get(&(class_internal.to_string(), field.to_string()))
-            .map(String::as_str)
-    }
-
     pub fn insert_external_value_class_name(&mut self, internal: TypeName, underlying: Ty) {
         self.external_value_classes.insert(internal, underlying);
     }
@@ -2245,7 +3433,7 @@ impl IrFile {
 
     /// Resolve a value class's erased underlying type without making callers branch on whether the
     /// declaration belongs to this source file or was recovered from dependency metadata.
-    fn value_class_underlying_name(&self, internal: TypeName) -> Option<Ty> {
+    pub(crate) fn value_class_underlying_name(&self, internal: TypeName) -> Option<Ty> {
         self.external_value_class_name(internal)
             .copied()
             .or_else(|| {
@@ -2373,840 +3561,12 @@ impl IrFile {
     }
 }
 
-/// Invoke `f` on each direct child expression of `e`. The single structural definition of an
-/// `IrExpr`'s sub-expressions — tree walks (index shifting, scans) delegate here so a new variant is
-/// covered in one place. Written EXHAUSTIVELY (no `_` arm) on purpose: adding an `IrExpr` variant must
-/// fail to compile here rather than silently drop its children from every walk.
-pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
-    match &exprs[e as usize] {
-        IrExpr::Block { stmts, value } => {
-            stmts.iter().for_each(|&s| f(s));
-            value.iter().for_each(|&v| f(v));
-        }
-        IrExpr::When { branches } => branches.iter().for_each(|(c, b)| {
-            c.iter().for_each(|&c| f(c));
-            f(*b);
-        }),
-        IrExpr::Return(v) => v.iter().for_each(|&v| f(v)),
-        IrExpr::TypeOp { arg, .. }
-        | IrExpr::NotNullAssert { operand: arg, .. }
-        | IrExpr::LateinitCheck { operand: arg, .. }
-        | IrExpr::Throw { operand: arg }
-        | IrExpr::EnumValueOf { arg, .. }
-        | IrExpr::ReifiedTypeOp { arg, .. }
-        | IrExpr::RefNew { init: arg, .. }
-        | IrExpr::RefGet { holder: arg, .. }
-        | IrExpr::NewArray { size: arg, .. }
-        | IrExpr::PrimitiveNeg { operand: arg, .. } => f(*arg),
-        IrExpr::StringConcat(parts) => parts.iter().for_each(|&p| f(p)),
-        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
-            f(*lhs);
-            f(*rhs);
-        }
-        IrExpr::SetValue { value, .. }
-        | IrExpr::SetStatic { value, .. }
-        | IrExpr::SetExternalStaticField { value, .. } => f(*value),
-        IrExpr::SetField {
-            receiver, value, ..
-        }
-        | IrExpr::PropertyWrite {
-            receiver, value, ..
-        }
-        | IrExpr::RefSet {
-            holder: receiver,
-            value,
-            ..
-        } => {
-            f(*receiver);
-            f(*value);
-        }
-        IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
-        IrExpr::GetField { receiver, .. }
-        | IrExpr::LateinitInitialized { receiver, .. }
-        | IrExpr::PropertyRead { receiver, .. } => f(*receiver),
-        IrExpr::Call {
-            args,
-            dispatch_receiver,
-            ..
-        } => {
-            dispatch_receiver.iter().for_each(|&r| f(r));
-            args.iter().for_each(|&a| f(a));
-        }
-        IrExpr::MethodCall { receiver, args, .. } => {
-            f(*receiver);
-            args.iter().flatten().for_each(|&a| f(a));
-        }
-        IrExpr::InvokeFunction { func, args, .. } => {
-            f(*func);
-            args.iter().for_each(|&a| f(a));
-        }
-        IrExpr::New { args, .. } | IrExpr::Vararg { elements: args, .. } => {
-            args.iter().for_each(|&a| f(a))
-        }
-        IrExpr::Lambda {
-            captures,
-            inline_body,
-            ..
-        } => {
-            captures.iter().for_each(|&c| f(c));
-            inline_body.iter().for_each(|&b| f(b));
-        }
-        IrExpr::While {
-            cond, body, update, ..
-        } => {
-            f(*cond);
-            f(*body);
-            update.iter().for_each(|&u| f(u));
-        }
-        IrExpr::Try {
-            body,
-            catches,
-            finally,
-            ..
-        } => {
-            f(*body);
-            catches.iter().for_each(|c| f(c.body));
-            finally.iter().for_each(|&fin| f(fin));
-        }
-        IrExpr::PluginPlaceholder { exprs: kids, .. } => kids.iter().for_each(|&k| f(k)),
-        IrExpr::Const(_)
-        | IrExpr::ClassConst { .. }
-        | IrExpr::GetValue(_)
-        | IrExpr::GetStatic(_)
-        | IrExpr::Break { .. }
-        | IrExpr::Continue { .. }
-        | IrExpr::EnumEntry { .. }
-        | IrExpr::ExternalStaticField { .. }
-        | IrExpr::ExternalStaticInstance { .. }
-        | IrExpr::StaticInstance { .. }
-        | IrExpr::EnumValues { .. }
-        | IrExpr::ReifiedClassMarker { .. }
-        | IrExpr::UnitInstance
-        | IrExpr::CurrentContinuation => {}
-    }
-}
-
-/// Whether evaluating `expr` can run NO code at all — a literal or a local read. Strictly conservative:
-/// anything that touches a type (a static read, an enum entry, a singleton) can trigger that type's
-/// initializer, which is arbitrary user code, so it is NOT in this set. Used where a value the source
-/// program computes is discarded by the target form and the consumer must decide whether it still has to
-/// be evaluated.
-pub fn expr_runs_no_code(ir: &IrFile, expr: ExprId) -> bool {
-    matches!(
-        ir.expr(expr),
-        IrExpr::Const(_) | IrExpr::ClassConst { .. } | IrExpr::GetValue(_) | IrExpr::UnitInstance
-    )
-}
-
-/// Whether a top-level `foo$default` synthetic can be SAFELY emitted for `fid`. The function name must be
-/// unmangled — a value-class-parameter-mangled `foo-<hash>` needs box/unbox adaptation the plain facade
-/// stub doesn't model — and every registered default expression must be simple enough to re-emit inside
-/// the stub: no lambda, no `invoke`, no value-class-mangled call, and no reference to a value index beyond
-/// the parameters (a default that spilled a temp or captured a closure). A plain OBJECT/`new` construction
-/// (`filters: F = F()`) IS allowed — the stub re-emits it like any other value. Conservative — an unknown
-/// shape is rejected, so the caller falls back to the unchanged inline call-site fill (never a miscompile).
-pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
-    let f = &ir.functions[fid as usize];
-    // This gate runs at TWO times: during lowering (call-site routing, before the value-class pass)
-    // and at emission (stub gating, after it). The value-class pass MANGLES a function whose
-    // parameters mention a value class (`foo` → `foo-<hash>`) and erases those parameter types; the
-    // stub follows along (`foo-<hash>$default(erased params…)`, kotlinc's shape), so a value-class
-    // signature is allowed — with carve-outs the erased stub can't model, checked by whichever
-    // evidence the current time has: pre-pass by the still-value-class-typed parameters, post-pass
-    // by the mangled name / the pass's own records. Both runs must agree for every carve-out the
-    // POST-pass can see, or a call is routed to a stub that is never emitted (NoSuchMethodError);
-    // a pre-pass-only rejection merely leaves an uncalled stub. (Only the PARAMETERS matter: a
-    // file-class function's value-class return does not mangle its name — see `vc_mangle`.)
-    let vc_of = |t: &Ty| {
-        t.non_null()
-            .obj_internal()
-            .filter(|&n| ir.is_value_class_name(n))
-    };
-    let vc_params: Vec<TypeName> = f.params.iter().filter_map(vc_of).collect();
-    if f.name.contains('-') || !vc_params.is_empty() {
-        // A `suspend` function's CPS rewrite appends a trailing `Continuation` — for the stub it is
-        // just another loaded parameter (kotlinc: `pick-<hash>$default(int, String, Continuation,
-        // int, Object)` delegating to the CPS method). The mask covers only the DECLARED defaulted
-        // parameters, and the stub-safe gate already restricts defaults to simple constants, which
-        // cannot suspend — so the shape is modeled.
-        // A NULLABLE-underlying value-class param stays BOXED in kotlinc's stub signature; the plain
-        // facade stub emits fully erased params — not modeled. Post-pass evidence: the value-class
-        // pass recorded the boxed stub params (`vc_underlying_nullable`, which also recurses through
-        // a nested-VC underlying). Pre-pass evidence: the underlying's DIRECT nullability — the
-        // recursive nested case is covered by the nested-VC reject below, so the two runs agree.
-        if ir
-            .default_stub_boxed_params
-            .get(&fid)
-            .is_some_and(|v| !v.is_empty())
-        {
-            return false;
-        }
-        for &n in &vc_params {
-            // A GENERIC value class (`X<T>(val s: T)`) or a NESTED value-class underlying erases
-            // through extra layers the placeholder/adaptation here doesn't cover — conservative
-            // pre-pass reject (post-pass still emits the stub; it just gets no routed calls).
-            if !vc_stub_shape_ok(ir, n) {
-                return false;
-            }
-        }
-    }
-    // A user function literally named `<name>$default` (a back-ticked identifier) would collide with the
-    // synthetic — don't emit the stub (kotlinc also treats that as a conflicting declaration).
-    let stub_name = format!("{}$default", f.name);
-    if ir
-        .functions
-        .iter()
-        .any(|g| g.dispatch_receiver.is_none() && g.name == stub_name)
-    {
-        return false;
-    }
-    // Overloaded top-level functions may all have `<name>$default` siblings; the descriptor selects the
-    // concrete overload, just as it does for the real method. The lowerer reaches this path only after the
-    // checker has selected a source declaration / function id.
-    let n = f.params.len() as u32;
-    let Some(defaults) = ir.param_defaults(fid) else {
-        return false;
-    };
-    defaults.iter().enumerate().all(|(i, d)| match d {
-        Some(d) => {
-            default_expr_stub_safe(ir, *d, n) && default_root_slot_ok(ir, *d, f.params.get(i))
-        }
-        None => true,
-    })
-}
-
-/// The erased representations must MATCH where a default value lands: a value-class construction
-/// default (`z: Z = Z(42)`) re-emits as the unboxed `constructor-impl` call, so it can only fill a
-/// slot whose erased type IS that underlying — i.e. a parameter of exactly the same NON-nullable
-/// value class. A `Z?` (boxed slot), `Any`, or interface parameter would need a `box-impl` the
-/// erased stub doesn't model — rejected (a pre-pass-only reject merely leaves an uncalled stub:
-/// post-pass the default is already a rewritten call and passes trivially).
-fn default_root_slot_ok(ir: &IrFile, e: ExprId, param: Option<&Ty>) -> bool {
-    // Post-pass view: provenance recorded while rewriting the generic construction tells us the
-    // expression's erased result without inspecting a JVM helper name. The erased slot must be exactly
-    // that underlying type; a boxed or generic slot would require adaptation the facade does not model.
-    if let Some((_, underlying)) = ir.erased_value_constructions.get(&e) {
-        return param.is_some_and(|param| param == underlying);
-    }
-    match &ir.exprs[e as usize] {
-        // Pre-pass view: the default is a value-class `new` — the slot must be exactly the same
-        // NON-nullable value class (erased representations match).
-        IrExpr::New { internal, .. } if ir.is_value_class_name(*internal) => {
-            param.is_some_and(|p| !p.is_nullable() && p.obj_internal() == Some(*internal))
-        }
-        // A MANGLED classpath call returns the ERASED underlying (that is what the mangling
-        // means), so it can only fill a slot erased the same way — the same non-nullable value
-        // class pre-pass, or its erased underlying post-pass (the value-class pass has already
-        // rewritten the parameter). A boxed (`Duration?`) or widened slot would need a `box-impl`
-        // the erased stub doesn't model.
-        IrExpr::Call {
-            callee: Callee::Static { name, .. },
-            ..
-        } if name.contains('-') && !ir.erased_value_constructions.contains_key(&e) => {
-            let root_vc = ir
-                .logical_types
-                .get(&e)
-                .and_then(|t| t.non_null().obj_internal())
-                .filter(|&n| ir.is_value_class_name(n));
-            root_vc.is_some_and(|n| {
-                param.is_some_and(|p| {
-                    (!p.is_nullable() && p.obj_internal() == Some(n))
-                        || ir
-                            .value_class_underlying_name(n)
-                            .is_some_and(|underlying| *p == underlying)
-                })
-            })
-        }
-        root => {
-            // A param whose erased slot is PRIMITIVE (pre-pass: a non-nullable value-class param
-            // over a primitive underlying; post-pass: the already-erased param) can only be filled
-            // by a root carrying the erased representation — a const, a local slot, or a
-            // construction (handled above). Any OTHER value-class-typed root (a field/getter read,
-            // a coercion) carries the BOXED representation — stored raw in the stub, it fails
-            // class-load verification.
-            let primitive_slot = param.is_some_and(|p| {
-                !p.is_reference()
-                    || (!p.is_nullable()
-                        && p.obj_internal()
-                            .and_then(|name| ir.value_class_underlying_name(name))
-                            .is_some_and(|underlying| !underlying.is_reference()))
-            });
-            if !primitive_slot {
-                return true;
-            }
-            let root_is_vc = ir.logical_types.get(&e).is_some_and(|t| {
-                t.non_null()
-                    .obj_internal()
-                    .is_some_and(|name| ir.is_value_class_name(name))
-            });
-            !root_is_vc || matches!(root, IrExpr::Const(_) | IrExpr::GetValue(_))
-        }
-    }
-}
-
-/// Whether a value class is simple enough for the erased `$default` stub: non-generic, with a
-/// resolvable, non-nullable, non-nested-VC underlying — the carve-outs of
-/// [`toplevel_default_stub_safe`], shared by the parameter check and the default-expression
-/// construction check ([`default_expr_stub_safe`]).
-fn vc_stub_shape_ok(ir: &IrFile, n: TypeName) -> bool {
-    let vc_of = |t: &Ty| {
-        t.non_null()
-            .obj_internal()
-            .filter(|&name| ir.is_value_class_name(name))
-    };
-    let same_file = ir.classes.iter().find(|c| c.is_value && c.fq_name == n);
-    if same_file.is_some_and(|c| !c.type_params.is_empty()) {
-        return false;
-    }
-    let underlying = ir.value_class_underlying_name(n);
-    match underlying {
-        Some(u) if u.is_nullable() => false,
-        Some(u) if vc_of(&u).is_some() => false,
-        Some(_) => true,
-        None => false,
-    }
-}
-
-fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
-    match &ir.exprs[e as usize] {
-        IrExpr::GetValue(i) if *i >= n => return false,
-        IrExpr::SetValue { var, .. } if *var >= n => return false,
-        IrExpr::Variable { index, .. } if *index >= n => return false,
-        // A plain `new`/object construction (`f: F = F()`) is fine — the stub re-emits it. A
-        // VALUE/inline-class construction erases to its unboxed underlying — but the value-class
-        // pass rewrites it to a plain `constructor-impl` static call in registered defaults exactly
-        // as in function bodies, so the erased stub CAN re-emit it — behind the same carve-outs as
-        // a value-class parameter (a generic / nullable-underlying / nested-VC shape keeps the
-        // conservative reject: the file falls back to the inline call-site fill / skip).
-        IrExpr::New { internal, .. }
-            if ir.is_value_class_name(*internal) && !vc_stub_shape_ok(ir, *internal) =>
-        {
-            return false;
-        }
-        // A default LAMBDA (`f: (Int) -> Int = { it + 1 }`) is re-emittable: the closure construction
-        // only reads its captures, and those are checked as children (a capture of a spilled temp /
-        // enclosing local — any value `>= n` — rejects above). Its `inline_body` is in the lambda's OWN
-        // value numbering, but it is never emitted by the stub (the stub instantiates the closure), so
-        // a false child rejection there is merely conservative. A callable-ref (`RefNew`) or an
-        // `invoke` still reaches state the static stub layout doesn't carry.
-        IrExpr::Lambda { .. } => {}
-        IrExpr::RefNew { .. } | IrExpr::InvokeFunction { .. } => return false,
-        IrExpr::Call {
-            callee: Callee::Static { name, .. },
-            ..
-        } if name.contains('-')
-            // Only a construction that THIS pass rewrote is known safe. Generated-looking spellings
-            // are not reserved: accepting them by string would let an unrelated user/library call
-            // bypass the conservative mangled-call gate.
-            && !ir.erased_value_constructions.contains_key(&e) =>
-        {
-            // EXCEPT a mangled call whose checked RESULT is a stub-modelable value class
-            // (`timeout: Duration = 60.seconds` — a classpath companion-extension getter): the
-            // mangling means the physical return already IS the erased underlying, which is
-            // exactly the representation the erased stub passes along. Whether the SLOT agrees is
-            // [`default_root_slot_ok`]'s question. Both gate runs see the same evidence — a
-            // classpath callee carries its mangled JVM name before and after the value-class pass.
-            let vc_result = ir
-                .logical_types
-                .get(&e)
-                .and_then(|t| t.non_null().obj_internal())
-                .filter(|&n| ir.is_value_class_name(n));
-            if !vc_result.is_some_and(|n| vc_stub_shape_ok(ir, n)) {
-                return false;
-            }
-        }
-        _ => {}
-    }
-    let mut ok = true;
-    for_each_child(&ir.exprs, e, &mut |c| {
-        if !default_expr_stub_safe(ir, c, n) {
-            ok = false;
-        }
-    });
-    ok
-}
-
-/// Shift every value index (`GetValue`/`SetValue`/`Variable`) `>= threshold` by `by`, throughout the
-/// expression tree rooted at `e`. Used when a pass **appends parameters** to a function: the body's
-/// locals (numbered from the old parameter count) must move up by the number of new parameters so
-/// they don't collide with the inserted parameter slots.
-pub fn shift_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) {
-    fn shift(
-        ir: &mut IrFile,
-        e: ExprId,
-        threshold: u32,
-        by: u32,
-        visited: &mut std::collections::HashSet<ExprId>,
-    ) {
-        // Operands may be shared deliberately (for example, the receiver of the read and write halves
-        // of an access increment). The arena is therefore a DAG, not necessarily a tree: rewrite each
-        // expression once even when multiple parents reference it.
-        if !visited.insert(e) {
-            return;
-        }
-        match &mut ir.exprs[e as usize] {
-            IrExpr::GetValue(i) if *i >= threshold => *i += by,
-            IrExpr::SetValue { var, .. } if *var >= threshold => *var += by,
-            IrExpr::Variable { index, .. } if *index >= threshold => *index += by,
-            // A `catch (e) { … }` variable is DECLARED by the `IrCatch.var` field (not a `Variable`
-            // node); its uses inside the catch body are shifted by the recursion below, so the field
-            // must shift too or the binding and its reads desync.
-            IrExpr::Try { catches, .. } => {
-                for c in catches.iter_mut() {
-                    if c.var >= threshold {
-                        c.var += by;
-                    }
-                }
-            }
-            _ => {}
-        }
-        // A nested `Lambda`'s CAPTURES reference the ENCLOSING scope's value slots (shift them), but
-        // its `inline_body` is a copy of the lambda's own body in the lambda's OWN value numbering
-        // (captures + params) — recursing into it would corrupt those internal slots with this
-        // enclosing threshold/delta. So for a `Lambda`, shift only the captures (the impl method's
-        // body is a separate function, already untouched here).
-        if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
-            let caps = captures.clone();
-            for c in caps {
-                shift(ir, c, threshold, by, visited);
-            }
-            return;
-        }
-        let mut kids = Vec::new();
-        for_each_child(&ir.exprs, e, &mut |c| kids.push(c));
-        for c in kids {
-            shift(ir, c, threshold, by, visited);
-        }
-    }
-
-    let mut visited = std::collections::HashSet::new();
-    shift(ir, e, threshold, by, &mut visited);
-}
+mod traversal;
+pub use traversal::*;
+mod clone;
+pub use clone::*;
+mod semantic_validation;
+pub use semantic_validation::UndeterminedIrType;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_trivial_function_ir() {
-        // Model `fun answer(): Int = 42` in the IR by hand (lowering comes in a later phase).
-        let mut f = IrFile::default();
-        let lit = f.add_expr(IrExpr::Const(IrConst::Int(42)));
-        let ret = f.add_expr(IrExpr::Return(Some(lit)));
-        let body = f.add_expr(IrExpr::Block {
-            stmts: vec![ret],
-            value: None,
-        });
-        let fun = f.add_fun(IrFunction {
-            name: "answer".to_string(),
-            params: vec![],
-            ret: Ty::obj("kotlin/Int"),
-            body: Some(body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        assert_eq!(f.functions[fun as usize].name, "answer");
-        // The return type is a Kotlin FqName, not a JVM descriptor — the backend maps it.
-        match f.functions[fun as usize].ret.obj_internal() {
-            Some(fq) => assert_eq!(fq, "kotlin/Int"),
-            None => panic!("expected class type"),
-        }
-        assert!(matches!(f.expr(body), IrExpr::Block { .. }));
-    }
-
-    #[test]
-    fn expr_diverges_by_handles_branches_and_custom_leaves() {
-        let mut f = IrFile::default();
-        let condition = f.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        let first = f.add_expr(IrExpr::Return(None));
-        let second = f.add_expr(IrExpr::Throw { operand: condition });
-        let exhaustive = f.add_expr(IrExpr::When {
-            branches: vec![(Some(condition), first), (None, second)],
-        });
-        let non_exhaustive = f.add_expr(IrExpr::When {
-            branches: vec![(Some(condition), first)],
-        });
-        let custom_leaf = f.add_expr(IrExpr::Const(IrConst::Int(1)));
-
-        assert!(f.expr_diverges_by(exhaustive, &|_, _| false));
-        assert!(!f.expr_diverges_by(non_exhaustive, &|_, _| false));
-        assert!(f.expr_diverges_by(custom_leaf, &|id, _| id == custom_leaf));
-    }
-
-    #[test]
-    fn zero_for_value_type_tracks_primitive_carriers() {
-        assert_eq!(
-            IrConst::zero_for_value_type(Ty::Boolean),
-            IrConst::Boolean(false)
-        );
-        assert_eq!(IrConst::zero_for_value_type(Ty::Int), IrConst::Int(0));
-        assert_eq!(IrConst::zero_for_value_type(Ty::UInt), IrConst::Int(0));
-        assert_eq!(IrConst::zero_for_value_type(Ty::ULong), IrConst::Long(0));
-        assert_eq!(IrConst::zero_for_value_type(Ty::String), IrConst::Null);
-    }
-
-    #[test]
-    fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
-        // A `Lambda` whose CAPTURE references the enclosing slot 1 and whose `inline_body` references the
-        // lambda's OWN slot 1. Shifting the enclosing scope (threshold 1, +2) must shift the capture
-        // (1 → 3) but leave the lambda-internal `inline_body` reference (1) untouched.
-        let mut f = IrFile::default();
-        let cap = f.add_expr(IrExpr::GetValue(1)); // capture of enclosing value 1
-        let inner = f.add_expr(IrExpr::GetValue(1)); // the lambda's OWN value 1
-        let lam = f.add_expr(IrExpr::Lambda {
-            impl_fn: 0,
-            arity: 0,
-            captures: vec![cap],
-            sam: None,
-            inline_body: Some(inner),
-        });
-        let outer = f.add_expr(IrExpr::GetValue(1)); // an enclosing value 1, sibling of the lambda
-        let block = f.add_expr(IrExpr::Block {
-            stmts: vec![lam],
-            value: Some(outer),
-        });
-        shift_value_indices(&mut f, block, 1, 2);
-        assert!(
-            matches!(f.exprs[cap as usize], IrExpr::GetValue(3)),
-            "capture must shift 1 -> 3"
-        );
-        assert!(
-            matches!(f.exprs[outer as usize], IrExpr::GetValue(3)),
-            "enclosing ref must shift 1 -> 3"
-        );
-        assert!(
-            matches!(f.exprs[inner as usize], IrExpr::GetValue(1)),
-            "lambda-internal inline_body ref must NOT shift"
-        );
-    }
-
-    #[test]
-    fn shift_value_indices_rewrites_shared_children_once() {
-        let mut f = IrFile::default();
-        let shared = f.add_expr(IrExpr::GetValue(1));
-        let block = f.add_expr(IrExpr::Block {
-            stmts: vec![shared],
-            value: Some(shared),
-        });
-
-        shift_value_indices(&mut f, block, 1, 1);
-
-        assert!(matches!(f.expr(shared), IrExpr::GetValue(2)));
-    }
-
-    #[test]
-    fn ir_field_new_uses_kotlin_defaults() {
-        let f = IrField::new("x".to_string(), Ty::Int);
-        assert_eq!(f.name, "x");
-        assert_eq!(f.ty, Ty::Int);
-        assert_eq!(f.type_param, None);
-        assert_eq!(f.default, None);
-        // Kotlin default: private backing field, not known-final, not lateinit.
-        assert!(f.is_private());
-        assert!(!f.is_final());
-        assert!(!f.is_lateinit());
-    }
-
-    #[test]
-    fn arena_builders_append_and_index() {
-        let mut f = IrFile::default();
-        let a = f.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let b = f.add_expr(IrExpr::Const(IrConst::Int(2)));
-        assert_eq!(a, 0);
-        assert_eq!(b, 1);
-        assert!(matches!(f.expr(a), IrExpr::Const(IrConst::Int(1))));
-
-        let fid = f.add_fun(IrFunction {
-            name: "g".to_string(),
-            params: vec![],
-            ret: Ty::Unit,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        assert_eq!(fid, 0);
-        let cid = f.add_class(IrClass {
-            fq_name: "demo/C".into(),
-            ..blank_class("demo/C")
-        });
-        assert_eq!(cid, 0);
-        assert!(f.classes[cid as usize].fq_name_matches("demo/C"));
-    }
-
-    #[test]
-    fn for_each_child_visits_every_direct_operand() {
-        let mut f = IrFile::default();
-        let lhs = f.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let rhs = f.add_expr(IrExpr::Const(IrConst::Int(2)));
-        let bin = f.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs,
-            rhs,
-        });
-        let mut kids = Vec::new();
-        for_each_child(&f.exprs, bin, &mut |c| kids.push(c));
-        assert_eq!(kids, vec![lhs, rhs]);
-
-        // A leaf node (Const) has no children.
-        let mut none = Vec::new();
-        for_each_child(&f.exprs, lhs, &mut |c| none.push(c));
-        assert!(none.is_empty());
-
-        // A block visits its statements then its value.
-        let blk = f.add_expr(IrExpr::Block {
-            stmts: vec![lhs, rhs],
-            value: Some(bin),
-        });
-        let mut bk = Vec::new();
-        for_each_child(&f.exprs, blk, &mut |c| bk.push(c));
-        assert_eq!(bk, vec![lhs, rhs, bin]);
-    }
-
-    /// A minimal well-formed `IrClass` for tests that only exercise fields/functions on the file.
-    fn blank_class(fq: &str) -> IrClass {
-        IrClass {
-            fq_name: fq.into(),
-            is_source_declared: false,
-            is_anonymous_object: false,
-            enclosing_function: None,
-            is_inner_class: false,
-            is_local_class: false,
-            is_value: false,
-            is_data: false,
-            decl_line: 0,
-            type_param_bounds: Vec::new(),
-            type_params: Vec::new(),
-            captured_type_params: Vec::new(),
-            supertypes: Vec::new(),
-            properties: Vec::new(),
-            fields: Vec::new(),
-            field_annotations: Vec::new(),
-            property_annotations: Vec::new(),
-            ctor_param_count: 0,
-            ctor_args: Vec::new(),
-            ctor_param_annotations: Vec::new(),
-            init_body: None,
-            pre_super_param_fields: Vec::new(),
-            explicit_param_stores: false,
-            methods: Vec::new(),
-            is_interface: false,
-            is_fun_interface: false,
-            is_annotation: false,
-            annotation_impl_of: None,
-            is_sealed: false,
-            sealed_subclasses: Default::default(),
-            is_abstract: false,
-            is_open: false,
-            superclass: "kotlin/Any".into(),
-            super_args: Vec::new(),
-            super_ctor_params: Vec::new(),
-            enum_entries: Vec::new(),
-            enum_entry_of: None,
-            prop_ref: None,
-            func_ref: None,
-            bridges: Vec::new(),
-            interfaces: Default::default(),
-            is_object: false,
-            is_companion: false,
-            companion_class: None,
-            secondary_ctors: Vec::new(),
-            has_primary_ctor: true,
-            applied_annotations: DeclarationAnnotations::default(),
-            primary_ctor_annotations: DeclarationAnnotations::default(),
-            annotation_retention: None,
-        }
-    }
-
-    fn add_toplevel_fn(f: &mut IrFile, name: &str, param: Ty) -> u32 {
-        f.add_fun(IrFunction {
-            name: name.to_string(),
-            params: vec![param],
-            ret: Ty::Unit,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        })
-    }
-
-    #[test]
-    fn toplevel_default_stub_safe_accepts_a_simple_constant_default() {
-        let mut f = IrFile::default();
-        let fid = add_toplevel_fn(&mut f, "greet", Ty::Int);
-        let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-        f.fn_params
-            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
-        assert!(toplevel_default_stub_safe(&f, fid));
-    }
-
-    #[test]
-    fn toplevel_default_stub_safe_accepts_mangled_suspend_and_rejects_missing_defaults() {
-        // A value-class-MANGLED name (the post-pass view of a VC-param function) emits the mangled
-        // `foo-<hash>$default` stub, kotlinc's shape — accepted since the erased params carry no
-        // extra carve-out evidence.
-        let mut f = IrFile::default();
-        let fid = add_toplevel_fn(&mut f, "greet-abc123", Ty::Int);
-        let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-        f.fn_params
-            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
-        assert!(toplevel_default_stub_safe(&f, fid));
-
-        // A mangled SUSPEND function stays accepted: the CPS-appended Continuation is just another
-        // loaded stub parameter (kotlinc's pick-<hash>$default shape), and the constant-only
-        // default restriction already excludes anything that could suspend.
-        f.suspend_funs.push(fid);
-        assert!(toplevel_default_stub_safe(&f, fid));
-
-        let mut g = IrFile::default();
-        let gid = add_toplevel_fn(&mut g, "hello", Ty::Int);
-        assert!(!toplevel_default_stub_safe(&g, gid));
-    }
-
-    #[test]
-    fn toplevel_default_stub_safe_allows_overloaded_and_rejects_unsafe_default() {
-        let mut f = IrFile::default();
-        let fid = add_toplevel_fn(&mut f, "over", Ty::Int);
-        add_toplevel_fn(&mut f, "over", Ty::String);
-        let def = f.add_expr(IrExpr::Const(IrConst::Int(0)));
-        f.fn_params
-            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
-        assert!(toplevel_default_stub_safe(&f, fid));
-
-        let mut g = IrFile::default();
-        let gid = add_toplevel_fn(&mut g, "spill", Ty::Int);
-        let bad = g.add_expr(IrExpr::GetValue(3));
-        g.fn_params
-            .insert(gid, FnParamInfo::defaults(Vec::new(), vec![Some(bad)]));
-        assert!(!toplevel_default_stub_safe(&g, gid));
-    }
-
-    #[test]
-    fn toplevel_default_stub_safe_accepts_a_lambda_capturing_only_parameters() {
-        // `fun foo(base: Int, f: () -> Int = { base })` — the default lambda captures a PARAMETER
-        // (value 0, in scope inside the stub), so the stub can re-emit the closure construction.
-        let mut f = IrFile::default();
-        let fid = f.add_fun(IrFunction {
-            name: "foo".to_string(),
-            params: vec![Ty::Int, Ty::obj("kotlin/jvm/functions/Function0")],
-            ret: Ty::Int,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let cap = f.add_expr(IrExpr::GetValue(0));
-        let lam = f.add_expr(IrExpr::Lambda {
-            impl_fn: 0,
-            arity: 0,
-            captures: vec![cap],
-            sam: None,
-            inline_body: None,
-        });
-        f.fn_params.insert(
-            fid,
-            FnParamInfo::defaults(Vec::new(), vec![None, Some(lam)]),
-        );
-        assert!(toplevel_default_stub_safe(&f, fid));
-    }
-
-    #[test]
-    fn toplevel_default_stub_safe_rejects_a_lambda_capturing_a_spilled_temp() {
-        // A capture beyond the parameter range (a spilled temp / enclosing local) is not in scope in
-        // the static stub frame — rejected.
-        let mut f = IrFile::default();
-        let fid = add_toplevel_fn(&mut f, "foo", Ty::Int);
-        let cap = f.add_expr(IrExpr::GetValue(7));
-        let lam = f.add_expr(IrExpr::Lambda {
-            impl_fn: 0,
-            arity: 0,
-            captures: vec![cap],
-            sam: None,
-            inline_body: None,
-        });
-        f.fn_params
-            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(lam)]));
-        assert!(!toplevel_default_stub_safe(&f, fid));
-    }
-
-    #[test]
-    fn toplevel_default_stub_safe_value_class_param_pre_mangling() {
-        // The PRE-pass view of a VC-param function: plain name, value-class-typed param. A plain
-        // non-nullable underlying routes through the (soon-mangled) stub; a NULLABLE underlying stays
-        // boxed in kotlinc's stub signature (not modeled) — rejected.
-        let mut f = IrFile::default();
-        let mut c = blank_class("X");
-        c.is_value = true;
-        c.fields.push(IrField {
-            name: "s".to_string(),
-            ty: Ty::String,
-            type_param: None,
-            default: None,
-            flags: IrfFlags::default().with_is_final(true),
-        });
-        f.add_class(c);
-        let fid = add_toplevel_fn(&mut f, "foo", Ty::obj("X"));
-        let def = f.add_expr(IrExpr::Const(IrConst::Int(5)));
-        f.fn_params
-            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(def)]));
-        assert!(toplevel_default_stub_safe(&f, fid));
-
-        f.classes[0].fields[0].ty = Ty::nullable(Ty::String);
-        assert!(!toplevel_default_stub_safe(&f, fid));
-    }
-
-    #[test]
-    fn default_stub_trusts_value_construction_provenance_not_helper_spelling() {
-        // A generated-looking JVM name is not proof that a call came from value-class lowering: source
-        // and dependency declarations can use escaped identifiers. Keep the call rejected until the
-        // value-class pass explicitly records that this expression replaced a semantic construction.
-        let mut f = IrFile::default();
-        let fid = add_toplevel_fn(&mut f, "consume", Ty::Int);
-        let call = f.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: crate::types::type_name("example/Wrapper"),
-                name: "constructor-impl".to_string(),
-                descriptor: "(I)I".to_string(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: Vec::new(),
-        });
-        f.fn_params
-            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(call)]));
-
-        assert!(!toplevel_default_stub_safe(&f, fid));
-
-        f.record_erased_value_construction(
-            call,
-            crate::types::type_name("example/Wrapper"),
-            Ty::Int,
-        );
-        assert!(toplevel_default_stub_safe(&f, fid));
-    }
-
-    #[test]
-    fn default_stub_uses_external_value_class_metadata_without_a_source_class() {
-        // Dependency metadata and same-file declarations must enter the representation checks through
-        // one query. No synthetic `IrClass` is added here: the external semantic record alone identifies
-        // the value class and its primitive underlying slot.
-        let mut f = IrFile::default();
-        let wrapper = crate::types::type_name("dependency/Wrapper");
-        f.insert_external_value_class_name(wrapper, Ty::Int);
-        let fid = add_toplevel_fn(&mut f, "consume", Ty::obj_name(wrapper));
-        let argument = f.add_expr(IrExpr::Const(IrConst::Int(7)));
-        let construction = f.add_expr(IrExpr::New {
-            internal: wrapper,
-            args: vec![argument],
-            ctor_params: Some(vec![Ty::Int]),
-            ctor_desc: None,
-        });
-        f.fn_params.insert(
-            fid,
-            FnParamInfo::defaults(Vec::new(), vec![Some(construction)]),
-        );
-
-        assert!(toplevel_default_stub_safe(&f, fid));
-    }
-}
+mod tests;

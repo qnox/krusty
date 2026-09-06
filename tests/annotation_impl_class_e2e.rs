@@ -205,6 +205,36 @@ fn a_nested_annotation_from_the_classpath_uses_the_same_construction_model() {
     );
 }
 
+#[test]
+fn unsigned_annotation_member_and_const_keep_their_semantic_type_across_a_dependency() {
+    let dependency = common::compile_lib(
+        "unsigned_annotation_metadata",
+        r#"package dependency
+           annotation class Marker(val value: UInt)
+           const val ONE: UInt = 1u"#,
+    )
+    .expect("compile unsigned annotation dependency");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process(
+        r#"package consumer
+           import dependency.*
+           fun read(marker: Marker): UInt = marker.value
+           fun box(): String {
+               return if (ONE == 1u) "OK" else "FAIL"
+           }"#,
+        "Use",
+        &[dependency.clone(), stdlib.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("consume unsigned annotation metadata");
+
+    assert_eq!(
+        common::run_box(&classes, "consumer.UseKt", &[dependency, stdlib]).as_deref(),
+        Some("OK")
+    );
+}
+
 /// The implementation class emits its members in kotlinc's ORDER: the accessors, then `equals`,
 /// `hashCode`, `toString`, and `annotationType()` LAST.
 ///

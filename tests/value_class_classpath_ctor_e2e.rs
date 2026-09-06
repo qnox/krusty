@@ -8,6 +8,7 @@
 //! the JVM against a kotlinc-compiled value class (so its @Metadata/ABI is authoritative).
 
 use super::common;
+use krusty::jvm::classreader::parse_class;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
@@ -54,6 +55,91 @@ fn classpath_value_class_constructed_by_name() {
 
     let Some(out) = common::run_box(&classes, "MainKt", &[libout.clone(), stdlib_path]) else {
         eprintln!("skipping: box runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "box() returned {out:?}");
+}
+
+#[test]
+fn krusty_value_class_member_surface_round_trips_across_modules() {
+    let library = r#"
+        @JvmInline
+        value class A(val value: String) {
+            val Char.value: String get() = this + nonExtensionValue()
+            fun nonExtensionValue(): String = value
+        }
+    "#;
+    let main = r#"
+        fun box(): String = with(A("K")) { 'O'.value }
+    "#;
+
+    let Some(out) =
+        common::expect_box_run_against("value_class_member_surface_roundtrip", library, main)
+    else {
+        eprintln!("skipping: kotlinc/JVM toolchain unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "box() returned {out:?}");
+}
+
+#[test]
+fn legacy_inline_class_public_secondary_constructor_round_trips() {
+    let Some(libout) = common::compile_lib(
+        "legacy_inline_secondary_constructor",
+        "inline class A private constructor(val value: String) {\n\
+         \x20 constructor(c: Char) : this(c + \"K\")\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert!(
+        libout.join("A.class").is_file(),
+        "the dependency must emit the inline-class carrier"
+    );
+    let dependency = parse_class(&std::fs::read(libout.join("A.class")).expect("A.class bytes"))
+        .expect("A.class must be readable");
+    assert_ne!(dependency.access & 0x0001, 0, "A must remain public");
+    assert!(
+        krusty::jvm::metadata::class_inline(&dependency).is_some(),
+        "legacy inline syntax must publish the normalized value-class metadata shape"
+    );
+    let stdlib = common::stdlib_jar();
+    let classes = common::expect_compile_in_process(
+        "fun box(): String = A('O').value\n",
+        "Use",
+        &[libout.clone(), stdlib.clone()],
+        Some(common::jdk_modules().as_path()),
+    );
+    match common::run_box(&classes, "UseKt", &[libout, stdlib]) {
+        Some(output) => assert_eq!(output.trim(), "OK", "box() = {output:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}
+
+#[test]
+fn classpath_fun_interface_contextually_types_value_class_lambda_parameter() {
+    let library = r#"
+        package x
+
+        @JvmInline
+        value class A(val value: String)
+
+        fun interface B {
+            fun method(a: A): String
+        }
+    "#;
+    let main = r#"
+        import x.*
+
+        val b = B { it.value }
+
+        fun box(): String = b.method(A("OK"))
+    "#;
+
+    let Some(out) =
+        common::expect_box_run_against("fun_interface_value_class_lambda_parameter", library, main)
+    else {
+        eprintln!("skipping: kotlinc/JVM toolchain unavailable");
         return;
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");

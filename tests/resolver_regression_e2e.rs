@@ -1019,6 +1019,71 @@ fun use() = exact<CharSequence>("x")
 }
 
 #[test]
+fn suppressed_invisible_dependency_overload_finalizes_an_inferred_signature() {
+    let library = common::compile_lib(
+        "suppressed_invisible_dependency",
+        r#"package hidden
+internal fun choose(value: String) = "wrong"
+internal fun choose(value: String, marker: Any) = "OK"
+"#,
+    )
+    .expect("compile dependency");
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let diagnostics = common::front_end_diagnostics(
+        r#"import hidden.choose
+@Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+fun box() = choose("", Any())
+"#,
+        &[library, stdlib],
+        Some(jdk.as_path()),
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn signed_unary_constants_use_the_nullable_primitive_expectation() {
+    let diagnostics = common::front_end_diagnostics(
+        r#"fun values() {
+    val byte: Byte? = -1
+    val byteMin: Byte = -128
+    val short: Short? = +1
+    val shortMin: Short = -32768
+}
+"#,
+        &[],
+        None,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn flow_narrowed_primitive_can_still_be_compared_with_null() {
+    let diagnostics = common::front_end_diagnostics(
+        r#"fun decrement(value: Byte?): Byte? {
+    var current = value
+    if (current != null) current--
+    return current
+}
+"#,
+        &[],
+        None,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
+fn generic_elvis_joins_through_the_definitely_non_null_upper_bound() {
+    let diagnostics = common::front_end_diagnostics_with_stdlib(
+        r#"fun <T : Number?> choose(value: T) = value ?: 42
+fun consume(value: Number?): Int = (value ?: 42).toInt()
+fun use(): Int = choose<Int?>(null).toInt()
+"#,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
 fn source_char_code_extension_shadows_the_core_declaration() {
     let src = r#"
 val Char.code: Int get() = 99

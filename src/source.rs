@@ -13,7 +13,7 @@ pub enum SourceKind {
 
 impl SourceKind {
     pub fn is_batch_compilable(self) -> bool {
-        matches!(self, Self::Kotlin)
+        matches!(self, Self::Kotlin | Self::Java)
     }
 
     pub fn wire_code(self) -> u8 {
@@ -38,6 +38,10 @@ impl SourceKind {
 pub struct SourceInput<'a> {
     pub kind: SourceKind,
     pub text: &'a str,
+    /// This file belongs to a common source set folded into a platform compilation through
+    /// multiplatform `dependsOn`. Optional expectations without a target actual are visible only
+    /// in such files.
+    pub is_common: bool,
     /// Source-file stem when the caller has one. Declaration identities whose language-defined
     /// generated name is file-scoped must be assigned before signature collection, so the frontend
     /// cannot recover this later from an emitted facade name.
@@ -49,8 +53,14 @@ impl<'a> SourceInput<'a> {
         Self {
             kind,
             text,
+            is_common: false,
             file_stem: None,
         }
+    }
+
+    pub fn common(mut self) -> Self {
+        self.is_common = true;
+        self
     }
 
     pub fn with_file_stem(mut self, file_stem: &'a str) -> Self {
@@ -71,12 +81,13 @@ impl<'a> SourceInput<'a> {
     }
 }
 
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["kt", "kts"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["kt", "kts", "java"];
 
 pub fn kind(path: &Path) -> Option<SourceKind> {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("kt") => Some(SourceKind::Kotlin),
         Some("kts") => Some(SourceKind::KotlinScript),
+        Some("java") => Some(SourceKind::Java),
         _ => None,
     }
 }
@@ -232,9 +243,10 @@ mod tests {
     fn recognizes_supported_source_paths() {
         assert!(is_supported_path(Path::new("Main.kt")));
         assert!(is_supported_path(Path::new("build.gradle.kts")));
-        assert!(!is_supported_path(Path::new("Main.java")));
+        assert!(is_supported_path(Path::new("Main.java")));
         assert!(!is_supported_path(Path::new("README.md")));
         assert!(is_batch_compilable_path(Path::new("Main.kt")));
+        assert!(is_batch_compilable_path(Path::new("Main.java")));
         assert!(!is_batch_compilable_path(Path::new("script.kts")));
         assert_eq!(
             SourceKind::from_wire_code(SourceKind::KotlinScript.wire_code()),

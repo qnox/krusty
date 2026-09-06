@@ -30,6 +30,15 @@ fn bound_string_length_prop_ref() {
     assert_eq!(run(SRC).expect("bound string::length prop ref"), "OK");
 }
 
+#[test]
+fn unbound_string_length_prop_ref() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20 val f = String::length\n\
+        \x20 return if (f.get(\"kotlin\") == 6) \"OK\" else \"Fail: ${f.get(\"kotlin\")}\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("unbound String::length prop ref"), "OK");
+}
+
 // A bound PROPERTY reference on an ARBITRARY-EXPRESSION receiver of a USER class (`A(..)::p`): the
 // receiver expression is evaluated once and captured, then `get()` reads the property. Bound METHOD
 // refs on such a receiver already worked; the property form did not.

@@ -172,6 +172,62 @@ impl SymbolSource for CompositeSource<'_> {
     }
 }
 
+/// Caller-owned memo for repeated reads from an immutable composite source.
+///
+/// A checker creates one cache for its bounded source unit and drops it with that unit. The cache
+/// therefore retains only normalized declaration records, never syntax or executable bodies, and
+/// cannot outlive or conceal mutation of any contributing provider.
+#[derive(Default)]
+pub(crate) struct SymbolQueryCache {
+    records: std::cell::RefCell<
+        std::collections::HashMap<
+            SymbolNamespace,
+            std::collections::HashMap<String, std::rc::Rc<ResolvedSymbols>>,
+        >,
+    >,
+}
+
+/// Immutable composite view backed by a caller-owned [`SymbolQueryCache`].
+pub(crate) struct CachedCompositeSource<'a> {
+    source: CompositeSource<'a>,
+    cache: &'a SymbolQueryCache,
+}
+
+impl<'a> CachedCompositeSource<'a> {
+    pub(crate) fn new(children: Vec<&'a dyn SymbolSource>, cache: &'a SymbolQueryCache) -> Self {
+        Self {
+            source: CompositeSource::new(children),
+            cache,
+        }
+    }
+}
+
+impl SymbolSource for CachedCompositeSource<'_> {
+    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+        self.source.package_exists(parent, name)
+    }
+
+    fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+        if let Some(symbols) = self
+            .cache
+            .records
+            .borrow()
+            .get(&namespace)
+            .and_then(|records| records.get(name))
+        {
+            return symbols.clone();
+        }
+        let symbols = self.source.symbols(namespace, name);
+        self.cache
+            .records
+            .borrow_mut()
+            .entry(namespace)
+            .or_default()
+            .insert(name.to_owned(), symbols.clone());
+        symbols
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +236,38 @@ mod tests {
         Visibility,
     };
     use crate::types::Ty;
+    use std::cell::Cell;
+
+    struct CountingEmptySource {
+        queries: Cell<usize>,
+    }
+
+    impl SymbolSource for CountingEmptySource {
+        fn symbols(
+            &self,
+            _namespace: SymbolNamespace,
+            _name: &str,
+        ) -> std::rc::Rc<ResolvedSymbols> {
+            self.queries.set(self.queries.get() + 1);
+            std::rc::Rc::new(ResolvedSymbols::default())
+        }
+    }
+
+    #[test]
+    fn cached_composite_reuses_the_complete_record_without_allocating_a_hit_key() {
+        let source = CountingEmptySource {
+            queries: Cell::new(0),
+        };
+        let cache = SymbolQueryCache::default();
+        let composite = CachedCompositeSource::new(vec![&source], &cache);
+        let namespace = SymbolNamespace::Package(TypeName::ROOT);
+
+        let first = composite.symbols(namespace, "missing");
+        let second = composite.symbols(namespace, "missing");
+
+        assert!(std::rc::Rc::ptr_eq(&first, &second));
+        assert_eq!(source.queries.get(), 1);
+    }
 
     /// A minimal source: one top-level overload of a chosen name, one type shape.
     struct FakeSource {
@@ -233,6 +321,9 @@ mod tests {
                                     owner: self.owner.as_str().into(),
                                     receiver_rank: 0,
                                     source_key: None,
+                                    stable_declaration: None,
+                                    getter_declaration: None,
+                                    setter_declaration: None,
                                     source_member: None,
                                     accessor_derived: false,
                                 }],
@@ -244,6 +335,7 @@ mod tests {
                     is_kotlin: true,
                     access: crate::libraries::ClassifierAccess::Public,
                     source_file: None,
+                    stable_declaration: None,
                     is_nested: false,
                     outer_instance: None,
                     kind: crate::libraries::TypeKind::Class,
@@ -254,18 +346,21 @@ mod tests {
                     supertypes: vec![self.owner.clone()].into(),
                     supertype_templates: vec![Ty::obj(&self.owner)],
                     constructors: vec![],
-                    fields: vec![],
+                    hidden_member_properties: Default::default(),
                     declared_callables,
+                    declared_callable_order: Vec::new(),
                     members: vec![],
                     companion: vec![],
                     constants: std::collections::HashMap::new(),
                     sam_eligible: false,
                     callable_signature: None,
+                    callable_signatures: Vec::new(),
                     companion_object: None,
                     value_underlying: None,
                     value_underlying_property: None,
                     alias_target: None,
                     type_parameters: crate::types::TypeParameters::default(),
+                    own_type_parameter_count: 0,
                     sealed_subclasses: crate::types::TypeNameList::new(),
                     enum_entries: Vec::new(),
                     enum_entries_accessor: None,

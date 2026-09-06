@@ -117,3 +117,48 @@ fn mapped_number_has_one_semantic_superclass_path() {
         "OK",
     );
 }
+
+#[test]
+fn concrete_kotlin_property_discharges_mapped_abstract_accessor() {
+    const MAIN: &str = "class Strings : AbstractSet<String>() {\n\
+        override val size: Int get() = 0\n\
+        override fun iterator(): Iterator<String> = emptyList<String>().iterator()\n\
+    }\n\
+    fun box(): String = \"OK\"\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[MAIN],
+        "mapped abstract accessor implemented by property",
+    );
+}
+
+#[test]
+fn inherited_interface_delegation_discharges_abstract_function() {
+    const MAIN: &str = "interface Scope {\n\
+        fun value(text: String = \"OK\"): String\n\
+    }\n\
+    class ScopeImpl : Scope {\n\
+        override fun value(text: String): String = text\n\
+    }\n\
+    abstract class Delegated(scope: Scope) : Scope by scope\n\
+    class Child : Delegated(ScopeImpl())\n\
+    fun box(): String = \"OK\"\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[MAIN],
+        "inherited interface delegation abstract obligation",
+    );
+}
+
+#[test]
+fn alpha_renamed_generic_override_discharges_abstract_function() {
+    const MAIN: &str = "interface Transform {\n\
+        fun <T> apply(value: T): T\n\
+    }\n\
+    class Identity : Transform {\n\
+        override fun <U> apply(value: U): U = value\n\
+    }\n\
+    fun box(): String = \"OK\"\n";
+    common::expect_front_end_ok_files_with_stdlib(
+        &[MAIN],
+        "alpha-renamed generic abstract obligation",
+    );
+}

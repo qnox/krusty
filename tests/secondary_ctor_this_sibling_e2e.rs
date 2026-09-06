@@ -26,6 +26,31 @@ fn this_delegation_targets_sibling_secondary() {
 }
 
 #[test]
+fn value_class_secondary_constructor_may_reach_primary_through_a_sibling() {
+    const SRC: &str = r#"
+        import kotlin.jvm.JvmInline
+
+        @JvmInline
+        value class Foo<T : String>(val value: T) {
+            constructor(number: Int) : this("OK" as T) {
+                if (number == 0) throw IllegalArgumentException()
+                if (number == 1) return
+                return Unit
+            }
+
+            constructor(number: Double) : this(number.toInt())
+        }
+
+        fun box(): String = Foo<String>(42.0).value
+    "#;
+
+    assert_eq!(
+        common::module_front_end_diagnostics(&[("ValueClassSiblingCtor", SRC)]),
+        Some(Vec::<String>::new()),
+    );
+}
+
+#[test]
 fn named_this_delegation_is_reordered_for_the_primary() {
     const SRC: &str = "class A(val text: String, val number: Int) {\n\
         \x20 constructor(value: Int): this(number = value, text = \"n\")\n\

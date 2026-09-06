@@ -49,3 +49,34 @@ fn const_read_is_inlined_no_getstatic_in_box() {
         "no <clinit> for a const-only facade"
     );
 }
+
+// A DEPENDENCY companion constant (`Int.MAX_VALUE`, `Double.MAX_VALUE`) is folded by the checker and
+// recorded as a resolved constant, not as a property the getter path can read: there is no runtime
+// property behind it. Checked FIR consumes that decision directly, so a builtin limit reads as a
+// constant rather than failing as an unsupported member access.
+#[test]
+fn builtin_companion_constants_read_as_constants() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20 if (Int.MAX_VALUE <= 0) return \"int\"\n\
+        \x20 if (Long.MIN_VALUE >= 0L) return \"long\"\n\
+        \x20 if (Double.MAX_VALUE <= 0.0) return \"double\"\n\
+        \x20 val x = 1\n\
+        \x20 if (x !in Int.MIN_VALUE..Int.MAX_VALUE) return \"range\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("builtin companion constants"), "OK");
+}
+
+// A `const val` referenced by BARE NAME from inside its own classifier. The checker folds it exactly
+// as it folds a qualified `A.y`, so checked FIR consumes the folded constant rather than looking for
+// a local or a property to read.
+#[test]
+fn a_const_val_reads_by_bare_name_inside_its_own_object() {
+    const SRC: &str = "object A {\n\
+        \x20 val x = \"O${foo()}\"\n\
+        \x20 fun foo() = y\n\
+        \x20 const val y = \"K\"\n\
+        }\n\
+        fun box(): String = A.x\n";
+    assert_eq!(run(SRC).expect("bare-name const val"), "OK");
+}

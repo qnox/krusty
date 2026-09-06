@@ -99,31 +99,44 @@ fn a_star_projected_member_read_is_approximated_to_its_bound() {
 /// until the read and write views came from one position-aware substitution.
 #[test]
 fn a_write_through_a_projected_receiver_is_rejected() {
-    const SOURCE: &str = r#"
-        fun <T> MutableList<T>.setFirst(value: T) {
-            this[0] = value
-        }
-
-        fun member(m: MutableList<*>) {
-            m.add("x")
-        }
-
-        fun extension(m: MutableList<*>) {
-            m.setFirst("x")
-        }
-    "#;
-    let (code, _) = common::kotlinc_source_result("ProjectedReceiverWrite", SOURCE);
-    assert_ne!(
-        code, 0,
-        "kotlinc must reject a write through a star projection"
-    );
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let krusty =
-        common::front_end_diagnostics(SOURCE, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
-    assert_eq!(
-        krusty.len(),
-        2,
-        "both the member and the extension write must be rejected: {krusty:?}"
-    );
+    for (name, source) in [
+        (
+            "ProjectedMemberWrite",
+            r#"
+                fun member(m: MutableList<*>) {
+                    m.add("x")
+                }
+            "#,
+        ),
+        (
+            "ProjectedExtensionWrite",
+            r#"
+                fun <T> MutableList<T>.setFirst(value: T) {
+                    this[0] = value
+                }
+
+                fun extension(m: MutableList<*>) {
+                    m.setFirst("x")
+                }
+            "#,
+        ),
+    ] {
+        let (code, _) = common::kotlinc_source_result(name, source);
+        assert_ne!(
+            code, 0,
+            "kotlinc must reject {name} through a star projection"
+        );
+        let krusty = common::front_end_diagnostics(
+            source,
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path()),
+        );
+        assert_eq!(
+            krusty.len(),
+            1,
+            "Krusty must reject {name} through a star projection: {krusty:?}"
+        );
+    }
 }

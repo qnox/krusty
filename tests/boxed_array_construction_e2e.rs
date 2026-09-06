@@ -131,3 +131,17 @@ fun box(): String {\n\
     common::expect_true_e2e("context_typed_empty_arrayof_compiles_and_runs", SRC, &[]);
     assert_eq!(run(SRC).expect("context-typed empty arrayOf"), "OK");
 }
+
+#[test]
+fn inline_initializers_return_from_the_enclosing_function() {
+    const SRC: &str = "fun objectArray() {\n\
+    Array<String>(5) { i -> if (i == 3) return; i.toString() }\n\
+    throw AssertionError(\"object initializer did not return\")\n\
+}\n\
+fun primitiveArray() {\n\
+    IntArray(5) { i -> if (i == 3) return; i }\n\
+    throw AssertionError(\"primitive initializer did not return\")\n\
+}\n\
+fun box(): String { objectArray(); primitiveArray(); return \"OK\" }\n";
+    assert_eq!(run(SRC).expect("inline array initializers"), "OK");
+}

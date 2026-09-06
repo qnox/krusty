@@ -80,3 +80,39 @@ fn suspend_value_class_param_member_resolves_and_emits_cps() {
         "expected the value-class argument unboxed via constructor-impl"
     );
 }
+
+#[test]
+fn suspend_value_class_default_call_in_a_lambda_inserts_continuation_before_masks() {
+    let library = r#"
+        package lib
+
+        @JvmInline
+        value class Token(val value: String)
+
+        suspend fun read(token: Token = Token("OK")): String = token.value
+    "#;
+    let main = r#"
+        import kotlin.coroutines.*
+        import lib.read
+
+        fun runImmediate(block: suspend () -> String): String {
+            var outcome = "not completed"
+            block.startCoroutine(Continuation(EmptyCoroutineContext) {
+                outcome = it.getOrThrow()
+            })
+            return outcome
+        }
+
+        fun box(): String = runImmediate { read() }
+    "#;
+
+    let Some(output) = common::expect_box_run_against(
+        "suspend_value_class_default_continuation_slot",
+        library,
+        main,
+    ) else {
+        eprintln!("skipping: kotlinc/JVM toolchain unavailable");
+        return;
+    };
+    assert_eq!(output.trim(), "OK", "box() returned {output:?}");
+}

@@ -7,7 +7,8 @@ use krusty::ast::{
 };
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::{
-    lex_name_tokens, FrontendNameToken, FrontendNameTokenKind, FrontendSymbols,
+    lex_name_tokens, FrontendDeclarationId, FrontendNameToken, FrontendNameTokenKind,
+    FrontendSymbols,
 };
 use krusty::libraries::SourceMember;
 use krusty::types::{Ty, TypeName, Visibility};
@@ -111,6 +112,7 @@ pub struct DefinitionSymbols {
     declarations: HashMap<(u32, u32), DefinitionTarget>,
     source_classes: HashMap<String, SourceClass>,
     source_members: HashMap<SourceMember, DefinitionTarget>,
+    stable_declarations: HashMap<FrontendDeclarationId, DefinitionTarget>,
     members: HashMap<(String, String), Vec<MemberDefinition>>,
     member_parents: HashMap<String, Vec<ParentDefinition>>,
     object_owners: HashSet<String>,
@@ -178,20 +180,29 @@ impl DefinitionSymbols {
                             .source_classes
                             .insert(owner.clone(), source_class);
                         let class_symbols = symbols.class_by_internal(&owner);
+                        if let Some(stable) =
+                            class_symbols.and_then(|class| class.stable_declaration)
+                        {
+                            definitions.stable_declarations.insert(stable, target);
+                        }
                         for (property_index, parameter) in class.props.iter().enumerate() {
                             if parameter.is_property && parameter.span.lo < parameter.span.hi {
                                 let target = DefinitionTarget {
                                     file: file_index as u32,
                                     span: definition_name_span(source, parameter.span),
                                 };
-                                definitions.source_members.insert(
-                                    SourceMember::ClassProperty {
-                                        file: file_index as u32,
-                                        owner: declaration.0,
-                                        property: property_index as u32,
-                                    },
-                                    target,
-                                );
+                                let source_member = SourceMember::ClassProperty {
+                                    file: file_index as u32,
+                                    owner: declaration.0,
+                                    property: property_index as u32,
+                                };
+                                definitions.source_members.insert(source_member, target);
+                                if let Some(stable) = class_symbols.and_then(|class| {
+                                    class
+                                        .stable_property_declaration(source_member, &parameter.name)
+                                }) {
+                                    definitions.stable_declarations.insert(stable, target);
+                                }
                                 definitions.insert_hover(
                                     target,
                                     format!(
@@ -227,14 +238,17 @@ impl DefinitionSymbols {
                                     file: file_index as u32,
                                     span,
                                 };
-                                definitions.source_members.insert(
-                                    SourceMember::ClassProperty {
-                                        file: file_index as u32,
-                                        owner: declaration.0,
-                                        property: (class.props.len() + body_property_index) as u32,
-                                    },
-                                    target,
-                                );
+                                let source_member = SourceMember::ClassProperty {
+                                    file: file_index as u32,
+                                    owner: declaration.0,
+                                    property: (class.props.len() + body_property_index) as u32,
+                                };
+                                definitions.source_members.insert(source_member, target);
+                                if let Some(stable) = class_symbols.and_then(|class| {
+                                    class.stable_property_declaration(source_member, &property.name)
+                                }) {
+                                    definitions.stable_declarations.insert(stable, target);
+                                }
                                 definitions.insert_hover(
                                     target,
                                     render_property_hover(
@@ -316,6 +330,11 @@ impl DefinitionSymbols {
                                     file: file_index as u32,
                                     span,
                                 };
+                                if let Some(stable) =
+                                    signature.and_then(|signature| signature.stable_declaration)
+                                {
+                                    definitions.stable_declarations.insert(stable, target);
+                                }
                                 definitions.source_members.insert(
                                     SourceMember::Class {
                                         file: file_index as u32,
@@ -374,6 +393,11 @@ impl DefinitionSymbols {
                                         file: file_index as u32,
                                         span,
                                     };
+                                    if let Some(stable) =
+                                        signature.and_then(|signature| signature.stable_declaration)
+                                    {
+                                        definitions.stable_declarations.insert(stable, target);
+                                    }
                                     definitions.source_members.insert(
                                         SourceMember::Class {
                                             file: file_index as u32,
@@ -424,18 +448,24 @@ impl DefinitionSymbols {
                                         file: file_index as u32,
                                         span,
                                     };
-                                    definitions.source_members.insert(
-                                        SourceMember::ClassProperty {
-                                            file: file_index as u32,
-                                            owner: class
-                                                .companion
-                                                .expect("companion declaration was resolved")
-                                                .0,
-                                            property: (companion.props.len() + body_property_index)
-                                                as u32,
-                                        },
-                                        target,
-                                    );
+                                    let source_member = SourceMember::ClassProperty {
+                                        file: file_index as u32,
+                                        owner: class
+                                            .companion
+                                            .expect("companion declaration was resolved")
+                                            .0,
+                                        property: (companion.props.len() + body_property_index)
+                                            as u32,
+                                    };
+                                    definitions.source_members.insert(source_member, target);
+                                    if let Some(stable) = companion_symbols.and_then(|class| {
+                                        class.stable_property_declaration(
+                                            source_member,
+                                            &property.name,
+                                        )
+                                    }) {
+                                        definitions.stable_declarations.insert(stable, target);
+                                    }
                                     definitions.insert_hover(
                                         target,
                                         render_property_hover(
@@ -531,6 +561,11 @@ impl DefinitionSymbols {
                                             && signature.source_decl == Some(declaration)
                                     })
                                 });
+                            if let Some(stable) =
+                                signature.and_then(|signature| signature.stable_declaration)
+                            {
+                                definitions.stable_declarations.insert(stable, target);
+                            }
                             definitions.insert_hover(
                                 target,
                                 render_function_hover(
@@ -1159,6 +1194,13 @@ impl DefinitionSymbols {
 
     pub(crate) fn source_member_target(&self, source: SourceMember) -> Option<DefinitionTarget> {
         self.source_members.get(&source).copied()
+    }
+
+    pub(crate) fn stable_declaration_target(
+        &self,
+        declaration: FrontendDeclarationId,
+    ) -> Option<DefinitionTarget> {
+        self.stable_declarations.get(&declaration).copied()
     }
 
     pub(crate) fn extension_value_target(

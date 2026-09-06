@@ -116,3 +116,41 @@ fn krusty_emits_aliases_targeting_classpath_types() {
         "OK"
     );
 }
+
+#[test]
+fn redundant_alias_argument_on_a_member_property_stays_a_type_parameter() {
+    const REDUNDANT_LIB: &str = "package lib\n\
+        typealias Names<T> = List<String>\n\
+        class Holder<T> { val names: Names<T>? = null }\n";
+    const MAIN: &str = "import lib.Holder\n\
+        fun box(): String = if (Holder<Int>().names == null) \"OK\" else \"fail\"\n";
+
+    assert_eq!(
+        common::expect_box_run_against("tae_redundant_member", REDUNDANT_LIB, MAIN)
+            .expect("toolchain"),
+        "OK"
+    );
+}
+
+#[test]
+fn dependency_alias_inference_preserves_a_local_nullable_property_parameter() {
+    const ALIAS_LIB: &str = "package failure\n\
+        typealias FailureOr<F> = Result<F>\n\
+        class Result<out R>(val value: Any?)\n\
+        class Failure<out E>(val error: E)\n\
+        fun <U> failure(): FailureOr<U> = Result(Failure(Unit))\n\
+        fun <T> success(value: T): Result<T> = Result(value)\n";
+    const MAIN: &str = "import failure.*\n\
+        class Single<S : Any>(val initialValue: S? = null)\n\
+        fun <I, O> I.let(f: (I) -> O): O = f(this)\n\
+        fun getLicense(key: String?): Single<FailureOr<String>> =\n\
+            Single(key?.let { success(it) } ?: failure())\n\
+        fun box(): String =\n\
+            if (getLicense(null).initialValue?.value is Failure<*>) \"OK\" else \"fail\"\n";
+
+    assert_eq!(
+        common::expect_box_run_against("tae_nullable_property", ALIAS_LIB, MAIN)
+            .expect("toolchain"),
+        "OK"
+    );
+}

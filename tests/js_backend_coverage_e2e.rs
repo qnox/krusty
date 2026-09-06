@@ -2,24 +2,24 @@
 
 use super::common;
 
-use std::path::PathBuf;
-
 /// Lower `src`, emit JS, append `console.log(box())`, run on Node. Returns Node's stdout, or `None`
-/// to skip (toolchain/node missing or a front-end gap).
+/// to skip only when Node is unavailable. A compiler rejection is a test failure.
 fn run(src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar();
-    let java_home = common::java_home();
-    let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let mut js = common::compile_js_in_process(src, "Main", &[stdlib], Some(&jdk))?;
+    let mut js = common::compile_js_in_process(src, "Main").unwrap_or_else(|diagnostics| {
+        panic!(
+            "JS production pipeline rejected source:\n{src}\n--- diagnostics ---\n{}",
+            diagnostics.join("\n")
+        )
+    });
     js.push_str("\nconsole.log(box());\n");
     common::run_js(&js)
 }
 
-/// Assert Node prints `expected`; skip (return) if the toolchain/node is unavailable.
+/// Assert Node prints `expected`; skip only if Node is unavailable.
 fn check(src: &str, expected: &str) {
     match run(src) {
         Some(out) => assert_eq!(out, expected, "js output mismatch\n--- src ---\n{src}"),
-        None => eprintln!("skipping js_backend_coverage_e2e: no stdlib/JDK/node"),
+        None => eprintln!("skipping js_backend_coverage_e2e: node is unavailable"),
     }
 }
 
