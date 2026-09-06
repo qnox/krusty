@@ -291,12 +291,8 @@ fn compile_source(
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
     let inputs = [krusty::source::SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
-        &inputs,
-        platform,
-        &features,
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
-        &mut diags,
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs, platform, &features, &mut diags,
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_jvm_default(krusty::conformance::jvm_default_mode(src));
@@ -543,12 +539,8 @@ fn compile_blocks_mixed(
             .iter()
             .map(|(stem, content)| krusty::source::SourceInput::java(content).with_file_stem(stem)),
     );
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
-        &inputs,
-        platform,
-        features,
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
-        &mut diags,
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs, platform, features, &mut diags,
     );
     let jvm_default = blocks
         .iter()
