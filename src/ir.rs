@@ -93,6 +93,14 @@ pub enum Callee {
         owner: TypeName,
         function: FunId,
     },
+    /// A checked call to a static source function with omitted semantic parameters. The argument
+    /// vector contains only supplied values in declaration order; defaults names omitted ordinals.
+    /// A backend chooses its own default-argument calling convention.
+    ClassStaticWithDefaults {
+        owner: TypeName,
+        function: FunId,
+        defaults: Box<[u32]>,
+    },
     /// `$default` companion of a static function owned by a class in this IR file.
     ClassStaticDefault {
         owner: TypeName,
@@ -104,6 +112,12 @@ pub enum Callee {
     /// `Object` marker to the real function's parameters. Used when a call omits a (possibly non-const)
     /// defaulted argument, mirroring kotlinc's default-argument ABI.
     LocalDefault(FunId),
+    /// A checked call to a source function in this IR file with omitted semantic parameters.
+    /// The argument vector contains only supplied values in declaration order.
+    LocalWithDefaults {
+        function: FunId,
+        defaults: Box<[u32]>,
+    },
     Intrinsic {
         operation: IrIntrinsic,
         ret: Ty,
@@ -133,7 +147,23 @@ pub enum Callee {
         name: String,
         params: Vec<Ty>,
         ret: Ty,
-        default_call: bool,
+    },
+    /// A checked same-module call with omitted semantic parameters. Unlike Module, this form
+    /// contains no target ABI masks, marker parameter, synthetic name, or placeholder values.
+    /// The argument vector contains supplied values in declaration order; defaults identifies holes.
+    ModuleWithDefaults {
+        target: crate::fir::CallableId,
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+        defaults: Box<[u32]>,
+        /// Semantic dispatch-receiver type for a member default call. It remains separate from the
+        /// declared parameter list and is transformed before a backend places that receiver in its
+        /// physical default-call convention.
+        dispatch_receiver_ty: Option<Ty>,
+        /// Checked position of an extension receiver in params. A backend that numbers default
+        /// masks independently from the receiver consumes this fact directly.
+        extension_receiver_parameter: Option<u32>,
     },
     /// A dependency callable selected by the frontend. The opaque declaration identity is realized
     /// by the target provider after common lowering; semantic parameters/results remain available to
@@ -245,8 +275,10 @@ impl Callee {
     pub(crate) fn source_function(&self) -> Option<FunId> {
         match self {
             Callee::Local(function)
+            | Callee::LocalWithDefaults { function, .. }
             | Callee::LocalDefault(function)
             | Callee::ClassStatic { function, .. }
+            | Callee::ClassStaticWithDefaults { function, .. }
             | Callee::ClassStaticDefault { function, .. } => Some(*function),
             _ => None,
         }
@@ -2458,11 +2490,6 @@ pub struct IrFile {
     /// overload selection. Ordinals include any leading captured parameters in the physical common
     /// constructor shape.
     pub constructor_default_arguments: std::collections::HashMap<ExprId, Vec<u32>>,
-    /// Checked defaulted-call operand positions, keyed by the call expression. The positions refer
-    /// directly to that call's argument vector after receiver insertion and before any target ABI
-    /// suffix. A backend that changes a parameter's representation uses this exact mapping to replace
-    /// the semantic zero placeholder; it must not rediscover omitted parameters from masks or names.
-    pub default_call_argument_positions: std::collections::HashMap<ExprId, Vec<u32>>,
     /// Current class identity → semantic superclass-constructor parameter ordinals omitted by its
     /// primary delegation. Kept separate from `super_args` so common IR does not encode a target's
     /// mask/marker ABI.
@@ -3359,12 +3386,6 @@ impl IrFile {
             .get(&construction)
             .map(Vec::as_slice)
             .unwrap_or_default()
-    }
-
-    pub fn insert_default_call_argument_positions(&mut self, call: ExprId, positions: Vec<u32>) {
-        if !positions.is_empty() {
-            self.default_call_argument_positions.insert(call, positions);
-        }
     }
 
     pub fn insert_class_signature(&mut self, internal: &str, sig: IrGenericSig) {

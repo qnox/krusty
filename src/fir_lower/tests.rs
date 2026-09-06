@@ -229,13 +229,7 @@ fn sibling_extension_provide_delegate_keeps_receiver_in_module_call_shape() {
         .iter()
         .find_map(|expression| match expression {
             IrExpr::Call {
-                callee:
-                    Callee::Module {
-                        name,
-                        params,
-                        default_call: false,
-                        ..
-                    },
+                callee: Callee::Module { name, params, .. },
                 args,
                 ..
             } if name == "provideDelegate" => Some((params, args)),
@@ -1332,7 +1326,7 @@ fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
 }
 
 #[test]
-fn same_file_defaults_and_varargs_are_consumed_before_backend_emission() {
+fn same_file_defaults_and_varargs_are_semantic_before_backend_emission() {
     let defaults = lower_single_source(
         "fun selected(left: Int = 1, right: Int = 2): Int = left\n\
          fun caller(): Int = selected(right = 7)\n",
@@ -1341,10 +1335,10 @@ fn same_file_defaults_and_varargs_are_consumed_before_backend_emission() {
     assert!(defaults.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::LocalDefault(_),
+            callee: crate::ir::Callee::LocalWithDefaults { defaults, .. },
             args,
             ..
-        } if args.len() == 4
+        } if defaults.as_ref() == [0] && args.len() == 1
     )));
     assert!(!defaults
         .exprs
@@ -1701,7 +1695,7 @@ fn checked_local_suspend_modifier_reaches_common_ir() {
 }
 
 #[test]
-fn local_default_call_uses_lifted_default_stub_without_checked_placeholder() {
+fn local_default_call_keeps_semantic_omission_without_abi_placeholders() {
     let ir = lower_single_source(
         r#"
             fun outer(): Int {
@@ -1726,12 +1720,15 @@ fn local_default_call_uses_lifted_default_stub_without_checked_placeholder() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::LocalDefault(function),
+            callee: crate::ir::Callee::LocalWithDefaults {
+                function,
+                defaults,
+            },
             args,
             ..
         } if *function == selected
-            && args.len() == 5
-            && matches!(ir.expr(args[3]), IrExpr::Const(IrConst::Int(2)))
+            && defaults.as_ref() == [1]
+            && args.len() == 2
     )));
     assert!(ir
         .exprs
@@ -1879,12 +1876,15 @@ fn adapted_local_function_reference_becomes_default_call_wrapper() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::LocalDefault(function),
+            callee: crate::ir::Callee::LocalWithDefaults {
+                function,
+                defaults,
+            },
             args,
             ..
         } if *function == join
-            && args.len() == 4
-            && matches!(ir.expr(args[2]), IrExpr::Const(IrConst::Int(2)))
+            && defaults.as_ref() == [1]
+            && args.len() == 1
     )));
     assert!(ir.classes.iter().any(|class| {
         class
@@ -2531,7 +2531,6 @@ fn sibling_inline_adapted_reference_uses_the_retained_inline_template() {
         IrExpr::Call {
             callee: crate::ir::Callee::Module {
                 name,
-                default_call: false,
                 ..
             },
             dispatch_receiver: None,

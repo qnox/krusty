@@ -45,6 +45,7 @@ pub fn emit_file(ir: &IrFile) -> String {
                 f.name,
                 params.join(", ")
             ));
+            emit_default_initializers(ir, fid, 2, !f.is_static, &mut out);
             emit_stmt(ir, body, 2, !f.is_static, &mut out);
             out.push_str("  }\n");
         }
@@ -67,10 +68,32 @@ pub fn emit_file(ir: &IrFile) -> String {
         let _ = i;
         let params: Vec<String> = (0..f.params.len()).map(|i| format!("v{i}")).collect();
         out.push_str(&format!("function {}({}) {{\n", f.name, params.join(", ")));
+        emit_default_initializers(ir, i as u32, 1, false, &mut out);
         emit_stmt(ir, body, 1, false, &mut out);
         out.push_str("}\n");
     }
     out
+}
+
+fn emit_default_initializers(
+    ir: &IrFile,
+    function: u32,
+    depth: usize,
+    instance: bool,
+    out: &mut String,
+) {
+    let Some(defaults) = ir.param_defaults(function) else {
+        return;
+    };
+    for (parameter, default) in defaults.iter().enumerate() {
+        let Some(default) = default else { continue };
+        let value = parameter + usize::from(instance);
+        indent(depth, out);
+        out.push_str(&format!(
+            "if (v{value} === undefined) v{value} = {};\n",
+            emit_expr(ir, *default, instance)
+        ));
+    }
 }
 
 fn class_simple(fq: &str) -> &str {
@@ -260,6 +283,29 @@ fn emit_args(ir: &IrFile, args: &[u32], inst: bool) -> String {
         .join(", ")
 }
 
+fn emit_args_with_defaults(
+    ir: &IrFile,
+    args: &[u32],
+    defaults: &[u32],
+    parameter_count: usize,
+    inst: bool,
+) -> String {
+    let mut supplied = args.iter().copied();
+    (0..parameter_count)
+        .map(|parameter| {
+            if defaults.contains(&(parameter as u32)) {
+                "undefined".to_owned()
+            } else {
+                supplied
+                    .next()
+                    .map(|argument| emit_expr(ir, argument, inst))
+                    .unwrap_or_else(|| "undefined".to_owned())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
     match node {
         IrExpr::Const(c) => match c {
@@ -385,6 +431,21 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     emit_args(ir, args, inst)
                 )
             }
+            Callee::ClassStaticWithDefaults {
+                owner,
+                function,
+                defaults,
+            } => {
+                let name = &ir.functions[*function as usize].name;
+                let owner = owner.render();
+                let parameter_count = ir.functions[*function as usize].params.len();
+                format!(
+                    "{}.{}({})",
+                    class_simple(&owner),
+                    name,
+                    emit_args_with_defaults(ir, args, defaults, parameter_count, inst)
+                )
+            }
             Callee::ClassStaticDefault { owner, function } => {
                 let name = format!("{}$default", ir.functions[*function as usize].name);
                 let owner = owner.render();
@@ -399,6 +460,14 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 let name = format!("{}$default", ir.functions[*fid as usize].name);
                 format!("{}({})", name, emit_args(ir, args, inst))
             }
+            Callee::LocalWithDefaults { function, defaults } => {
+                let declaration = &ir.functions[*function as usize];
+                format!(
+                    "{}({})",
+                    declaration.name,
+                    emit_args_with_defaults(ir, args, defaults, declaration.params.len(), inst,)
+                )
+            }
             // A resolved JVM static call has no JS equivalent — emit the receiver-first form by name.
             Callee::Static { name, .. } => {
                 format!("{}({})", name, emit_args(ir, args, inst))
@@ -407,15 +476,22 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             Callee::CrossFile { name, .. } => {
                 format!("{}({})", name, emit_args(ir, args, inst))
             }
-            Callee::Module {
-                name, default_call, ..
-            } => {
-                let name = if *default_call {
-                    format!("{name}$default")
-                } else {
-                    name.clone()
-                };
+            Callee::Module { name, .. } => {
                 format!("{}({})", name, emit_args(ir, args, inst))
+            }
+            Callee::ModuleWithDefaults {
+                name,
+                params,
+                defaults,
+                ..
+            } => {
+                let args = emit_args_with_defaults(ir, args, defaults, params.len(), inst);
+                match dispatch_receiver {
+                    Some(receiver) => {
+                        format!("{}.{}({})", emit_expr(ir, *receiver, inst), name, args)
+                    }
+                    None => format!("{}({})", name, args),
+                }
             }
             Callee::External { target, .. } => format!(
                 "__krusty_external_{}({})",

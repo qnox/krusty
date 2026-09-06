@@ -118,6 +118,15 @@ fn class_field_and_method() {
 }
 
 #[test]
+fn default_arguments_use_semantic_omissions() {
+    check(
+        "fun join(first: String = \"O\", second: String = \"K\"): String = first + second\n\
+         fun box(): String = join(second = \"K\")",
+        "OK",
+    );
+}
+
+#[test]
 fn body_property_jvm_defaults_remain_semantic_initializers() {
     // JVM storage starts as zero/null and may omit these physical stores. JavaScript fields start as
     // `undefined`, so common IR must retain the Kotlin initializers for this backend to realize.

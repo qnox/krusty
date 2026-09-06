@@ -21,6 +21,8 @@ pub enum SkipReason {
     /// `derive_bridges` — an override whose bridge cannot be modeled (a bounded type-param erasure, or a
     /// `suspend` override the coroutine pass would rewrite out from under the bridge).
     Bridges,
+    /// JVM default-argument operands could not be realized from a checked semantic call.
+    DefaultCalls,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -51,14 +53,17 @@ pub enum SkipReason {
 /// 7. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
 ///
-/// 8. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
+/// 8. `realize_default_calls` — materialize JVM placeholders, masks, and marker operands only after
+///    value-class lowering has fixed their physical carriers.
 ///
-/// 9. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 9. `lower_class_capture_slots` — realize marked mutable class captures as JVM `Ref` holders.
 ///
-/// 10. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 10. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+///
+/// 11. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///     (`require`/`check`) message lambda; it is spliced at the call site.
 ///
-/// 11. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 12. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///     its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///     be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///     ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -113,6 +118,7 @@ pub fn run_backend_passes_with_metadata(
         &module_readable_value_classes,
         classpath,
         continuation_metadata,
+        None,
     )
 }
 
@@ -122,19 +128,20 @@ pub fn run_backend_passes_with_checked_metadata(
     ir: &mut crate::ir::IrFile,
     facade: &str,
     module_name: &str,
-    module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
-    module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
+    classifiers: &CheckedBackendClassifiers<'_>,
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
+    stems: &[String],
 ) -> Result<(), SkipReason> {
     crate::plugins::run_enabled_from_ir(ir, module_name, jvm_plugin_type_descriptor);
     run_backend_passes_after_plugins(
         ir,
         facade,
-        module_value_classes,
-        module_readable_value_classes,
+        classifiers.module().source_value_classes(),
+        classifiers.module().metadata_readable_value_classes(),
         classpath,
         continuation_metadata,
+        Some(stems),
     )
 }
 
@@ -145,6 +152,7 @@ fn run_backend_passes_after_plugins(
     module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
+    stems: Option<&[String]>,
 ) -> Result<(), SkipReason> {
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
@@ -185,6 +193,10 @@ fn run_backend_passes_after_plugins(
         module_readable_value_classes,
     ) {
         return Err(SkipReason::ValueClasses);
+    }
+    if let Some(stems) = stems {
+        crate::jvm::module_calls::realize_default_calls(ir, stems)
+            .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
     if !crate::jvm::suspend::lower_suspend(ir, facade, continuation_metadata) {
@@ -748,14 +760,19 @@ impl JvmBackend {
 
     fn emit_streamed_ir(
         &self,
-        mut ir: crate::ir::IrFile,
-        classifiers: &CheckedBackendClassifiers<'_>,
-        module_name: &str,
-        stem: &str,
+        file: crate::backend::CheckedIrFile<'_>,
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
+        let crate::backend::CheckedIrFile {
+            mut ir,
+            source,
+            classifiers,
+            module_name,
+            stems,
+        } = file;
+        let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let mut continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
@@ -763,10 +780,10 @@ impl JvmBackend {
             &mut ir,
             &facade_name,
             module_name,
-            classifiers.module().source_value_classes(),
-            classifiers.module().metadata_readable_value_classes(),
+            &classifiers,
             &self.cp,
             &mut continuation_metadata,
+            stems,
         ) {
             report_backend_pass_failure(reason, diags);
             return Vec::new();
@@ -785,7 +802,7 @@ impl JvmBackend {
             module_name,
             facade_name,
             package,
-            BackendReadyClassifiers::Checked(classifiers),
+            BackendReadyClassifiers::Checked(&classifiers),
             inner_class_resolver,
             continuation_metadata,
             metadata,
@@ -898,10 +915,18 @@ impl JvmBackend {
 }
 
 fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
+    if reason == SkipReason::DefaultCalls {
+        diags.error(
+            crate::diag::Span::new(0, 0),
+            "internal error: invalid checked default-argument realization".to_string(),
+        );
+        return;
+    }
     let what = match reason {
         SkipReason::ValueClasses => "value-class",
         SkipReason::Suspend => "suspend-function",
         SkipReason::Bridges => "bridge-method",
+        SkipReason::DefaultCalls => unreachable!(),
     };
     diags.error(
         crate::diag::Span::new(0, 0),
@@ -1013,15 +1038,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        self.emit_streamed_ir(
-            file.ir,
-            &file.classifiers,
-            file.module_name,
-            stem,
-            property_realizations,
-            state,
-            diags,
-        )
+        self.emit_streamed_ir(file, property_realizations, state, diags)
     }
 
     fn finalize(&self, state: JvmState, module_name: &str) -> Vec<Artifact> {
