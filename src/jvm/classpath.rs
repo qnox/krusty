@@ -2021,19 +2021,6 @@ pub struct Classpath {
     stub_overlay: RefCell<HashMap<TypeName, std::sync::Arc<ClassInfo>>>,
 }
 
-/// Current process resident-set size in KiB from Linux `/proc/self/status` (`VmRSS`, already in KiB),
-/// for memory profiling. `0` if unavailable (non-Linux, or the file can't be read).
-pub fn process_rss_kb() -> u64 {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("VmRSS:"))
-                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-        })
-        .unwrap_or(0)
-}
-
 impl Classpath {
     /// Common declaration metadata distributed beside the selected Kotlin stdlib. The JVM stdlib
     /// intentionally omits optional expectations with no JVM actual; the sibling KLIB retains their
