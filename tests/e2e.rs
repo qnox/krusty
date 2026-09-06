@@ -206,6 +206,8 @@ mod classpath_default_arg_subtype_e2e;
 mod classpath_default_args_e2e;
 #[path = "classpath_default_vararg_call_e2e.rs"]
 mod classpath_default_vararg_call_e2e;
+#[path = "classpath_entry_warning_e2e.rs"]
+mod classpath_entry_warning_e2e;
 #[path = "classpath_enum_regex_vc_e2e.rs"]
 mod classpath_enum_regex_vc_e2e;
 #[path = "classpath_extension_default_implicit_receiver_e2e.rs"]

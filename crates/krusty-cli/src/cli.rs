@@ -343,6 +343,78 @@ impl Options {
     }
 }
 
+/// Something wrong with a user-supplied `-cp` entry, found before analysis opens it.
+///
+/// The classpath reader drops an entry it cannot open WITHOUT saying so, and the compile then reads
+/// as a resolution failure ("unresolved reference 'kotlinx'") that nothing in the output ties to
+/// the jar. kotlinc warns in both cases and continues; so does krusty, in kotlinc's words for the
+/// missing case, so the cause is on stderr the moment it happens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClasspathEntryProblem {
+    /// The path does not exist. kotlinc: `warning: classpath entry points to a non-existent location`.
+    Missing(PathBuf),
+    /// The path exists but cannot be read, or names an archive that does not open as one.
+    Unreadable { path: PathBuf, reason: String },
+}
+
+impl std::fmt::Display for ClasspathEntryProblem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(path) => write!(
+                formatter,
+                "warning: classpath entry points to a non-existent location: {}",
+                path.display()
+            ),
+            Self::Unreadable { path, reason } => write!(
+                formatter,
+                "warning: cannot read classpath entry {}: {reason}",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// Classify every user-supplied classpath entry. A directory only has to be listable; an archive
+/// (`.jar`/`.zip`) has to open as one; any other file (a JDK `lib/modules` jimage, say) only has to
+/// open — its format is the reader's business.
+pub fn classpath_entry_problems(entries: &[PathBuf]) -> Vec<ClasspathEntryProblem> {
+    entries
+        .iter()
+        .filter_map(|path| {
+            if !path.exists() {
+                return Some(ClasspathEntryProblem::Missing(path.clone()));
+            }
+            let reason = if path.is_dir() {
+                std::fs::read_dir(path).err().map(|error| error.to_string())
+            } else {
+                match std::fs::File::open(path) {
+                    Err(error) => Some(error.to_string()),
+                    Ok(file) => {
+                        let is_archive = path
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                extension.eq_ignore_ascii_case("jar")
+                                    || extension.eq_ignore_ascii_case("zip")
+                            });
+                        if is_archive {
+                            zip::ZipArchive::new(file)
+                                .err()
+                                .map(|error| format!("not a readable archive ({error})"))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            };
+            reason.map(|reason| ClasspathEntryProblem::Unreadable {
+                path: path.clone(),
+                reason,
+            })
+        })
+        .collect()
+}
+
 /// krusty's release version. Injected at build time via the `KRUSTY_VERSION` env var; the `just`
 /// release recipe sets it to `<max-Kotlin-reference-version>-build.<n>` (e.g. 2.4.20-build.3, a
 /// SemVer prerelease so builds stay strictly ordered). Falls back to the crate version for a plain
@@ -692,6 +764,71 @@ mod tests {
         // `-no-jdk` suppresses the JDK even with a `-jdk-home`; effective cp adds nothing.
         let o = parse_args(&["-no-stdlib", "-no-jdk", "-jdk-home", "/opt/jdk", "f.kt"]);
         assert_eq!(o.effective_classpath().unwrap(), o.classpath);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("krusty_cp_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn empty_jar(path: &std::path::Path) {
+        // The smallest valid zip: an end-of-central-directory record and nothing else.
+        std::fs::write(path, b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0").unwrap();
+    }
+
+    #[test]
+    fn a_missing_classpath_entry_is_a_warning_in_kotlinc_words() {
+        let problems = classpath_entry_problems(&[PathBuf::from("/definitely/not/there.jar")]);
+        assert_eq!(
+            problems,
+            vec![ClasspathEntryProblem::Missing(PathBuf::from(
+                "/definitely/not/there.jar"
+            ))]
+        );
+        assert_eq!(
+            problems[0].to_string(),
+            "warning: classpath entry points to a non-existent location: /definitely/not/there.jar"
+        );
+    }
+
+    #[test]
+    fn a_jar_that_cannot_be_opened_is_a_warning() {
+        let dir = scratch("truncated");
+        let jar = dir.join("core.jar");
+        std::fs::write(&jar, b"PK\x03\x04 not really a zip").unwrap();
+        let problems = classpath_entry_problems(std::slice::from_ref(&jar));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            matches!(&problems[0], ClasspathEntryProblem::Unreadable { path, .. } if *path == jar)
+        );
+        // kotlinc warns (`WARN: Error while reading zip file`) and continues; so does krusty.
+        assert!(
+            problems[0].to_string().starts_with(&format!(
+                "warning: cannot read classpath entry {}: ",
+                jar.display()
+            )),
+            "{}",
+            problems[0]
+        );
+    }
+
+    #[test]
+    fn readable_entries_of_every_kind_raise_nothing() {
+        let dir = scratch("fine");
+        let jar = dir.join("ok.jar");
+        empty_jar(&jar);
+        let classes = dir.join("classes");
+        std::fs::create_dir_all(&classes).unwrap();
+        // A jimage or any non-archive file is read by the classpath reader itself; only that it
+        // opens is checked here.
+        let modules = dir.join("modules");
+        std::fs::write(&modules, b"JIMAGE").unwrap();
+        assert_eq!(
+            classpath_entry_problems(&[jar, classes, modules]),
+            Vec::<ClasspathEntryProblem>::new()
+        );
     }
 
     #[test]
