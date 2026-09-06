@@ -1156,7 +1156,14 @@ fn value_block(ir: &mut IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
         IrExpr::Block {
             stmts,
             value: Some(value),
-        } => Some((stmts, value)),
+        } => {
+            // The block is only an evaluation-order wrapper. When it is removed, retain the exact
+            // checked result type on the expression that replaces it; later coroutine
+            // normalization uses that metadata to allocate branch-result storage without
+            // re-inferring a type from backend shapes.
+            preserve_replacement_logical_type(ir, e, value);
+            Some((stmts, value))
+        }
         // Checked result coercions do not make a source grouping block semantically observable.
         // Lift the block's statements and reapply the exact operation to its value; no type or
         // conversion decision is repeated here.
@@ -1174,6 +1181,12 @@ fn value_block(ir: &mut IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
             Some((statements, value))
         }
         _ => None,
+    }
+}
+
+fn preserve_replacement_logical_type(ir: &mut IrFile, original: ExprId, replacement: ExprId) {
+    if let Some(ty) = ir.logical_types.get(&original).copied() {
+        ir.logical_types.entry(replacement).or_insert(ty);
     }
 }
 
@@ -2696,6 +2709,7 @@ fn hoist_expr(
             for statement in stmts {
                 hoist_stmt(ir, statement, suspend_set, orig_rets, value_types, prelude);
             }
+            preserve_replacement_logical_type(ir, e, v);
             hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude)
         }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
