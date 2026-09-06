@@ -201,6 +201,35 @@ fun box(): String {{ var r: String? = \"FAIL\"; val h: Holder? = Holder(); build
 }
 
 #[test]
+fn suspend_safe_call_elvis_inside_captured_arithmetic_runs() {
+    // Safe-call lowering wraps the selected branch in an evaluation-order block. Suspend
+    // normalization may remove that wrapper, but the checked `Int` result type must stay attached
+    // to the replacement `when` so its conditionally resumed value can be stored before addition.
+    let src = format!(
+        "{BUILDER}\
+class Holder {{\n\
+  suspend fun get(): Int = suspendCoroutineUninterceptedOrReturn {{ continuation ->\n\
+    continuation.resume(14)\n\
+    COROUTINE_SUSPENDED\n\
+  }}\n\
+}}\n\
+fun box(): String {{\n\
+  var result = 0\n\
+  var holder: Holder? = null\n\
+  builder {{ result = 42 + (holder?.get() ?: 0) }}\n\
+  if (result != 42) return \"null: $result\"\n\
+  holder = Holder()\n\
+  builder {{ result = 42 + (holder?.get() ?: 0) }}\n\
+  return if (result == 56) \"OK\" else \"present: $result\"\n\
+}}\n"
+    );
+    assert_eq!(
+        run(&src).expect("suspending safe-call/elvis arithmetic runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn suspend_in_an_if_expression_into_a_captured_var_runs() {
     let src = format!(
         "{BUILDER}\
