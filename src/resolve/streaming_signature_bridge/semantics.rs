@@ -399,18 +399,32 @@ impl ProductionSignatureSemantics<'_> {
             .map(|bound| {
                 Some((
                     self.headers.lookup_names.get(bound.parameter)?.to_owned(),
-                    self.headers
-                        .syntax
-                        .transient_type_ref(bound.ty, &self.headers.lookup_names)?,
+                    bound.ty,
                 ))
             })
             .collect::<Option<Vec<_>>>()
             .ok_or_else(Self::failure)?;
         let enclosing = lexical.visible_tparams();
-        let semantic = super::super::TParams::symbolic_from_decl_enclosing(
+        let semantic = super::super::TParams::symbolic_from_syntax_enclosing(
             &source_names,
             &declared_bounds,
-            &|name| self.table.class_names.get(name),
+            &|bound| {
+                SignatureTypeSyntax::compact(
+                    &self.headers.syntax,
+                    &self.headers.lookup_names,
+                    *bound,
+                )
+                .bare_parameter_spelling()
+            },
+            &|bound, parameter| {
+                SignatureTypeSyntax::compact(
+                    &self.headers.syntax,
+                    &self.headers.lookup_names,
+                    *bound,
+                )
+                .tparam_bound_semantic_with(&|name| self.table.class_names.get(name), parameter)
+                .expect("inventoried type-parameter bound must retain compact syntax")
+            },
             &|name| enclosing.contains(name).then(|| enclosing.bound(name)),
         )
         .alpha_renamed_declaration(

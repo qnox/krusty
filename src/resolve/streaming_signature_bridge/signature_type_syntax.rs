@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use crate::ast::TypeRef;
 use crate::diag::Span;
 use crate::fir::{HeaderSyntaxArena, HeaderTypeId, HeaderTypeKind, LookupNames};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Copy)]
 pub(super) enum SignatureTypeSyntax<'a> {
@@ -246,6 +246,79 @@ impl<'a> SignatureTypeSyntax<'a> {
                 }))
             }
         }
+    }
+
+    pub(super) fn bare_parameter_spelling(self) -> Option<String> {
+        if self.nullable()? || self.definitely_non_null()? || self.function_shape()?.is_some() {
+            return None;
+        }
+        let spelling = self.spelling()?;
+        (self.arguments()?.is_empty() && !spelling.contains(['.', '/', '$']))
+            .then(|| spelling.into_owned())
+    }
+
+    /// Resolve the restricted semantic shape used for type-parameter upper bounds. Classifier
+    /// identity still comes from the declaration's ordinary class-name table; local and enclosing
+    /// type parameters are supplied by the shared recursive bound builder.
+    pub(super) fn tparam_bound_semantic_with(
+        self,
+        resolve: &dyn Fn(&str) -> Option<TypeName>,
+        parameter: &mut dyn FnMut(&str) -> Option<Ty>,
+    ) -> Option<Ty> {
+        let nullable = self.nullable()?;
+        let spelling = self.spelling()?;
+        let arguments = self.arguments()?;
+        let parameter_reference = (self.function_shape()?.is_none()
+            && arguments.is_empty()
+            && !spelling.contains(['.', '/', '$']))
+        .then(|| parameter(&spelling))
+        .flatten();
+        let base = if let Some(parameter) = parameter_reference {
+            parameter
+        } else if let Some(function) = self.function_shape()? {
+            let parameter_count = function.parameters.len();
+            let mut parameters = Vec::with_capacity(parameter_count);
+            for component in function.parameters {
+                parameters.push(if component.star_projection()? {
+                    Ty::nullable(Ty::obj("kotlin/Any"))
+                } else {
+                    component.tparam_bound_semantic_with(resolve, parameter)?
+                });
+            }
+            let result = match function.result {
+                Some(result) if result.star_projection()? => Ty::nullable(Ty::obj("kotlin/Any")),
+                Some(result) => result.tparam_bound_semantic_with(resolve, parameter)?,
+                None => Ty::Unit,
+            };
+            Ty::fun_with_shape(
+                parameters,
+                result,
+                function.context_count.min(parameter_count),
+                function.has_receiver,
+                function.suspend,
+            )
+        } else if let Some(builtin) = Ty::from_name(&spelling) {
+            builtin
+        } else if let Some(element) = Ty::primitive_array_element(&spelling) {
+            Ty::array(element)
+        } else if let Some(classifier) = resolve(&spelling) {
+            let star_bound = Ty::nullable(Ty::obj("kotlin/Any"));
+            let arguments = arguments
+                .into_iter()
+                .map(|argument| {
+                    let resolved = if argument.star_projection()? {
+                        Ty::Error
+                    } else {
+                        argument.tparam_bound_semantic_with(resolve, parameter)?
+                    };
+                    argument.projected(resolved, star_bound)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Ty::obj_args_name(classifier, &arguments)
+        } else {
+            Ty::obj("kotlin/Any")
+        };
+        Some(if nullable { Ty::nullable(base) } else { base })
     }
 
     /// AST materialization is restricted to diagnostic rendering for compact callers.

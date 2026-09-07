@@ -47,6 +47,7 @@ mod stable_metadata;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
+mod type_parameter_bounds;
 pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
 use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
@@ -14572,132 +14573,39 @@ impl TParams {
         resolve: &dyn Fn(&str) -> Option<TypeName>,
         enclosing: &dyn Fn(&str) -> Option<Ty>,
     ) -> Self {
-        let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
-        /// Resolve a bound through the ordinary shared type-shape operations while keeping references
-        /// to this declaration's and enclosing declarations' type parameters symbolic.
-        fn semantic_bound(
-            bound: &TypeRef,
-            names: &[String],
-            bounds: &[(String, TypeRef)],
-            enclosing: &dyn Fn(&str) -> Option<Ty>,
-            resolve: &dyn Fn(&str) -> Option<TypeName>,
-            visiting: &mut std::collections::HashSet<String>,
-        ) -> Ty {
-            tparam_bound_semantic_with(bound, resolve, &mut |candidate| {
-                if let Some(ty) = enclosing(candidate) {
-                    return Some(ty);
-                }
-                names.iter().any(|name| name == candidate).then(|| {
-                    Ty::ty_param(
-                        candidate,
-                        parameter_bound(candidate, names, bounds, resolve, enclosing, visiting),
-                    )
-                })
-            })
-        }
-        fn parameter_bound(
-            name: &str,
-            names: &[String],
-            bounds: &[(String, TypeRef)],
-            resolve: &dyn Fn(&str) -> Option<TypeName>,
-            enclosing: &dyn Fn(&str) -> Option<Ty>,
-            visiting: &mut std::collections::HashSet<String>,
-        ) -> Ty {
-            let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
-            if !visiting.insert(name.to_string()) {
-                return implicit;
-            }
-            let bound = bounds
-                .iter()
-                .find_map(|(owner, bound)| (owner == name).then_some(bound));
-            let result = match bound {
-                Some(bound)
-                    if !bound.nullable()
-                        && !bound.definitely_non_null()
-                        && bound.arg.is_none()
-                        && bound.targs.is_empty()
-                        && bound.fun_params.is_empty()
-                        && names.iter().any(|candidate| candidate == &bound.name) =>
-                {
-                    Ty::ty_param(
-                        &bound.name,
-                        parameter_bound(&bound.name, names, bounds, resolve, enclosing, visiting),
-                    )
-                }
-                Some(bound) => semantic_bound(bound, names, bounds, enclosing, resolve, visiting),
-                None => implicit,
-            };
-            visiting.remove(name);
-            result
-        }
-        let mut out = TParams::default();
-        for name in names {
-            let direct_bounds = bounds
-                .iter()
-                .filter_map(|(owner, bound)| (owner == name).then_some(bound))
-                .map(|bound| {
-                    let is_parameter_bound = !bound.nullable()
-                        && !bound.definitely_non_null()
-                        && bound.arg.is_none()
-                        && bound.targs.is_empty()
-                        && bound.fun_params.is_empty()
-                        && names.iter().any(|candidate| candidate == &bound.name);
-                    if is_parameter_bound {
-                        Ty::ty_param(
-                            &bound.name,
-                            parameter_bound(
-                                &bound.name,
-                                names,
-                                bounds,
-                                resolve,
-                                enclosing,
-                                &mut std::collections::HashSet::new(),
-                            ),
-                        )
-                    } else {
-                        semantic_bound(
-                            bound,
-                            names,
-                            bounds,
-                            enclosing,
-                            resolve,
-                            &mut std::collections::HashSet::new(),
-                        )
-                    }
-                })
-                .collect::<Vec<_>>();
-            let bound = direct_bounds.first().copied().unwrap_or(implicit);
-            out.erasure.insert(name.clone(), Ty::ty_param(name, bound));
-            let mut extra_bounds = direct_bounds.into_iter().skip(1).collect::<Vec<_>>();
-            // `direct_bounds` already contains every constraint written on this parameter. Flatten
-            // additional constraints only through a bare type-parameter edge (`T : X`); starting
-            // the traversal at `T` itself would decode each direct generic bound a second time
-            // without symbolic arguments (`Comparable<T>` -> `Comparable<Any>`).
-            for inherited in bounds
-                .iter()
-                .filter_map(|(owner, candidate)| {
-                    (owner == name
-                        && !candidate.nullable()
-                        && !candidate.definitely_non_null()
-                        && candidate.arg.is_none()
-                        && candidate.targs.is_empty()
-                        && candidate.fun_params.is_empty()
-                        && names.iter().any(|parameter| parameter == &candidate.name))
-                    .then_some(candidate.name.as_str())
-                })
-                .flat_map(|inherited| {
-                    declared_tparam_semantic_bounds(inherited, names, bounds, resolve)
-                })
-            {
-                if inherited != bound && !extra_bounds.contains(&inherited) {
-                    extra_bounds.push(inherited);
-                }
-            }
-            if !extra_bounds.is_empty() {
-                out.extra_bounds.insert(name.clone(), extra_bounds);
-            }
-        }
-        out
+        Self::symbolic_from_syntax_enclosing(
+            names,
+            bounds,
+            &|bound| {
+                (!bound.nullable()
+                    && !bound.definitely_non_null()
+                    && bound.arg.is_none()
+                    && bound.targs.is_empty()
+                    && bound.fun_params.is_empty())
+                .then(|| bound.name.clone())
+            },
+            &|bound, parameter| tparam_bound_semantic_with(bound, resolve, parameter),
+            enclosing,
+        )
+    }
+
+    /// Construct symbolic type parameters from one declaration-owned syntax representation.
+    /// `bare_parameter` and `semantic_bound` keep parser and compact headers on the same recursion
+    /// and intersection-bound algorithm without converting either representation into the other.
+    pub(crate) fn symbolic_from_syntax_enclosing<B>(
+        names: &[String],
+        bounds: &[(String, B)],
+        bare_parameter: &dyn Fn(&B) -> Option<String>,
+        semantic: &type_parameter_bounds::BoundSemantic<'_, B>,
+        enclosing: &dyn Fn(&str) -> Option<Ty>,
+    ) -> Self {
+        type_parameter_bounds::symbolic_from_syntax_enclosing(
+            names,
+            bounds,
+            bare_parameter,
+            semantic,
+            enclosing,
+        )
     }
 
     /// Give one declaration's semantic formals stable identities while keeping source names as the
@@ -14819,61 +14727,6 @@ pub(crate) fn declared_tparam_semantic_bound(
         }
         return Some(tparam_bound_semantic(bound, resolve));
     }
-}
-
-/// All semantic upper bounds of `name`, including bounds inherited through another parameter.
-/// `<T : X, X : Comparable<UInt>> where X : UInt` therefore gives `T` the same intersection
-/// `[Comparable, UInt]` as `X`. JVM erasure still uses the first entry; member/operator lookup sees
-/// the complete intersection.
-fn declared_tparam_semantic_bounds(
-    name: &str,
-    names: &[String],
-    bounds: &[(String, TypeRef)],
-    resolve: &dyn Fn(&str) -> Option<TypeName>,
-) -> Vec<Ty> {
-    fn collect(
-        current: &str,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-        visiting: &mut std::collections::HashSet<String>,
-        out: &mut Vec<Ty>,
-    ) {
-        if !visiting.insert(current.to_string()) {
-            return;
-        }
-        for bound in bounds
-            .iter()
-            .filter_map(|(parameter, bound)| (parameter == current).then_some(bound))
-        {
-            let parameter_bound = !bound.nullable()
-                && !bound.definitely_non_null()
-                && bound.arg.is_none()
-                && bound.targs.is_empty()
-                && bound.fun_params.is_empty()
-                && names.iter().any(|candidate| candidate == &bound.name);
-            if parameter_bound {
-                collect(&bound.name, names, bounds, resolve, visiting, out);
-            } else {
-                let ty = tparam_bound_semantic(bound, resolve);
-                if !out.contains(&ty) {
-                    out.push(ty);
-                }
-            }
-        }
-        visiting.remove(current);
-    }
-
-    let mut out = Vec::new();
-    collect(
-        name,
-        names,
-        bounds,
-        resolve,
-        &mut std::collections::HashSet::new(),
-        &mut out,
-    );
-    out
 }
 
 /// Resolve a type-parameter bound without erasing nullability.
