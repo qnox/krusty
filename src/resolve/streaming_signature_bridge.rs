@@ -3310,73 +3310,6 @@ fn semantic_classifier_self(signature: &ClassSig) -> Ty {
     Ty::obj_args_name(signature.internal, &arguments)
 }
 
-/// Complete source classifier applications emitted by the transitional checked-signature table.
-/// Source syntax writes only an inner/local classifier's own arguments; the stable semantic type
-/// carries captured declaration arguments after them. Compact explicit-header resolution will
-/// eventually be the sole producer, but every signature crossing this bridge must already obey the
-/// final representation invariant.
-fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty) -> Ty {
-    match ty {
-        Ty::Obj(owner, arguments) => {
-            let mut arguments = arguments
-                .iter()
-                .copied()
-                .map(|argument| semantic_type_with_classifier_captures(table, argument))
-                .collect::<Vec<_>>();
-            if let Some(classifier) = table.class_by_type_name(owner) {
-                let own = classifier.type_params.len();
-                let captured = &classifier.captured_type_parameters;
-                if arguments.len() >= own && arguments.len() < own + captured.type_params.len() {
-                    arguments.extend(
-                        captured
-                            .type_params
-                            .iter()
-                            .enumerate()
-                            .skip(arguments.len().saturating_sub(own))
-                            .map(|(ordinal, parameter)| {
-                                Ty::ty_param(
-                                    parameter,
-                                    captured
-                                        .type_param_bounds
-                                        .get(ordinal)
-                                        .copied()
-                                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                                )
-                            }),
-                    );
-                }
-            }
-            Ty::obj_args_name(owner, &arguments)
-        }
-        Ty::Fun(function) => Ty::fun_with_shape(
-            function
-                .params
-                .iter()
-                .copied()
-                .map(|parameter| semantic_type_with_classifier_captures(table, parameter))
-                .collect(),
-            semantic_type_with_classifier_captures(table, function.ret),
-            function.context_count,
-            function.has_receiver,
-            function.suspend,
-        ),
-        Ty::Nullable(inner) => Ty::nullable(semantic_type_with_classifier_captures(table, *inner)),
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(semantic_type_with_classifier_captures(table, *inner))
-        }
-        Ty::InProjection(inner) => {
-            Ty::in_projection(semantic_type_with_classifier_captures(table, *inner))
-        }
-        Ty::OutProjection(inner) => {
-            Ty::out_projection(semantic_type_with_classifier_captures(table, *inner))
-        }
-        Ty::StarProjection(inner) => {
-            Ty::star_projection(semantic_type_with_classifier_captures(table, *inner))
-        }
-        other => other,
-    }
-}
-
 /// Revalidate the completed semantic parent graph after body-local aliases have been expanded.
 /// The transitional collector cannot resolve a statement-local alias and therefore cannot see a
 /// cycle expressed through one; conversely, its unresolved spelling must not cause a valid compact
@@ -3552,10 +3485,7 @@ fn compact_classifier_parents(
         .filter(|parent| retained_parent(*parent))
         .or_else(|| {
             let owner = classifier.super_internal?;
-            let implicit = semantic_type_with_classifier_captures(
-                semantics.table,
-                Ty::obj_args_name(owner, &classifier.super_type_args),
-            );
+            let implicit = Ty::obj_args_name(owner, &classifier.super_type_args);
             (!implicit.mentions_error()).then_some(implicit)
         });
 
@@ -3575,16 +3505,13 @@ fn compact_classifier_parents(
         {
             continue;
         }
-        let implicit = semantic_type_with_classifier_captures(
-            semantics.table,
-            Ty::obj_args_name(
-                owner,
-                classifier
-                    .interface_type_args
-                    .get(ordinal)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            ),
+        let implicit = Ty::obj_args_name(
+            owner,
+            classifier
+                .interface_type_args
+                .get(ordinal)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         );
         if implicit.mentions_error() {
             crate::trace_compiler!(
@@ -4657,7 +4584,6 @@ pub(crate) fn finalized_streamed_signature_index(
                 continue;
             }
             if let Some(storage) = resolved_backing_field_type {
-                let storage = semantic_type_with_classifier_captures(table, storage);
                 let Ok(storage) = crate::fir::ResolvedTy::new(storage) else {
                     failed.push(stub.id);
                     continue;
@@ -4722,7 +4648,6 @@ pub(crate) fn finalized_streamed_signature_index(
                     failed.push(stub.id);
                     continue;
                 };
-                let resolved = semantic_type_with_classifier_captures(table, resolved);
                 let Ok(resolved) = crate::fir::ResolvedTy::new(resolved) else {
                     failed.push(stub.id);
                     continue;
@@ -4730,13 +4655,6 @@ pub(crate) fn finalized_streamed_signature_index(
                 explicit_backing_field_types.insert(stub.id, resolved);
             }
         }
-        let parameters = parameters
-            .into_iter()
-            .map(|parameter| semantic_type_with_classifier_captures(table, parameter))
-            .collect::<Vec<_>>();
-        let result = semantic_type_with_classifier_captures(table, result);
-        let receiver =
-            receiver.map(|receiver| semantic_type_with_classifier_captures(table, receiver));
         crate::trace_compiler!(
             "signature",
             "streamed declaration={:?} name={:?} kind={:?} parameters={parameters:?} result={result:?} receiver={receiver:?}",
