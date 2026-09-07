@@ -1144,7 +1144,7 @@ pub trait SignatureSemantics {
     fn make_non_nullable(&self, base: ResolvedTy) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Whether the callable selected for the call at `origin` carries a
-    /// `returns() implies (<argument> != null)` contract effect for its positional `argument`.
+    /// `returns() implies (<parameter> != null)` contract effect for source `argument`.
     /// Consulted after the call itself evaluated; a semantics that keeps no selection state
     /// proves nothing.
     fn call_proves_argument_non_null(&self, _origin: OriginId, _argument: u32) -> bool {

@@ -47,6 +47,7 @@ enum SelectedTopLevelCall {
         callable: Box<crate::libraries::LibraryCallable>,
         source: Option<(u32, u32)>,
         declaration: Option<crate::fir::DeclarationId>,
+        parameter_by_argument: Box<[Option<u32>]>,
     },
     Value(Box<crate::libraries::PropertyInfo>),
     /// Runtime value denoted by a classifier name (an object singleton or companion). Call syntax
@@ -75,13 +76,19 @@ struct ProductionSignatureSemantics<'a> {
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
     /// The contract of the callable selected for each top-level call, by call origin, so a
     /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
-    selected_call_contracts:
-        RefCell<HashMap<crate::fir::OriginId, std::sync::Arc<crate::contracts::Contract>>>,
+    selected_call_contracts: RefCell<HashMap<crate::fir::OriginId, SelectedCallContract>>,
     /// Same-module source contracts bound before solving starts, by stable declaration, so a
     /// call of a source function with `returns() implies (x != null)` proves as much in a
     /// Pass-1 block as a library one. Publication into the index still happens at finalization.
     source_contracts:
         RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
+}
+
+struct SelectedCallContract {
+    contract: std::sync::Arc<crate::contracts::Contract>,
+    /// Selected declaration parameter for each argument in source order. The contract refers to
+    /// declaration parameters, while the compact graph retains source argument order.
+    parameter_by_argument: Box<[Option<u32>]>,
 }
 
 #[derive(Clone)]
@@ -1599,6 +1606,27 @@ impl ProductionSignatureSemantics<'_> {
             .iter()
             .all(|source| slots.iter().any(|slot| slot == &Some(*source)))
             .then_some(slots)
+    }
+
+    fn selected_argument_parameters(
+        candidate: &crate::libraries::FunctionInfo,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        trailing_lambda: bool,
+    ) -> Box<[Option<u32>]> {
+        let names = arguments
+            .iter()
+            .map(|argument| argument.name.map(str::to_owned))
+            .collect::<Vec<_>>();
+        let source_by_parameter =
+            Self::candidate_call_slots(candidate, &names, arguments.len(), trailing_lambda)
+                .expect("a selected call must retain its declaration argument mapping");
+        let mut parameter_by_argument = vec![None; arguments.len()];
+        for (parameter, source) in source_by_parameter.into_iter().enumerate() {
+            if let Some(source) = source {
+                parameter_by_argument[source] = u32::try_from(parameter).ok();
+            }
+        }
+        parameter_by_argument.into_boxed_slice()
     }
 
     /// Keep only declarations whose own parameter names/defaults/vararg shape can consume the

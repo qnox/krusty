@@ -56,7 +56,11 @@ fun second(head: String?) = run {\n\
     checkNotNull(head)\n\
     head.length\n\
 }\n\
-fun box(): String = if (first(listOf(\"abc\")) == 3 && second(\"de\") == 2) \"OK\" else \"FAIL\"\n";
+fun third(head: String?) = run {\n\
+    requireNotNull(value = head)\n\
+    head.length\n\
+}\n\
+fun box(): String = if (first(listOf(\"abc\")) == 3 && second(\"de\") == 2 && third(\"fghi\") == 4) \"OK\" else \"FAIL\"\n";
     assert_eq!(
         run(SRC).expect("contract narrowing in an inferred signature compiles + runs"),
         "OK"

@@ -1213,20 +1213,13 @@ impl SignatureConstraintExtractor {
     /// After an expression-statement call `f(x, …)` where `x` names a lexical value, later reads
     /// of `x` in this block go through a [`SigExpr::ContractNarrowed`] node: non-null when the
     /// callee selected at evaluation proves it (`assertNotNull`, `requireNotNull`, a source
-    /// `returns() implies (x != null)`), the plain value otherwise. Positional arguments only —
-    /// a contract parameter index is positional.
+    /// `returns() implies (x != null)`), the plain value otherwise. The source argument index is
+    /// retained here; selection maps it to the chosen declaration parameter, including named calls.
     fn narrow_contract_arguments(&mut self, file: &File, expression: ExprId, effect: SigExprId) {
         let Expr::Call { callee, args } = file.expr(expression) else {
             return;
         };
         if !matches!(file.expr(*callee), Expr::Name(_)) {
-            return;
-        }
-        if file
-            .call_arg_names
-            .get(&expression.0)
-            .is_some_and(|names| names.iter().any(Option::is_some))
-        {
             return;
         }
         for (index, argument) in args.iter().enumerate() {
