@@ -10648,7 +10648,7 @@ const EXPLICIT_PROPERTY_TYPE_MESSAGE: &str =
     "this property must have an explicit type, be initialized, or be delegated.";
 
 pub(crate) fn publish_checked_compile_time_constants(
-    files: &[File],
+    files: &[Option<&File>],
     index: &mut crate::fir::ResolvedModuleIndex,
     table: &SymbolTable,
 ) {
@@ -10656,11 +10656,14 @@ pub(crate) fn publish_checked_compile_time_constants(
         .iter()
         .enumerate()
         .map(|(file_index, file)| {
-            crate::fir::ActiveSourceDeclarations::bind_complete_source(
-                file,
-                crate::fir::SourceFileId::from_raw(file_index as u32),
-                index,
-            )
+            file.map(|file| {
+                crate::fir::ActiveSourceDeclarations::bind_complete_source(
+                    file,
+                    crate::fir::SourceFileId::from_raw(file_index as u32),
+                    index,
+                )
+            })
+            .transpose()
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("constant syntax must bind to the stable declaration inventory");
@@ -10672,7 +10675,8 @@ pub(crate) fn publish_checked_compile_time_constants(
         .iter()
         .enumerate()
         .zip(&active_sources)
-        .flat_map(|((file_index, file), active)| {
+        .filter_map(|((file_index, file), active)| Some((file_index, (*file)?, active.as_ref()?)))
+        .flat_map(|(file_index, file, active)| {
             file.decls.iter().copied().filter_map(move |declaration| {
                 let Decl::Class(class) = file.decl(declaration) else {
                     return None;
@@ -10714,7 +10718,10 @@ pub(crate) fn publish_checked_compile_time_constants(
         let Some(initializer) = property.init else {
             continue;
         };
-        if let Some(value) = source_literal_constant(&files[file_index as usize], initializer, ty) {
+        let Some(file) = files[file_index as usize] else {
+            continue;
+        };
+        if let Some(value) = source_literal_constant(file, initializer, ty) {
             index.publish_compile_time_constant(stable, value);
         }
     }
@@ -10722,7 +10729,8 @@ pub(crate) fn publish_checked_compile_time_constants(
         .iter()
         .enumerate()
         .zip(&active_sources)
-        .flat_map(|((file_index, file), active)| {
+        .filter_map(|((file_index, file), active)| Some((file_index, (*file)?, active.as_ref()?)))
+        .flat_map(|(file_index, file, active)| {
             file.decls.iter().copied().filter_map(move |declaration| {
                 let Decl::Property(property) = file.decl(declaration) else {
                     return None;
@@ -10746,7 +10754,9 @@ pub(crate) fn publish_checked_compile_time_constants(
                 continue;
             }
             let folded = {
-                let file = &files[file_index as usize];
+                let Some(file) = files[file_index as usize] else {
+                    continue;
+                };
                 let Decl::Property(property) = file.decl(declaration) else {
                     continue;
                 };
@@ -10757,7 +10767,9 @@ pub(crate) fn publish_checked_compile_time_constants(
                     file_index,
                     &environment,
                     index,
-                    &active_sources[file_index as usize],
+                    active_sources[file_index as usize]
+                        .as_ref()
+                        .expect("retained constant syntax must have an active declaration map"),
                     None,
                     &mut diagnostics,
                 );

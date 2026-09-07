@@ -1734,6 +1734,39 @@ fn same_file_suspend_actual_keeps_expect_default_in_production_stream() {
 }
 
 #[test]
+fn production_pass_one_retains_only_sources_with_bounded_executable_work() {
+    let inputs = [
+        SourceInput::kotlin("fun ordinary(): Int = 1\n").with_file_stem("Ordinary"),
+        SourceInput::kotlin("expect fun configured(value: Int = 2): Int\n")
+            .with_file_stem("Expected")
+            .common(),
+        SourceInput::kotlin("actual fun configured(value: Int): Int = value\n")
+            .with_file_stem("Actual"),
+        SourceInput::kotlin("inline fun retainedInline(): Int = 3\n").with_file_stem("Inline"),
+        SourceInput::kotlin("const val RETAINED_CONST: Int = 4\n").with_file_stem("Const"),
+    ];
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_streaming_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects"),
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    assert!(analysis.streamed.is_some(), "signatures must finalize");
+    assert_eq!(
+        analysis
+            .reparse_sources
+            .iter()
+            .map(ReparseSource::retained_pass_one_syntax)
+            .collect::<Vec<_>>(),
+        [false, true, false, true, true],
+        "ordinary and actual-only sources must drop after compact header extraction"
+    );
+}
+
+#[test]
 fn actualized_declarations_keep_callable_reference_and_lambda_expect_defaults() {
     let inputs = [
         SourceInput::kotlin(

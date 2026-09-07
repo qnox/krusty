@@ -146,7 +146,7 @@ pub(super) fn defaults(
     headers: &mut crate::fir::StreamedHeaderModule,
     index: &mut crate::fir::ResolvedModuleIndex,
     mut providers: Vec<crate::fir::DefaultArgumentProvider>,
-    files: &[File],
+    files: &[Option<&File>],
     skip: &[bool],
     checked_count: usize,
     symbols: &mut FrontendSymbols,
@@ -171,8 +171,15 @@ pub(super) fn defaults(
             return None;
         }
         diags.set_file(raw_source as u32);
+        let Some(file) = files[raw_source] else {
+            crate::trace_compiler!(
+                "fir",
+                "Pass 1 signature-default source {raw_source} has no retained syntax",
+            );
+            return None;
+        };
         if !check_default_source(
-            &files[raw_source],
+            file,
             raw_source,
             &selection,
             &mut providers,
@@ -492,7 +499,7 @@ pub(super) fn streaming(
     module: crate::fir::FrontendModule,
     bodies: crate::fir::BodyPartition,
     default_arguments: crate::fir::DefaultArgumentStore,
-    files: &mut [File],
+    files: &mut [Option<File>],
     skip: &[bool],
     checked_count: usize,
     symbols: &mut FrontendSymbols,
@@ -522,7 +529,7 @@ pub(super) fn streaming(
     // below resolves every sibling declaration through the finalized semantic index.
     for (raw_source, owners) in inline_owners.iter().enumerate() {
         if owners.is_empty() {
-            files[raw_source] = File::default();
+            files[raw_source] = None;
         }
     }
 
@@ -552,8 +559,15 @@ pub(super) fn streaming(
                 "Pass 1 retained stable bodies source={source:?} bodies={selected_stable_bodies:?}",
             );
             let active_roots = owners.iter().copied().collect();
+            let Some(file) = files[raw_source].as_ref() else {
+                crate::trace_compiler!(
+                    "fir",
+                    "Pass 1 inline source {raw_source} has no retained syntax",
+                );
+                return None;
+            };
             let active = match crate::fir::ActiveSourceDeclarations::bind_retained_fragments(
-                &files[raw_source],
+                file,
                 source,
                 &index,
                 &active_roots,
@@ -569,7 +583,7 @@ pub(super) fn streaming(
                 }
             };
             let info = crate::resolve::check_preinferred_inline_declarations_at_with_index(
-                &files[raw_source],
+                file,
                 raw_source as u32,
                 &selection.roots[raw_source],
                 &selection.bodies[raw_source],
@@ -579,7 +593,6 @@ pub(super) fn streaming(
                 symbols,
                 diags,
             );
-            let file = files.get(raw_source)?;
             if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
                 file, source, symbols, &info, &mut index, owners, &active,
             ) {
@@ -654,17 +667,15 @@ pub(super) fn streaming(
         // `info` is intentionally dropped here. Production never accumulates checked side tables
         // for more than the active inline source. Release the complete legacy declaration view at
         // the same boundary; later inline files see this source only through stable semantic data.
-        files[raw_source] = File::default();
+        files[raw_source] = None;
     }
     assert!(
         inline_work.is_empty(),
         "every selected inline body must be consumed with its source"
     );
     assert!(
-        files.iter().all(|file| {
-            file.decl_arena.is_empty() && file.expr_arena.is_empty() && file.stmt_arena.is_empty()
-        }),
-        "no legacy parser arena may survive Pass-1 inline/default preparation"
+        files.iter().all(Option::is_none),
+        "no bounded parser syntax may survive Pass-1 inline/default preparation"
     );
     finish(index, inline_bodies, sources, default_arguments, unexpected)
 }

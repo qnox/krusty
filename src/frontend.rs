@@ -84,6 +84,8 @@ pub(crate) struct ReparseSource {
     parse_count: std::cell::Cell<usize>,
     #[cfg(test)]
     released_before_collection: bool,
+    #[cfg(test)]
+    retained_pass_one_syntax: bool,
 }
 
 impl ReparseSource {
@@ -163,6 +165,11 @@ impl ReparseSource {
     #[cfg(test)]
     fn released_before_collection(&self) -> bool {
         self.released_before_collection
+    }
+
+    #[cfg(test)]
+    fn retained_pass_one_syntax(&self) -> bool {
+        self.retained_pass_one_syntax
     }
 }
 
@@ -717,7 +724,19 @@ fn analyze_source_set_impl(
     retain_inspection_analysis: bool,
 ) -> SourceSetAnalysis {
     let diagnostics_start = diags.diags.len();
-    let mut files = Vec::with_capacity(sources.len());
+    // Inspection entry points deliberately retain the complete parser product. Production keeps a
+    // source slot only when Pass 1 still owes bounded executable work for it (inline/default/const);
+    // ordinary files drop as soon as their compact headers and signature constraints are extracted.
+    let mut inspection_files = Vec::with_capacity(if retain_inspection_analysis {
+        sources.len()
+    } else {
+        0
+    });
+    let mut retained_pass_one_syntax = Vec::with_capacity(if retain_inspection_analysis {
+        0
+    } else {
+        sources.len()
+    });
     let mut parse_errors = Vec::with_capacity(sources.len());
     let mut reparse_sources = Vec::with_capacity(sources.len());
     let mut pass1_builder = crate::fir::HeaderInventoryBuilder::default();
@@ -747,6 +766,8 @@ fn analyze_source_set_impl(
             parse_count: std::cell::Cell::new(0),
             #[cfg(test)]
             released_before_collection: false,
+            #[cfg(test)]
+            retained_pass_one_syntax: false,
         });
         let diagnostics_before = diags.diags.len();
         let mut file = parse_source_kind(source.text, source.kind, &features, diags);
@@ -767,6 +788,7 @@ fn analyze_source_set_impl(
             source,
             (!parse_error && source.kind != SourceKind::Java).then_some(&file),
         );
+        let mut retain_bounded_syntax = false;
         if let Some(active_headers) = extracted {
             let source = active_headers.source();
             let stubs = active_headers.stubs();
@@ -778,26 +800,23 @@ fn analyze_source_set_impl(
                 pass1_builder.source_origin(source, span)
             });
             // Compact signature extraction has consumed every ordinary expression dependency for
-            // this source. Production keeps the parser body arenas only for bounded Pass-1 work
-            // that has not moved to its own store yet: inline checking, const evaluation, and MPP
-            // actualization matching. Dependency-prefix and inspection entry points retain their
-            // legacy view until their separate migration boundary.
-            let needs_bounded_pass_one_syntax = multiplatform
-                || has_signature_defaults(&file)
+            // this source. Production keeps parser syntax only for bounded Pass-1 executable work
+            // that has not moved to its own store yet. MPP matching is compact-header work; only an
+            // expect declaration that actually owns a default needs its parser fragment retained.
+            let needs_bounded_pass_one_syntax = has_signature_defaults(&file)
                 || stubs.iter().any(|stub| {
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
                 });
+            retain_bounded_syntax = index < inferred_count && needs_bounded_pass_one_syntax;
             local_class_contexts.push(crate::resolve::pass_one_local_class_context(
                 &file,
                 Some(&active_headers),
             ));
             drop(active_headers);
-            if !retain_inspection_analysis && index < inferred_count && !multiplatform {
+            if !retain_inspection_analysis && index < inferred_count {
                 if needs_bounded_pass_one_syntax {
                     retained_syntax::compact(&mut file);
-                } else {
-                    file.release_body_arenas();
                 }
                 #[cfg(test)]
                 {
@@ -810,10 +829,21 @@ fn analyze_source_set_impl(
         } else {
             local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, None));
         }
-        files.push(file);
+        if retain_inspection_analysis {
+            inspection_files.push(file);
+        } else {
+            #[cfg(test)]
+            {
+                reparse_sources
+                    .last_mut()
+                    .expect("the active source owns reparse state")
+                    .retained_pass_one_syntax = retain_bounded_syntax;
+            }
+            retained_pass_one_syntax.push(retain_bounded_syntax.then_some(file));
+        }
     }
 
-    assert!(checked_count <= inferred_count && inferred_count <= files.len());
+    assert!(checked_count <= inferred_count && inferred_count <= sources.len());
     let mut pass1_headers = pass1_builder.finish();
     let source_classifiers = pass1_headers.source_classifier_names();
     let platform_sources = sources
@@ -843,21 +873,6 @@ fn analyze_source_set_impl(
         // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
         // an orphan target with no surviving signature or callable.
         let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
-        // Actualization publishes stable expect-default providers before syntax is compacted. Once
-        // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
-        if !retain_inspection_analysis {
-            for (file, _source) in files
-                .iter_mut()
-                .zip(&mut reparse_sources)
-                .take(inferred_count)
-            {
-                retained_syntax::compact(file);
-                #[cfg(test)]
-                {
-                    _source.released_before_collection = true;
-                }
-            }
-        }
         (signature_default_work_items, matched)
     } else {
         (
@@ -865,9 +880,9 @@ fn analyze_source_set_impl(
             std::collections::HashSet::new(),
         )
     };
-    let inferred_end = inferred_count.min(files.len());
-    if trim_support_bodies {
-        for file in &mut files[inferred_end..] {
+    let inferred_end = inferred_count.min(sources.len());
+    if retain_inspection_analysis && trim_support_bodies {
+        for file in &mut inspection_files[inferred_end..] {
             file.release_body_arenas();
         }
     }
@@ -890,14 +905,14 @@ fn analyze_source_set_impl(
     }
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
     if !retain_inspection_analysis {
-        // Signature collection and inline-capture projection are the last
-        // consumers of declaration-only legacy `File` views. From here on, retain a parser fragment
-        // only when it still owns executable syntax that Pass 1 must turn into checked FIR
-        // (inline/default/const work). The compact headers and signature graph are authoritative for
-        // every declaration fact used by finalization, including enum-entry member signatures.
-        for file in files.iter_mut().take(inferred_end) {
-            if file.expr_arena.is_empty() && file.stmt_arena.is_empty() {
-                *file = File::default();
+        // A bounded source that compacted to no executable syntax has no remaining Pass-1 owner.
+        // Remove the slot entirely; stable headers remain authoritative for declaration facts.
+        for file in retained_pass_one_syntax.iter_mut().take(inferred_end) {
+            if file
+                .as_ref()
+                .is_some_and(|file| file.expr_arena.is_empty() && file.stmt_arena.is_empty())
+            {
+                *file = None;
             }
         }
     }
@@ -919,8 +934,21 @@ fn analyze_source_set_impl(
         // A `const val` initializer is a stable declaration dependency. Check each such bounded
         // fragment now, while Pass 1 still owns its AST and exact operator selections can be
         // consumed; retain only the folded payload before the signature graph and arenas die.
+        let pass_one_files = if retain_inspection_analysis {
+            inspection_files
+                .iter()
+                .take(inferred_end)
+                .map(Some)
+                .collect::<Vec<_>>()
+        } else {
+            retained_pass_one_syntax
+                .iter()
+                .take(inferred_end)
+                .map(Option::as_ref)
+                .collect::<Vec<_>>()
+        };
         crate::resolve::publish_checked_compile_time_constants(
-            &files[..inferred_end],
+            &pass_one_files,
             &mut index,
             &mut symbols,
         );
@@ -942,7 +970,7 @@ fn analyze_source_set_impl(
             &mut pass1_headers,
             &mut index,
             std::mem::take(&mut signature_default_work_items),
-            &files[..inferred_end],
+            &pass_one_files,
             &parse_errors,
             checked_count,
             &mut symbols,
@@ -983,8 +1011,8 @@ fn analyze_source_set_impl(
         recovery_streamed = Some(diagnostic_streamed_state(index, sources));
         None
     };
-    if trim_support_bodies {
-        for file in &mut files[checked_count.min(inferred_end)..inferred_end] {
+    if retain_inspection_analysis && trim_support_bodies {
+        for file in &mut inspection_files[checked_count.min(inferred_end)..inferred_end] {
             file.release_body_arenas();
         }
     }
@@ -998,7 +1026,7 @@ fn analyze_source_set_impl(
                     .map(|streamed| streamed.module.index())
             });
         let types: Vec<Option<FrontendTypeInfo>> = if let Some(index) = retained_index {
-            files
+            inspection_files
                 .iter()
                 .enumerate()
                 .map(|(source, file)| {
@@ -1024,14 +1052,16 @@ fn analyze_source_set_impl(
                 })
                 .collect()
         } else {
-            std::iter::repeat_with(|| None).take(files.len()).collect()
+            std::iter::repeat_with(|| None)
+                .take(inspection_files.len())
+                .collect()
         };
         let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
             inline_preparation::from_checked_analysis(
                 module,
                 bodies,
                 default_arguments,
-                &files,
+                &inspection_files,
                 &types,
                 &mut symbols,
             )
@@ -1046,7 +1076,7 @@ fn analyze_source_set_impl(
                 module,
                 bodies,
                 default_arguments,
-                &mut files,
+                &mut retained_pass_one_syntax,
                 &parse_errors,
                 checked_count,
                 &mut symbols,
@@ -1058,11 +1088,7 @@ fn analyze_source_set_impl(
     let streamed = streamed.or(recovery_streamed);
     diags.collapse_duplicates_from(diagnostics_start);
     let analysis = SourceSetAnalysis {
-        files: if retain_inspection_analysis {
-            files
-        } else {
-            Vec::new()
-        },
+        files: inspection_files,
         symbols,
         types,
         reparse_sources,
