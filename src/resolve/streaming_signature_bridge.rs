@@ -4470,41 +4470,11 @@ pub(crate) fn finalized_streamed_signature_index(
             )
         } else {
             match stub.kind {
-                DeclarationKind::Function => {
-                    let enum_entry = anchor.owner.and_then(|owner| {
-                        headers
-                            .declarations
-                            .anchor(owner)
-                            .is_some_and(|owner| owner.kind == DeclarationKind::EnumEntry)
-                            .then_some(owner)
-                    });
-                    if enum_entry.is_some() {
-                        compact_header_seed(headers, stub.id)
-                    } else {
-                        stable_function(table, headers, &classifier_types, stub.id).map(
-                            |(signature, receiver)| {
-                                (
-                                    semantic_parameters(signature),
-                                    semantic_result(signature),
-                                    receiver,
-                                )
-                            },
-                        )
-                    }
-                }
-                DeclarationKind::Property => {
-                    let enum_entry = anchor.owner.and_then(|owner| {
-                        headers
-                            .declarations
-                            .anchor(owner)
-                            .is_some_and(|owner| owner.kind == DeclarationKind::EnumEntry)
-                            .then_some(owner)
-                    });
-                    if enum_entry.is_some() {
-                        compact_header_seed(headers, stub.id)
-                    } else {
-                        stable_property(table, stub.id)
-                    }
+                // Written callable shapes come from the compact header inventory. Explicit types
+                // are resolved below in their stable declaration scope, and inferred results are
+                // graph outputs; neither fact is seeded from the transitional symbol table.
+                DeclarationKind::Function | DeclarationKind::Property => {
+                    compact_header_seed(headers, stub.id)
                 }
                 DeclarationKind::Constructor => stable_constructor(table, stub.id).or_else(|| {
                     (anchor.sibling == 0)
@@ -4643,12 +4613,18 @@ pub(crate) fn finalized_streamed_signature_index(
             owner: stub.id,
             source: stub.source,
         };
-        // Non-local explicit headers are resolved from compact syntax regardless of whether the
-        // transitional collector produced a superficially publishable type. Syntaxless generated
-        // declarations keep their authoritative semantic seed; an empty syntax projection must
-        // not erase generated parameters. Local-class headers use the graph expressions below
-        // because those already expanded statement-local aliases while their lexical rung was live.
-        if !stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) && has_compact_declaration {
+        // Explicit headers are resolved from compact syntax regardless of whether the transitional
+        // collector produced a superficially publishable type. A body-local declaration prefers
+        // graph types captured while its exact lexical alias rung was live; when it owns no such
+        // graph projection (for example a retained inline member with `: String`), its ordinary
+        // stable header scope is authoritative. Syntaxless generated declarations keep their
+        // semantic seed, so an empty syntax projection must not erase generated parameters.
+        let compact_local_types = stub
+            .flags
+            .has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+            .then(|| graph.explicit_signature_types(stub.id))
+            .flatten();
+        if has_compact_declaration && compact_local_types.is_none() {
             let mut header_resolution_failed = false;
             let mut resolved_backing_field_type = None;
             let mut resolved_parameters = Vec::with_capacity(parameter_types.len());
@@ -4756,11 +4732,7 @@ pub(crate) fn finalized_streamed_signature_index(
         {
             receiver = Some(compact_header_star_bounds(table, &syntax, resolved));
         }
-        let compact_explicit_types = stub
-            .flags
-            .has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-            .then(|| graph.explicit_signature_types(stub.id))
-            .flatten();
+        let compact_explicit_types = compact_local_types;
         crate::trace_compiler!(
             "signature",
             "compact explicit declaration={:?} kind={:?} types={compact_explicit_types:?}",
