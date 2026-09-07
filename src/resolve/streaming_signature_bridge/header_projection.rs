@@ -16,11 +16,11 @@ pub(in crate::resolve) struct StreamedCallableHeader {
     pub(in crate::resolve) visibility: Visibility,
     pub(in crate::resolve) flags: crate::fir::DeclarationFlags,
     pub(in crate::resolve) signature_inference: Option<crate::fir::InferredSignatureKind>,
-    pub(in crate::resolve) receiver: Option<TypeRef>,
+    pub(in crate::resolve) receiver: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) receiver_source_spelling: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) parameters: Vec<StreamedCallableParameter>,
     pub(in crate::resolve) result: StreamedResultKind,
-    pub(in crate::resolve) explicit_result: Option<TypeRef>,
+    pub(in crate::resolve) explicit_result: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) type_parameters: Vec<String>,
     pub(in crate::resolve) has_reified_type_parameter: bool,
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
@@ -228,15 +228,8 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
     else {
         return None;
     };
-    let (receiver, receiver_source_spelling) = match receiver {
-        Some(receiver_id) => {
-            let receiver = headers
-                .syntax
-                .transient_type_ref(receiver_id, &headers.lookup_names)?;
-            (Some(receiver), headers.syntax.source_spelling(receiver_id))
-        }
-        None => (None, None),
-    };
+    let receiver_source_spelling =
+        receiver.and_then(|receiver| headers.syntax.source_spelling(receiver));
     let parameters = headers
         .syntax
         .parameters(parameters)
@@ -254,14 +247,9 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         })
         .collect::<Option<Vec<_>>>()?;
     let (result, explicit_result) = match result {
-        crate::fir::HeaderResultType::Explicit(result) => (
-            StreamedResultKind::Explicit,
-            Some(
-                headers
-                    .syntax
-                    .transient_type_ref(result, &headers.lookup_names)?,
-            ),
-        ),
+        crate::fir::HeaderResultType::Explicit(result) => {
+            (StreamedResultKind::Explicit, Some(result))
+        }
         crate::fir::HeaderResultType::ImplicitUnit => (StreamedResultKind::ImplicitUnit, None),
         crate::fir::HeaderResultType::Inferred => (StreamedResultKind::Inferred, None),
     };

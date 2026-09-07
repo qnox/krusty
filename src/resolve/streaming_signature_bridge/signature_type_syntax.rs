@@ -11,7 +11,7 @@ use crate::fir::{HeaderSyntaxArena, HeaderTypeId, HeaderTypeKind, LookupNames};
 use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Copy)]
-pub(super) enum SignatureTypeSyntax<'a> {
+pub(in crate::resolve) enum SignatureTypeSyntax<'a> {
     Parser(&'a TypeRef),
     Compact {
         arena: &'a HeaderSyntaxArena,
@@ -21,11 +21,11 @@ pub(super) enum SignatureTypeSyntax<'a> {
 }
 
 impl<'a> SignatureTypeSyntax<'a> {
-    pub(super) fn parser(reference: &'a TypeRef) -> Self {
+    pub(in crate::resolve) fn parser(reference: &'a TypeRef) -> Self {
         Self::Parser(reference)
     }
 
-    pub(super) fn compact(
+    pub(in crate::resolve) fn compact(
         arena: &'a HeaderSyntaxArena,
         names: &'a LookupNames,
         id: HeaderTypeId,
@@ -33,7 +33,7 @@ impl<'a> SignatureTypeSyntax<'a> {
         Self::Compact { arena, names, id }
     }
 
-    pub(super) fn spelling(self) -> Option<Cow<'a, str>> {
+    pub(in crate::resolve) fn spelling(self) -> Option<Cow<'a, str>> {
         match self {
             Self::Parser(reference) => Some(Cow::Borrowed(&reference.name)),
             Self::Compact { arena, names, id } => arena
@@ -139,7 +139,7 @@ impl<'a> SignatureTypeSyntax<'a> {
         })
     }
 
-    pub(super) fn arguments(self) -> Option<Vec<Self>> {
+    pub(in crate::resolve) fn arguments(self) -> Option<Vec<Self>> {
         match self {
             Self::Parser(reference) => Some(
                 reference

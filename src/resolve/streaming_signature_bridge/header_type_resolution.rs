@@ -46,7 +46,7 @@ fn projected_argument(
         .expect("a declaration type argument must retain its projection")
 }
 
-fn resolve_signature_type_with(
+pub(in crate::resolve) fn resolve_signature_type_with(
     reference: SignatureTypeSyntax<'_>,
     classes: &ClassNames,
     tparams: &TParams,

@@ -5719,23 +5719,27 @@ fn has_projected_generic_return_hazard_from_header(
     headers: &crate::fir::StreamedHeaderModule,
     function: &StreamedCallableHeader,
 ) -> bool {
-    let Some(ret) = function.explicit_result.as_ref() else {
+    let Some(ret) = function.explicit_result else {
+        return false;
+    };
+    let Some(return_spelling) = compact_header_type_spelling(headers, ret) else {
         return false;
     };
     if !function
         .type_parameters
         .iter()
-        .any(|parameter| parameter == &ret.name)
+        .any(|parameter| parameter == &return_spelling)
     {
         return false;
     }
     let mut occurrences = function
         .receiver
-        .as_ref()
-        .map(|receiver| type_ref_formal_occurrences(receiver, &ret.name, false))
+        .and_then(|receiver| {
+            header_type_formal_occurrences(headers, receiver, &return_spelling, false)
+        })
         .unwrap_or_default();
     for parameter in &function.parameters {
-        let here = header_type_formal_occurrences(headers, parameter.ty, &ret.name, false)
+        let here = header_type_formal_occurrences(headers, parameter.ty, &return_spelling, false)
             .expect("a callable parameter must retain compact type syntax");
         occurrences.0 |= here.0;
         occurrences.1 |= here.1;
@@ -5819,13 +5823,11 @@ fn generic_value_operand_slots_from_header(
             .any(|parameter| parameter == name)
     };
     let mut slots = Vec::new();
-    if function.receiver.as_ref().is_some_and(|receiver| {
-        !receiver.nullable()
-            && receiver.arg.is_none()
-            && receiver.targs.is_empty()
-            && receiver.fun_params.is_empty()
-            && is_formal(&receiver.name)
-    }) {
+    if function
+        .receiver
+        .and_then(|receiver| header_type_bare_parameter_spelling(headers, receiver))
+        .is_some_and(|spelling| is_formal(&spelling))
+    {
         slots.push(0);
     }
     slots.extend(
@@ -6679,10 +6681,10 @@ fn collect_signatures_with_cp_impl(
                         })
                         .collect();
                     let ret = match callable_header.result {
-                        StreamedResultKind::Explicit => ty_of_ref(
+                        StreamedResultKind::Explicit => resolve_header_type_with(
+                            headers,
                             callable_header
                                 .explicit_result
-                                .as_ref()
                                 .expect("explicit compact result type"),
                             &class_names,
                             &tp,
@@ -6732,11 +6734,14 @@ fn collect_signatures_with_cp_impl(
                         .collect();
                     let source_receiver = callable_header
                         .receiver
-                        .as_ref()
                         .map(|receiver| {
                             if companion_extension {
                                 associated_companion_receiver_ty_from_spelling(
-                                    receiver,
+                                    SignatureTypeSyntax::compact(
+                                        &headers.syntax,
+                                        &headers.lookup_names,
+                                        receiver,
+                                    ),
                                     callable_header.receiver_source_spelling,
                                     headers,
                                     &class_names,
@@ -6744,7 +6749,13 @@ fn collect_signatures_with_cp_impl(
                                     diags,
                                 )
                             } else {
-                                ty_of_ref(receiver, &class_names, &semantic_tp, diags)
+                                resolve_header_type_with(
+                                    headers,
+                                    receiver,
+                                    &class_names,
+                                    &semantic_tp,
+                                    diags,
+                                )
                             }
                         })
                         .map(|receiver| {
@@ -7868,8 +7879,9 @@ fn collect_signatures_with_cp_impl(
                         // `String[]` is expected (a `ClassCastException`).
                         let ret = method_header
                             .explicit_result
-                            .as_ref()
-                            .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
+                            .map(|result| {
+                                resolve_header_type_with(headers, result, &class_names, &mtp, diags)
+                            })
                             .unwrap_or_else(|| {
                                 if method_header.signature_inference.is_some() {
                                     // Inferred member results belong exclusively to the declaration's
@@ -7911,8 +7923,15 @@ fn collect_signatures_with_cp_impl(
                                 );
                             let ret_shape = method_header
                                 .explicit_result
-                                .as_ref()
-                                .map(|ret| ty_of_ref(ret, &class_names, &symbolic_mtp, diags))
+                                .map(|result| {
+                                    resolve_header_type_with(
+                                        headers,
+                                        result,
+                                        &class_names,
+                                        &symbolic_mtp,
+                                        diags,
+                                    )
+                                })
                                 .unwrap_or(signature.ret);
                             signature.generic_sig = Some(source_generic_signature_from_header(
                                 headers,
@@ -7978,10 +7997,15 @@ fn collect_signatures_with_cp_impl(
                             &classifier_header.type_parameters,
                         );
                         if !value_operand_slots.is_empty() {
-                            let physical_receiver = method_header
-                                .receiver
-                                .as_ref()
-                                .map(|receiver| ty_of_ref(receiver, &class_names, &mtp, diags));
+                            let physical_receiver = method_header.receiver.map(|receiver| {
+                                resolve_header_type_with(
+                                    headers,
+                                    receiver,
+                                    &class_names,
+                                    &mtp,
+                                    diags,
+                                )
+                            });
                             table
                                 .source_generic_member_value_operand_slots
                                 .entry(internal)
@@ -7994,10 +8018,9 @@ fn collect_signatures_with_cp_impl(
                                     value_operand_slots,
                                 ));
                         }
-                        let extension_receiver = method_header
-                            .receiver
-                            .as_ref()
-                            .map(|receiver| ty_of_ref(receiver, &class_names, &mtp, diags));
+                        let extension_receiver = method_header.receiver.map(|receiver| {
+                            resolve_header_type_with(headers, receiver, &class_names, &mtp, diags)
+                        });
                         source_methods.push(SourceMethodPlan {
                             signature: signature.clone(),
                             extension_receiver,
@@ -9002,7 +9025,7 @@ fn collect_signatures_with_cp_impl(
                         );
                         let erased_receiver = if companion_extension {
                             associated_companion_receiver_ty_from_spelling(
-                                recv_ref,
+                                SignatureTypeSyntax::parser(recv_ref),
                                 property_header.receiver_source_spelling,
                                 headers,
                                 &class_names,
@@ -9014,7 +9037,7 @@ fn collect_signatures_with_cp_impl(
                         };
                         let recv_ty = if companion_extension {
                             associated_companion_receiver_ty_from_spelling(
-                                recv_ref,
+                                SignatureTypeSyntax::parser(recv_ref),
                                 property_header.receiver_source_spelling,
                                 headers,
                                 &class_names,
@@ -10869,14 +10892,30 @@ fn streamed_function_conflict_display(
             default: parameter.has_default,
         })
         .collect::<Vec<_>>();
+    let receiver = match header.receiver {
+        Some(receiver) => Some(
+            headers
+                .syntax
+                .transient_type_ref(receiver, &headers.lookup_names)?,
+        ),
+        None => None,
+    };
+    let result = match header.explicit_result {
+        Some(result) => Some(
+            headers
+                .syntax
+                .transient_type_ref(result, &headers.lookup_names)?,
+        ),
+        None => None,
+    };
     render_function_display(
         header.context_count,
         stub.flags.has(crate::fir::DeclarationFlags::SUSPEND),
         &type_parameters,
-        header.receiver.as_ref(),
+        receiver.as_ref(),
         name,
         &parameters,
-        header.explicit_result.as_ref(),
+        result.as_ref(),
         None,
         max_bytes,
     )
@@ -11204,14 +11243,14 @@ fn declared_member_callable_headers(
     for declaration in members {
         let header = streamed_callable_header_by_declaration(headers, declaration)
             .expect("a production member function must have a compact header");
-        let Some(return_ref) = header.explicit_result.as_ref() else {
+        let Some(return_ref) = header.explicit_result else {
             continue;
         };
         let method_tparams =
             class_tparams.extended_with(&header.type_parameters, &header.bounds, &|name| {
                 classes.get(name)
             });
-        let ret = ty_of_ref(return_ref, classes, &method_tparams, diags);
+        let ret = resolve_header_type_with(headers, return_ref, classes, &method_tparams, diags);
         let mut signature = member_signature_from_header(
             headers,
             &header,
@@ -11244,11 +11283,9 @@ fn declared_member_callable_headers(
                 diags,
             ));
         }
-        if let Some(receiver_ty) = header
-            .receiver
-            .as_ref()
-            .map(|receiver| ty_of_ref(receiver, classes, &method_tparams, diags))
-        {
+        if let Some(receiver_ty) = header.receiver.map(|receiver| {
+            resolve_header_type_with(headers, receiver, classes, &method_tparams, diags)
+        }) {
             extensions
                 .entry(header.name.clone())
                 .or_default()
@@ -11370,13 +11407,9 @@ fn source_generic_signature_from_header(
     inferred_ret_tparam: Option<String>,
     diags: &mut DiagSink,
 ) -> GenericSig {
-    let resolve = |reference: &TypeRef, diags: &mut DiagSink| {
-        ty_of_ref(reference, classes, type_params, diags)
-    };
     let receiver = header
         .receiver
-        .as_ref()
-        .map(|reference| resolve(reference, diags));
+        .map(|receiver| resolve_header_type_with(headers, receiver, classes, type_params, diags));
     let params = header
         .parameters
         .iter()
@@ -11387,8 +11420,7 @@ fn source_generic_signature_from_header(
         .collect();
     let ret = header
         .explicit_result
-        .as_ref()
-        .map(|reference| resolve(reference, diags))
+        .map(|result| resolve_header_type_with(headers, result, classes, type_params, diags))
         .unwrap_or_else(|| {
             let bindings = header
                 .type_parameters
@@ -11414,7 +11446,7 @@ fn source_generic_signature_from_header(
                 .bounds
                 .iter()
                 .filter(|(owner, _)| owner == parameter)
-                .map(|(_, bound)| resolve(bound, diags))
+                .map(|(_, bound)| ty_of_ref(bound, classes, type_params, diags))
                 .collect()
         })
         .collect();
@@ -11571,7 +11603,7 @@ fn apply_alias_expansion(
 /// aliases with different fixed arguments associate with the same expanded classifier. Ordinary
 /// extension receivers still go through full alias application and arity checking.
 fn associated_companion_receiver_ty_from_spelling(
-    receiver: &TypeRef,
+    receiver: SignatureTypeSyntax<'_>,
     source_spelling: Option<crate::fir::HeaderTypeId>,
     headers: &crate::fir::StreamedHeaderModule,
     classes: &ClassNames,
@@ -11585,7 +11617,7 @@ fn associated_companion_receiver_ty_from_spelling(
                 .ty(source_spelling)
                 .expect("receiver source spelling must name compact syntax");
             let crate::fir::HeaderTypeKind::Classifier { detail, .. } = spelling.kind else {
-                return ty_of_ref(receiver, classes, tparams, diags);
+                return resolve_signature_type_with(receiver, classes, tparams, diags);
             };
             let spelling = headers
                 .syntax
@@ -11600,14 +11632,17 @@ fn associated_companion_receiver_ty_from_spelling(
                         .expect("compact receiver source spelling must retain its name")
                 })
         }
-        None => receiver.targs.is_empty().then(|| receiver.name.clone()),
+        None => receiver
+            .arguments()
+            .filter(|arguments| arguments.is_empty())
+            .and_then(|_| receiver.spelling().map(|spelling| spelling.into_owned())),
     };
     if let Some(alias_spelling) = alias_spelling {
         if let Some(alias) = classes.alias_expansion(&alias_spelling) {
             return Ty::obj_name(alias.target);
         }
     }
-    ty_of_ref(receiver, classes, tparams, diags)
+    resolve_signature_type_with(receiver, classes, tparams, diags)
 }
 
 fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {

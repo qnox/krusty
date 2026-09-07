@@ -33,9 +33,9 @@ pub(super) use header_projection::*;
 pub(super) use header_type_resolution::{
     header_type_bare_parameter_spelling, header_type_formal_occurrences,
     header_type_has_function_receiver, resolve_header_function_parameter_types,
-    resolve_header_type_with, resolve_parser_type_with,
+    resolve_header_type_with, resolve_parser_type_with, resolve_signature_type_with,
 };
-use signature_type_syntax::*;
+pub(super) use signature_type_syntax::SignatureTypeSyntax;
 
 #[cfg(test)]
 pub(crate) use local_signatures::publish_checked_local_signatures;
