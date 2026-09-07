@@ -2048,6 +2048,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   common inference contains no collection-name table. A Kotlin-declared `MutableMap<String, Any>`
   carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. Tests:
   `tests/java_flexible_collection_e2e.rs`.
+- **A lambda whose input is still an open callee formal is a postponed probe.** A generic call
+  whose lambda parameter's INPUT is one of the callee's own formals (`fun <T : Any> matching(f:
+  (T) -> Boolean): T`, mockk's `match { it.contains(x) }`) can only shape that lambda once `T` is
+  known. In argument position the enclosing call supplies `T` after it selects, and krusty already
+  re-checks the nested call under that expectation — but the first applicability probe checked the
+  body against the open `T` and REPORTED what it found (`unresolved reference 'contains'` on `it`,
+  once per matcher in a real project's `verify { … }` blocks). kotlinc postpones such a lambda. The
+  shared lambda entry point (`check_lambda_with_implicit_receivers_and_return_labeled`) now records
+  the body diagnostics of a lambda any of whose inputs is not lexically fixed as that lambda's
+  probe verdict (`provisional_lambda_diagnostics`, keyed by the lambda). The diagnostics STAY in
+  the sink meanwhile — applicability counts emitted errors, and draining them changed inference
+  (a fun-interface callee formal then captured the enclosing `T`) — and are withdrawn only when
+  the same lambda is checked again under closed inputs; a second probe of the same lambda leaves
+  the first verdict standing (a repeated diagnostic collapses later), and a verdict no closed
+  re-check withdrew is dropped from the record at statement end and stands. The top-level path's
+  `deferred_member_errors` (member lookups on a callee formal, answered by the finalized recheck)
+  join the record, keyed by the call, when the call had no expectation, and are withdrawn when the
+  call is checked again under one. Still open
+  beside it: a top-level callee whose `T` nothing fixes reports nothing where kotlinc reports
+  `cannot infer type for type parameter 'T'` (the batch compiler then fails FIR construction with
+  `UnsupportedCallShape`). Test: `tests/postponed_lambda_probe_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is

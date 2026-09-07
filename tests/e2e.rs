@@ -1060,6 +1060,8 @@ mod platform_classifier_identity_e2e;
 mod plugins_e2e;
 #[path = "postponed_bound_inference_e2e.rs"]
 mod postponed_bound_inference_e2e;
+#[path = "postponed_lambda_probe_e2e.rs"]
+mod postponed_lambda_probe_e2e;
 #[path = "primitive_array_members_e2e.rs"]
 mod primitive_array_members_e2e;
 #[path = "primitive_bound_generic_e2e.rs"]

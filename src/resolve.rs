@@ -27651,6 +27651,9 @@ impl<'a> Checker<'a> {
         self.resolved_calls.remove(&call);
         self.unbound_classifier_value_calls.remove(&call);
         self.resolved_constructors.remove(&call);
+        if expected.is_some() {
+            self.withdraw_provisional_diagnostics(call);
+        }
         if self.file.collection_literal_calls.contains(&call.0) {
             return self.check_collection_literal(scope, call, args, span, expected);
         }
@@ -32100,6 +32103,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // Without an expectation this check is a probe: an enclosing call may still bind
+                // the formal and re-check the call, so a member error the finalized recheck could
+                // not answer is held for that re-check (see `provisional_lambda_diagnostics`).
+                let call_expected: Option<Ty> = expected;
+                let deferred_mark = call_expected.is_none().then_some(self.diags.diags.len());
                 for (expression, diagnostic_span, name) in
                     postponed_constraints.deferred_member_errors.drain(..)
                 {
@@ -32115,6 +32123,9 @@ impl<'a> Checker<'a> {
                     if !already_reported {
                         self.diags.error(diagnostic_span, message);
                     }
+                }
+                if let Some(mark) = deferred_mark {
+                    self.hold_provisional_diagnostics(call, mark);
                 }
                 let arg_tys = arg_tys
                     .into_iter()
@@ -46222,6 +46233,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_suspend_function_conversions: HashMap::new(),
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
+        provisional_lambda_diagnostics: HashMap::new(),
         unbound_classifier_value_calls: std::collections::HashSet::new(),
         implicit_receiver_selections: HashMap::new(),
         implicit_receiver_identity_uses: HashMap::new(),
@@ -49590,6 +49602,12 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Body diagnostics of a lambda checked against a callee formal nothing has bound yet (a probe
+    /// of `matching { it.contains(x) }` before the enclosing call supplies `T`). kotlinc postpones
+    /// such a lambda. The diagnostics stay in the sink while the probe is judged — applicability
+    /// counts emitted errors — and are withdrawn only when the same lambda (or call) is checked
+    /// again under the bound input; at statement end the record is dropped and they stand.
+    provisional_lambda_diagnostics: HashMap<ExprId, Vec<crate::diag::Diagnostic>>,
     /// Classifier-value calls whose generic result remains provisional until its consumer is known.
     unbound_classifier_value_calls: std::collections::HashSet<ExprId>,
     /// Checker-selected receiver for a bare call or property read. The receiver stack is semantic scope
@@ -75066,6 +75084,11 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.expr_depth -= 1;
+        // A statement is done: a probe verdict no re-check withdrew is the verdict, and it is
+        // already in the sink.
+        if self.expr_depth == 0 {
+            self.provisional_lambda_diagnostics.clear();
+        }
         #[cfg(feature = "trace")]
         self.expr_stack.pop();
         t
@@ -85708,7 +85731,71 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// Every shaped lambda check funnels through here. A lambda whose INPUT is still an open
+    /// callee formal (`matching { it.contains(x) }` probed before the enclosing call binds `T`)
+    /// cannot have its body judged yet: kotlinc postpones it. Its body diagnostics are held per
+    /// lambda (`provisional_lambda_diagnostics`), replaced by the next check of the same lambda —
+    /// the re-check under the bound input that follows the enclosing selection — and reported at
+    /// statement end when no such re-check came.
     fn check_lambda_with_implicit_receivers_and_return_labeled(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        shape: LambdaShape<'_>,
+        label: Option<&str>,
+        mode: LambdaCheckMode,
+    ) -> Ty {
+        let open_input = shape
+            .value_types
+            .iter()
+            .chain(shape.context_types.iter())
+            .chain(shape.extension_receiver.iter())
+            .any(|input| !Self::type_is_lexically_fixed(scope, *input));
+        // Only a check under closed inputs supersedes a probe verdict; a second probe of the same
+        // lambda leaves the first verdict standing (a repeated diagnostic collapses later).
+        if !open_input {
+            self.withdraw_provisional_diagnostics(e);
+        }
+        let probe_mark = open_input.then_some(self.diags.diags.len());
+        let checked = self.check_lambda_with_implicit_receivers_and_return_labeled_now(
+            scope, e, shape, label, mode,
+        );
+        if let Some(mark) = probe_mark {
+            self.hold_provisional_diagnostics(e, mark);
+        }
+        checked
+    }
+
+    /// Record the diagnostics emitted since `mark` as the probe verdict of `key` (a lambda or a
+    /// call). They stay in the sink: the enclosing selection still sees an errored argument.
+    fn hold_provisional_diagnostics(&mut self, key: ExprId, mark: usize) {
+        if self.diags.diags.len() > mark {
+            let held = self.diags.diags[mark..].to_vec();
+            self.provisional_lambda_diagnostics
+                .entry(key)
+                .or_default()
+                .extend(held);
+        }
+    }
+
+    /// `key` is being checked again: its probe verdict is superseded, so withdraw it from the
+    /// sink (first matching entry per held diagnostic; the sink may have grown since).
+    fn withdraw_provisional_diagnostics(&mut self, key: ExprId) {
+        let Some(held) = self.provisional_lambda_diagnostics.remove(&key) else {
+            return;
+        };
+        for diagnostic in held {
+            if let Some(index) = self.diags.diags.iter().position(|candidate| {
+                candidate.file == diagnostic.file
+                    && candidate.span == diagnostic.span
+                    && candidate.msg == diagnostic.msg
+            }) {
+                self.diags.diags.remove(index);
+            }
+        }
+    }
+
+    fn check_lambda_with_implicit_receivers_and_return_labeled_now(
         &mut self,
         scope: &CheckerScope<'_>,
         e: ExprId,
