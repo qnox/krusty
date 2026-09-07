@@ -788,7 +788,10 @@ fn analyze_source_set_impl(
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
                 });
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, stubs));
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(
+                &file,
+                Some(&active_headers),
+            ));
             drop(active_headers);
             if !retain_inspection_analysis && index < inferred_count && !multiplatform {
                 if needs_bounded_pass_one_syntax {
@@ -805,7 +808,7 @@ fn analyze_source_set_impl(
                 }
             }
         } else {
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &[]));
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, None));
         }
         files.push(file);
     }

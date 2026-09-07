@@ -17,18 +17,12 @@ use super::class_internal;
 pub(super) struct EnclosingTypeParameterDeclaration {
     pub(super) declaration_start: u32,
     pub(super) names: Vec<String>,
-    pub(super) bounds: Vec<(String, crate::ast::TypeRef)>,
 }
 
-fn type_parameters(
-    declaration_start: u32,
-    names: &[String],
-    bounds: &[(String, crate::ast::TypeRef)],
-) -> EnclosingTypeParameterDeclaration {
+fn type_parameters(declaration_start: u32, names: &[String]) -> EnclosingTypeParameterDeclaration {
     EnclosingTypeParameterDeclaration {
         declaration_start,
         names: names.to_vec(),
-        bounds: bounds.to_vec(),
     }
 }
 
@@ -134,7 +128,6 @@ fn record_scoped_local_classifiers(
                     nested.push(type_parameters(
                         function.signature_span.lo,
                         &function.type_params,
-                        &function.type_param_bounds,
                     ));
                     file.any_fun_expr(function, &mut |child| {
                         expressions.push((child, nested.clone()));
@@ -166,18 +159,13 @@ fn record_class_member_local_classifiers(
     result: &mut HashMap<DeclId, Vec<EnclosingTypeParameterDeclaration>>,
 ) {
     let mut class_scope = declarations.to_vec();
-    class_scope.push(type_parameters(
-        class.span.lo,
-        &class.type_params,
-        &class.type_param_bounds,
-    ));
+    class_scope.push(type_parameters(class.span.lo, &class.type_params));
 
     for method in &class.methods {
         let mut method_scope = class_scope.clone();
         method_scope.push(type_parameters(
             method.signature_span.lo,
             &method.type_params,
-            &method.type_param_bounds,
         ));
         record_scoped_local_classifiers(file, &method.body, &method_scope, result);
         for default in method
@@ -190,11 +178,7 @@ fn record_class_member_local_classifiers(
     }
     for property in &class.body_props {
         let mut property_scope = class_scope.clone();
-        property_scope.push(type_parameters(
-            property.span.lo,
-            &property.type_params,
-            &property.type_param_bounds,
-        ));
+        property_scope.push(type_parameters(property.span.lo, &property.type_params));
         for_each_property_body(property, |body| {
             record_scoped_local_classifiers(file, &body, &property_scope, result)
         });
@@ -249,11 +233,7 @@ fn class_type_parameter_scope(
     file: &File,
     class: &ClassDecl,
 ) -> Vec<EnclosingTypeParameterDeclaration> {
-    let mut declarations = vec![type_parameters(
-        class.span.lo,
-        &class.type_params,
-        &class.type_param_bounds,
-    )];
+    let mut declarations = vec![type_parameters(class.span.lo, &class.type_params)];
     let mut outer = class.inner_of.as_deref();
     let mut guard = 0;
     while let Some(owner) = outer {
@@ -271,11 +251,7 @@ fn class_type_parameter_scope(
         else {
             break;
         };
-        declarations.push(type_parameters(
-            class.span.lo,
-            &class.type_params,
-            &class.type_param_bounds,
-        ));
+        declarations.push(type_parameters(class.span.lo, &class.type_params));
         outer = class.inner_of.as_deref();
     }
     declarations.reverse();
@@ -298,11 +274,7 @@ pub(super) fn local_class_enclosing_tparams(
         |property: &PropDecl,
          mut declarations: Vec<EnclosingTypeParameterDeclaration>,
          result: &mut HashMap<DeclId, Vec<EnclosingTypeParameterDeclaration>>| {
-            declarations.push(type_parameters(
-                property.span.lo,
-                &property.type_params,
-                &property.type_param_bounds,
-            ));
+            declarations.push(type_parameters(property.span.lo, &property.type_params));
             for_each_property_body(property, |body| record(&body, &declarations, result));
         };
 
@@ -313,7 +285,6 @@ pub(super) fn local_class_enclosing_tparams(
                 &[type_parameters(
                     function.signature_span.lo,
                     &function.type_params,
-                    &function.type_param_bounds,
                 )],
                 &mut result,
             ),
@@ -324,7 +295,6 @@ pub(super) fn local_class_enclosing_tparams(
                     scope.push(type_parameters(
                         method.signature_span.lo,
                         &method.type_params,
-                        &method.type_param_bounds,
                     ));
                     record(&method.body, &scope, &mut result);
                 }
@@ -345,7 +315,6 @@ pub(super) fn local_class_enclosing_tparams(
                         scope.push(type_parameters(
                             method.signature_span.lo,
                             &method.type_params,
-                            &method.type_param_bounds,
                         ));
                         record(&method.body, &scope, &mut result);
                     }
@@ -394,11 +363,7 @@ pub(super) fn local_class_enclosing_tparams(
             let Some(mut scope) = result.get(&owner_declaration).cloned() else {
                 continue;
             };
-            scope.push(type_parameters(
-                owner.span.lo,
-                &owner.type_params,
-                &owner.type_param_bounds,
-            ));
+            scope.push(type_parameters(owner.span.lo, &owner.type_params));
             result.insert(declaration, scope.clone());
             record_class_member_local_classifiers(file, class, &scope, &mut result);
             progressed = true;

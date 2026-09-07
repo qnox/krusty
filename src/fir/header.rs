@@ -3520,6 +3520,7 @@ pub(crate) struct ActiveSourceHeaders<'file> {
     source: SourceFileId,
     stubs: Vec<DeclarationStub>,
     primary_declarations: Vec<Option<DeclarationId>>,
+    type_parameter_declarations: std::collections::HashMap<u32, DeclarationId>,
     active_file: std::marker::PhantomData<&'file File>,
 }
 
@@ -3537,6 +3538,12 @@ impl ActiveSourceHeaders<'_> {
             .get(parser.0 as usize)
             .copied()
             .flatten()
+    }
+
+    pub(crate) fn type_parameter_declaration(&self, signature_start: u32) -> Option<DeclarationId> {
+        self.type_parameter_declarations
+            .get(&signature_start)
+            .copied()
     }
 }
 
@@ -3594,10 +3601,28 @@ impl HeaderInventoryBuilder {
         self.sources.set_package(source_id, file.package.as_deref());
         self.inventoried[raw] = true;
         let extracted = self.add_file(source_id, file, source.is_common);
+        let type_parameter_declarations = extracted
+            .stubs
+            .iter()
+            .filter_map(|stub| {
+                let header = self.syntax.declaration(stub.id)?;
+                let start = match header.kind {
+                    HeaderDeclarationKind::Callable {
+                        signature_start, ..
+                    } => signature_start,
+                    HeaderDeclarationKind::Property { .. }
+                    | HeaderDeclarationKind::Classifier { .. } => stub.range.lo,
+                    HeaderDeclarationKind::Constructor { .. }
+                    | HeaderDeclarationKind::TypeAlias { .. } => return None,
+                };
+                Some((start, stub.id))
+            })
+            .collect();
         Some(ActiveSourceHeaders {
             source: source_id,
             stubs: extracted.stubs,
             primary_declarations: extracted.primary_declarations,
+            type_parameter_declarations,
             active_file: std::marker::PhantomData,
         })
     }

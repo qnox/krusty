@@ -58,9 +58,7 @@ use constant_evaluation::{
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
 use context_sensitive_resolution::expected_nested_classifier;
 use delegated_properties::select_delegate_operator;
-use local_class_scope::{
-    local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
-};
+use local_class_scope::{local_class_enclosing_tparams, local_class_sibling_names};
 pub(crate) use override_plans::publish_override_plans;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 pub(crate) use stable_metadata::publish_stable_declaration_metadata;
@@ -6985,7 +6983,15 @@ fn collect_signatures_with_cp_impl(
                                 .get(&compact_classifier.id)
                         })
                         .cloned()
-                        .unwrap_or_default();
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|declaration| {
+                            streamed_type_parameter_declaration_header(headers, declaration)
+                                .expect(
+                                    "an enclosing type-parameter declaration must keep its compact header",
+                                )
+                        })
+                        .collect::<Vec<_>>();
                     // A classifier header is resolved before declarations in that classifier's own
                     // body enter scope. Keep this declaration-owned header scope separate from the
                     // member scope built below: `class C : Base { interface Base }` must bind the
@@ -7196,7 +7202,9 @@ fn collect_signatures_with_cp_impl(
                     let enclosing_ctp = enclosing_tparam_declarations.iter().fold(
                         TParams::default(),
                         |scope, declaration| {
-                            scope.erased_extended_with(
+                            compact_tparams_class_erased_extended_with(
+                                &scope,
+                                headers,
                                 &declaration.names,
                                 &declaration.bounds,
                                 &|name| class_names.get(name),
@@ -7214,18 +7222,19 @@ fn collect_signatures_with_cp_impl(
                     let symbolic_enclosing_tparams = enclosing_tparam_declarations.iter().fold(
                         TParams::default(),
                         |scope, declaration| {
-                            let extended = scope
-                                .symbolic_extended_with(
-                                    &declaration.names,
-                                    &declaration.bounds,
-                                    &|name| class_names.get(name),
-                                )
-                                .alpha_renamed_declaration(
-                                    &declaration.names,
-                                    table.compilation_id,
-                                    i as u32,
-                                    declaration.declaration_start,
-                                );
+                            let extended = compact_tparams_symbolic_extended_with(
+                                &scope,
+                                headers,
+                                &declaration.names,
+                                &declaration.bounds,
+                                &|name| class_names.get(name),
+                            )
+                            .alpha_renamed_declaration(
+                                &declaration.names,
+                                table.compilation_id,
+                                i as u32,
+                                declaration.declaration_start,
+                            );
                             enclosing_semantic_parameters.push(
                                 declaration
                                     .names
@@ -14295,30 +14304,6 @@ impl TParams {
             erasure: bindings.into_iter().collect(),
             ..Default::default()
         }
-    }
-
-    /// Class-bound erasure layered over an enclosing scope, used to fold an inner/local class's
-    /// enclosing declarations before its own parameters.
-    pub(crate) fn erased_extended_with(
-        &self,
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        type_parameter_bounds::class_erased_extended_from_syntax(
-            self,
-            names,
-            bounds,
-            &|bound| (!bound.nullable()).then(|| bound.name.clone()),
-            &|bound| {
-                (!bound.nullable()
-                    && bound.arg.is_none()
-                    && bound.targs.is_empty()
-                    && bound.fun_params.is_empty())
-                .then(|| bound.name.clone())
-            },
-            &|bound| tparam_bound_erasure(Some(bound), resolve),
-        )
     }
 
     pub(crate) fn extended_with(
@@ -28340,7 +28325,7 @@ mod tests {
         let mut builder = crate::fir::HeaderInventoryBuilder::default();
         builder.add_source(0, &input, Some(&file));
         let headers = builder.finish();
-        let local_contexts = [pass_one_local_class_context(&file, &[])];
+        let local_contexts = [pass_one_local_class_context(&file, None)];
 
         // Deliberately corrupt the transient declaration header after compact extraction. This is
         // a migration regression: production signature publication must no longer read these AST
@@ -28576,7 +28561,7 @@ mod tests {
         let mut builder = crate::fir::HeaderInventoryBuilder::default();
         builder.add_source(0, &input, Some(&file));
         let headers = builder.finish();
-        let local_contexts = [pass_one_local_class_context(&file, &[])];
+        let local_contexts = [pass_one_local_class_context(&file, None)];
         let expected = headers
             .stubs
             .iter()
@@ -39482,8 +39467,7 @@ struct AnonymousLexicalClassScope {
 /// here lets the ordinary parser arenas die before whole-module signature collection begins.
 #[derive(Default, Clone)]
 pub(crate) struct PassOneLocalClassContext {
-    enclosing_type_parameters:
-        HashMap<crate::fir::DeclarationId, Vec<EnclosingTypeParameterDeclaration>>,
+    enclosing_type_parameters: HashMap<crate::fir::DeclarationId, Vec<crate::fir::DeclarationId>>,
     sibling_classifiers: HashMap<crate::fir::DeclarationId, Vec<(String, TypeName)>>,
     anonymous_owners: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
     anonymous_declarations: std::collections::HashSet<crate::fir::DeclarationId>,
@@ -39491,22 +39475,20 @@ pub(crate) struct PassOneLocalClassContext {
 
 pub(crate) fn pass_one_local_class_context(
     file: &File,
-    stubs: &[crate::fir::DeclarationStub],
+    active_headers: Option<&crate::fir::ActiveSourceHeaders<'_>>,
 ) -> PassOneLocalClassContext {
+    let Some(active_headers) = active_headers else {
+        return PassOneLocalClassContext::default();
+    };
     let stable_by_transient = file
         .decl_arena
         .iter()
         .enumerate()
-        .filter_map(|(raw, declaration)| {
-            let Decl::Class(class) = declaration else {
-                return None;
-            };
-            stubs
-                .iter()
-                .find(|stub| {
-                    stub.kind == crate::fir::DeclarationKind::Classifier && stub.range == class.span
-                })
-                .map(|stub| (DeclId(raw as u32), stub.id))
+        .filter_map(|(raw, _)| {
+            let parser = DeclId(raw as u32);
+            active_headers
+                .declaration(parser)
+                .map(|stable| (parser, stable))
         })
         .collect::<HashMap<_, _>>();
     let transient_tparams = local_class_enclosing_tparams(file);
@@ -39538,10 +39520,19 @@ pub(crate) fn pass_one_local_class_context(
         enclosing_type_parameters: transient_tparams
             .into_iter()
             .filter_map(|(declaration, parameters)| {
-                stable_by_transient
-                    .get(&declaration)
-                    .copied()
-                    .map(|stable| (stable, parameters))
+                let stable = stable_by_transient.get(&declaration).copied()?;
+                let parameters = parameters
+                    .into_iter()
+                    .filter(|parameter| !parameter.names.is_empty())
+                    .map(|parameter| {
+                        active_headers
+                            .type_parameter_declaration(parameter.declaration_start)
+                            .expect(
+                                "an enclosing type-parameter declaration must have a stable header",
+                            )
+                    })
+                    .collect();
+                Some((stable, parameters))
             })
             .collect(),
         sibling_classifiers: transient_siblings

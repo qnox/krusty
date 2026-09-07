@@ -5252,11 +5252,12 @@ fn compact_symbol_collection_never_dereferences_released_body_arenas() {
     let mut diagnostics = DiagSink::new();
     let mut file = crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
     let mut builder = crate::fir::HeaderInventoryBuilder::default();
-    builder
+    let active_headers = builder
         .add_source(0, &input, Some(&file))
         .expect("valid Kotlin source must produce compact headers");
+    let local_context = super::pass_one_local_class_context(&file, Some(&active_headers));
+    drop(active_headers);
     let headers = builder.finish();
-    let local_context = super::pass_one_local_class_context(&file, &headers.stubs);
 
     file.release_body_arenas();
     assert!(file.expr_arena.is_empty());

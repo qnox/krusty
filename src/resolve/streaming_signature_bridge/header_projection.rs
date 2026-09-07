@@ -479,6 +479,62 @@ pub(in crate::resolve) fn streamed_type_alias_header_by_declaration(
     })
 }
 
+pub(in crate::resolve) struct StreamedTypeParameterDeclarationHeader {
+    pub(in crate::resolve) declaration_start: u32,
+    pub(in crate::resolve) names: Vec<String>,
+    pub(in crate::resolve) bounds: Vec<(String, crate::fir::HeaderTypeId)>,
+}
+
+pub(in crate::resolve) fn streamed_type_parameter_declaration_header(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::DeclarationId,
+) -> Option<StreamedTypeParameterDeclarationHeader> {
+    let stub = headers.stub(declaration)?;
+    let header = headers.syntax.declaration(declaration)?;
+    let (type_parameters, bounds, declaration_start) = match header.kind {
+        crate::fir::HeaderDeclarationKind::Callable {
+            type_parameters,
+            bounds,
+            signature_start,
+            ..
+        } => (type_parameters, bounds, signature_start),
+        crate::fir::HeaderDeclarationKind::Property {
+            type_parameters,
+            bounds,
+            ..
+        }
+        | crate::fir::HeaderDeclarationKind::Classifier {
+            type_parameters,
+            bounds,
+            ..
+        } => (type_parameters, bounds, stub.range.lo),
+        crate::fir::HeaderDeclarationKind::Constructor { .. }
+        | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => return None,
+    };
+    let names = headers
+        .syntax
+        .type_parameters(type_parameters)
+        .iter()
+        .map(|parameter| headers.lookup_names.get(parameter.name).map(str::to_owned))
+        .collect::<Option<Vec<_>>>()?;
+    let bounds = headers
+        .syntax
+        .bounds(bounds)
+        .iter()
+        .map(|bound| {
+            Some((
+                headers.lookup_names.get(bound.parameter)?.to_owned(),
+                bound.ty,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(StreamedTypeParameterDeclarationHeader {
+        declaration_start,
+        names,
+        bounds,
+    })
+}
+
 pub(in crate::resolve) struct StreamedClassifierParameter {
     pub(in crate::resolve) name: String,
     pub(in crate::resolve) ty: crate::fir::HeaderTypeId,
