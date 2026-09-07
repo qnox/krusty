@@ -1944,6 +1944,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Compilation continues, as in kotlinc, so a stray unusable jar never changes the output of a module
   that does not need it. Checked before analysis on the user's `-cp` entries only
   (`cli::classpath_entry_problems`). Tests: `tests/classpath_entry_warning_e2e.rs`.
+- **A star projection is the `out` projection of its readable bound.** `Resp<*>` is `Resp<out
+  Any?>`, and a Java wildcard `Resp<?>` reaches Kotlin as `Resp<out Any!>`. Inside an INVARIANT
+  outer argument (`Publisher<MutableHttpResponse<*>>` against Micronaut's Java
+  `Publisher<MutableHttpResponse<?>>` from `ServerFilterChain.proceed`) the two spellings are one
+  type argument, whichever way the assignment runs; krusty's invariant-argument equality
+  (`assignable::same_type_argument`) compared projection kinds literally and rejected both
+  directions (`argument type mismatch: actual type is 'Publisher<MutableHttpResponse<*>>', but
+  'Publisher<MutableHttpResponse<out Any!>>' was expected`, three times in one test file). A
+  `StarProjection(bound)` now equals an `OutProjection(other)` when the bound and the other are the
+  same flexible type. Not a subtyping change: `Foo<*>` with a narrower declared bound is still not
+  `Foo<out Any?>`. Emitted bytes for the shapes are unchanged by this rule; the residues beside them
+  (a bridge method's debug tables, constant-pool order) predate it. Test:
+  `tests/star_projection_wildcard_e2e.rs` (a Java fixture with a wildcard result and parameter,
+  declared, stubbed, and passed, run on the JVM).
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
