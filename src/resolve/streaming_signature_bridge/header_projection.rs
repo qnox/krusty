@@ -478,7 +478,7 @@ pub(in crate::resolve) fn streamed_type_alias_header_by_declaration(
 
 pub(in crate::resolve) struct StreamedClassifierParameter {
     pub(in crate::resolve) name: String,
-    pub(in crate::resolve) ty: TypeRef,
+    pub(in crate::resolve) ty: crate::fir::HeaderTypeId,
     pub(in crate::resolve) is_vararg: bool,
     pub(in crate::resolve) has_default: bool,
     pub(in crate::resolve) is_property: bool,
@@ -597,7 +597,7 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
             };
             Some(StreamedClassifierParameter {
                 name: headers.lookup_names.get(parameter.name)?.to_string(),
-                ty: materialize(parameter.ty)?,
+                ty: parameter.ty,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
                 is_property: parameter.flags.is_property(),

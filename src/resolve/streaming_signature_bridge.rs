@@ -31,10 +31,10 @@ pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
 pub(super) use declaration_spellings::collect_compact_declared_spellings;
 pub(super) use header_projection::*;
 pub(super) use header_type_resolution::{
-    header_type_bare_parameter_spelling, header_type_formal_occurrences,
-    header_type_has_function_receiver, header_type_parameter_spelling_allow_nullable,
-    resolve_header_function_parameter_types, resolve_header_type_with, resolve_parser_type_with,
-    resolve_signature_type_with,
+    header_type_bare_classifier_shape, header_type_bare_parameter_spelling,
+    header_type_formal_occurrences, header_type_has_function_receiver,
+    header_type_parameter_spelling_allow_nullable, resolve_header_function_parameter_types,
+    resolve_header_type_with, resolve_parser_type_with, resolve_signature_type_with,
 };
 pub(super) use signature_type_syntax::SignatureTypeSyntax;
 

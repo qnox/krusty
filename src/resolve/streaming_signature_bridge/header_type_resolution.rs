@@ -260,3 +260,21 @@ pub(in crate::resolve) fn header_type_parameter_spelling_allow_nullable(
     (syntax.arguments()?.is_empty() && !spelling.contains(['.', '/', '$']))
         .then(|| spelling.into_owned())
 }
+
+pub(in crate::resolve) fn header_type_bare_classifier_shape(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+) -> Option<(String, bool, bool)> {
+    let syntax = SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax);
+    if syntax.function_shape()?.is_some() || !syntax.arguments()?.is_empty() {
+        return None;
+    }
+    let spelling = syntax.spelling()?;
+    (!spelling.contains(['.', '/', '$'])).then(|| {
+        (
+            spelling.into_owned(),
+            syntax.nullable().unwrap_or(false),
+            syntax.definitely_non_null().unwrap_or(false),
+        )
+    })
+}

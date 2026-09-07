@@ -7288,9 +7288,21 @@ fn collect_signatures_with_cp_impl(
                         .iter()
                         .map(|parameter| {
                             let ty = if compact_local_header {
-                                ty_of_ref_silent(&parameter.ty, &primary_header_class_names, &ctp)
+                                resolve_header_type_with(
+                                    headers,
+                                    parameter.ty,
+                                    &primary_header_class_names,
+                                    &ctp,
+                                    &mut DiagSink::new(),
+                                )
                             } else {
-                                ty_of_ref(&parameter.ty, &primary_header_class_names, &ctp, diags)
+                                resolve_header_type_with(
+                                    headers,
+                                    parameter.ty,
+                                    &primary_header_class_names,
+                                    &ctp,
+                                    diags,
+                                )
                             };
                             semantic_value_parameter_ty(ty, parameter.is_vararg)
                         })
@@ -7299,16 +7311,18 @@ fn collect_signatures_with_cp_impl(
                         .primary_parameters
                         .iter()
                         .map(|parameter| {
-                            let ty = ty_of_ref_silent(
-                                &parameter.ty,
+                            let ty = resolve_header_type_with(
+                                headers,
+                                parameter.ty,
                                 &primary_header_class_names,
                                 &symbolic_ctp,
+                                &mut DiagSink::new(),
                             );
                             let ty = semantic_value_parameter_ty(ty, parameter.is_vararg);
-                            (
-                                ty,
-                                !parameter.is_vararg && parameter.ty.definitely_non_null(),
-                            )
+                            let definitely_non_null =
+                                header_type_bare_classifier_shape(headers, parameter.ty)
+                                    .is_some_and(|(_, _, definitely_non_null)| definitely_non_null);
+                            (ty, !parameter.is_vararg && definitely_non_null)
                         })
                         .collect();
                     let ctor_param_names: Vec<(String, bool)> = classifier_header
@@ -8517,28 +8531,31 @@ fn collect_signatures_with_cp_impl(
                     // generic instantiation can substitute the corresponding type argument. A nullable
                     // parameter (`T?`) has its own direct-shape table because nullability wraps the
                     // declaration parameter rather than the use-site argument.
-                    let tparam_index = |r: &TypeRef| -> Option<(usize, bool)> {
-                        if r.nullable() || !r.targs.is_empty() || r.arg.is_some() {
+                    let tparam_index = |syntax: crate::fir::HeaderTypeId| -> Option<(usize, bool)> {
+                        let (spelling, nullable, definitely_non_null) =
+                            header_type_bare_classifier_shape(headers, syntax)?;
+                        if nullable {
                             return None;
                         }
                         classifier_header
                             .type_parameters
                             .iter()
-                            .position(|t| *t == r.name)
-                            .map(|index| (index, r.definitely_non_null()))
+                            .position(|parameter| parameter == &spelling)
+                            .map(|index| (index, definitely_non_null))
                     };
                     // Direct `T?` remains distinct from bare `T` for member selection, but both retain
                     // their complete symbolic declaration shape below. Storage erasure and the
                     // nullable-scalar boxing boundary are backend work, never a reason to widen a
                     // frontend signature to the parameter's upper bound.
-                    let is_direct_nullable_tparam = |r: &TypeRef| {
-                        r.nullable()
-                            && r.targs.is_empty()
-                            && r.arg.is_none()
+                    let direct_nullable_tparam = |syntax: crate::fir::HeaderTypeId| {
+                        let (spelling, nullable, _) =
+                            header_type_bare_classifier_shape(headers, syntax)?;
+                        (nullable
                             && classifier_header
                                 .type_parameters
                                 .iter()
-                                .any(|parameter| parameter == &r.name)
+                                .any(|parameter| parameter == &spelling))
+                        .then_some(spelling)
                     };
                     let mut generic_props: HashMap<String, (usize, bool)> = HashMap::new();
                     let mut nullable_tparam_props: HashMap<String, usize> = HashMap::new();
@@ -8547,14 +8564,14 @@ fn collect_signatures_with_cp_impl(
                         .iter()
                         .filter(|parameter| parameter.is_property && !parameter.is_vararg)
                     {
-                        if let Some(index) = tparam_index(&parameter.ty) {
+                        if let Some(index) = tparam_index(parameter.ty) {
                             generic_props.insert(parameter.name.clone(), index);
                         }
-                        if is_direct_nullable_tparam(&parameter.ty) {
+                        if let Some(spelling) = direct_nullable_tparam(parameter.ty) {
                             if let Some(index) = classifier_header
                                 .type_parameters
                                 .iter()
-                                .position(|name| *name == parameter.ty.name)
+                                .position(|name| name == &spelling)
                             {
                                 nullable_tparam_props.insert(parameter.name.clone(), index);
                             }
