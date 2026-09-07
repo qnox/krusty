@@ -12,7 +12,7 @@ use crate::ast::{
 use crate::diag::{DiagSink, Severity, Span};
 use crate::features::LangFeatures;
 use crate::source::{SourceInput, SourceKind};
-use crate::types::Visibility;
+use crate::types::{TypeName, Visibility};
 
 mod visibility_suppressions;
 
@@ -3120,6 +3120,32 @@ impl StreamedHeaderModule {
             .collect::<Vec<_>>();
         positions.sort_unstable();
         positions.into_iter().map(|position| &self.stubs[position])
+    }
+
+    /// Resolved module identity fixed by one classifier header's source package and declared path.
+    /// This is a compact-header fact: callers never need to recover the same association from a
+    /// temporary semantic table's declaration sidecar.
+    pub fn classifier_identity(&self, declaration: DeclarationId) -> Option<TypeName> {
+        let stub = self.stub(declaration)?;
+        (stub.kind == DeclarationKind::Classifier).then_some(())?;
+        let source_name = self.lookup_names.get(stub.lookup_name?)?;
+        let package = self.sources.get(stub.source)?.package;
+        Some(crate::types::type_name_child(
+            package,
+            &source_name.replace('.', "$"),
+        ))
+    }
+
+    /// Every live classifier declaration and its compact semantic identity, in inventory order.
+    pub fn classifier_identities(&self) -> impl Iterator<Item = (DeclarationId, TypeName)> + '_ {
+        self.stubs.iter().filter_map(|stub| {
+            (stub.kind == DeclarationKind::Classifier)
+                .then(|| {
+                    self.classifier_identity(stub.id)
+                        .map(|identity| (stub.id, identity))
+                })
+                .flatten()
+        })
     }
 
     /// Stable declaration-stream order captured while the bounded source unit is active. Signature

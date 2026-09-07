@@ -285,15 +285,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
     file_class_names: &[ClassNames],
 ) -> std::collections::HashMap<DeclarationId, DeclaredSpellings> {
     let expansions = table.alias_expansion_spellings.clone();
-    let classifier_types = table
-        .classes
-        .values()
-        .filter_map(|classifier| {
-            classifier
-                .stable_declaration
-                .map(|declaration| (declaration, classifier.internal))
-        })
-        .collect();
+    let classifier_types = headers.classifier_identities().collect();
     let empty_receivers = std::collections::HashMap::new();
     let semantics = super::ProductionSignatureSemantics {
         headers,
