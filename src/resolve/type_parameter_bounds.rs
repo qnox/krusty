@@ -58,6 +58,21 @@ pub(super) fn erased_from_syntax<B>(
     }
 }
 
+pub(super) fn class_erased_from_syntax<B>(
+    names: &[String],
+    bounds: &[(String, B)],
+    chain_parameter: &dyn Fn(&B) -> Option<String>,
+    bound_erasure: &dyn Fn(&B) -> Ty,
+) -> TParams {
+    let mut out = erased_from_syntax(names, bounds, chain_parameter, bound_erasure);
+    for erased in out.erasure.values_mut() {
+        if !erased.is_reference() {
+            *erased = Ty::obj("kotlin/Any");
+        }
+    }
+    out
+}
+
 pub(super) fn erased_from_syntax_with_primary_class<B: Clone>(
     names: &[String],
     bounds: &[(String, B)],
@@ -126,6 +141,28 @@ pub(super) fn erased_extended_from_syntax<B>(
 ) -> TParams {
     let mut out = enclosing.clone();
     let mut declared = erased_from_syntax(names, bounds, chain_parameter, bound_erasure);
+    for name in names {
+        if let Some(bound) =
+            enclosing_bound_erasure(enclosing, name, names, bounds, enclosing_parameter)
+        {
+            declared.erasure.insert(name.clone(), bound);
+        }
+    }
+    out.erasure.extend(declared.erasure);
+    out.extra_bounds.extend(declared.extra_bounds);
+    out
+}
+
+pub(super) fn class_erased_extended_from_syntax<B>(
+    enclosing: &TParams,
+    names: &[String],
+    bounds: &[(String, B)],
+    chain_parameter: &dyn Fn(&B) -> Option<String>,
+    enclosing_parameter: &dyn Fn(&B) -> Option<String>,
+    bound_erasure: &dyn Fn(&B) -> Ty,
+) -> TParams {
+    let mut out = enclosing.clone();
+    let mut declared = class_erased_from_syntax(names, bounds, chain_parameter, bound_erasure);
     for name in names {
         if let Some(bound) =
             enclosing_bound_erasure(enclosing, name, names, bounds, enclosing_parameter)

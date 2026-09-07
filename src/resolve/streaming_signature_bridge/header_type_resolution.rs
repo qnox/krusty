@@ -248,6 +248,47 @@ pub(in crate::resolve) fn header_type_bare_parameter_spelling(
         .bare_parameter_spelling()
 }
 
+pub(in crate::resolve) fn header_type_spelling(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+) -> Option<String> {
+    SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax)
+        .spelling()
+        .map(|spelling| spelling.into_owned())
+}
+
+pub(in crate::resolve) fn header_type_span(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+) -> Option<crate::diag::Span> {
+    SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax).span()
+}
+
+pub(in crate::resolve) fn header_type_is_function(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+) -> bool {
+    SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax)
+        .function_shape()
+        .flatten()
+        .is_some()
+}
+
+pub(in crate::resolve) fn resolve_header_type_arguments_with(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+    classes: &ClassNames,
+    tparams: &TParams,
+    diags: &mut DiagSink,
+) -> Vec<Ty> {
+    SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax)
+        .arguments()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|argument| resolve_signature_type_with(argument, classes, tparams, diags))
+        .collect()
+}
+
 pub(in crate::resolve) fn header_type_parameter_spelling_allow_nullable(
     headers: &StreamedHeaderModule,
     syntax: HeaderTypeId,
@@ -358,6 +399,23 @@ pub(in crate::resolve) fn compact_tparams_extended_with(
     resolve: &dyn Fn(&str) -> Option<TypeName>,
 ) -> TParams {
     type_parameter_bounds::erased_extended_from_syntax(
+        enclosing,
+        names,
+        bounds,
+        &|bound| compact_non_nullable_bound_spelling(headers, *bound),
+        &|bound| header_type_bare_parameter_spelling(headers, *bound),
+        &|bound| compact_bound_erasure(headers, *bound, resolve),
+    )
+}
+
+pub(in crate::resolve) fn compact_tparams_class_erased_extended_with(
+    enclosing: &TParams,
+    headers: &StreamedHeaderModule,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> TParams {
+    type_parameter_bounds::class_erased_extended_from_syntax(
         enclosing,
         names,
         bounds,

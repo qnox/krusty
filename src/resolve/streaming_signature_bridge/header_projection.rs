@@ -489,9 +489,9 @@ pub(in crate::resolve) struct StreamedClassifierHeader {
     pub(in crate::resolve) type_parameters: Vec<String>,
     pub(in crate::resolve) lexical_type_parameter_captures: Vec<String>,
     pub(in crate::resolve) type_parameter_variances: Vec<crate::types::TypeVariance>,
-    pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
-    pub(in crate::resolve) supertypes: Vec<TypeRef>,
-    pub(in crate::resolve) base: Option<TypeRef>,
+    pub(in crate::resolve) bounds: Vec<(String, crate::fir::HeaderTypeId)>,
+    pub(in crate::resolve) supertypes: Vec<crate::fir::HeaderTypeId>,
+    pub(in crate::resolve) base: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) delegated_interfaces: Vec<usize>,
     pub(in crate::resolve) primary_parameters: Vec<StreamedClassifierParameter>,
 }
@@ -541,7 +541,6 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
         .iter()
         .map(|parameter| headers.lookup_names.get(parameter.name).map(str::to_string))
         .collect::<Option<Vec<_>>>()?;
-    let materialize = |ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names);
     let bounds = headers
         .syntax
         .bounds(bounds)
@@ -549,20 +548,14 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
         .map(|bound| {
             Some((
                 headers.lookup_names.get(bound.parameter)?.to_string(),
-                materialize(bound.ty)?,
+                bound.ty,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
     let supertypes = headers
         .syntax
         .type_operands(supertypes)
-        .iter()
-        .map(|supertype| materialize(*supertype))
-        .collect::<Option<Vec<_>>>()?;
-    let base = match base {
-        Some(base) => Some(materialize(base)?),
-        None => None,
-    };
+        .to_vec();
     let delegated_interfaces = headers
         .syntax
         .interface_delegations(delegations)

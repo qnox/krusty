@@ -6490,18 +6490,20 @@ fn collect_signatures_with_cp_impl(
                 .supertypes
                 .iter()
                 .filter_map(|supertype| {
+                    let spelling = header_type_spelling(headers, *supertype)?;
                     declared_supertype_name_from_source_name(
                         &source_name,
-                        &supertype.name,
+                        &spelling,
                         &names,
                         &lexical_classifiers,
                     )
                 })
                 .collect::<Vec<_>>();
-            supertypes.extend(classifier_header.base.as_ref().and_then(|base| {
+            supertypes.extend(classifier_header.base.and_then(|base| {
+                let spelling = header_type_spelling(headers, base)?;
                 declared_supertype_name_from_source_name(
                     &source_name,
-                    &base.name,
+                    &spelling,
                     &names,
                     &lexical_classifiers,
                 )
@@ -6515,14 +6517,6 @@ fn collect_signatures_with_cp_impl(
             source_direct_supertypes.insert(internal, supertypes);
         }
     }
-
-    let ty_of_ref = |r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink| {
-        ty_of_ref_with(r, classes, tparams, diags)
-    };
-    // Helper tables are rebuilt by the authoritative pass, which owns their diagnostics.
-    let ty_of_ref_silent = |r: &TypeRef, classes: &ClassNames, tparams: &TParams| {
-        ty_of_ref_with(r, classes, tparams, &mut DiagSink::new())
-    };
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
@@ -7178,20 +7172,23 @@ fn collect_signatures_with_cp_impl(
                     // for a class parameter that kotlinc signs its members with. Enclosing declarations
                     // are folded first so a same-spelled own formal shadows them, as the symbolic
                     // scope built below does.
-                    let ctp = enclosing_tparam_declarations
-                        .iter()
-                        .fold(TParams::default(), |scope, declaration| {
+                    let enclosing_ctp = enclosing_tparam_declarations.iter().fold(
+                        TParams::default(),
+                        |scope, declaration| {
                             scope.erased_extended_with(
                                 &declaration.names,
                                 &declaration.bounds,
                                 &|name| class_names.get(name),
                             )
-                        })
-                        .erased_extended_with(
-                            &classifier_header.type_parameters,
-                            &classifier_header.bounds,
-                            &|name| class_names.get(name),
-                        );
+                        },
+                    );
+                    let ctp = compact_tparams_class_erased_extended_with(
+                        &enclosing_ctp,
+                        headers,
+                        &classifier_header.type_parameters,
+                        &classifier_header.bounds,
+                        &|name| class_names.get(name),
+                    );
                     let mut enclosing_semantic_parameters = Vec::new();
                     let symbolic_enclosing_tparams = enclosing_tparam_declarations.iter().fold(
                         TParams::default(),
@@ -7227,18 +7224,19 @@ fn collect_signatures_with_cp_impl(
                             extended
                         },
                     );
-                    let symbolic_ctp = symbolic_enclosing_tparams
-                        .symbolic_extended_with(
-                            &classifier_header.type_parameters,
-                            &classifier_header.bounds,
-                            &|name| class_names.get(name),
-                        )
-                        .alpha_renamed_declaration(
-                            &classifier_header.type_parameters,
-                            table.compilation_id,
-                            i as u32,
-                            compact_classifier.range.lo,
-                        );
+                    let symbolic_ctp = compact_tparams_symbolic_extended_with(
+                        &symbolic_enclosing_tparams,
+                        headers,
+                        &classifier_header.type_parameters,
+                        &classifier_header.bounds,
+                        &|name| class_names.get(name),
+                    )
+                    .alpha_renamed_declaration(
+                        &classifier_header.type_parameters,
+                        table.compilation_id,
+                        i as u32,
+                        compact_classifier.range.lo,
+                    );
                     // Capture only type parameters lexically visible at the local declaration. Keep
                     // every declaration in `symbolic_enclosing_tparams` above so an outer bound can
                     // retain identities it mentions, but a nearer same-spelled formal hides the outer
@@ -7509,29 +7507,22 @@ fn collect_signatures_with_cp_impl(
                                 .supertypes
                                 .iter()
                                 .map(|supertype| {
-                                    supertype
-                                        .targs
-                                        .iter()
-                                        .map(|argument| {
-                                            ty_of_ref_silent(
-                                                argument,
-                                                &header_class_names,
-                                                &symbolic_ctp,
-                                            )
-                                        })
-                                        .collect()
+                                    resolve_header_type_arguments_with(
+                                        headers,
+                                        *supertype,
+                                        &header_class_names,
+                                        &symbolic_ctp,
+                                        &mut DiagSink::new(),
+                                    )
                                 })
                                 .chain(classifier_header.base.iter().map(|base| {
-                                    base.targs
-                                        .iter()
-                                        .map(|argument| {
-                                            ty_of_ref_silent(
-                                                argument,
-                                                &header_class_names,
-                                                &symbolic_ctp,
-                                            )
-                                        })
-                                        .collect()
+                                    resolve_header_type_arguments_with(
+                                        headers,
+                                        *base,
+                                        &header_class_names,
+                                        &symbolic_ctp,
+                                        &mut DiagSink::new(),
+                                    )
                                 }))
                                 .chain(
                                     classifier_flags
@@ -8305,18 +8296,20 @@ fn collect_signatures_with_cp_impl(
                     }
                     // An unresolved supertype is diagnosed at its own source span and is never emitted.
                     let super_span = |name: &str| {
-                        if let Some(base) = classifier_header
-                            .base
-                            .as_ref()
-                            .filter(|base| base.name == name)
-                        {
-                            return base.span;
+                        if let Some(base) = classifier_header.base.filter(|base| {
+                            header_type_spelling(headers, *base).as_deref() == Some(name)
+                        }) {
+                            return header_type_span(headers, base)
+                                .unwrap_or(compact_classifier.range);
                         }
                         classifier_header
                             .supertypes
                             .iter()
-                            .find(|t| t.name == name)
-                            .map(|t| t.span)
+                            .copied()
+                            .find(|supertype| {
+                                header_type_spelling(headers, *supertype).as_deref() == Some(name)
+                            })
+                            .and_then(|supertype| header_type_span(headers, supertype))
                             .unwrap_or(compact_classifier.range)
                     };
                     let mut resolve_super = |s: &str| -> TypeName {
@@ -8363,24 +8356,22 @@ fn collect_signatures_with_cp_impl(
                     {
                         None
                     } else {
-                        classifier_header
-                            .supertypes
-                            .iter()
-                            .find(|supertype| {
-                                declared_supertype_name_from_source_name(
-                                    &classifier_source_name,
-                                    &supertype.name,
-                                    &header_class_names,
-                                    &lexical_inheritors,
-                                )
-                                .is_some_and(|internal| {
-                                    user_base_classes.contains(&internal)
-                                        || libraries
-                                            .classifier(internal)
-                                            .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
-                                })
+                        classifier_header.supertypes.iter().find_map(|supertype| {
+                            let spelling = header_type_spelling(headers, *supertype)?;
+                            declared_supertype_name_from_source_name(
+                                &classifier_source_name,
+                                &spelling,
+                                &header_class_names,
+                                &lexical_inheritors,
+                            )
+                            .filter(|internal| {
+                                user_base_classes.contains(internal)
+                                    || libraries
+                                        .classifier(*internal)
+                                        .is_some_and(|ty| !ty.is_interface() && !ty.is_object())
                             })
-                            .map(|supertype| supertype.name.clone())
+                            .map(|_| spelling)
+                        })
                     };
                     let mut interfaces: Vec<TypeName> = classifier_header
                         .supertypes
@@ -8388,18 +8379,22 @@ fn collect_signatures_with_cp_impl(
                         // Arrow syntax contributes a callable shape, not a nominal classifier
                         // edge. Resolving its parser marker (`<fun>`) as an interface both emits a
                         // bogus unresolved-reference diagnostic and pollutes hierarchy traversal.
-                        .filter(|t| function_type_ref_shape(t).is_none())
-                        .filter(|t| parenless_base.as_deref() != Some(t.name.as_str()))
-                        .map(|t| resolve_super(&t.name))
+                        .copied()
+                        .filter(|supertype| !header_type_is_function(headers, *supertype))
+                        .filter_map(|supertype| {
+                            let spelling = header_type_spelling(headers, supertype)?;
+                            (parenless_base.as_deref() != Some(spelling.as_str()))
+                                .then(|| resolve_super(&spelling))
+                        })
                         .collect();
                     if classifier_flags.has(ClassFlags::ANNOTATION) {
                         interfaces.push(type_name("kotlin/Annotation"));
                     }
                     let super_internal = classifier_header
                         .base
-                        .as_ref()
-                        .map(|base| base.name.as_str())
-                        .or(parenless_base.as_deref())
+                        .and_then(|base| header_type_spelling(headers, base))
+                        .or(parenless_base.clone())
+                        .as_deref()
                         .map(&mut resolve_super)
                         .or_else(|| classifier_is_enum.then(|| type_name("kotlin/Enum")));
                     let resolved_annotations = resolved_compact_annotation_identities(
@@ -8791,7 +8786,16 @@ fn collect_signatures_with_cp_impl(
                     let callable_signatures = classifier_header
                         .supertypes
                         .iter()
-                        .map(|supertype| ty_of_ref_silent(supertype, &class_names, &symbolic_ctp))
+                        .copied()
+                        .map(|supertype| {
+                            resolve_header_type_with(
+                                headers,
+                                supertype,
+                                &class_names,
+                                &symbolic_ctp,
+                                &mut DiagSink::new(),
+                            )
+                        })
                         .filter(|supertype| matches!(supertype, Ty::Fun(_)))
                         .collect::<Vec<_>>();
                     let callable_signature = callable_signatures.first().copied();
@@ -8833,31 +8837,34 @@ fn collect_signatures_with_cp_impl(
                             interface_type_args: classifier_header
                                 .supertypes
                                 .iter()
-                                .filter(|interface| function_type_ref_shape(interface).is_none())
+                                .copied()
+                                .filter(|interface| !header_type_is_function(headers, *interface))
                                 .filter(|interface| {
-                                    parenless_base.as_deref() != Some(interface.name.as_str())
+                                    header_type_spelling(headers, *interface).as_deref()
+                                        != parenless_base.as_deref()
                                 })
                                 .map(|interface| {
-                                    interface
-                                        .targs
-                                        .iter()
-                                        .map(|argument| {
-                                            ty_of_ref(
-                                                argument,
-                                                &header_class_names,
-                                                &symbolic_ctp,
-                                                diags,
-                                            )
-                                        })
-                                        .collect()
+                                    resolve_header_type_arguments_with(
+                                        headers,
+                                        interface,
+                                        &header_class_names,
+                                        &symbolic_ctp,
+                                        diags,
+                                    )
                                 })
                                 .collect(),
                             delegated_interfaces: classifier_header
                                 .delegated_interfaces
                                 .iter()
                                 .map(|&supertype| {
-                                    let interface = &classifier_header.supertypes[supertype];
-                                    ty_of_ref(interface, &header_class_names, &symbolic_ctp, diags)
+                                    let interface = classifier_header.supertypes[supertype];
+                                    resolve_header_type_with(
+                                        headers,
+                                        interface,
+                                        &header_class_names,
+                                        &symbolic_ctp,
+                                        diags,
+                                    )
                                 })
                                 .collect(),
                             super_internal: super_internal_ref,
@@ -8869,27 +8876,27 @@ fn collect_signatures_with_cp_impl(
                             } else {
                                 classifier_header
                                     .base
-                                    .as_ref()
                                     .or_else(|| {
                                         parenless_base.as_deref().and_then(|base| {
-                                            classifier_header
-                                                .supertypes
-                                                .iter()
-                                                .find(|supertype| supertype.name == base)
+                                            classifier_header.supertypes.iter().copied().find(
+                                                |supertype| {
+                                                    header_type_spelling(headers, *supertype)
+                                                        .as_deref()
+                                                        == Some(base)
+                                                },
+                                            )
                                         })
                                     })
-                                    .map(|base| base.targs.as_slice())
-                                    .unwrap_or_default()
-                                    .iter()
-                                    .map(|argument| {
-                                        ty_of_ref(
-                                            argument,
+                                    .map(|base| {
+                                        resolve_header_type_arguments_with(
+                                            headers,
+                                            base,
                                             &header_class_names,
                                             &symbolic_ctp,
                                             diags,
                                         )
                                     })
-                                    .collect()
+                                    .unwrap_or_default()
                             },
                             super_ctor_params: Vec::new(),
                             ctor_param_names,
@@ -14460,73 +14467,26 @@ impl TParams {
         }
     }
 
-    /// CLASS type parameters, erased to their declared REFERENCE bound: `class Bounded<T : Cargo>`
-    /// signs its constructor/field/accessors with `Lapp/Cargo;`, exactly as kotlinc does and as the
-    /// FUNCTION path ([`from_decl_with`](Self::from_decl_with)) already did. A primitive-bounded
-    /// parameter still erases to `Any` — kotlinc specializes those too, but krusty's value-class pass
-    /// owns class-param bound handling and naive specialization there breaks the Object/value-class
-    /// boundary (VerifyError), so scalar bounds keep an `Any` erasure.
-    pub(crate) fn erased_with(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        let mut out = TParams::from_decl_with(names, bounds, resolve);
-        for erased in out.erasure.values_mut() {
-            if !erased.is_reference() {
-                *erased = Ty::obj("kotlin/Any");
-            }
-        }
-        out
-    }
-
-    /// [`erased_with`](Self::erased_with) layered over an enclosing scope — the class counterpart of
-    /// [`extended_with`](Self::extended_with), used to fold an inner/local class's enclosing
-    /// declarations before its own parameters.
+    /// Class-bound erasure layered over an enclosing scope, used to fold an inner/local class's
+    /// enclosing declarations before its own parameters.
     pub(crate) fn erased_extended_with(
         &self,
         names: &[String],
         bounds: &[(String, TypeRef)],
         resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
-        let mut out = self.clone();
-        let mut declared = TParams::erased_with(names, bounds, resolve);
-        for name in names {
-            if let Some(bound) = type_parameter_bounds::enclosing_bound_erasure(
-                self,
-                name,
-                names,
-                bounds,
-                &|bound| {
-                    (!bound.nullable()
-                        && bound.arg.is_none()
-                        && bound.targs.is_empty()
-                        && bound.fun_params.is_empty())
-                    .then(|| bound.name.clone())
-                },
-            ) {
-                declared.erasure.insert(name.clone(), bound);
-            }
-        }
-        out.erasure.extend(declared.erasure);
-        out.extra_bounds.extend(declared.extra_bounds);
-        out
-    }
-
-    /// Build from declared names + their upper bounds, resolving a CLASS/interface bound to its JVM
-    /// type so member access on `T` resolves and the descriptor erases to the bound (`<T: CharSequence>`
-    /// → `java/lang/CharSequence`, not `Object`). `resolve` maps a bound's simple class name to its JVM
-    /// internal name (primitive/`String` bounds need no resolver). Without a resolver (`from_decl`) only
-    /// primitive bounds are recovered — a reference bound stays `Any`.
-    pub(crate) fn from_decl_with(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-    ) -> Self {
-        type_parameter_bounds::erased_from_syntax(
+        type_parameter_bounds::class_erased_extended_from_syntax(
+            self,
             names,
             bounds,
             &|bound| (!bound.nullable()).then(|| bound.name.clone()),
+            &|bound| {
+                (!bound.nullable()
+                    && bound.arg.is_none()
+                    && bound.targs.is_empty()
+                    && bound.fun_params.is_empty())
+                .then(|| bound.name.clone())
+            },
             &|bound| tparam_bound_erasure(Some(bound), resolve),
         )
     }
