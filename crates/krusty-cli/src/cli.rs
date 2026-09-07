@@ -799,18 +799,22 @@ mod tests {
         let jar = dir.join("core.jar");
         std::fs::write(&jar, b"PK\x03\x04 not really a zip").unwrap();
         let problems = classpath_entry_problems(std::slice::from_ref(&jar));
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            matches!(&problems[0], ClasspathEntryProblem::Unreadable { path, .. } if *path == jar)
+        assert_eq!(
+            problems,
+            vec![ClasspathEntryProblem::Unreadable {
+                path: jar.clone(),
+                reason: "not a readable archive (invalid Zip archive: Could not find EOCD)"
+                    .to_string(),
+            }]
         );
         // kotlinc warns (`WARN: Error while reading zip file`) and continues; so does krusty.
-        assert!(
-            problems[0].to_string().starts_with(&format!(
-                "warning: cannot read classpath entry {}: ",
+        assert_eq!(
+            problems[0].to_string(),
+            format!(
+                "warning: cannot read classpath entry {}: not a readable archive \
+                 (invalid Zip archive: Could not find EOCD)",
                 jar.display()
-            )),
-            "{}",
-            problems[0]
+            )
         );
     }
 

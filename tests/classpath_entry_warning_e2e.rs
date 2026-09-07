@@ -31,11 +31,10 @@ fn compile_with_cp(name: &str, cp_entry: &std::path::Path) -> (bool, String, boo
 fn a_missing_classpath_entry_warns_in_kotlinc_words_and_compiles() {
     let missing = std::path::PathBuf::from("/definitely/not/there.jar");
     let (ok, stderr, emitted) = compile_with_cp("missing", &missing);
-    assert!(
-        stderr.contains(
-            "warning: classpath entry points to a non-existent location: /definitely/not/there.jar"
-        ),
-        "stderr:\n{stderr}"
+    assert_eq!(
+        stderr,
+        "warning: classpath entry points to a non-existent location: \
+         /definitely/not/there.jar\n"
     );
     assert!(
         ok && emitted,
@@ -51,12 +50,13 @@ fn a_truncated_jar_on_the_classpath_warns_and_compiles() {
     let jar = dir.join("core.jar");
     std::fs::write(&jar, b"PK\x03\x04 not really a zip").unwrap();
     let (ok, stderr, emitted) = compile_with_cp("truncated", &jar);
-    assert!(
-        stderr.contains(&format!(
-            "warning: cannot read classpath entry {}: ",
+    assert_eq!(
+        stderr,
+        format!(
+            "warning: cannot read classpath entry {}: not a readable archive \
+             (invalid Zip archive: Could not find EOCD)\n",
             jar.display()
-        )),
-        "stderr:\n{stderr}"
+        )
     );
     assert!(
         ok && emitted,
