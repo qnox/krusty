@@ -146,12 +146,45 @@ fn locate(prefix: &str) -> Option<PathBuf> {
     out
 }
 
+/// The newest `<artifact>-<version>.jar` Gradle has cached for `group:artifact` in `modules-2`,
+/// its dependency cache proper. Versions are compared numerically, so 1.11.0 beats 1.9.0.
+fn gradle_module_jar(group: &str, artifact: &str) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let artifact_dir = std::path::Path::new(&home)
+        .join(".gradle/caches/modules-2/files-2.1")
+        .join(group)
+        .join(artifact);
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for version in std::fs::read_dir(&artifact_dir).ok()?.flatten() {
+        let name = version.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let key = name
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let jar_name = format!("{artifact}-{name}.jar");
+        for hash in std::fs::read_dir(version.path()).ok()?.flatten() {
+            let jar = hash.path().join(&jar_name);
+            if jar.is_file() && best.as_ref().is_none_or(|(k, _)| key > *k) {
+                best = Some((key.clone(), jar));
+            }
+        }
+    }
+    best.map(|(_, jar)| jar)
+}
+
 fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    // core, json, stdlib from the local gradle cache (mirrors a -classpath user). A deep walk that
-    // reliably reaches the modules-2 cache (common::stdlib_jar's type-alias scan can miss it).
-    let core = locate("kotlinx-serialization-core-jvm")?;
-    let json = locate("kotlinx-serialization-json-jvm")?;
-    let std = locate("kotlin-stdlib-2").unwrap_or_else(common::stdlib_jar);
+    // core, json, stdlib from the local gradle cache (mirrors a -classpath user). Ask `modules-2`
+    // by coordinates first: a first-hit walk over the whole of `~/.gradle` stops in whichever
+    // Gradle wrapper distribution readdir lists first (an unrelated, older serialization version)
+    // and is exposed to every concurrent Gradle process rewriting that tree. The walk stays as the
+    // fallback for a cache laid out differently.
+    let core = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")
+        .or_else(|| locate("kotlinx-serialization-core-jvm"))?;
+    let json = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-json-jvm")
+        .or_else(|| locate("kotlinx-serialization-json-jvm"))?;
+    let std = common::stdlib_jar();
     Some((core, json, std))
 }
 
@@ -222,7 +255,7 @@ fn binary_compiles_serializable_and_emits_serializer() {
         .expect("run krusty");
     assert!(
         out.join("Foo.class").exists() && out.join("Foo$$serializer.class").exists(),
-        "krusty binary must emit Foo.class + Foo$$serializer.class; stderr:\n{}",
+        "krusty binary must emit Foo.class + Foo$$serializer.class; classpath: {cp}; stderr:\n{}",
         String::from_utf8_lossy(&o.stderr)
     );
 }
@@ -265,7 +298,7 @@ fn classpath_ctor_with_null_arg_resolves() {
         .expect("run krusty");
     assert!(
         out.join("Gap2Kt.class").exists(),
-        "SerializationException(message, null) must compile; stderr:\n{}",
+        "SerializationException(message, null) must compile; classpath: {cp}; stderr:\n{}",
         String::from_utf8_lossy(&o.stderr)
     );
 }
