@@ -5427,23 +5427,16 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
-        let declared_bounds = bounds
+        let explicitly_bounded_parameters = bounds
             .map(|bounds| headers.syntax.bounds(bounds))
             .unwrap_or_default()
             .iter()
-            .map(|bound| {
-                Some((
-                    headers.lookup_names.get(bound.parameter)?.to_owned(),
-                    headers
-                        .syntax
-                        .transient_type_ref(bound.ty, &headers.lookup_names)?,
-                ))
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(declared_bounds) = declared_bounds else {
+            .map(|bound| headers.lookup_names.get(bound.parameter).map(str::to_owned))
+            .collect::<Option<HashSet<_>>>();
+        let Some(explicitly_bounded_parameters) = explicitly_bounded_parameters else {
             crate::trace_compiler!(
                 "fir",
-                "signature finalization declined {:?}: type parameter bound is not interned",
+                "signature finalization declined {:?}: bounded type parameter name is not interned",
                 stub.id,
             );
             stop_with_failure!(stub.id);
@@ -5468,9 +5461,7 @@ pub(crate) fn finalized_streamed_signature_index(
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
             let semantic_name = semantic.ty_param_name().unwrap_or(source_name);
-            let has_explicit_bound = declared_bounds
-                .iter()
-                .any(|(owner, _)| owner == source_name);
+            let has_explicit_bound = explicitly_bounded_parameters.contains(source_name);
             let resolved_bounds = has_explicit_bound
                 .then(|| {
                     let mut bounds = vec![semantic
