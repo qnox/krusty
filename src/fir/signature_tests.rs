@@ -4,6 +4,57 @@ use crate::diag::DiagSink;
 use crate::source::SourceInput;
 
 #[test]
+fn generated_nested_classifier_identity_comes_from_its_stable_owner() {
+    let text = "package sample\nclass Foo";
+    let sources = [SourceInput::kotlin(text).with_file_stem("GeneratedCompanion")];
+    let mut diagnostics = DiagSink::new();
+    let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
+    let mut headers = inventory_parsed_source_headers(&sources, std::slice::from_ref(&file));
+    let outer = headers
+        .stubs
+        .iter()
+        .find(|stub| {
+            stub.kind == DeclarationKind::Classifier
+                && stub
+                    .lookup_name
+                    .and_then(|name| headers.lookup_names.get(name))
+                    == Some("Foo")
+        })
+        .expect("source classifier")
+        .id;
+    let outer_anchor = headers
+        .declarations
+        .anchor(outer)
+        .expect("source classifier anchor");
+    let generated = headers.declarations.intern(DeclarationAnchor {
+        source: outer_anchor.source,
+        range: outer_anchor.range,
+        owner: Some(outer),
+        kind: DeclarationKind::Classifier,
+        sibling: u32::MAX,
+    });
+    let lookup_name = headers.lookup_names.intern("Companion");
+    headers.push_stub(DeclarationStub {
+        id: generated,
+        source: outer_anchor.source,
+        range: outer_anchor.range,
+        lookup_name: Some(lookup_name),
+        body: None,
+        signature_inference: None,
+        initialization_order: None,
+        kind: DeclarationKind::Classifier,
+        visibility: crate::types::Visibility::Public,
+        flags: DeclarationFlags::default().with(DeclarationFlags::COMPILER_GENERATED, true),
+    });
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    assert_eq!(
+        headers.classifier_identity(generated),
+        Some(crate::types::type_name("sample/Foo$Companion"))
+    );
+}
+
+#[test]
 fn compact_calls_preserve_mapping_spread_trailing_lambda_and_type_arguments() {
     let text = r#"
 fun inferred() = transform<String>(

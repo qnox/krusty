@@ -3574,11 +3574,23 @@ pub(crate) fn install_streamed_plugin_declarations(
                 signature.plugin_expression.is_some() && signature.stable_declaration.is_none()
             })
         })
-        .map(|class| class.internal)
+        .map(|class| {
+            let (owner, generated_companion) = match class.stable_declaration {
+                Some(declaration) => (declaration, false),
+                None => (
+                    companion_owners
+                        .get(&class.internal)
+                        .expect("a plugin-generated classifier must have a stable enclosing owner")
+                        .0,
+                    true,
+                ),
+            };
+            (owner.raw(), generated_companion, class.internal)
+        })
         .collect::<Vec<_>>();
-    generated_owners.sort_by_key(|owner| owner.render());
+    generated_owners.sort_by_key(|(owner, generated_companion, _)| (*owner, *generated_companion));
 
-    for internal in generated_owners {
+    for (_, _, internal) in generated_owners {
         let stable_owner = match table
             .class_by_type_name(internal)
             .and_then(|class| class.stable_declaration)
@@ -4940,10 +4952,9 @@ pub(crate) fn finalized_streamed_signature_index(
                     generated_function(table, headers, &classifier_types, stub)
                         .map(|(signature, _)| signature.annotations.as_slice())
                 }
-                DeclarationKind::Classifier => table
-                    .classes
-                    .values()
-                    .find(|class| class.stable_declaration == Some(stub.id))
+                DeclarationKind::Classifier => classifier_types
+                    .get(&stub.id)
+                    .and_then(|classifier| table.class_by_type_name(*classifier))
                     .map(|class| class.annotations.as_slice()),
                 DeclarationKind::Property
                 | DeclarationKind::Constructor
