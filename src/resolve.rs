@@ -10634,7 +10634,7 @@ pub(crate) fn publish_checked_compile_time_constants(
     files: &[File],
     headers: &crate::fir::StreamedHeaderModule,
     index: &mut crate::fir::ResolvedModuleIndex,
-    table: &mut SymbolTable,
+    table: &SymbolTable,
 ) {
     // Explicitly typed and already-inferred singleton constants do not necessarily pass through
     // the deferred-property publication loop. Publish their literal payloads unconditionally from
@@ -10667,19 +10667,30 @@ pub(crate) fn publish_checked_compile_time_constants(
                 .body_props
                 .iter()
                 .filter(|property| property.is_const)
-                .filter_map(move |property| owner.map(|owner| (file_index, owner, property)))
+                .filter_map(move |property| {
+                    let owner = owner?;
+                    let stable = table
+                        .class_by_type_name(owner)?
+                        .declared_props
+                        .get(&property.name)?
+                        .stable_declaration?;
+                    Some((file_index, stable, property))
+                })
         })
         .collect::<Vec<_>>();
-    table.begin_module_mutation();
-    for (file_index, owner, property) in member_literals {
-        let Some(ty) = table
-            .class_by_type_name(owner)
-            .and_then(|class| class.declared_props.get(&property.name))
-            .map(|property| property.ty)
+    for (file_index, stable, property) in member_literals {
+        let Some(ty) = index
+            .signature(stable)
+            .map(|signature| signature.result.get())
         else {
             continue;
         };
-        publish_member_constant(&files[file_index as usize], table, owner, property, ty);
+        let Some(initializer) = property.init else {
+            continue;
+        };
+        if let Some(value) = source_literal_constant(&files[file_index as usize], initializer, ty) {
+            index.publish_compile_time_constant(stable, value);
+        }
     }
     let declarations = files
         .iter()
@@ -10711,11 +10722,7 @@ pub(crate) fn publish_checked_compile_time_constants(
     for _ in 0..declarations.len() {
         let mut changed = false;
         for &(file_index, declaration, stable, initializer) in &declarations {
-            let already_published = table
-                .stable_source_props
-                .get(&stable)
-                .is_none_or(|property| property.compile_time_constant.is_some());
-            if already_published {
+            if index.compile_time_constant(stable).is_some() {
                 continue;
             }
             let folded = {
@@ -10747,44 +10754,12 @@ pub(crate) fn publish_checked_compile_time_constants(
             let Some(folded) = folded else {
                 continue;
             };
-            if let Some(property) = table.stable_source_props.get_mut(&stable) {
-                property.compile_time_constant = Some(folded.clone());
-                index.publish_compile_time_constant(stable, folded);
-                changed = true;
-            }
+            index.publish_compile_time_constant(stable, folded);
+            changed = true;
         }
         if !changed {
             break;
         }
-    }
-    table.finish_module_mutation();
-}
-
-/// Publish a top-level explicit backing field without changing the property's declared signature.
-fn publish_member_constant(
-    file: &File,
-    table: &mut SymbolTable,
-    owner: TypeName,
-    property: &PropDecl,
-    ty: Ty,
-) {
-    if !property.is_const {
-        return;
-    }
-    let Some(init) = property.init else {
-        return;
-    };
-    let Some(value) = source_literal_constant(file, init, ty) else {
-        return;
-    };
-    let is_singleton = table
-        .class_by_type_name(owner)
-        .is_some_and(ClassSig::is_object);
-    if !is_singleton {
-        return;
-    }
-    if let Some(class) = table.class_by_type_name_mut(owner) {
-        class.constants.insert(property.name.clone(), value);
     }
 }
 

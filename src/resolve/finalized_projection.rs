@@ -516,33 +516,4 @@ pub(crate) fn publish_stable_declaration_metadata(
             suppressions.optional_declaration_usage,
         );
     }
-    for property in table
-        .source_props
-        .values()
-        .chain(table.stable_source_props.values())
-    {
-        let (Some(declaration), Some(constant)) = (
-            property.stable_declaration,
-            property.compile_time_constant.as_ref(),
-        ) else {
-            continue;
-        };
-        if index.compile_time_constant(declaration).is_none() {
-            index.publish_compile_time_constant(declaration, constant.clone());
-        }
-    }
-    for class in table.classes.values() {
-        for (name, constant) in &class.constants {
-            let Some(declaration) = class
-                .declared_props
-                .get(name)
-                .and_then(|property| property.stable_declaration)
-            else {
-                continue;
-            };
-            if index.compile_time_constant(declaration).is_none() {
-                index.publish_compile_time_constant(declaration, constant.clone());
-            }
-        }
-    }
 }
