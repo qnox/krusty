@@ -4109,53 +4109,69 @@ pub(crate) fn finalized_streamed_signature_index(
         None
     }
 
-    fn stable_constructor(
+    fn generated_constructor(
         table: &SymbolTable,
+        headers: &crate::fir::StreamedHeaderModule,
+        classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
         declaration: crate::fir::DeclarationId,
     ) -> Option<(Vec<Ty>, Ty, Option<Ty>)> {
-        table.classes.values().find_map(|class| {
-            if class.primary_constructor_declaration == Some(declaration) {
-                return Some((
-                    class
-                        .ctor_param_shapes
-                        .iter()
-                        .map(|(parameter, _)| *parameter)
-                        .collect(),
-                    semantic_classifier_self(class),
-                    None,
-                ));
-            }
-            class
-                .secondary_constructor_declarations
-                .iter()
-                .position(|candidate| *candidate == Some(declaration))
-                .and_then(|ordinal| class.secondary_ctor_shapes.get(ordinal).cloned())
-                .map(|parameters| (parameters, semantic_classifier_self(class), None))
-        })
+        if headers.syntax.declaration(declaration).is_some() {
+            return None;
+        }
+        let owner = headers.declarations.anchor(declaration)?.owner?;
+        let class = classifier_types
+            .get(&owner)
+            .and_then(|classifier| table.class_by_type_name(*classifier))?;
+        if class.primary_constructor_declaration == Some(declaration) {
+            return Some((
+                class
+                    .ctor_param_shapes
+                    .iter()
+                    .map(|(parameter, _)| *parameter)
+                    .collect(),
+                semantic_classifier_self(class),
+                None,
+            ));
+        }
+        class
+            .secondary_constructor_declarations
+            .iter()
+            .position(|candidate| *candidate == Some(declaration))
+            .and_then(|ordinal| class.secondary_ctor_shapes.get(ordinal).cloned())
+            .map(|parameters| (parameters, semantic_classifier_self(class), None))
     }
 
     fn stable_constructor_implicit_integer_coercion(
         table: &SymbolTable,
+        headers: &crate::fir::StreamedHeaderModule,
+        classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
         declaration: crate::fir::DeclarationId,
         ordinal: usize,
     ) -> bool {
-        table.classes.values().any(|class| {
-            if class.primary_constructor_declaration == Some(declaration) {
-                return class
-                    .ctor_implicit_integer_coercion
-                    .get(ordinal)
-                    .copied()
-                    .unwrap_or(false);
-            }
-            class
-                .secondary_constructor_declarations
-                .iter()
-                .position(|candidate| *candidate == Some(declaration))
-                .and_then(|constructor| class.secondary_ctor_call_sigs.get(constructor))
-                .and_then(|signature| signature.implicit_integer_coercion.get(ordinal))
+        let Some(class) = headers
+            .declarations
+            .anchor(declaration)
+            .and_then(|anchor| anchor.owner)
+            .and_then(|owner| classifier_types.get(&owner))
+            .and_then(|classifier| table.class_by_type_name(*classifier))
+        else {
+            return false;
+        };
+        if class.primary_constructor_declaration == Some(declaration) {
+            return class
+                .ctor_implicit_integer_coercion
+                .get(ordinal)
                 .copied()
-                .unwrap_or(false)
-        })
+                .unwrap_or(false);
+        }
+        class
+            .secondary_constructor_declarations
+            .iter()
+            .position(|candidate| *candidate == Some(declaration))
+            .and_then(|constructor| class.secondary_ctor_call_sigs.get(constructor))
+            .and_then(|signature| signature.implicit_integer_coercion.get(ordinal))
+            .copied()
+            .unwrap_or(false)
     }
 
     fn generated_function<'a>(
@@ -4449,24 +4465,34 @@ pub(crate) fn finalized_streamed_signature_index(
                 DeclarationKind::Function | DeclarationKind::Property => {
                     compact_header_seed(headers, stub.id)
                 }
-                DeclarationKind::Constructor => stable_constructor(table, stub.id).or_else(|| {
-                    (anchor.sibling == 0)
-                        .then_some(anchor.owner)
-                        .flatten()
-                        .and_then(|owner| classifier_types.get(&owner))
-                        .and_then(|owner| table.class_by_type_name(*owner))
-                        .map(|class| {
-                            (
-                                class
-                                    .ctor_param_shapes
-                                    .iter()
-                                    .map(|(parameter, _)| *parameter)
-                                    .collect(),
-                                semantic_classifier_self(class),
-                                None,
-                            )
-                        })
-                }),
+                DeclarationKind::Constructor => {
+                    if let Some(declaration) = headers.syntax.declaration(stub.id) {
+                        let crate::fir::HeaderDeclarationKind::Constructor {
+                            context_parameters,
+                            parameters,
+                        } = declaration.kind
+                        else {
+                            unreachable!("a constructor stub must own a constructor header")
+                        };
+                        anchor
+                            .owner
+                            .and_then(|owner| classifier_types.get(&owner))
+                            .and_then(|owner| table.class_by_type_name(*owner))
+                            .map(|class| {
+                                (
+                                    vec![
+                                        Ty::Pending;
+                                        headers.syntax.parameters(context_parameters).len()
+                                            + headers.syntax.parameters(parameters).len()
+                                    ],
+                                    semantic_classifier_self(class),
+                                    None,
+                                )
+                            })
+                    } else {
+                        generated_constructor(table, headers, &classifier_types, stub.id)
+                    }
+                }
                 DeclarationKind::Classifier
                 | DeclarationKind::TypeAlias
                 | DeclarationKind::Accessor
@@ -4485,20 +4511,6 @@ pub(crate) fn finalized_streamed_signature_index(
             failed.push(stub.id);
             continue;
         };
-        if undemanded_ordinary_local
-            && parameters
-                .iter()
-                .copied()
-                .chain(std::iter::once(result))
-                .chain(receiver)
-                .any(|ty| crate::fir::ResolvedTy::new(ty).is_err())
-        {
-            // The transitional symbol table cannot resolve a body-local type outside its lexical
-            // rung. Preserve the stable declaration header and let Pass 2 either publish the
-            // checked signature or report the source diagnostic; do not turn it into a silent
-            // module-finalization failure.
-            continue;
-        }
         let constructor_property_vararg = (stub.kind == DeclarationKind::Property)
             .then_some(anchor.owner)
             .flatten()
@@ -4648,7 +4660,9 @@ pub(crate) fn finalized_streamed_signature_index(
                 }
             }
             if header_resolution_failed {
-                failed.push(stub.id);
+                if !undemanded_ordinary_local {
+                    failed.push(stub.id);
+                }
                 continue;
             }
             if let Some(storage) = resolved_backing_field_type {
@@ -6101,7 +6115,11 @@ pub(crate) fn finalized_streamed_signature_index(
                                 )
                                 .with_implicit_integer_coercion(
                                     stable_constructor_implicit_integer_coercion(
-                                        table, stub.id, ordinal,
+                                        table,
+                                        headers,
+                                        &classifier_types,
+                                        stub.id,
+                                        ordinal,
                                     ),
                                 ),
                             )
