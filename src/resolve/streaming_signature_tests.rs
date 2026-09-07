@@ -5405,13 +5405,18 @@ fun statement(scope: Scope<List<String>>) = exec { scope returns emptyList() }
     // `emptyList()` probes as `List<Any>`; the selected parameter `List<String>` is its
     // expectation, exactly as for a top-level call, so the member selects in Pass 1.
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("nested generic member calls must finalize in Pass 1")
+        .module
+        .index();
     for name in ["infix", "statement"] {
-        let ret = analysis
-            .symbols
-            .funs
-            .get(name)
-            .and_then(|overloads| overloads.first())
-            .map(|signature| signature.ret);
+        let ret = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find(|declaration| index.declaration_name(*declaration) == Some(name))
+            .and_then(|declaration| index.signature(declaration))
+            .map(|signature| signature.result.get());
         assert_eq!(ret, Some(Ty::obj("kotlin/Int")), "{name}");
     }
 }
@@ -5446,12 +5451,17 @@ fun broken() = run { undefinedCall(); 1 }
             .collect::<Vec<_>>(),
         vec!["unresolved reference 'undefinedCall'."]
     );
-    let ret = analysis
-        .symbols
-        .funs
-        .get("broken")
-        .and_then(|overloads| overloads.first())
-        .map(|signature| signature.ret);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the surviving block result must finalize in Pass 1")
+        .module
+        .index();
+    let ret = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("broken"))
+        .and_then(|declaration| index.signature(declaration))
+        .map(|signature| signature.result.get());
     assert_eq!(ret, Some(Ty::obj("kotlin/Int")));
 }
 
