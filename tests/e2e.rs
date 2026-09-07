@@ -206,6 +206,8 @@ mod classpath_default_arg_subtype_e2e;
 mod classpath_default_args_e2e;
 #[path = "classpath_default_vararg_call_e2e.rs"]
 mod classpath_default_vararg_call_e2e;
+#[path = "classpath_entry_warning_e2e.rs"]
+mod classpath_entry_warning_e2e;
 #[path = "classpath_enum_regex_vc_e2e.rs"]
 mod classpath_enum_regex_vc_e2e;
 #[path = "classpath_extension_default_implicit_receiver_e2e.rs"]
@@ -948,6 +950,8 @@ mod nested_data_class_tostring_e2e;
 mod nested_decls_in_object_e2e;
 #[path = "nested_enum_access_e2e.rs"]
 mod nested_enum_access_e2e;
+#[path = "nested_generic_call_expectation_e2e.rs"]
+mod nested_generic_call_expectation_e2e;
 #[path = "nested_generic_constructor_e2e.rs"]
 mod nested_generic_constructor_e2e;
 #[path = "nested_hof_capture_e2e.rs"]

@@ -1874,15 +1874,46 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   by origin at selection) and yields the definitely-non-null type only when an effect
   `returns() implies (param_i != null)` names that argument. `assertNotNull`, `requireNotNull`,
   `checkNotNull` and a same-module source contract all qualify; a same-module `assertNotNull`
-  without a contract narrows nothing and the read is rejected as kotlinc rejects it. Named
-  arguments decline (a contract parameter index is positional). The body check still applies its
-  own flow narrowing in Pass 2; Pass 1 only has to agree on the result type, so the emitted
+  without a contract narrows nothing and the read is rejected as kotlinc rejects it. Source
+  arguments are mapped to the selected declaration parameters, including named arguments and
+  repeated positional vararg elements, before a contract parameter index is applied. The body
+  check still applies its own flow narrowing in Pass 2; Pass 1 only has to agree on the result type, so the emitted
   bytes of such a body do not change under this rule (the inline `run { … }` shape itself still
   carries the known inline-lambda residues: the `$i$a$-run` marker local, the inlined
   `requireNotNull` body, and a `checkcast` kotlinc omits on an unused generic result). Tests:
   `streaming_signature_tests::expression_body_narrows_a_value_after_a_not_null_contract_call`,
   `…::a_shadowing_callee_without_a_contract_does_not_narrow_in_pass_one`,
   `tests/contract_smartcast_e2e.rs::expression_bodied_function_narrows_after_require_not_null`.
+- **A selected call re-enters an argument only when the expectation can change it.** After a
+  callable is selected, each argument is re-checked under the selected parameter type so the
+  expectation can reach a nested generic call's result variables (`"OK" to emptySet()` under
+  `Pair<Any, Set<Any>>`), and a nested generic call whose probe was only an erased bound is finished
+  from its own arguments. Both re-entries happened unconditionally, so every level of
+  `mapOf("k" to mapOf("k" to …))` redid its whole subtree twice — once for `to`, once for `mapOf` —
+  exponential in the nesting: six levels took 70 s in a release build and a 230-line test file with
+  such literals stalled the editor's analysis worker for the better part of an hour. Three rules now
+  bound it, all idempotence arguments rather than new inference: (1) an argument whose recorded type
+  already EQUALS the selected expectation is committed as that type without re-entry (the recorded
+  type, not the probe's older encoding of the same shape, is what a re-entry used to replace);
+  (2) an expectation of `Any`/`Any?` constrains no result variable (a literal declared
+  `Map<String, Any?>` hands `Any?` to every nested value); (3) a nested generic call whose probe is
+  concrete — no formal, no error slot, not the top type — was already typed from its own arguments
+  and is not finished again. Nine levels: 21.7 s CPU → under a second, and the depth curve is flat.
+  Tests: `tests/nested_generic_call_expectation_e2e.rs` (a depth-9 time bound, and the `emptySet()`
+  case that must still be re-entered).
+- **A classpath entry that cannot be opened is reported, in kotlinc's words.** The classpath reader
+  drops a `-cp` entry it cannot open without a message, so a missing, truncated or unreadable jar
+  surfaced only as `unresolved reference` on every import from it — a harness run under load
+  produced exactly that for two serialization tests and nothing tied it to the jar. kotlinc 2.4.10
+  warns and continues in both cases: `warning: classpath entry points to a non-existent location:
+  <path>` for a missing entry, and `WARN: Error while reading zip file: <path>` (with a stack trace)
+  for an archive that does not open; a truncated but structurally valid archive it reads silently.
+  krusty prints the first message verbatim and `warning: cannot read classpath entry <path>: <why>`
+  for an existing entry that cannot be read or, for a `.jar`/`.zip`, does not open as an archive;
+  a directory only has to be listable and any other file (a `lib/modules` jimage) only has to open.
+  Compilation continues, as in kotlinc, so a stray unusable jar never changes the output of a module
+  that does not need it. Checked before analysis on the user's `-cp` entries only
+  (`cli::classpath_entry_problems`). Tests: `tests/classpath_entry_warning_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
