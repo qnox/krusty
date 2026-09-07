@@ -4109,46 +4109,6 @@ pub(crate) fn finalized_streamed_signature_index(
         None
     }
 
-    fn stable_property_annotations(
-        table: &SymbolTable,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<&[TypeName]> {
-        if let Some(property) = table
-            .source_props
-            .values()
-            .chain(table.stable_source_props.values())
-            .find(|property| property.stable_declaration == Some(declaration))
-        {
-            return Some(&property.annotations);
-        }
-        if let Some(property) = table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.stable_declaration == Some(declaration))
-        {
-            return Some(&property.annotations);
-        }
-        for class in table.classes.values() {
-            if let Some(property) = class
-                .declared_props
-                .values()
-                .find(|property| property.stable_declaration == Some(declaration))
-            {
-                return Some(&property.annotations);
-            }
-            if let Some(property) = class
-                .contextual_props
-                .values()
-                .flatten()
-                .find(|property| property.stable_declaration == Some(declaration))
-            {
-                return Some(&property.annotations);
-            }
-        }
-        None
-    }
-
     fn stable_constructor(
         table: &SymbolTable,
         declaration: crate::fir::DeclarationId,
@@ -4171,23 +4131,6 @@ pub(crate) fn finalized_streamed_signature_index(
                 .position(|candidate| *candidate == Some(declaration))
                 .and_then(|ordinal| class.secondary_ctor_shapes.get(ordinal).cloned())
                 .map(|parameters| (parameters, semantic_classifier_self(class), None))
-        })
-    }
-
-    fn stable_constructor_annotations(
-        table: &SymbolTable,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<&[TypeName]> {
-        table.classes.values().find_map(|class| {
-            if class.primary_constructor_declaration == Some(declaration) {
-                return Some(class.primary_constructor_annotations.as_slice());
-            }
-            class
-                .secondary_constructor_declarations
-                .iter()
-                .position(|candidate| *candidate == Some(declaration))
-                .and_then(|ordinal| class.secondary_constructor_annotations.get(ordinal))
-                .map(Vec::as_slice)
         })
     }
 
@@ -4385,6 +4328,36 @@ pub(crate) fn finalized_streamed_signature_index(
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
     };
+    let mut resolved_header_annotations = HashMap::new();
+    for stub in &headers.stubs {
+        let Some(declaration) = headers.syntax.declaration(stub.id) else {
+            continue;
+        };
+        let scope = crate::fir::SignatureScope {
+            owner: stub.id,
+            source: stub.source,
+        };
+        let mut annotations = Vec::new();
+        let mut rejected = false;
+        for syntax in headers.syntax.type_operands(declaration.annotations) {
+            let Ok(annotation) =
+                explicit_type_semantics.resolve_explicit_header_type(scope, *syntax)
+            else {
+                rejected = true;
+                break;
+            };
+            let Some(annotation) = annotation.non_null().obj_internal() else {
+                rejected = true;
+                break;
+            };
+            annotations.push(annotation);
+        }
+        if rejected {
+            failed.push(stub.id);
+        } else {
+            resolved_header_annotations.insert(stub.id, annotations);
+        }
+    }
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
             continue;
@@ -5130,19 +5103,26 @@ pub(crate) fn finalized_streamed_signature_index(
             stub.lookup_name
                 .and_then(|name| headers.lookup_names.get(name)),
         );
-        let annotations = match stub.kind {
-            DeclarationKind::Function => {
-                stable_function(table, headers, &classifier_types, stub.id)
-                    .map(|(signature, _)| signature.annotations.as_slice())
-            }
-            DeclarationKind::Property => stable_property_annotations(table, stub.id),
-            DeclarationKind::Constructor => stable_constructor_annotations(table, stub.id),
-            DeclarationKind::Classifier => table
-                .classes
-                .values()
-                .find(|class| class.stable_declaration == Some(stub.id))
-                .map(|class| class.annotations.as_slice()),
-            _ => None,
+        let annotations = match headers.syntax.declaration(stub.id) {
+            Some(_) => resolved_header_annotations.get(&stub.id).map(Vec::as_slice),
+            None => match stub.kind {
+                DeclarationKind::Function => {
+                    stable_function(table, headers, &classifier_types, stub.id)
+                        .map(|(signature, _)| signature.annotations.as_slice())
+                }
+                DeclarationKind::Classifier => table
+                    .classes
+                    .values()
+                    .find(|class| class.stable_declaration == Some(stub.id))
+                    .map(|class| class.annotations.as_slice()),
+                DeclarationKind::Property
+                | DeclarationKind::Constructor
+                | DeclarationKind::EnumEntry
+                | DeclarationKind::TypeAlias
+                | DeclarationKind::Accessor
+                | DeclarationKind::Initializer
+                | DeclarationKind::Script => None,
+            },
         };
         if let Some(annotations) = annotations {
             index.publish_declaration_annotations(stub.id, annotations.iter().copied());
