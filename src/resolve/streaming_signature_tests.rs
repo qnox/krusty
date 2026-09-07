@@ -5380,6 +5380,82 @@ fn assert_jvm_streaming_frontend(source: &str, stem: &str) {
 }
 
 #[test]
+fn a_member_call_hands_its_parameter_to_a_nested_generic_call_in_pass_one() {
+    let source = r#"// WITH_STDLIB
+class Scope<T> { infix fun returns(value: T): Int = 1 }
+fun exec(body: () -> Unit): Int = 0
+fun infix(scope: Scope<List<String>>) = run { scope returns emptyList() }
+fun statement(scope: Scope<List<String>>) = exec { scope returns emptyList() }
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("MemberContextualCallArgument")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("member contextual-call regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    // `emptyList()` probes as `List<Any>`; the selected parameter `List<String>` is its
+    // expectation, exactly as for a top-level call, so the member selects in Pass 1.
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    for name in ["infix", "statement"] {
+        let ret = analysis
+            .symbols
+            .funs
+            .get(name)
+            .and_then(|overloads| overloads.first())
+            .map(|signature| signature.ret);
+        assert_eq!(ret, Some(Ty::obj("kotlin/Int")), "{name}");
+    }
+}
+
+#[test]
+fn a_failing_statement_does_not_fail_the_inferred_result_of_its_block() {
+    let source = r#"// WITH_STDLIB
+fun broken() = run { undefinedCall(); 1 }
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("FailingBlockStatement")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("failing block statement regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    // kotlinc infers `Int` and reports the statement from the body check: exactly one
+    // diagnostic, at the unresolved call, and a published signature.
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        vec!["unresolved reference 'undefinedCall'."]
+    );
+    let ret = analysis
+        .symbols
+        .funs
+        .get("broken")
+        .and_then(|overloads| overloads.first())
+        .map(|signature| signature.ret);
+    assert_eq!(ret, Some(Ty::obj("kotlin/Int")));
+}
+
+#[test]
 fn expression_body_narrows_a_value_after_a_not_null_contract_call() {
     let source = r#"// WITH_STDLIB
 import kotlin.contracts.ExperimentalContracts

@@ -115,8 +115,17 @@ impl ProductionSignatureSemantics<'_> {
         }
         let mut common = Vec::with_capacity(arguments.len());
         for (index, argument) in arguments.iter().enumerate() {
-            if matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)) {
-                common.push(Ty::obj("kotlin/Any"));
+            if let crate::fir::SigCallArgumentProbe::Typed(argument) = argument {
+                // A nested generic call takes the parameter every shape agrees on as its
+                // expectation (`s returns emptyList()` against `returns(v: List<String>)`); an
+                // ordinary typed argument constrains nothing here.
+                let shared = argument
+                    .contextual_call
+                    .then(|| shapes.first().map(|shape| shape[index]))
+                    .flatten()
+                    .filter(|first| shapes.iter().all(|shape| shape[index] == *first))
+                    .filter(|parameter| !parameter.mentions_ty_param());
+                common.push(shared.unwrap_or_else(|| Ty::obj("kotlin/Any")));
                 continue;
             }
             let functions = shapes
