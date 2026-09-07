@@ -301,11 +301,11 @@ pub(in crate::resolve) struct StreamedPropertyHeader {
     pub(in crate::resolve) flags: crate::fir::DeclarationFlags,
     pub(in crate::resolve) signature_inference: Option<crate::fir::InferredSignatureKind>,
     pub(in crate::resolve) getter_declared: bool,
-    pub(in crate::resolve) receiver: Option<TypeRef>,
+    pub(in crate::resolve) receiver: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) receiver_source_spelling: Option<crate::fir::HeaderTypeId>,
-    pub(in crate::resolve) context_parameters: Vec<(String, TypeRef)>,
-    pub(in crate::resolve) declared_type: Option<TypeRef>,
-    pub(in crate::resolve) backing_field_type: Option<TypeRef>,
+    pub(in crate::resolve) context_parameters: Vec<(String, crate::fir::HeaderTypeId)>,
+    pub(in crate::resolve) declared_type: Option<crate::fir::HeaderTypeId>,
+    pub(in crate::resolve) backing_field_type: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) type_parameters: Vec<String>,
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) mutable: bool,
@@ -355,14 +355,8 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
     else {
         return None;
     };
-    let materialize = |ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names);
-    let (receiver, receiver_source_spelling) = match receiver {
-        Some(receiver_id) => {
-            let receiver = materialize(receiver_id)?;
-            (Some(receiver), headers.syntax.source_spelling(receiver_id))
-        }
-        None => (None, None),
-    };
+    let receiver_source_spelling =
+        receiver.and_then(|receiver| headers.syntax.source_spelling(receiver));
     let context_parameters = headers
         .syntax
         .parameters(context_parameters)
@@ -370,18 +364,11 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         .map(|parameter| {
             Some((
                 headers.lookup_names.get(parameter.name)?.to_string(),
-                materialize(parameter.ty)?,
+                parameter.ty,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
-    let declared_type = match declared_type.or(getter_type) {
-        Some(declared_type) => Some(materialize(declared_type)?),
-        None => None,
-    };
-    let backing_field_type = match backing_field_type {
-        Some(backing_field_type) => Some(materialize(backing_field_type)?),
-        None => None,
-    };
+    let declared_type = declared_type.or(getter_type);
     let type_parameters = headers
         .syntax
         .type_parameters(type_parameters)
@@ -395,7 +382,9 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         .map(|bound| {
             Some((
                 headers.lookup_names.get(bound.parameter)?.to_string(),
-                materialize(bound.ty)?,
+                headers
+                    .syntax
+                    .transient_type_ref(bound.ty, &headers.lookup_names)?,
             ))
         })
         .collect::<Option<Vec<_>>>()?;

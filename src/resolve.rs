@@ -7646,23 +7646,37 @@ fn collect_signatures_with_cp_impl(
                         let context_params = property_header
                             .context_parameters
                             .iter()
-                            .map(|(_, parameter)| ty_of_ref(parameter, &class_names, &btp, diags))
+                            .map(|(_, parameter)| {
+                                resolve_header_type_with(
+                                    headers,
+                                    *parameter,
+                                    &class_names,
+                                    &btp,
+                                    diags,
+                                )
+                            })
                             .collect::<Vec<_>>();
                         let symbolic_context_params = property_header
                             .context_parameters
                             .iter()
                             .map(|(_, parameter)| {
-                                ty_of_ref(parameter, &class_names, &symbolic_btp, diags)
+                                resolve_header_type_with(
+                                    headers,
+                                    *parameter,
+                                    &class_names,
+                                    &symbolic_btp,
+                                    diags,
+                                )
                             })
                             .collect::<Vec<_>>();
-                        let extension_receiver = property_header
-                            .receiver
-                            .as_ref()
-                            .map(|receiver| ty_of_ref(receiver, &class_names, &btp, diags));
+                        let extension_receiver = property_header.receiver.map(|receiver| {
+                            resolve_header_type_with(headers, receiver, &class_names, &btp, diags)
+                        });
                         let property_ty = property_header
                             .declared_type
-                            .as_ref()
-                            .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
+                            .map(|ty| {
+                                resolve_header_type_with(headers, ty, &class_names, &btp, diags)
+                            })
                             .unwrap_or_else(|| {
                                 if body_local_classifier {
                                     Ty::Error
@@ -7683,8 +7697,15 @@ fn collect_signatures_with_cp_impl(
                             .then(|| {
                                 property_header
                                     .backing_field_type
-                                    .as_ref()
-                                    .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
+                                    .map(|ty| {
+                                        resolve_header_type_with(
+                                            headers,
+                                            ty,
+                                            &class_names,
+                                            &btp,
+                                            diags,
+                                        )
+                                    })
                                     .or_else(|| {
                                         (property_header.signature_inference
                                             == Some(
@@ -7726,7 +7747,7 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                         if let (Some(receiver_ty), Some(receiver)) =
-                            (extension_receiver, property_header.receiver.as_ref())
+                            (extension_receiver, property_header.receiver)
                         {
                             let key = (receiver_ty.erased_recv(), property_header.name.clone());
                             if !member_ext_keys.insert(key) {
@@ -7742,7 +7763,8 @@ fn collect_signatures_with_cp_impl(
                                 .entry(property_header.name.clone())
                                 .or_insert_with(Vec::new)
                                 .push(MemberExtPropSig {
-                                    receiver: ty_of_ref(
+                                    receiver: resolve_header_type_with(
+                                        headers,
                                         receiver,
                                         &class_names,
                                         &symbolic_btp,
@@ -7750,9 +7772,14 @@ fn collect_signatures_with_cp_impl(
                                     ),
                                     ret: property_header
                                         .declared_type
-                                        .as_ref()
                                         .map(|ret| {
-                                            ty_of_ref(ret, &class_names, &symbolic_btp, diags)
+                                            resolve_header_type_with(
+                                                headers,
+                                                ret,
+                                                &class_names,
+                                                &symbolic_btp,
+                                                diags,
+                                            )
                                         })
                                         .unwrap_or(property_ty),
                                     context_params: symbolic_context_params,
@@ -9002,7 +9029,7 @@ fn collect_signatures_with_cp_impl(
                     );
                     // Extension property `val Recv.name: T get() = …`: register by (erased receiver,
                     // name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
-                    if let Some(recv_ref) = &property_header.receiver {
+                    if let Some(recv_ref) = property_header.receiver {
                         // An extension property's own type params (`val <T> Array<T>.length`) scope over
                         // the receiver and declared type — bind them (erased) so the receiver isn't a raw
                         // `Array` and `T` isn't mistaken for an unresolved class.
@@ -9025,7 +9052,11 @@ fn collect_signatures_with_cp_impl(
                         );
                         let erased_receiver = if companion_extension {
                             associated_companion_receiver_ty_from_spelling(
-                                SignatureTypeSyntax::parser(recv_ref),
+                                SignatureTypeSyntax::compact(
+                                    &headers.syntax,
+                                    &headers.lookup_names,
+                                    recv_ref,
+                                ),
                                 property_header.receiver_source_spelling,
                                 headers,
                                 &class_names,
@@ -9033,11 +9064,21 @@ fn collect_signatures_with_cp_impl(
                                 diags,
                             )
                         } else {
-                            ty_of_ref(recv_ref, &class_names, &erased_tparams, diags)
+                            resolve_header_type_with(
+                                headers,
+                                recv_ref,
+                                &class_names,
+                                &erased_tparams,
+                                diags,
+                            )
                         };
                         let recv_ty = if companion_extension {
                             associated_companion_receiver_ty_from_spelling(
-                                SignatureTypeSyntax::parser(recv_ref),
+                                SignatureTypeSyntax::compact(
+                                    &headers.syntax,
+                                    &headers.lookup_names,
+                                    recv_ref,
+                                ),
                                 property_header.receiver_source_spelling,
                                 headers,
                                 &class_names,
@@ -9045,13 +9086,25 @@ fn collect_signatures_with_cp_impl(
                                 diags,
                             )
                         } else {
-                            ty_of_ref(recv_ref, &class_names, &semantic_tparams, diags)
+                            resolve_header_type_with(
+                                headers,
+                                recv_ref,
+                                &class_names,
+                                &semantic_tparams,
+                                diags,
+                            )
                         };
                         let context_params = property_header
                             .context_parameters
                             .iter()
                             .map(|(_, parameter)| {
-                                ty_of_ref(parameter, &class_names, &semantic_tparams, diags)
+                                resolve_header_type_with(
+                                    headers,
+                                    *parameter,
+                                    &class_names,
+                                    &semantic_tparams,
+                                    diags,
+                                )
                             })
                             .collect::<Vec<_>>();
                         let mut context_scope = property_header
@@ -9069,18 +9122,19 @@ fn collect_signatures_with_cp_impl(
                         if !companion_extension {
                             context_scope.push(("this".to_string(), recv_ty, false));
                         }
-                        let receiver_type_parameter = (recv_ref.arg.is_none()
-                            && recv_ref.targs.is_empty()
-                            && recv_ref.fun_params.is_empty()
-                            && !recv_ref.definitely_non_null())
-                        .then(|| {
-                            property_header
-                                .type_parameters
-                                .iter()
-                                .position(|parameter| parameter == &recv_ref.name)
-                        })
-                        .flatten();
-                        let accepts_nullable_receiver = recv_ref.nullable()
+                        let receiver_type_parameter =
+                            header_type_parameter_spelling_allow_nullable(headers, recv_ref)
+                                .and_then(|spelling| {
+                                    property_header
+                                        .type_parameters
+                                        .iter()
+                                        .position(|parameter| parameter == &spelling)
+                                });
+                        let receiver_is_nullable = headers
+                            .syntax
+                            .ty(recv_ref)
+                            .is_some_and(|receiver| receiver.flags.nullable());
+                        let accepts_nullable_receiver = receiver_is_nullable
                             || receiver_type_parameter.is_some_and(|index| {
                                 declared_tparam_semantic_bound(
                                     &property_header.type_parameters[index],
@@ -9092,8 +9146,15 @@ fn collect_signatures_with_cp_impl(
                             });
                         let ty = property_header
                             .declared_type
-                            .as_ref()
-                            .map(|r| ty_of_ref(r, &class_names, &semantic_tparams, diags))
+                            .map(|ty| {
+                                resolve_header_type_with(
+                                    headers,
+                                    ty,
+                                    &class_names,
+                                    &semantic_tparams,
+                                    diags,
+                                )
+                            })
                             .or_else(|| compact_inference.is_some().then_some(Ty::Pending))
                             .unwrap_or(Ty::Error);
                         crate::trace_compiler!(
@@ -9115,7 +9176,7 @@ fn collect_signatures_with_cp_impl(
                             // admits nullable instantiations when its bound permits them; wrapping
                             // it in `?` changes inference (`String?` against `T?` binds `T = String`)
                             // and loses the use-site nullable type argument carried by `T` itself.
-                            let declared_receiver = if recv_ref.nullable() {
+                            let declared_receiver = if receiver_is_nullable {
                                 Ty::nullable(recv_ty)
                             } else {
                                 recv_ty
@@ -9204,7 +9265,13 @@ fn collect_signatures_with_cp_impl(
                         .context_parameters
                         .iter()
                         .map(|(_, parameter)| {
-                            ty_of_ref(parameter, &class_names, &property_tparams, diags)
+                            resolve_header_type_with(
+                                headers,
+                                *parameter,
+                                &class_names,
+                                &property_tparams,
+                                diags,
+                            )
                         })
                         .collect::<Vec<_>>();
                     // A top-level backing-field property with a CUSTOM accessor (`val x = init get() =
@@ -9223,10 +9290,14 @@ fn collect_signatures_with_cp_impl(
                     // delegate's `getValue` return type. Resolving the read-type here lets `val a = x`
                     // infer. (The lowering — `x$delegate`/`x$kprop` + `getX()` — is in fir_lower; an
                     // unresolvable delegate type yields `Error` and the file skips.)
-                    let inferred_ty = match property_header.declared_type.as_ref() {
-                        Some(declared) => {
-                            ty_of_ref(declared, &class_names, &property_tparams, diags)
-                        }
+                    let inferred_ty = match property_header.declared_type {
+                        Some(declared) => resolve_header_type_with(
+                            headers,
+                            declared,
+                            &class_names,
+                            &property_tparams,
+                            diags,
+                        ),
                         None if compact_inference.is_some() => Ty::Pending,
                         None => Ty::Error,
                     };
@@ -9241,8 +9312,15 @@ fn collect_signatures_with_cp_impl(
                     // on the order the compiler was asked in.
                     let storage_ty = property_header
                         .backing_field_type
-                        .as_ref()
-                        .map(|field| ty_of_ref(field, &class_names, &property_tparams, diags))
+                        .map(|field| {
+                            resolve_header_type_with(
+                                headers,
+                                field,
+                                &class_names,
+                                &property_tparams,
+                                diags,
+                            )
+                        })
                         .or_else(|| {
                             (compact_inference
                                 == Some(crate::fir::InferredSignatureKind::BackingFieldInitializer))

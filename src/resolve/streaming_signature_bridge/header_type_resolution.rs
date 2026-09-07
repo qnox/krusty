@@ -247,3 +247,16 @@ pub(in crate::resolve) fn header_type_bare_parameter_spelling(
     SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax)
         .bare_parameter_spelling()
 }
+
+pub(in crate::resolve) fn header_type_parameter_spelling_allow_nullable(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+) -> Option<String> {
+    let syntax = SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax);
+    if syntax.definitely_non_null()? || syntax.function_shape()?.is_some() {
+        return None;
+    }
+    let spelling = syntax.spelling()?;
+    (syntax.arguments()?.is_empty() && !spelling.contains(['.', '/', '$']))
+        .then(|| spelling.into_owned())
+}
