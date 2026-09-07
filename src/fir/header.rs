@@ -709,7 +709,7 @@ pub struct HeaderParameter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderParameterAnnotationClassLiteral {
     pub annotation_ordinal: u32,
-    pub classifier: LookupNameRange,
+    pub classifier: HeaderTypeId,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -954,6 +954,25 @@ impl HeaderSyntaxArena {
             .collect::<Vec<_>>();
         let (start, len) = Self::range(&mut self.path_segments, segments);
         LookupNameRange { start, len }
+    }
+
+    fn add_classifier_path(
+        &mut self,
+        spelling: &str,
+        span: Span,
+        names: &mut LookupNames,
+    ) -> HeaderTypeId {
+        let path = self.add_path(spelling, names);
+        let arguments = self.add_type_range(std::iter::empty());
+        let detail = self.add_classifier_detail(path, arguments);
+        self.push_type(HeaderType {
+            kind: HeaderTypeKind::Classifier {
+                detail,
+                abbreviated_argument: None,
+            },
+            flags: HeaderTypeFlags::default(),
+            span,
+        })
     }
 
     fn push_type(&mut self, ty: HeaderType) -> HeaderTypeId {
@@ -2430,7 +2449,11 @@ pub fn extract_file_header_syntax(
                 if !qualifier_segments(file, *receiver, &mut segments) || segments.is_empty() {
                     continue;
                 }
-                let classifier = headers.add_path(&segments.join("."), names);
+                let classifier = headers.add_classifier_path(
+                    &segments.join("."),
+                    file.expr_span(*receiver).unwrap_or(parameter.ty.span),
+                    names,
+                );
                 annotation_class_literals.push(HeaderParameterAnnotationClassLiteral {
                     annotation_ordinal: u32::try_from(annotation_ordinal)
                         .expect("too many parameter annotations"),

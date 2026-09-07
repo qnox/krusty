@@ -145,11 +145,8 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
                     .map(|argument| {
                         let classifier = headers
                             .syntax
-                            .type_path(argument.classifier)
-                            .iter()
-                            .map(|segment| headers.lookup_names.get(*segment))
-                            .collect::<Option<Vec<_>>>()?
-                            .join(".");
+                            .transient_type_ref(argument.classifier, &headers.lookup_names)?
+                            .name;
                         Some((
                             usize::try_from(argument.annotation_ordinal).ok()?,
                             classifier,
@@ -752,11 +749,8 @@ pub(in crate::resolve) fn streamed_constructor_parameters_by_declaration(
                     .map(|argument| {
                         let classifier = headers
                             .syntax
-                            .type_path(argument.classifier)
-                            .iter()
-                            .map(|segment| headers.lookup_names.get(*segment))
-                            .collect::<Option<Vec<_>>>()?
-                            .join(".");
+                            .transient_type_ref(argument.classifier, &headers.lookup_names)?
+                            .name;
                         Some((
                             usize::try_from(argument.annotation_ordinal).ok()?,
                             classifier,

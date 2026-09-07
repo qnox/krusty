@@ -343,11 +343,9 @@ impl ProductionSignatureSemantics<'_> {
         )
     }
 
-    /// Declare a callable/property's own type parameters when it has no transitional symbol-table
-    /// record. Enum-entry members are the first such family: their complete syntax is packed in the
-    /// header arena, but they live on the entry subclass rather than in the parent enum's legacy
-    /// method table. Stable alpha-renamed identities must match the later index publication path.
-    fn declare_header_only_type_parameters(
+    /// Declare a compact header's own type parameters with the same stable alpha-renamed identities
+    /// used by resolved-index publication.
+    fn declare_header_type_parameters(
         &self,
         lexical: &super::super::CheckerScope<'_>,
         declaration: crate::fir::DeclarationId,
@@ -434,10 +432,9 @@ impl ProductionSignatureSemantics<'_> {
         Ok(())
     }
 
-    /// Reconstruct the semantic generic signature of a compact callable that has no transitional
-    /// symbol-table member. The declaration's alpha-renamed type-parameter identities come from the
-    /// same lexical header scope used to resolve its written parameter/result types.
-    fn header_only_callable_generic_signature(
+    /// Construct a compact callable's semantic generic signature from the same lexical header scope
+    /// used to resolve its written parameter and result types.
+    fn compact_callable_generic_signature(
         &self,
         declaration: crate::fir::DeclarationId,
         signature: &crate::fir::ResolvedSignature,
@@ -558,76 +555,7 @@ impl ProductionSignatureSemantics<'_> {
                 lexical.declare_tparams(&source_names, &semantic, |_| false);
             }
         }
-        if let Some(generic) = self
-            .callable_signature(scope.owner)
-            .and_then(|signature| signature.generic_sig.as_ref())
-        {
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                &generic.formals,
-                &generic.formal_bounds,
-            );
-        } else if let Some(property) = self
-            .table
-            .source_props
-            .values()
-            .chain(self.table.stable_source_props.values())
-            .find(|property| property.stable_declaration == Some(scope.owner))
-        {
-            let bounds = property
-                .formal_bounds
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                &property.formals,
-                &bounds,
-            );
-        } else if let Some(property) = self
-            .table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.stable_declaration == Some(scope.owner))
-        {
-            let bounds = property
-                .formal_bounds
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                &property.formals,
-                &bounds,
-            );
-        } else if let Some(property) = self
-            .table
-            .classes
-            .values()
-            .flat_map(|class| class.member_ext_props.values().flatten())
-            .find(|property| property.stable_declaration() == Some(scope.owner))
-        {
-            let bounds = property
-                .type_param_bounds()
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                property.type_params(),
-                &bounds,
-            );
-        } else {
-            self.declare_header_only_type_parameters(&lexical, scope.owner)?;
-        }
+        self.declare_header_type_parameters(&lexical, scope.owner)?;
         Ok(resolve(&lexical))
     }
 
@@ -860,16 +788,16 @@ impl ProductionSignatureSemantics<'_> {
         self.commit_postponed_bindings(scope, postponed_bindings);
         if let Some(signature) = self.demanded_source_signature(None, declaration, demand)? {
             return self
-                .apply_demanded_source_callable(
+                .apply_demanded_source_callable(DemandedSourceCall {
                     source,
-                    declaration,
-                    Some(receiver),
-                    &signature,
-                    &argument_types,
-                    None,
-                    &resolved_type_arguments,
-                    None,
-                )
+                    stable_declaration: declaration,
+                    receiver: Some(receiver),
+                    signature: &signature,
+                    arguments: &argument_types,
+                    argument_kinds: None,
+                    explicit_type_arguments: &resolved_type_arguments,
+                    expected: None,
+                })
                 .map(Some);
         }
         crate::fir::ResolvedTy::new(result)
@@ -1419,41 +1347,30 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         owners.reverse();
         let mut lexical = std::collections::HashMap::<&str, Ty>::new();
+        let root = super::super::CheckerScope::root();
+        let owner_scope = root.child(super::super::scope::ScopeKind::Function { receiver: None });
         for owner in owners {
-            let semantic = self
-                .callable_signature(owner)
-                .and_then(|signature| signature.generic_sig.as_ref())
-                .map(|generic| {
-                    generic
-                        .formals
-                        .iter()
-                        .zip(&generic.formal_bounds)
-                        .map(|(name, bounds)| {
-                            Ty::ty_param(
-                                name,
-                                bounds
-                                    .first()
-                                    .copied()
-                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .or_else(|| {
-                    self.classifier_signature(owner).map(|classifier| {
-                        classifier
-                            .type_parameters
-                            .type_params
-                            .iter()
-                            .zip(&classifier.type_parameters.type_param_bounds)
-                            .map(|(name, bound)| Ty::ty_param(name, *bound))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .unwrap_or_default();
-            for (parameter, ty) in self.header_type_parameters(owner).iter().zip(semantic) {
+            if let Some(classifier) = self.classifier_signature(owner) {
+                let bounds = classifier
+                    .type_parameters
+                    .type_param_bounds
+                    .iter()
+                    .copied()
+                    .map(|bound| vec![bound])
+                    .collect::<Vec<_>>();
+                self.declare_semantic_type_parameters(
+                    &owner_scope,
+                    owner,
+                    &classifier.type_parameters.type_params,
+                    &bounds,
+                );
+            } else {
+                self.declare_header_type_parameters(&owner_scope, owner)?;
+            }
+            let visible = owner_scope.visible_tparams();
+            for parameter in self.header_type_parameters(owner) {
                 if let Some(source) = self.headers.lookup_names.get(parameter.name) {
-                    lexical.insert(source, ty);
+                    lexical.insert(source, visible.bound(source));
                 }
             }
         }
@@ -2040,8 +1957,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let mut applicable = Vec::new();
             for declaration in entry_candidates {
                 let signature = demand(declaration)?;
-                let generic =
-                    self.header_only_callable_generic_signature(declaration, &signature)?;
+                let generic = self.compact_callable_generic_signature(declaration, &signature)?;
                 if let Some((_, result)) = crate::symbol_resolver::specialize_typed_call_signature(
                     &source,
                     &generic,
@@ -2395,16 +2311,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             &selected_argument_types,
                         );
                     }
-                    return self.apply_demanded_source_callable(
+                    return self.apply_demanded_source_callable(DemandedSourceCall {
                         source,
-                        declaration,
-                        Some(receiver),
-                        &signature,
-                        &selected_argument_types,
-                        None,
-                        &resolved_type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    );
+                        stable_declaration: declaration,
+                        receiver: Some(receiver),
+                        signature: &signature,
+                        arguments: &selected_argument_types,
+                        argument_kinds: None,
+                        explicit_type_arguments: &resolved_type_arguments,
+                        expected: expected.map(crate::fir::ResolvedTy::get),
+                    });
                 }
                 crate::trace_compiler!(
                     "signature",
@@ -2946,18 +2862,18 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         &parameters,
                         &selected_argument_types,
                     );
-                    return self.apply_demanded_source_callable(
+                    return self.apply_demanded_source_callable(DemandedSourceCall {
                         source,
-                        declaration,
-                        None,
-                        &signature,
-                        &selected_argument_types,
-                        (!trailing_lambda
+                        stable_declaration: declaration,
+                        receiver: None,
+                        signature: &signature,
+                        arguments: &selected_argument_types,
+                        argument_kinds: (!trailing_lambda
                             && arguments.iter().all(|argument| argument.name.is_none()))
                         .then_some(argument_kinds.as_slice()),
-                        &resolved_type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    );
+                        explicit_type_arguments: &resolved_type_arguments,
+                        expected: expected.map(crate::fir::ResolvedTy::get),
+                    });
                 }
                 crate::fir::ResolvedTy::new(callable.ret).map_err(|_| Self::failure())
             }
@@ -5166,16 +5082,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         if let Some(signature) = self.demanded_source_signature(None, source_declaration, demand)? {
             return self
-                .apply_demanded_source_callable(
+                .apply_demanded_source_callable(DemandedSourceCall {
                     source,
-                    source_declaration,
-                    Some(receiver.get()),
-                    &signature,
-                    &argument_types,
-                    None,
-                    &type_arguments,
-                    expected.map(crate::fir::ResolvedTy::get),
-                )
+                    stable_declaration: source_declaration,
+                    receiver: Some(receiver.get()),
+                    signature: &signature,
+                    arguments: &argument_types,
+                    argument_kinds: None,
+                    explicit_type_arguments: &type_arguments,
+                    expected: expected.map(crate::fir::ResolvedTy::get),
+                })
                 .map(|ty| crate::fir::ResolvedMemberCall {
                     ty: Some(ty),
                     declaration: source_declaration,
@@ -5488,16 +5404,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(signature) =
                 self.demanded_source_signature(None, selected.stable_declaration, demand)?
             {
-                return self.apply_demanded_source_callable(
-                    selected.source_key,
-                    selected.stable_declaration,
-                    Some(callee.get()),
-                    &signature,
-                    &argument_types,
-                    None,
-                    &[],
-                    None,
-                );
+                return self.apply_demanded_source_callable(DemandedSourceCall {
+                    source: selected.source_key,
+                    stable_declaration: selected.stable_declaration,
+                    receiver: Some(callee.get()),
+                    signature: &signature,
+                    arguments: &argument_types,
+                    argument_kinds: None,
+                    explicit_type_arguments: &[],
+                    expected: None,
+                });
             }
             return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
         }

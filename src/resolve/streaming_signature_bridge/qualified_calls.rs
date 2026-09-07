@@ -78,16 +78,16 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(signature) =
             self.demanded_source_signature(None, selected.stable_declaration, demand)?
         {
-            return self.apply_demanded_source_callable(
-                selected.source_key,
-                selected.stable_declaration,
-                None,
-                &signature,
-                &selected_argument_types,
-                None,
-                &type_arguments,
-                None,
-            );
+            return self.apply_demanded_source_callable(DemandedSourceCall {
+                source: selected.source_key,
+                stable_declaration: selected.stable_declaration,
+                receiver: None,
+                signature: &signature,
+                arguments: &selected_argument_types,
+                argument_kinds: None,
+                explicit_type_arguments: &type_arguments,
+                expected: None,
+            });
         }
         crate::trace_compiler!(
             "signature",

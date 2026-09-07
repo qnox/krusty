@@ -1477,10 +1477,6 @@ impl MemberExtPropSig {
         &self.type_params
     }
 
-    pub(crate) fn type_param_bounds(&self) -> &[Ty] {
-        &self.type_param_bounds
-    }
-
     pub(crate) fn context_params(&self) -> &[Ty] {
         &self.context_params
     }

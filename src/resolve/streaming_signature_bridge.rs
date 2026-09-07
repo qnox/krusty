@@ -117,6 +117,17 @@ struct ExplicitContextCall {
     argument_types: Vec<Ty>,
 }
 
+struct DemandedSourceCall<'a> {
+    source: Option<(u32, u32)>,
+    stable_declaration: Option<crate::fir::DeclarationId>,
+    receiver: Option<Ty>,
+    signature: &'a crate::fir::ResolvedSignature,
+    arguments: &'a [Ty],
+    argument_kinds: Option<&'a [crate::symbol_resolver::CallArgKind]>,
+    explicit_type_arguments: &'a [Ty],
+    expected: Option<Ty>,
+}
+
 const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
 
 impl ProductionSignatureSemantics<'_> {
@@ -354,30 +365,22 @@ impl ProductionSignatureSemantics<'_> {
         .map_err(|_| Self::failure())
     }
 
-    fn callable_signature(&self, declaration: crate::fir::DeclarationId) -> Option<&Signature> {
-        stable_function_signature(self.table, self.headers, self.classifier_types, declaration)
-            .map(|(signature, _)| signature)
-    }
-
     fn declaration_extension_receiver(&self, declaration: crate::fir::DeclarationId) -> Option<Ty> {
-        self.callable_signature(declaration)
-            .and_then(|signature| signature.source_receiver)
-            .or_else(|| {
-                self.table
-                    .ext_props
-                    .values()
-                    .flatten()
-                    .find(|property| property.stable_declaration == Some(declaration))
-                    .map(|property| property.receiver)
-            })
-            .or_else(|| {
-                self.table
-                    .classes
-                    .values()
-                    .flat_map(|class| class.member_ext_props.values().flatten())
-                    .find(|property| property.stable_declaration() == Some(declaration))
-                    .map(|property| property.receiver_ty())
-            })
+        let anchor = self.headers.declarations.anchor(declaration)?;
+        let receiver = match self.headers.syntax.declaration(declaration)?.kind {
+            crate::fir::HeaderDeclarationKind::Callable { receiver, .. }
+            | crate::fir::HeaderDeclarationKind::Property { receiver, .. } => receiver?,
+            crate::fir::HeaderDeclarationKind::Classifier { .. }
+            | crate::fir::HeaderDeclarationKind::Constructor { .. }
+            | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => return None,
+        };
+        self.resolve_compact_header_type(
+            crate::fir::SignatureScope {
+                owner: declaration,
+                source: anchor.source,
+            },
+            receiver,
+        )
     }
 
     /// The `thisRef` passed to delegated-property conventions belongs to the property declaration,
@@ -2229,15 +2232,18 @@ impl ProductionSignatureSemantics<'_> {
 
     fn apply_demanded_source_callable(
         &self,
-        source: Option<(u32, u32)>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        receiver: Option<Ty>,
-        signature: &crate::fir::ResolvedSignature,
-        arguments: &[Ty],
-        argument_kinds: Option<&[crate::symbol_resolver::CallArgKind]>,
-        explicit_type_arguments: &[Ty],
-        expected: Option<Ty>,
+        call: DemandedSourceCall<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let DemandedSourceCall {
+            source,
+            stable_declaration,
+            receiver,
+            signature,
+            arguments,
+            argument_kinds,
+            explicit_type_arguments,
+            expected,
+        } = call;
         let Some(callable) = self
             .table
             .funs
@@ -3096,18 +3102,15 @@ impl ProductionSignatureSemantics<'_> {
                 .filter_map(|parameter| self.resolve_compact_header_type(scope, parameter.ty))
                 .collect();
         }
-        self.callable_signature(scope.owner)
-            .map(|signature| {
-                signature.params[..signature.context_count.min(signature.params.len())].to_vec()
-            })
-            .unwrap_or_default()
+        Vec::new()
     }
 
     fn declaration_implicit_receivers(&self, scope: crate::fir::SignatureScope) -> Vec<Ty> {
-        let Some(anchor) = self.headers.declarations.anchor(scope.owner) else {
+        if self.headers.declarations.anchor(scope.owner).is_none() {
             return Vec::new();
-        };
+        }
         let context_receivers = self.declaration_context_receivers(scope);
+        let extension_receiver = self.declaration_extension_receiver(scope.owner);
         if let Some(mut owner) = self.declaration_semantic_parent(scope.owner) {
             let mut receivers = Vec::new();
             let mut direct_classifier = true;
@@ -3120,29 +3123,7 @@ impl ProductionSignatureSemantics<'_> {
                         return Vec::new();
                     };
                     if direct_classifier {
-                        if anchor.kind == crate::fir::DeclarationKind::Function {
-                            if let Some(extension) = signature
-                                .member_ext_funs
-                                .values()
-                                .flatten()
-                                .find(|function| {
-                                    function.signature().stable_declaration == Some(scope.owner)
-                                })
-                                .map(|function| function.receiver_ty())
-                            {
-                                receivers.push(extension);
-                            }
-                        } else if anchor.kind == crate::fir::DeclarationKind::Property {
-                            if let Some(extension) = signature
-                                .member_ext_props
-                                .values()
-                                .flatten()
-                                .find(|property| property.stable_declaration() == Some(scope.owner))
-                                .map(|property| property.receiver_ty())
-                            {
-                                receivers.push(extension);
-                            }
-                        }
+                        receivers.extend(extension_receiver);
                         receivers.extend(context_receivers.iter().copied());
                     }
                     let arguments = signature
@@ -3226,36 +3207,7 @@ impl ProductionSignatureSemantics<'_> {
                 owner = parent;
             }
         }
-        // A top-level EXTENSION PROPERTY (`val A.z get() = this.x`) also has a receiver, and `this`
-        // inside its accessor resolves to it. Only functions were consulted here, so the receiver
-        // was invisible and the whole module's signatures declined with no diagnostic.
-        if let Some(receiver) = self
-            .table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.stable_declaration == Some(scope.owner))
-            .map(|property| property.receiver)
-        {
-            let mut receivers = vec![receiver];
-            receivers.extend(context_receivers);
-            return receivers;
-        }
-        let source_receiver = self
-            .table
-            .funs
-            .values()
-            .flatten()
-            .chain(
-                self.table
-                    .ext_funs
-                    .values()
-                    .flat_map(HashMap::values)
-                    .flatten(),
-            )
-            .find(|signature| signature.stable_declaration == Some(scope.owner))
-            .and_then(|signature| signature.source_receiver);
-        let mut receivers = source_receiver.into_iter().collect::<Vec<_>>();
+        let mut receivers = extension_receiver.into_iter().collect::<Vec<_>>();
         receivers.extend(context_receivers);
         receivers
     }
@@ -3879,13 +3831,13 @@ fn member_extension_receiver(function: &super::MemberExtFunSig) -> Ty {
         .unwrap_or_else(|| function.receiver_ty())
 }
 
-/// The Pass-1 signature published for a stable FUNCTION declaration, with the receiver a member
-/// extension carries.
+/// The transitional signature of a syntaxless compiler-generated function, with the receiver a
+/// generated member extension carries.
 ///
 /// Located by the declaration's stable owner and lookup name in exactly one method table. Enum-entry
 /// body members are seeded from compact FIR instead, so a missing keyed entry is not permission to
 /// reinterpret the declaration by scanning unrelated legacy symbols.
-fn stable_function_signature<'a>(
+fn generated_function_signature<'a>(
     table: &'a SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
@@ -3963,6 +3915,148 @@ fn stable_function_signature<'a>(
     None
 }
 
+fn compact_type_formal_occurrences(
+    syntax: &crate::fir::HeaderSyntaxArena,
+    ty: crate::fir::HeaderTypeId,
+    formal: crate::fir::LookupNameId,
+    projected: bool,
+) -> (bool, bool) {
+    let Some(ty) = syntax.ty(ty) else {
+        return (false, false);
+    };
+    let projected = projected || ty.flags.in_projection() || ty.flags.out_projection();
+    let mut occurrences = (false, false);
+    match ty.kind {
+        crate::fir::HeaderTypeKind::Classifier {
+            detail,
+            abbreviated_argument,
+        } => {
+            let Some(detail) = syntax.classifier_type(detail) else {
+                return occurrences;
+            };
+            let path = syntax.type_path(detail.path);
+            if path == [formal] {
+                occurrences = (projected, !projected);
+            }
+            for argument in syntax.type_operands(detail.arguments) {
+                let child = compact_type_formal_occurrences(syntax, *argument, formal, projected);
+                occurrences.0 |= child.0;
+                occurrences.1 |= child.1;
+            }
+            if let Some(argument) = abbreviated_argument {
+                let child = compact_type_formal_occurrences(syntax, argument, formal, projected);
+                occurrences.0 |= child.0;
+                occurrences.1 |= child.1;
+            }
+        }
+        crate::fir::HeaderTypeKind::Function {
+            parameters, result, ..
+        } => {
+            for parameter in syntax.type_operands(parameters) {
+                let child = compact_type_formal_occurrences(syntax, *parameter, formal, projected);
+                occurrences.0 |= child.0;
+                occurrences.1 |= child.1;
+            }
+            if let Some(result) = result {
+                let child = compact_type_formal_occurrences(syntax, result, formal, projected);
+                occurrences.0 |= child.0;
+                occurrences.1 |= child.1;
+            }
+        }
+    }
+    occurrences
+}
+
+fn compact_projected_return_hazard(
+    headers: &crate::fir::StreamedHeaderModule,
+    receiver: Option<crate::fir::HeaderTypeId>,
+    parameters: crate::fir::HeaderParameterRange,
+    result: crate::fir::HeaderResultType,
+    type_parameters: crate::fir::HeaderTypeParameterRange,
+) -> bool {
+    let crate::fir::HeaderResultType::Explicit(result) = result else {
+        return false;
+    };
+    let Some(result) = headers.syntax.ty(result) else {
+        return false;
+    };
+    let crate::fir::HeaderTypeKind::Classifier { detail, .. } = result.kind else {
+        return false;
+    };
+    let Some(detail) = headers.syntax.classifier_type(detail) else {
+        return false;
+    };
+    let path = headers.syntax.type_path(detail.path);
+    let Some(&formal) = path.first().filter(|_| path.len() == 1).filter(|formal| {
+        headers
+            .syntax
+            .type_parameters(type_parameters)
+            .iter()
+            .any(|parameter| parameter.name == **formal)
+    }) else {
+        return false;
+    };
+    let mut occurrences = (false, false);
+    for input in receiver.into_iter().chain(
+        headers
+            .syntax
+            .parameters(parameters)
+            .iter()
+            .map(|parameter| parameter.ty),
+    ) {
+        let here = compact_type_formal_occurrences(&headers.syntax, input, formal, false);
+        occurrences.0 |= here.0;
+        occurrences.1 |= here.1;
+    }
+    occurrences.0 && !occurrences.1
+}
+
+fn compact_header_has_annotation(
+    semantics: &ProductionSignatureSemantics<'_>,
+    scope: crate::fir::SignatureScope,
+    annotations: crate::fir::HeaderTypeRange,
+    expected: TypeName,
+) -> Result<bool, crate::fir::DiagnosticId> {
+    for annotation in semantics.headers.syntax.type_operands(annotations) {
+        let resolved = semantics.resolve_explicit_header_type(scope, *annotation)?;
+        if resolved.non_null().obj_internal() == Some(expected) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn compact_callable_equality_bound(
+    semantics: &ProductionSignatureSemantics<'_>,
+    scope: crate::fir::SignatureScope,
+    parameters: crate::fir::HeaderParameterRange,
+) -> Result<Option<Ty>, crate::fir::DiagnosticId> {
+    for parameter in semantics.headers.syntax.parameters(parameters) {
+        let annotations = semantics
+            .headers
+            .syntax
+            .type_operands(parameter.annotations);
+        for argument in semantics
+            .headers
+            .syntax
+            .parameter_annotation_class_literals(parameter.annotation_class_literals)
+        {
+            let Some(annotation) = annotations.get(argument.annotation_ordinal as usize) else {
+                continue;
+            };
+            let annotation = semantics.resolve_explicit_header_type(scope, *annotation)?;
+            if annotation.non_null().obj_internal()
+                != Some(crate::types::type_name("kotlin/EqualityBound"))
+            {
+                continue;
+            }
+            let classifier = semantics.resolve_explicit_header_type(scope, argument.classifier)?;
+            return Ok(classifier.non_null().obj_internal().map(Ty::obj_name));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn finalized_streamed_signature_index(
     headers: &crate::fir::StreamedHeaderModule,
     table: &mut SymbolTable,
@@ -4024,15 +4118,6 @@ pub(crate) fn finalized_streamed_signature_index(
             | crate::fir::HeaderDeclarationKind::Constructor { .. }
             | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
         }
-    }
-
-    fn stable_function<'a>(
-        table: &'a SymbolTable,
-        headers: &crate::fir::StreamedHeaderModule,
-        classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<(&'a Signature, Option<Ty>)> {
-        stable_function_signature(table, headers, classifier_types, declaration)
     }
 
     fn generated_constructor(
@@ -4106,7 +4191,15 @@ pub(crate) fn finalized_streamed_signature_index(
         classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
         stub: &crate::fir::DeclarationStub,
     ) -> Option<(&'a Signature, Option<Ty>)> {
-        stable_function_signature(table, headers, classifier_types, stub.id)
+        if stub.kind != crate::fir::DeclarationKind::Function
+            || !stub
+                .flags
+                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+            || headers.syntax.declaration(stub.id).is_some()
+        {
+            return None;
+        }
+        generated_function_signature(table, headers, classifier_types, stub.id)
     }
 
     fn generated_data_object_method_is_suppressed(
@@ -4961,8 +5054,17 @@ pub(crate) fn finalized_streamed_signature_index(
         failed.sort_by_key(|declaration| declaration.raw());
         failed.dedup();
     }
+    let emitted_signature_diagnostics = semantics.diagnostics.borrow().len();
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
+            for diagnostic in semantics
+                .diagnostics
+                .borrow()
+                .iter()
+                .skip(emitted_signature_diagnostics)
+            {
+                emit_production_signature_diagnostic(diags, diagnostic);
+            }
             failed.push($declaration);
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
@@ -4998,7 +5100,7 @@ pub(crate) fn finalized_streamed_signature_index(
             Some(_) => resolved_header_annotations.get(&stub.id).map(Vec::as_slice),
             None => match stub.kind {
                 DeclarationKind::Function => {
-                    stable_function(table, headers, &classifier_types, stub.id)
+                    generated_function(table, headers, &classifier_types, stub)
                         .map(|(signature, _)| signature.annotations.as_slice())
                 }
                 DeclarationKind::Classifier => table
@@ -5352,7 +5454,7 @@ pub(crate) fn finalized_streamed_signature_index(
             && headers.syntax.declaration(stub.id).is_none()
             && !suppressed_generated_callables.contains(&stub.id)
     }) {
-        let Some((signature, _)) = stable_function(table, headers, &classifier_types, stub.id)
+        let Some((signature, _)) = generated_function(table, headers, &classifier_types, stub)
         else {
             stop_with_failure!(stub.id);
         };
@@ -5796,71 +5898,90 @@ pub(crate) fn finalized_streamed_signature_index(
                     },
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE),
                 );
-                let stable_signature = stable_function(table, headers, &classifier_types, stub.id)
-                    .map(|(signature, _)| signature);
-                let parameters = headers
-                    .syntax
-                    .parameters(parameters)
-                    .iter()
-                    .enumerate()
-                    .map(|(ordinal, parameter)| {
-                        let name = headers
-                            .lookup_names
-                            .get(parameter.name)
-                            .expect("a compact callable parameter must retain its spelling");
-                        (
-                            name,
-                            crate::fir::ResolvedValueParameterFlags::new(
-                                parameter.flags.is_vararg(),
-                                parameter.flags.has_default(),
-                                parameter.flags.is_property(),
-                                parameter.flags.is_mutable_property(),
-                            )
-                            .with_implicit_integer_coercion(
-                                stable_signature
-                                    .and_then(|signature| {
-                                        signature.implicit_integer_coercion.get(ordinal)
-                                    })
-                                    .copied()
-                                    .unwrap_or(false),
-                            )
-                            .with_exact(
-                                stable_signature
-                                    .and_then(|signature| signature.exact_params.get(ordinal))
-                                    .copied()
-                                    .unwrap_or(false),
-                            )
-                            .with_no_infer(
-                                stable_signature
-                                    .and_then(|signature| signature.no_infer_params.get(ordinal))
-                                    .copied()
-                                    .unwrap_or(false),
-                            ),
+                let scope = crate::fir::SignatureScope {
+                    owner: stub.id,
+                    source: stub.source,
+                };
+                let mut published_parameters = Vec::new();
+                for parameter in headers.syntax.parameters(parameters) {
+                    let name = headers
+                        .lookup_names
+                        .get(parameter.name)
+                        .expect("a compact callable parameter must retain its spelling");
+                    let implicit_integer_coercion = match compact_header_has_annotation(
+                        &semantics,
+                        scope,
+                        parameter.annotations,
+                        crate::types::type_name("kotlin/internal/ImplicitIntegerCoercion"),
+                    ) {
+                        Ok(value) => value,
+                        Err(_) => stop_with_failure!(stub.id),
+                    };
+                    let exact = match compact_header_has_annotation(
+                        &semantics,
+                        scope,
+                        parameter.type_annotations,
+                        crate::types::type_name("kotlin/internal/Exact"),
+                    ) {
+                        Ok(value) => value,
+                        Err(_) => stop_with_failure!(stub.id),
+                    };
+                    let no_infer = match compact_header_has_annotation(
+                        &semantics,
+                        scope,
+                        parameter.type_annotations,
+                        crate::types::type_name("kotlin/internal/NoInfer"),
+                    ) {
+                        Ok(value) => value,
+                        Err(_) => stop_with_failure!(stub.id),
+                    };
+                    published_parameters.push((
+                        name,
+                        crate::fir::ResolvedValueParameterFlags::new(
+                            parameter.flags.is_vararg(),
+                            parameter.flags.has_default(),
+                            parameter.flags.is_property(),
+                            parameter.flags.is_mutable_property(),
                         )
-                    })
-                    .collect::<Vec<_>>();
-                index.publish_callable_parameters(callable, parameters);
+                        .with_implicit_integer_coercion(implicit_integer_coercion)
+                        .with_exact(exact)
+                        .with_no_infer(no_infer),
+                    ));
+                }
+                index.publish_callable_parameters(callable, published_parameters);
                 index.publish_callable_behavior(
                     callable,
                     crate::fir::ResolvedCallableBehavior {
-                        requires_splice: stable_signature.map_or_else(
-                            || {
-                                headers
-                                    .syntax
-                                    .type_parameters(type_parameters)
-                                    .iter()
-                                    .any(|parameter| parameter.flags.is_reified())
+                        requires_splice: headers
+                            .syntax
+                            .type_parameters(type_parameters)
+                            .iter()
+                            .any(|parameter| parameter.flags.is_reified()),
+                        projected_return_hazard: compact_projected_return_hazard(
+                            headers,
+                            match declaration.kind {
+                                crate::fir::HeaderDeclarationKind::Callable {
+                                    receiver, ..
+                                } => receiver,
+                                _ => unreachable!("a function owns callable compact syntax"),
                             },
-                            Signature::requires_splice,
+                            parameters,
+                            match declaration.kind {
+                                crate::fir::HeaderDeclarationKind::Callable { result, .. } => {
+                                    result
+                                }
+                                _ => unreachable!("a function owns callable compact syntax"),
+                            },
+                            type_parameters,
                         ),
-                        projected_return_hazard: stable_signature
-                            .is_some_and(|signature| signature.projected_return_hazard),
-                        plugin_expression: stable_signature
-                            .and_then(|signature| signature.plugin_expression),
+                        plugin_expression: None,
                     },
                 );
                 let equality_bound =
-                    stable_signature.and_then(|signature| signature.equality_bound);
+                    match compact_callable_equality_bound(&semantics, scope, parameters) {
+                        Ok(bound) => bound,
+                        Err(_) => stop_with_failure!(stub.id),
+                    };
                 if let Some(bound) = equality_bound {
                     if index
                         .publish_callable_equality_bound(callable, bound)

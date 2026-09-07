@@ -95,6 +95,85 @@ fn generated_data_class_copy_publishes_its_complete_callable_header() {
 }
 
 #[test]
+fn compact_source_callable_publishes_resolved_parameter_behavior() {
+    let inputs = [
+        SourceInput::kotlin(
+            "package kotlin.internal\n\
+             annotation class Exact\n\
+             annotation class NoInfer\n\
+             annotation class ImplicitIntegerCoercion\n",
+        )
+        .with_file_stem("CompilerAnnotations"),
+        SourceInput::kotlin(
+            "import kotlin.internal.Exact\n\
+             import kotlin.internal.NoInfer\n\
+             import kotlin.internal.ImplicitIntegerCoercion\n\
+             class Box<T>\n\
+             class Marker\n\
+             inline fun <reified T> constrained(@ImplicitIntegerCoercion value: @Exact @NoInfer T): T = value\n\
+             fun <T> projected(value: Box<out T>): T = null!!\n\
+             fun matches(@kotlin.EqualityBound(Marker::class) other: Any?): Boolean = false\n",
+        )
+        .with_file_stem("SourceBehavior"),
+    ];
+    let mut diagnostics = DiagSink::new();
+    let mut classpath = crate::toolchain::classpath_jars_for(inputs[1].text);
+    if let Some(jdk) = crate::toolchain::jdk_modules() {
+        classpath.push(jdk);
+    }
+    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
+    ));
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        platform,
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("source callable behavior must finalize")
+        .module
+        .index();
+    let callable_named = |name: &str| {
+        (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find_map(|declaration| {
+                (index.declaration_name(declaration) == Some(name))
+                    .then(|| index.callable_for_declaration(declaration))
+                    .flatten()
+            })
+            .unwrap_or_else(|| panic!("stable callable '{name}'"))
+    };
+    let constrained = callable_named("constrained");
+    let parameter = index
+        .callable_parameter(constrained.id, 0)
+        .expect("constrained parameter");
+    assert_eq!(
+        parameter.flags(),
+        crate::fir::ResolvedValueParameterFlags::new(false, false, false, false)
+            .with_implicit_integer_coercion(true)
+            .with_exact(true)
+            .with_no_infer(true),
+    );
+    assert!(index.callable_behavior(constrained.id).requires_splice);
+    assert!(
+        index
+            .callable_behavior(callable_named("projected").id)
+            .projected_return_hazard
+    );
+    assert_eq!(
+        index
+            .callable_equality_bound(callable_named("matches").id)
+            .map(crate::fir::ResolvedTy::get),
+        Some(Ty::obj("Marker")),
+    );
+}
+
+#[test]
 fn implicit_any_is_the_class_super_rung_during_signature_solving() {
     let source = r#"
 interface Contract {
