@@ -1210,6 +1210,42 @@ impl SignatureConstraintExtractor {
         }
     }
 
+    /// After an expression-statement call `f(x, …)` where `x` names a lexical value, later reads
+    /// of `x` in this block go through a [`SigExpr::ContractNarrowed`] node: non-null when the
+    /// callee selected at evaluation proves it (`assertNotNull`, `requireNotNull`, a source
+    /// `returns() implies (x != null)`), the plain value otherwise. The source argument index is
+    /// retained here; selection maps it to the chosen declaration parameter, including named calls.
+    fn narrow_contract_arguments(&mut self, file: &File, expression: ExprId, effect: SigExprId) {
+        let Expr::Call { callee, args } = file.expr(expression) else {
+            return;
+        };
+        if !matches!(file.expr(*callee), Expr::Name(_)) {
+            return;
+        }
+        for (index, argument) in args.iter().enumerate() {
+            let Expr::Name(name) = file.expr(*argument) else {
+                continue;
+            };
+            let Some(value) = self
+                .lexical_values
+                .iter()
+                .rev()
+                .find_map(|values| values.get(name.as_str()).copied())
+            else {
+                continue;
+            };
+            let narrowed = self.graph.add_expr(SigExpr::ContractNarrowed {
+                value,
+                call: effect,
+                argument: u32::try_from(index).expect("too many call arguments"),
+            });
+            self.lexical_values
+                .last_mut()
+                .expect("block scope must exist")
+                .insert(name.clone().into_boxed_str(), narrowed);
+        }
+    }
+
     fn smartcast_type(
         &mut self,
         file: &File,
@@ -2054,7 +2090,9 @@ impl SignatureConstraintExtractor {
                             }
                         }
                         Stmt::Expr(expression) => {
-                            effects.push(self.expression(file, *expression, scope, origin)?);
+                            let effect = self.expression(file, *expression, scope, origin)?;
+                            effects.push(effect);
+                            self.narrow_contract_arguments(file, *expression, effect);
                         }
                         Stmt::LocalDelegate {
                             name, ty, delegate, ..

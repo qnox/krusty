@@ -1210,6 +1210,28 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 SigExpr::NonNullable(base) => semantics.make_non_nullable(evaluate_expression(
                     semantics, base, graph, demand, memo, computing,
                 )?),
+                SigExpr::ContractNarrowed {
+                    value,
+                    call,
+                    argument,
+                } => {
+                    // The call statement is also a sequence effect ahead of this read, so its
+                    // selection is memoized; a failed call narrows nothing and reports itself.
+                    let selected =
+                        evaluate_expression(semantics, call, graph, demand, memo, computing)
+                            .is_ok();
+                    let value =
+                        evaluate_expression(semantics, value, graph, demand, memo, computing)?;
+                    let proven = selected
+                        && call_selection_origin(graph, call).is_some_and(|origin| {
+                            semantics.call_proves_argument_non_null(origin, argument)
+                        });
+                    if proven {
+                        semantics.make_non_nullable(value)
+                    } else {
+                        Ok(value)
+                    }
+                }
                 SigExpr::Substitute {
                     base,
                     substitutions,
@@ -1274,5 +1296,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
 
     fn missing_signature_diagnostic(&self, declaration: DeclarationId) -> DiagnosticId {
         self.semantics.missing_signature_diagnostic(declaration)
+    }
+}
+
+/// The selection origin of a call statement: the call itself, or the result of the sequence the
+/// extractor wraps around a call whose arguments carry local member effects.
+fn call_selection_origin(graph: &SignatureGraph, expression: SigExprId) -> Option<OriginId> {
+    match graph.expr(expression)? {
+        SigExpr::Call { target, .. } => graph.callable_selection(target).map(|s| s.origin),
+        SigExpr::Sequence { result, .. } => call_selection_origin(graph, result),
+        _ => None,
     }
 }
