@@ -24,12 +24,12 @@ pub(crate) struct SourceContractCandidate {
 /// provider identity belong to the normal signature resolver below, not to syntax recognition.
 pub(crate) fn extract_source_contract_candidates(
     file: &File,
-    source: crate::fir::SourceFileId,
-    stubs: &[crate::fir::DeclarationStub],
+    active: &crate::fir::ActiveSourceHeaders<'_>,
 ) -> Vec<SourceContractCandidate> {
     file.decls
         .iter()
         .filter_map(|&parser_declaration| {
+            let declaration = active.declaration(parser_declaration)?;
             let Decl::Fun(function) = file.decl(parser_declaration) else {
                 return None;
             };
@@ -65,17 +65,9 @@ pub(crate) fn extract_source_contract_candidates(
                 &function.name,
                 function.receiver.is_some(),
             )?;
-            let declaration = stubs
-                .iter()
-                .find(|stub| {
-                    stub.source == source
-                        && stub.kind == crate::fir::DeclarationKind::Function
-                        && stub.range == function.span
-                })?
-                .id;
             Some(SourceContractCandidate {
                 declaration,
-                source,
+                source: active.source(),
                 callee: callee.clone().into_boxed_str(),
                 shadowed_by_parameter: function
                     .params
@@ -156,5 +148,45 @@ impl ProductionSignatureSemantics<'_> {
             failed.dedup();
             Err(failed)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Decl;
+    use crate::diag::{DiagSink, Span};
+    use crate::source::SourceInput;
+
+    #[test]
+    fn active_header_binding_does_not_join_contracts_by_source_range() {
+        let source = "import kotlin.contracts.contract\n\
+                      fun accepts(value: Any): Boolean {\n\
+                          contract { returns(true) implies (value is String) }\n\
+                          return true\n\
+                      }";
+        let input = SourceInput::kotlin(source).with_file_stem("ContractIdentity");
+        let mut diagnostics = DiagSink::new();
+        let file = crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        let mut builder = crate::fir::HeaderInventoryBuilder::default();
+        let active = builder
+            .add_source(0, &input, Some(&file))
+            .expect("valid Kotlin source has active headers");
+        let parser_declaration = file.decls[0];
+        let stable = active
+            .declaration(parser_declaration)
+            .expect("the source function has a stable declaration");
+
+        let mut reparsed =
+            crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        let Decl::Fun(function) = reparsed.decl_mut(parser_declaration) else {
+            panic!("the first declaration must remain the source function")
+        };
+        function.span = Span::new(source.len() as u32 + 10, source.len() as u32 + 20);
+
+        let candidates = extract_source_contract_candidates(&reparsed, &active);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].declaration, stable);
     }
 }

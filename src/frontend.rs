@@ -767,11 +767,14 @@ fn analyze_source_set_impl(
             source,
             (!parse_error && source.kind != SourceKind::Java).then_some(&file),
         );
-        if let Some((source, stubs)) = extracted {
+        if let Some(active_headers) = extracted {
+            let source = active_headers.source();
+            let stubs = active_headers.stubs();
             source_contracts.extend(crate::resolve::extract_source_contract_candidates(
-                &file, source, &stubs,
+                &file,
+                &active_headers,
             ));
-            signature_constraints.extract_file(&file, source, &stubs, |span| {
+            signature_constraints.extract_file(&file, source, stubs, |span| {
                 pass1_builder.source_origin(source, span)
             });
             // Compact signature extraction has consumed every ordinary expression dependency for
@@ -785,7 +788,8 @@ fn analyze_source_set_impl(
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
                 });
-            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &stubs));
+            local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, stubs));
+            drop(active_headers);
             if !retain_inspection_analysis && index < inferred_count && !multiplatform {
                 if needs_bounded_pass_one_syntax {
                     retained_syntax::compact(&mut file);

@@ -14,6 +14,11 @@ use crate::features::LangFeatures;
 use crate::source::{SourceInput, SourceKind};
 use crate::types::Visibility;
 
+mod visibility_suppressions;
+
+pub(crate) use visibility_suppressions::HeaderVisibilitySuppressionApplication;
+use visibility_suppressions::HeaderVisibilitySuppressionArena;
+
 pub use super::declaration_stub::*;
 pub use super::identities::*;
 pub use super::lookup_scope::*;
@@ -1405,12 +1410,17 @@ impl HeaderSyntaxArena {
 /// stubs contain no parser arena ids or owned spellings; an optional temporary lookup-name id is not
 /// semantic identity. Stubs remain valid after `file` is dropped. This is the stable-identity portion
 /// of pass 1; signature syntax and constraints are attached by the resolver-facing extraction pass.
+struct ExtractedFileStubs {
+    stubs: Vec<DeclarationStub>,
+    primary_declarations: Vec<Option<DeclarationId>>,
+}
+
 fn extract_file_stub_inventory(
     file: &File,
     source: SourceFileId,
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
-) -> Vec<DeclarationStub> {
+) -> ExtractedFileStubs {
     fn body_range(file: &File, body: &FunBody) -> Option<TextRange> {
         let expression = match body {
             FunBody::Expr(expression) | FunBody::Block(expression) => *expression,
@@ -1745,8 +1755,8 @@ fn extract_file_stub_inventory(
                 flags: DeclarationFlags::default(),
             });
         }
-        if let Some(companion) = class.companion {
-            let Decl::Class(companion) = file.decl(companion) else {
+        if let Some(companion_declaration) = class.companion {
+            let Decl::Class(companion) = file.decl(companion_declaration) else {
                 panic!("a companion declaration edge must target a class")
             };
             class_stubs(
@@ -2062,6 +2072,7 @@ fn extract_file_stub_inventory(
     let nested_owners = nested_classifier_owners(file, source, ids);
     let companion_declarations = companion_declarations(file);
     let mut stubs = Vec::new();
+    let mut primary_declarations = vec![None; file.decl_arena.len()];
     let mut declaration_blocks = Vec::new();
     for (index, declaration) in file.decls.iter().enumerate() {
         if companion_declarations.contains(declaration) {
@@ -2100,6 +2111,22 @@ fn extract_file_stub_inventory(
                 u32::try_from(index).expect("too many file declarations"),
                 &mut stubs,
             ),
+        }
+        let stable =
+            *primary_declarations[declaration.0 as usize].get_or_insert(stubs[first_stub].id);
+        if let Decl::Class(class) = file.decl(*declaration) {
+            if let Some(companion) = class.companion {
+                primary_declarations[companion.0 as usize] = stubs[first_stub..]
+                    .iter()
+                    .find(|stub| {
+                        stub.kind == DeclarationKind::Classifier
+                            && stub.flags.has(DeclarationFlags::COMPANION)
+                            && ids
+                                .anchor(stub.id)
+                                .is_some_and(|anchor| anchor.owner == Some(stable))
+                    })
+                    .map(|stub| stub.id);
+            }
         }
         if file.is_local_declaration(*declaration) {
             for stub in &mut stubs[first_stub..] {
@@ -2236,7 +2263,10 @@ fn extract_file_stub_inventory(
             break;
         }
     }
-    stubs
+    ExtractedFileStubs {
+        stubs,
+        primary_declarations,
+    }
 }
 
 pub fn extract_file_stubs(
@@ -2245,7 +2275,7 @@ pub fn extract_file_stubs(
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
 ) -> Vec<DeclarationStub> {
-    extract_file_stub_inventory(file, source, ids, names)
+    extract_file_stub_inventory(file, source, ids, names).stubs
 }
 
 /// Put one file's declarations into the stable stream shared by Pass 1 and a fresh Pass-2 parse.
@@ -3343,192 +3373,6 @@ impl HeaderAnnotationStringArena {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HeaderVisibilitySuppressionApplication {
-    pub annotation: Span,
-    pub invisible_reference: bool,
-    pub invisible_member: bool,
-    pub optional_declaration_usage: bool,
-}
-
-/// Compact `@Suppress` argument facts needed while signatures are solved after ordinary expression
-/// arenas have been released. Annotation identity is deliberately not guessed here: the ordinary
-/// resolver later joins `annotation` to its resolved classifier and accepts these flags only for
-/// `kotlin.Suppress`.
-#[derive(Default)]
-struct HeaderVisibilitySuppressionArena {
-    files: std::collections::HashMap<SourceFileId, Vec<HeaderVisibilitySuppressionApplication>>,
-    declarations:
-        std::collections::HashMap<DeclarationId, Vec<HeaderVisibilitySuppressionApplication>>,
-}
-
-impl HeaderVisibilitySuppressionArena {
-    fn applications(
-        file: &File,
-        annotations: &[crate::ast::AnnotationRef],
-        arguments: &[Vec<crate::ast::ExprId>],
-    ) -> Vec<HeaderVisibilitySuppressionApplication> {
-        annotations
-            .iter()
-            .zip(arguments)
-            .filter_map(|(annotation, arguments)| {
-                let mut invisible_reference = false;
-                let mut invisible_member = false;
-                let mut optional_declaration_usage = false;
-                for argument in arguments {
-                    let Some(value) = file.const_string_value(*argument) else {
-                        continue;
-                    };
-                    match value.as_str() {
-                        Some("INVISIBLE_REFERENCE") => invisible_reference = true,
-                        Some("INVISIBLE_MEMBER") => invisible_member = true,
-                        Some("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE") => {
-                            optional_declaration_usage = true
-                        }
-                        _ => {}
-                    }
-                }
-                (invisible_reference || invisible_member || optional_declaration_usage).then_some(
-                    HeaderVisibilitySuppressionApplication {
-                        annotation: annotation.span,
-                        invisible_reference,
-                        invisible_member,
-                        optional_declaration_usage,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn add_file(&mut self, source: SourceFileId, file: &File, stubs: &[DeclarationStub]) {
-        let file_applications = file
-            .file_annotations
-            .iter()
-            .filter_map(|(annotation, arguments)| {
-                Self::applications(
-                    file,
-                    std::slice::from_ref(annotation),
-                    std::slice::from_ref(arguments),
-                )
-                .into_iter()
-                .next()
-            })
-            .collect::<Vec<_>>();
-        if !file_applications.is_empty() {
-            self.files.insert(source, file_applications);
-        }
-
-        let mut record = |range: Span,
-                          kind: DeclarationKind,
-                          annotations: &[crate::ast::AnnotationRef],
-                          arguments: &[Vec<crate::ast::ExprId>]| {
-            let applications = Self::applications(file, annotations, arguments);
-            if let (false, Some(declaration)) = (
-                applications.is_empty(),
-                stubs
-                    .iter()
-                    .find(|stub| stub.range == range && stub.kind == kind)
-                    .map(|stub| stub.id),
-            ) {
-                self.declarations
-                    .entry(declaration)
-                    .or_default()
-                    .extend(applications);
-            }
-        };
-        for &declaration in &file.decls {
-            match file.decl(declaration) {
-                Decl::Fun(function) => record(
-                    function.span,
-                    DeclarationKind::Function,
-                    &function.annotations,
-                    &function.annotation_args,
-                ),
-                Decl::Property(property) => record(
-                    property.span,
-                    DeclarationKind::Property,
-                    &property.annotations,
-                    &property.annotation_args,
-                ),
-                Decl::Class(class) => {
-                    record(
-                        class.span,
-                        DeclarationKind::Classifier,
-                        &class.annotations,
-                        &class.annotation_args,
-                    );
-                    if let Some(annotations) = &class.primary_ctor_annotations {
-                        record(
-                            class.span,
-                            DeclarationKind::Constructor,
-                            annotations,
-                            &class.primary_ctor_annotation_args,
-                        );
-                    }
-                    for function in &class.methods {
-                        record(
-                            function.span,
-                            DeclarationKind::Function,
-                            &function.annotations,
-                            &function.annotation_args,
-                        );
-                    }
-                    for property in &class.body_props {
-                        record(
-                            property.span,
-                            DeclarationKind::Property,
-                            &property.annotations,
-                            &property.annotation_args,
-                        );
-                    }
-                    for entry in &class.enum_entries {
-                        for function in &entry.methods {
-                            record(
-                                function.span,
-                                DeclarationKind::Function,
-                                &function.annotations,
-                                &function.annotation_args,
-                            );
-                        }
-                        for property in &entry.props {
-                            record(
-                                property.span,
-                                DeclarationKind::Property,
-                                &property.annotations,
-                                &property.annotation_args,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn file(&self, source: SourceFileId) -> &[HeaderVisibilitySuppressionApplication] {
-        self.files
-            .get(&source)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    fn declaration(&self, declaration: DeclarationId) -> &[HeaderVisibilitySuppressionApplication] {
-        self.declarations
-            .get(&declaration)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        self.files
-            .values()
-            .chain(self.declarations.values())
-            .map(|applications| {
-                applications.len() * std::mem::size_of::<HeaderVisibilitySuppressionApplication>()
-            })
-            .sum()
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct HeaderAnnotationArgumentRange {
     start: u32,
@@ -3657,18 +3501,45 @@ pub fn stream_file_stub_inventory(
                 crate::frontend::name_anonymous_classes(&mut file, &format!("{stem}Kt"));
             }
         }
-        let (source_id, stubs) = builder
+        let active = builder
             .add_source(index, source, Some(&file))
             .expect("Kotlin source must produce compact headers");
-        visit(source_id, &file, &stubs);
+        visit(active.source(), &file, active.stubs());
         // `file` drops here, before the next loop iteration parses another source.
     }
 
     builder.finish()
 }
 
+/// Stable headers extracted from one parser unit, plus its short-lived parser-to-header binding.
+/// The lifetime prevents the binding from escaping the active `File`; only `stubs` enter the
+/// finished module.
+pub(crate) struct ActiveSourceHeaders<'file> {
+    source: SourceFileId,
+    stubs: Vec<DeclarationStub>,
+    primary_declarations: Vec<Option<DeclarationId>>,
+    active_file: std::marker::PhantomData<&'file File>,
+}
+
+impl ActiveSourceHeaders<'_> {
+    pub(crate) const fn source(&self) -> SourceFileId {
+        self.source
+    }
+
+    pub(crate) fn stubs(&self) -> &[DeclarationStub] {
+        &self.stubs
+    }
+
+    pub(crate) fn declaration(&self, parser: DeclId) -> Option<DeclarationId> {
+        self.primary_declarations
+            .get(parser.0 as usize)
+            .copied()
+            .flatten()
+    }
+}
+
 #[derive(Default)]
-pub struct HeaderInventoryBuilder {
+pub(crate) struct HeaderInventoryBuilder {
     sources: SourceMap,
     signature_origins: super::body::OriginStore,
     declarations: DeclarationIds,
@@ -3686,18 +3557,19 @@ pub struct HeaderInventoryBuilder {
 }
 
 impl HeaderInventoryBuilder {
-    pub fn source_origin(&mut self, source: SourceFileId, span: Span) -> OriginId {
+    pub(crate) fn source_origin(&mut self, source: SourceFileId, span: Span) -> OriginId {
         self.signature_origins.source(source, span)
     }
 
     /// Add one source immediately after parsing it. Java sources receive a stable file identity but
-    /// no Kotlin declaration headers. The returned stubs borrow nothing from `file`.
-    pub fn add_source(
+    /// no Kotlin declaration headers. Header payloads borrow nothing from `file`; the accompanying
+    /// parser-to-stable binding is lifetime-limited to this active parser unit.
+    pub(crate) fn add_source<'file>(
         &mut self,
         index: usize,
         source: &SourceInput<'_>,
-        file: Option<&File>,
-    ) -> Option<(SourceFileId, Vec<DeclarationStub>)> {
+        file: Option<&'file File>,
+    ) -> Option<ActiveSourceHeaders<'file>> {
         let extension = match source.kind {
             SourceKind::Kotlin => "kt",
             SourceKind::KotlinScript => "kts",
@@ -3719,7 +3591,13 @@ impl HeaderInventoryBuilder {
         let file = file?;
         self.sources.set_package(source_id, file.package.as_deref());
         self.inventoried[raw] = true;
-        Some((source_id, self.add_file(source_id, file, source.is_common)))
+        let extracted = self.add_file(source_id, file, source.is_common);
+        Some(ActiveSourceHeaders {
+            source: source_id,
+            stubs: extracted.stubs,
+            primary_declarations: extracted.primary_declarations,
+            active_file: std::marker::PhantomData,
+        })
     }
 
     fn add_file(
@@ -3727,7 +3605,7 @@ impl HeaderInventoryBuilder {
         source: SourceFileId,
         file: &File,
         is_common: bool,
-    ) -> Vec<DeclarationStub> {
+    ) -> ExtractedFileStubs {
         let first_source_type = self.syntax.type_count();
         self.scopes
             .add_file(source, file, is_common, &mut self.lookup_names);
@@ -3735,27 +3613,31 @@ impl HeaderInventoryBuilder {
             let ty = self.syntax.add_type(ty, &mut self.lookup_names);
             self.detached_types.push((source, ty));
         }
-        let mut stubs = extract_file_stub_inventory(
+        let ExtractedFileStubs {
+            mut stubs,
+            primary_declarations,
+        } = extract_file_stub_inventory(
             file,
             source,
             &mut self.declarations,
             &mut self.lookup_names,
         );
         order_file_stubs(&mut stubs, &self.declarations);
-        self.visibility_suppressions.add_file(source, file, &stubs);
-        let primary_stub = |declaration: DeclId| {
-            let (kind, range) = match file.decl(declaration) {
-                Decl::Fun(function) => (DeclarationKind::Function, function.span),
-                Decl::Property(property) => (DeclarationKind::Property, property.span),
-                Decl::Class(class) => (DeclarationKind::Classifier, class.span),
-            };
-            stubs
-                .iter()
-                .find(|stub| stub.kind == kind && stub.range == range)
-                .map(|stub| stub.id)
-        };
+        self.visibility_suppressions.add_file(
+            source,
+            file,
+            &stubs,
+            &self.declarations,
+            &primary_declarations,
+        );
         for (&local, &root) in &file.local_class_enclosing_declarations {
-            if let (Some(local), Some(root)) = (primary_stub(local), primary_stub(root)) {
+            if let (Some(local), Some(root)) = (
+                primary_declarations
+                    .get(local.0 as usize)
+                    .copied()
+                    .flatten(),
+                primary_declarations.get(root.0 as usize).copied().flatten(),
+            ) {
                 self.local_classifier_lexical_roots.insert(local, root);
             }
         }
@@ -3772,22 +3654,15 @@ impl HeaderInventoryBuilder {
             &mut self.lookup_names,
         );
         for &declaration in &file.decls {
+            let Some(stable) = primary_declarations
+                .get(declaration.0 as usize)
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
             match file.decl(declaration) {
                 Decl::Fun(function) => {
-                    let Some(stable) = stubs
-                        .iter()
-                        .find(|stub| {
-                            stub.kind == DeclarationKind::Function
-                                && stub.range == function.span
-                                && self
-                                    .declarations
-                                    .anchor(stub.id)
-                                    .is_some_and(|anchor| anchor.owner.is_none())
-                        })
-                        .map(|stub| stub.id)
-                    else {
-                        continue;
-                    };
                     self.annotation_strings.add(
                         stable,
                         file,
@@ -3796,15 +3671,6 @@ impl HeaderInventoryBuilder {
                     );
                 }
                 Decl::Class(class) => {
-                    let Some(stable) = stubs
-                        .iter()
-                        .find(|stub| {
-                            stub.kind == DeclarationKind::Classifier && stub.range == class.span
-                        })
-                        .map(|stub| stub.id)
-                    else {
-                        continue;
-                    };
                     self.annotation_strings.add(
                         stable,
                         file,
@@ -3815,15 +3681,6 @@ impl HeaderInventoryBuilder {
                         .add_class(stable, class, file, &mut self.lookup_names);
                 }
                 Decl::Property(property) => {
-                    let Some(stable) = stubs
-                        .iter()
-                        .find(|stub| {
-                            stub.kind == DeclarationKind::Property && stub.range == property.span
-                        })
-                        .map(|stub| stub.id)
-                    else {
-                        continue;
-                    };
                     self.annotation_strings.add(
                         stable,
                         file,
@@ -3835,10 +3692,13 @@ impl HeaderInventoryBuilder {
         }
         self.stubs.extend(stubs.iter().copied());
         self.inventory.extend(stubs.iter().map(|stub| stub.id));
-        stubs
+        ExtractedFileStubs {
+            stubs,
+            primary_declarations,
+        }
     }
 
-    pub fn finish(self) -> StreamedHeaderModule {
+    pub(crate) fn finish(self) -> StreamedHeaderModule {
         let stub_positions = StreamedHeaderModule::index_stubs(&self.stubs);
         let indexed_stubs = self.stubs.len();
         StreamedHeaderModule {

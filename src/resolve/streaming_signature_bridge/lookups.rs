@@ -14,20 +14,18 @@ impl ProductionSignatureSemantics<'_> {
         let anchor = self.headers.declarations.anchor(declaration)?;
         let owner = anchor.owner?;
         let owner_header = self.headers.syntax.declaration(owner)?;
-        let crate::fir::HeaderDeclarationKind::Classifier {
-            primary_parameters, ..
-        } = owner_header.kind
-        else {
+        let crate::fir::HeaderDeclarationKind::Classifier { .. } = owner_header.kind else {
             return None;
         };
         match anchor.kind {
             crate::fir::DeclarationKind::Constructor if anchor.sibling == 0 => Some(owner),
             crate::fir::DeclarationKind::Property => self
                 .headers
-                .syntax
-                .parameters(primary_parameters)
-                .get(anchor.sibling as usize)
-                .filter(|parameter| parameter.flags.is_property() && parameter.span == anchor.range)
+                .stub(declaration)
+                .filter(|stub| {
+                    stub.flags
+                        .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
+                })
                 .map(|_| owner),
             crate::fir::DeclarationKind::Function
             | crate::fir::DeclarationKind::Classifier
