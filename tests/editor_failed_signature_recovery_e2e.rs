@@ -95,14 +95,14 @@ private val text = lazy { "x" }
 fun useText(): Int = text.value.length
 "#;
     let d = editor_diagnostics(source);
-    assert!(
-        d.iter()
-            .any(|m| m.contains("unresolved reference 'Missing'")),
-        "the unresolved supertype must be reported, got: {d:?}"
-    );
-    assert!(
-        !d.iter()
-            .any(|m| m.contains("'value'") || m.contains("'length'")),
-        "the other declarations must keep their types, got: {d:?}"
+    assert_eq!(
+        d,
+        vec![
+            "unresolved reference 'Missing'.".to_string(),
+            "unresolved reference 'AlsoMissing'.".to_string(),
+            "unresolved reference 'AlsoMissing'.".to_string(),
+            "unresolved reference 'Missing'.".to_string(),
+        ],
+        "the unresolved supertypes must be reported exactly without erasing unrelated types"
     );
 }
