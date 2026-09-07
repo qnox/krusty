@@ -17,6 +17,7 @@ mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
 mod header_projection;
+mod header_type_resolution;
 mod local_signatures;
 mod lookups;
 mod postponed_calls;
@@ -29,6 +30,11 @@ pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
 pub(super) use declaration_spellings::collect_compact_declared_spellings;
 pub(super) use header_projection::*;
+pub(super) use header_type_resolution::{
+    header_type_bare_parameter_spelling, header_type_formal_occurrences,
+    header_type_has_function_receiver, resolve_header_function_parameter_types,
+    resolve_header_type_with, resolve_parser_type_with,
+};
 use signature_type_syntax::*;
 
 #[cfg(test)]

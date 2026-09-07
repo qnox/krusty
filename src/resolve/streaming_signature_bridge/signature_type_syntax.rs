@@ -90,6 +90,13 @@ impl<'a> SignatureTypeSyntax<'a> {
         }
     }
 
+    pub(super) fn is_import(self) -> Option<bool> {
+        match self {
+            Self::Parser(reference) => Some(reference.is_import()),
+            Self::Compact { arena, id, .. } => arena.ty(id).map(|ty| ty.flags.is_import()),
+        }
+    }
+
     pub(super) fn definitely_non_null(self) -> Option<bool> {
         match self {
             Self::Parser(reference) => Some(reference.definitely_non_null()),
@@ -255,6 +262,21 @@ impl<'a> SignatureTypeSyntax<'a> {
         let spelling = self.spelling()?;
         (self.arguments()?.is_empty() && !spelling.contains(['.', '/', '$']))
             .then(|| spelling.into_owned())
+    }
+
+    pub(super) fn formal_occurrences(self, name: &str, projected: bool) -> Option<(bool, bool)> {
+        let projected = projected || self.in_projection()? || self.out_projection()?;
+        let spelling = self.spelling()?;
+        let mut occurrences = (
+            projected && spelling == name,
+            !projected && spelling == name,
+        );
+        for child in self.nested()? {
+            let child = child.formal_occurrences(name, projected)?;
+            occurrences.0 |= child.0;
+            occurrences.1 |= child.1;
+        }
+        Some(occurrences)
     }
 
     /// Resolve the restricted semantic shape used for type-parameter upper bounds. Classifier

@@ -5715,15 +5715,32 @@ fn has_projected_generic_return_hazard(_file: &File, function: &FunDecl) -> bool
     )
 }
 
-fn has_projected_generic_return_hazard_from_header(function: &StreamedCallableHeader) -> bool {
-    has_projected_generic_return_hazard_for(
-        function.explicit_result.as_ref(),
-        &function.type_parameters,
-        function
-            .receiver
-            .iter()
-            .chain(function.parameters.iter().map(|parameter| &parameter.ty)),
-    )
+fn has_projected_generic_return_hazard_from_header(
+    headers: &crate::fir::StreamedHeaderModule,
+    function: &StreamedCallableHeader,
+) -> bool {
+    let Some(ret) = function.explicit_result.as_ref() else {
+        return false;
+    };
+    if !function
+        .type_parameters
+        .iter()
+        .any(|parameter| parameter == &ret.name)
+    {
+        return false;
+    }
+    let mut occurrences = function
+        .receiver
+        .as_ref()
+        .map(|receiver| type_ref_formal_occurrences(receiver, &ret.name, false))
+        .unwrap_or_default();
+    for parameter in &function.parameters {
+        let here = header_type_formal_occurrences(headers, parameter.ty, &ret.name, false)
+            .expect("a callable parameter must retain compact type syntax");
+        occurrences.0 |= here.0;
+        occurrences.1 |= here.1;
+    }
+    occurrences.0 && !occurrences.1
 }
 
 fn has_projected_generic_return_hazard_for<'a>(
@@ -5790,44 +5807,37 @@ fn extend_streamed_lexical_nested_classifier_names(
     }
 }
 fn generic_value_operand_slots_from_header(
+    headers: &crate::fir::StreamedHeaderModule,
     function: &StreamedCallableHeader,
     owner_type_params: &[String],
 ) -> Vec<u32> {
-    generic_value_operand_slots_for(
-        function.receiver.as_ref(),
+    let is_formal = |name: &str| {
         function
-            .parameters
+            .type_parameters
             .iter()
-            .map(|parameter| (&parameter.ty, parameter.is_vararg)),
-        &function.type_parameters,
-        owner_type_params,
-    )
-}
-
-fn generic_value_operand_slots_for<'a>(
-    receiver: Option<&TypeRef>,
-    parameters: impl Iterator<Item = (&'a TypeRef, bool)>,
-    type_parameters: &[String],
-    owner_type_params: &[String],
-) -> Vec<u32> {
-    let is_bare_formal = |ty: &TypeRef| {
-        !ty.nullable()
-            && ty.arg.is_none()
-            && ty.targs.is_empty()
-            && ty.fun_params.is_empty()
-            && type_parameters
-                .iter()
-                .chain(owner_type_params)
-                .any(|parameter| parameter == &ty.name)
+            .chain(owner_type_params)
+            .any(|parameter| parameter == name)
     };
     let mut slots = Vec::new();
-    if receiver.is_some_and(is_bare_formal) {
+    if function.receiver.as_ref().is_some_and(|receiver| {
+        !receiver.nullable()
+            && receiver.arg.is_none()
+            && receiver.targs.is_empty()
+            && receiver.fun_params.is_empty()
+            && is_formal(&receiver.name)
+    }) {
         slots.push(0);
     }
     slots.extend(
-        parameters
+        function
+            .parameters
+            .iter()
             .enumerate()
-            .filter(|(_, (ty, is_vararg))| !is_vararg && is_bare_formal(ty))
+            .filter(|(_, parameter)| {
+                !parameter.is_vararg
+                    && header_type_bare_parameter_spelling(headers, parameter.ty)
+                        .is_some_and(|spelling| is_formal(&spelling))
+            })
             .map(|(index, _)| index as u32 + 1),
     );
     slots
@@ -6658,7 +6668,13 @@ fn collect_signatures_with_cp_impl(
                         .parameters
                         .iter()
                         .map(|parameter| {
-                            let ty = ty_of_ref(&parameter.ty, &class_names, &tp, diags);
+                            let ty = resolve_header_type_with(
+                                headers,
+                                parameter.ty,
+                                &class_names,
+                                &tp,
+                                diags,
+                            );
                             semantic_value_parameter_ty(ty, parameter.is_vararg)
                         })
                         .collect();
@@ -6705,16 +6721,13 @@ fn collect_signatures_with_cp_impl(
                         .parameters
                         .iter()
                         .map(|parameter| {
-                            if !parameter.ty.fun_params.is_empty() || parameter.ty.name == "<fun>" {
-                                parameter
-                                    .ty
-                                    .fun_params
-                                    .iter()
-                                    .map(|r| ty_of_ref(r, &class_names, &tp, diags))
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            }
+                            resolve_header_function_parameter_types(
+                                headers,
+                                parameter.ty,
+                                &class_names,
+                                &tp,
+                                diags,
+                            )
                         })
                         .collect();
                     let source_receiver = callable_header
@@ -6749,6 +6762,7 @@ fn collect_signatures_with_cp_impl(
                                 generic_header.receiver = None;
                             }
                             source_generic_signature_from_header(
+                                headers,
                                 &generic_header,
                                 &class_names,
                                 &semantic_tp,
@@ -6766,7 +6780,7 @@ fn collect_signatures_with_cp_impl(
                         );
                     }
                     let projected_return_hazard =
-                        has_projected_generic_return_hazard_from_header(&callable_header);
+                        has_projected_generic_return_hazard_from_header(headers, &callable_header);
                     let stable_declaration = Some(compact_function.id);
                     let sig = Signature {
                         params,
@@ -6849,7 +6863,9 @@ fn collect_signatures_with_cp_impl(
                         lambda_recv: callable_header
                             .parameters
                             .iter()
-                            .map(|parameter| parameter.ty.fun_has_receiver())
+                            .map(|parameter| {
+                                header_type_has_function_receiver(headers, parameter.ty)
+                            })
                             .collect(),
                         visibility: function_visibility,
                         context_count: callable_header.context_count,
@@ -7899,6 +7915,7 @@ fn collect_signatures_with_cp_impl(
                                 .map(|ret| ty_of_ref(ret, &class_names, &symbolic_mtp, diags))
                                 .unwrap_or(signature.ret);
                             signature.generic_sig = Some(source_generic_signature_from_header(
+                                headers,
                                 &method_header,
                                 &class_names,
                                 &symbolic_mtp,
@@ -7936,8 +7953,9 @@ fn collect_signatures_with_cp_impl(
                                             .parameters
                                             .iter()
                                             .map(|parameter| {
-                                                ty_of_ref(
-                                                    &parameter.ty,
+                                                resolve_header_type_with(
+                                                    headers,
+                                                    parameter.ty,
                                                     &class_names,
                                                     &symbolic_mtp,
                                                     diags,
@@ -7955,6 +7973,7 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                         let value_operand_slots = generic_value_operand_slots_from_header(
+                            headers,
                             &method_header,
                             &classifier_header.type_parameters,
                         );
@@ -8531,17 +8550,26 @@ fn collect_signatures_with_cp_impl(
                             let erased = parameters
                                 .iter()
                                 .map(|parameter| {
-                                    let ty = ty_of_ref(&parameter.ty, &class_names, &ctp, diags);
+                                    let ty = resolve_header_type_with(
+                                        headers,
+                                        parameter.ty,
+                                        &class_names,
+                                        &ctp,
+                                        diags,
+                                    );
                                     semantic_value_parameter_ty(ty, parameter.is_vararg)
                                 })
                                 .collect::<Vec<_>>();
                             let symbolic = parameters
                                 .iter()
                                 .map(|parameter| {
-                                    let ty = ty_of_ref_silent(
-                                        &parameter.ty,
+                                    let mut silent = DiagSink::new();
+                                    let ty = resolve_header_type_with(
+                                        headers,
+                                        parameter.ty,
                                         &class_names,
                                         &symbolic_ctp,
+                                        &mut silent,
                                     );
                                     semantic_value_parameter_ty(ty, parameter.is_vararg)
                                 })
@@ -10821,12 +10849,22 @@ fn streamed_function_conflict_display(
             },
         })
         .collect::<Vec<_>>();
+    let parameter_types = header
+        .parameters
+        .iter()
+        .map(|parameter| {
+            headers
+                .syntax
+                .transient_type_ref(parameter.ty, &headers.lookup_names)
+        })
+        .collect::<Option<Vec<_>>>()?;
     let parameters = header
         .parameters
         .iter()
-        .map(|parameter| FunctionValueParameterDisplay {
+        .zip(&parameter_types)
+        .map(|(parameter, ty)| FunctionValueParameterDisplay {
             name: &parameter.name,
-            ty: &parameter.ty,
+            ty,
             vararg: parameter.is_vararg,
             default: parameter.has_default,
         })
@@ -11028,7 +11066,7 @@ fn member_signature_from_header(
         .parameters
         .iter()
         .map(|parameter| {
-            let ty = ty_of_ref(&parameter.ty, classes, mtp, diags);
+            let ty = resolve_header_type_with(headers, parameter.ty, classes, mtp, diags);
             semantic_value_parameter_ty(ty, parameter.is_vararg)
         })
         .collect();
@@ -11036,23 +11074,14 @@ fn member_signature_from_header(
         .parameters
         .iter()
         .map(|parameter| {
-            if !parameter.ty.fun_params.is_empty() || parameter.ty.name == "<fun>" {
-                parameter
-                    .ty
-                    .fun_params
-                    .iter()
-                    .map(|r| ty_of_ref(r, classes, mtp, diags))
-                    .collect()
-            } else {
-                Vec::new()
-            }
+            resolve_header_function_parameter_types(headers, parameter.ty, classes, mtp, diags)
         })
         .collect();
     Signature {
         params,
         ret,
         generic_sig: None,
-        projected_return_hazard: has_projected_generic_return_hazard_from_header(header),
+        projected_return_hazard: has_projected_generic_return_hazard_from_header(headers, header),
         flags: SigFlags::default()
             .with_vararg(
                 header
@@ -11129,7 +11158,7 @@ fn member_signature_from_header(
         lambda_recv: header
             .parameters
             .iter()
-            .map(|parameter| parameter.ty.fun_has_receiver())
+            .map(|parameter| header_type_has_function_receiver(headers, parameter.ty))
             .collect(),
         visibility: header.visibility,
         context_count: header.context_count,
@@ -11206,6 +11235,7 @@ fn declared_member_callable_headers(
                     header.signature_start,
                 );
             signature.generic_sig = Some(source_generic_signature_from_header(
+                headers,
                 &header,
                 classes,
                 &symbolic_method_tparams,
@@ -11332,6 +11362,7 @@ fn source_generic_signature_from_tparams(
 }
 
 fn source_generic_signature_from_header(
+    headers: &crate::fir::StreamedHeaderModule,
     header: &StreamedCallableHeader,
     classes: &ClassNames,
     type_params: &TParams,
@@ -11350,7 +11381,7 @@ fn source_generic_signature_from_header(
         .parameters
         .iter()
         .map(|parameter| {
-            let ty = resolve(&parameter.ty, diags);
+            let ty = resolve_header_type_with(headers, parameter.ty, classes, type_params, diags);
             semantic_value_parameter_ty(ty, parameter.is_vararg)
         })
         .collect();
@@ -11871,114 +11902,7 @@ fn ty_of_ref_with(
     tparams: &TParams,
     diags: &mut DiagSink,
 ) -> Ty {
-    if r.definitely_non_null() && !tparams.contains(&r.name) {
-        diags.error(
-            r.span,
-            "a definitely non-null type must use a type parameter on the left of '& Any'",
-        );
-        return Ty::Error;
-    }
-    let (resolved_classifier, failed_segment) = match classes.classifier_binding(&r.name) {
-        Ok(classifier) => (Some(classifier), None),
-        Err(segment) => (None, Some(segment)),
-    };
-    let scoped = if tparams.contains(&r.name) {
-        Some(tparams.bound(&r.name))
-    } else {
-        typeref_classifier(r, resolved_classifier).map(|internal| {
-            if r.targs.is_empty() {
-                // A PARAMETERLESS alias still expands: `typealias Plain = PBox<String, Int>` names
-                // a parameterized target whose arguments all come from its own right-hand side.
-                apply_alias_expansion(
-                    classes,
-                    &r.name,
-                    internal,
-                    &[],
-                    r.is_import(),
-                    r.span,
-                    diags,
-                )
-            } else {
-                let args: Vec<Ty> = r
-                    .targs
-                    .iter()
-                    .map(|argument| type_argument_of_ref(argument, classes, tparams, diags))
-                    .collect::<Vec<_>>();
-                apply_alias_expansion(
-                    classes,
-                    &r.name,
-                    internal,
-                    &args,
-                    r.is_import(),
-                    r.span,
-                    diags,
-                )
-            }
-        })
-    };
-    // Arrow/receiver-function syntax is already a semantic function type. The parser also retains
-    // its physical `FunctionN` spelling for metadata/emission, but a real stdlib classifier under
-    // that name must not replace the arrow's receiver/context/suspend shape. Ordinary textual type
-    // names still obey lexical-classifier/type-parameter precedence over default imports.
-    let function_syntax = !r.fun_params.is_empty() || r.name == "<fun>";
-    let base = if function_syntax {
-        typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, diags))
-            .expect("function syntax must produce a semantic function type")
-    } else if let Some(t) = scoped {
-        t
-    } else if let Some(t) = typeref_leaf(r, &mut |x| ty_of_ref_with(x, classes, tparams, diags)) {
-        t
-    } else if let Some(internal) = resolved_classifier.or_else(|| classes.get(&r.name)) {
-        // `"__ty/<PrimName>"` encodes a type-alias → primitive/builtin mapping.
-        if let Some(prim) = internal.strip_prefix("__ty/") {
-            Ty::from_name(&prim).unwrap_or(Ty::Error)
-        } else if r.targs.is_empty() {
-            apply_alias_expansion(
-                classes,
-                &r.name,
-                internal,
-                &[],
-                r.is_import(),
-                r.span,
-                diags,
-            )
-        } else {
-            // Generic instantiation `C<A, …>` — carry the resolved arguments (erased in descriptors).
-            let args: Vec<Ty> = r
-                .targs
-                .iter()
-                .map(|argument| type_argument_of_ref(argument, classes, tparams, diags))
-                .collect();
-            // A classpath type alias names a target that may take a DIFFERENT argument list than the
-            // alias declares (`Lens<S, A>` = `PLens<S, S, A, A>`). Substitute this use's arguments
-            // into the recorded expansion; pasting them onto the target would change its arity.
-            apply_alias_expansion(
-                classes,
-                &r.name,
-                internal,
-                &args,
-                r.is_import(),
-                r.span,
-                diags,
-            )
-        }
-    } else {
-        let segment = failed_segment.unwrap_or(&r.name);
-        diags.error(r.span, format!("unresolved reference '{segment}'."));
-        Ty::Error
-    };
-    let base = if r.definitely_non_null() {
-        match base {
-            Ty::TyParam(name, bound) => Ty::ty_param(name, bound.non_null()),
-            other => other.clone(),
-        }
-    } else {
-        base
-    };
-    if r.nullable() && base != Ty::Error {
-        return Ty::nullable(base);
-    }
-    base
+    resolve_parser_type_with(r, classes, tparams, diags)
 }
 
 /// Result of typechecking a file: the type assigned to every expression node.

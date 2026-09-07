@@ -31,7 +31,7 @@ pub(in crate::resolve) struct StreamedCallableHeader {
 #[derive(Clone)]
 pub(in crate::resolve) struct StreamedCallableParameter {
     pub(in crate::resolve) name: String,
-    pub(in crate::resolve) ty: TypeRef,
+    pub(in crate::resolve) ty: crate::fir::HeaderTypeId,
     pub(in crate::resolve) is_vararg: bool,
     pub(in crate::resolve) has_default: bool,
     pub(in crate::resolve) annotations: crate::fir::HeaderTypeRange,
@@ -244,9 +244,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         .map(|parameter| {
             Some(StreamedCallableParameter {
                 name: headers.lookup_names.get(parameter.name)?.to_string(),
-                ty: headers
-                    .syntax
-                    .transient_type_ref(parameter.ty, &headers.lookup_names)?,
+                ty: parameter.ty,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
                 annotations: parameter.annotations,
@@ -681,9 +679,7 @@ pub(in crate::resolve) fn streamed_constructor_parameters_by_declaration(
         .map(|parameter| {
             Some(StreamedCallableParameter {
                 name: headers.lookup_names.get(parameter.name)?.to_string(),
-                ty: headers
-                    .syntax
-                    .transient_type_ref(parameter.ty, &headers.lookup_names)?,
+                ty: parameter.ty,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
                 annotations: parameter.annotations,
