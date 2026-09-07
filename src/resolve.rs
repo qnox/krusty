@@ -53142,6 +53142,7 @@ impl<'a> Checker<'a> {
     /// `operator fun T.invoke`; it is never inferred from a classifier spelling.
     fn value_type_claims_call(&self, scope: &CheckerScope<'_>, ty: Ty) -> bool {
         matches!(ty.non_null(), Ty::Fun(_))
+            || !self.stable_classifier_callable_signatures(ty).is_empty()
             || !self.invoke_operator_candidates(ty).is_empty()
             || self
                 .member_extension_function_shapes(scope, ty, CALLABLE_INVOKE_OPERATOR)
