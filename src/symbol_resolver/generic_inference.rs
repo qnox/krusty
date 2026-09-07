@@ -1039,12 +1039,28 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             // The outer classifiers must denote the same type: matching `Array<T>` against
             // `Wrapper<Int>` by argument position invents `T = Int`. Vararg calls unwrap their array
             // declaration explicitly in `infer_generic_call_bindings`; ordinary unification never does.
+            let flexible_mutability = matches!(
+                actual.projection_inner().unwrap_or(actual),
+                Ty::PlatformNullable(_)
+            );
             let mut actual = actual.projection_inner().unwrap_or(actual).non_null();
             while let (Some(_), Ty::TyParam(_, bound)) = (source, actual) {
                 actual = bound.projection_inner().unwrap_or(*bound).non_null();
             }
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
+                // A Java collection reaches Kotlin as the flexible `(Mutable)X<..>!`; its
+                // read-only face binds the declared shape too.
+                Ty::Obj(actual_name, _)
+                    if flexible_mutability
+                        && crate::types::READ_ONLY_COLLECTION_COUNTERPARTS.iter().any(
+                            |(mutable, read_only)| {
+                                actual_name.matches(mutable) && name.matches(read_only)
+                            },
+                        ) =>
+                {
+                    Some(actual)
+                }
                 Ty::Obj(_, _) => source.and_then(|source| {
                     receiver_hierarchy(source, actual)
                         .into_iter()
@@ -1611,9 +1627,23 @@ pub(super) fn unify_inferred_ty_impl(
             }
         }
         Ty::Obj(name, arguments) => {
-            let actual = actual.projection_inner().unwrap_or(actual).non_null();
+            let actual = actual.projection_inner().unwrap_or(actual);
+            // A Java collection reaches Kotlin as the flexible `(Mutable)X<..>!`; krusty carries
+            // its mutable face under platform nullability, and the read-only face binds too.
+            let flexible_mutability = matches!(actual, Ty::PlatformNullable(_));
+            let actual = actual.non_null();
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
+                Ty::Obj(actual_name, _)
+                    if flexible_mutability
+                        && crate::types::READ_ONLY_COLLECTION_COUNTERPARTS.iter().any(
+                            |(mutable, read_only)| {
+                                actual_name.matches(mutable) && name.matches(read_only)
+                            },
+                        ) =>
+                {
+                    Some(actual)
+                }
                 Ty::Obj(_, _) => source.and_then(|source| {
                     receiver_hierarchy(source, actual)
                         .into_iter()
@@ -3299,10 +3329,37 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
     expected: Ty,
     admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Option<GSigBinds> {
-    let declared = return_shape_at_expected_owner(source, generic_sig.ret, expected)?;
+    // A Java collection expectation is mutability-flexible (`(Mutable)Map<K!, V!>!`): a declared
+    // read-only result (`emptyMap(): Map<K, V>`) relates through the read-only face.
+    let (declared, expected) =
+        match return_shape_at_expected_owner(source, generic_sig.ret, expected) {
+            Some(declared) => (declared, expected),
+            None => {
+                let read_only = platform_read_only_face(expected)?;
+                (
+                    return_shape_at_expected_owner(source, generic_sig.ret, read_only)?,
+                    read_only,
+                )
+            }
+        };
     let mut projected = generic_sig.clone();
     projected.ret = declared;
     infer_generic_return_bindings(&projected, expected, admits)
+}
+
+/// The read-only face of a platform-nullable mutable collection (`(Mutable)Map<K!, V!>!` seen as
+/// `Map<K!, V!>!`), or `None` when `ty` is not that shape.
+pub(crate) fn platform_read_only_face(ty: Ty) -> Option<Ty> {
+    let Ty::PlatformNullable(inner) = ty else {
+        return None;
+    };
+    let Ty::Obj(name, args) = inner else {
+        return None;
+    };
+    let (_, read_only) = crate::types::READ_ONLY_COLLECTION_COUNTERPARTS
+        .iter()
+        .find(|(mutable, _)| name.matches(mutable))?;
+    Some(Ty::platform_nullable(Ty::obj_args(read_only, args)))
 }
 
 /// The declared return restated at the expected type's own constructor. `MutableReply<T>` used where

@@ -768,6 +768,8 @@ mod java_array_covariance_e2e;
 mod java_class_intrinsic_e2e;
 #[path = "java_ctor_sam_conversion_e2e.rs"]
 mod java_ctor_sam_conversion_e2e;
+#[path = "java_flexible_collection_e2e.rs"]
+mod java_flexible_collection_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_nested_static_e2e.rs"]
