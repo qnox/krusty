@@ -48,7 +48,7 @@ pub(in crate::resolve) enum StreamedResultKind {
     Inferred,
 }
 
-fn compact_header_type_spelling(
+pub(in crate::resolve) fn compact_header_type_spelling(
     headers: &crate::fir::StreamedHeaderModule,
     syntax: crate::fir::HeaderTypeId,
 ) -> Option<String> {
@@ -64,6 +64,53 @@ fn compact_header_type_spelling(
         .map(|segment| headers.lookup_names.get(*segment))
         .collect::<Option<Vec<_>>>()
         .map(|segments| segments.join("."))
+}
+
+pub(in crate::resolve) fn collect_compact_header_type_names(
+    headers: &crate::fir::StreamedHeaderModule,
+    root: crate::fir::HeaderTypeId,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let mut pending = vec![root];
+    while let Some(syntax) = pending.pop() {
+        let Some(ty) = headers.syntax.ty(syntax) else {
+            continue;
+        };
+        match ty.kind {
+            crate::fir::HeaderTypeKind::Classifier {
+                detail,
+                abbreviated_argument,
+            } => {
+                let Some(detail) = headers.syntax.classifier_type(detail) else {
+                    continue;
+                };
+                let spelling = headers
+                    .syntax
+                    .type_path(detail.path)
+                    .iter()
+                    .map(|segment| headers.lookup_names.get(*segment))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|segments| segments.join("."));
+                if let Some(spelling) = spelling.filter(|spelling| !spelling.is_empty()) {
+                    out.insert(spelling);
+                }
+                pending.extend(
+                    headers
+                        .syntax
+                        .type_operands(detail.arguments)
+                        .iter()
+                        .copied(),
+                );
+                pending.extend(abbreviated_argument);
+            }
+            crate::fir::HeaderTypeKind::Function {
+                parameters, result, ..
+            } => {
+                pending.extend(headers.syntax.type_operands(parameters).iter().copied());
+                pending.extend(result);
+            }
+        }
+    }
 }
 
 pub(in crate::resolve) fn resolved_compact_annotation_identities(

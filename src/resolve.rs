@@ -5408,23 +5408,6 @@ pub fn import_map(file: &File) -> HashMap<String, String> {
     m
 }
 
-/// Collect every simple type NAME referenced in a `TypeRef` (recursively through generic arguments,
-/// function-type params/return, and the array/return `arg`) into `out`.
-fn collect_typeref_names(r: &TypeRef, out: &mut std::collections::HashSet<String>) {
-    if !r.name.is_empty() && r.name != "<fun>" {
-        out.insert(r.name.clone());
-    }
-    if let Some(a) = &r.arg {
-        collect_typeref_names(a, out);
-    }
-    for t in &r.targs {
-        collect_typeref_names(t, out);
-    }
-    for p in &r.fun_params {
-        collect_typeref_names(p, out);
-    }
-}
-
 fn collect_streamed_header_type_names(
     headers: &crate::fir::StreamedHeaderModule,
     source: crate::fir::SourceFileId,
@@ -5437,12 +5420,7 @@ fn collect_streamed_header_type_names(
             .filter(|stub| stub.source == source)
             .flat_map(|stub| headers.syntax.declaration_type_roots(stub.id)),
     ) {
-        if let Some(reference) = headers
-            .syntax
-            .transient_type_ref(root, &headers.lookup_names)
-        {
-            collect_typeref_names(&reference, out);
-        }
+        collect_compact_header_type_names(headers, root, out);
     }
 }
 
@@ -6540,17 +6518,16 @@ fn collect_signatures_with_cp_impl(
         let names = &file_class_names[file_index];
         let source = crate::fir::SourceFileId::from_raw(file_index as u32);
         for root in headers.detached_type_roots(source) {
-            let Some(reference) = headers
-                .syntax
-                .transient_type_ref(root, &headers.lookup_names)
-            else {
+            let Some(ty) = headers.syntax.ty(root) else {
                 continue;
             };
-            if let Some(internal) = names.get_class(&reference.name) {
-                table.resolved_annotations.insert(
-                    (file_index as u32, reference.span.lo, reference.span.hi),
-                    internal,
-                );
+            let Some(spelling) = compact_header_type_spelling(headers, root) else {
+                continue;
+            };
+            if let Some(internal) = names.get_class(&spelling) {
+                table
+                    .resolved_annotations
+                    .insert((file_index as u32, ty.span.lo, ty.span.hi), internal);
             }
         }
     }
@@ -7032,12 +7009,11 @@ fn collect_signatures_with_cp_impl(
                                 )
                         }) {
                             for root in headers.syntax.declaration_type_roots(stub.id) {
-                                if let Some(reference) = headers
-                                    .syntax
-                                    .transient_type_ref(root, &headers.lookup_names)
-                                {
-                                    collect_typeref_names(&reference, &mut referenced_types);
-                                }
+                                collect_compact_header_type_names(
+                                    headers,
+                                    root,
+                                    &mut referenced_types,
+                                );
                             }
                         }
                     }
