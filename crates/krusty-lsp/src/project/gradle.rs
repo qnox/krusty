@@ -220,10 +220,10 @@ struct GradleSourceSet {
     output: Vec<String>,
     #[serde(default)]
     kotlinc_args: Vec<String>,
-    /// Project dependencies of THIS source set's compile classpath. Absent from an older probe's
-    /// output, in which case the project-level list stands in.
+    /// Project dependencies of THIS source set's compile classpath. `None` means an older probe
+    /// omitted the field; `Some([])` is an authoritative empty dependency set.
     #[serde(default)]
-    project_deps: Vec<String>,
+    project_deps: Option<Vec<String>>,
 }
 
 /// One Kotlin Multiplatform compilation, e.g. the `main` compilation of the `jvm` target.
@@ -449,11 +449,10 @@ fn module_of(project: &GradleProject, source_set: &GradleSourceSet) -> Module {
     module.kotlinc_args = merged_kotlinc_args(&project.kotlinc_args, &source_set.kotlinc_args);
     // The source set's own project dependencies are exact; the project-level list only knows
     // `implementation`/`api` and stands in for a probe that recorded nothing per source set.
-    let project_deps = if source_set.project_deps.is_empty() {
-        &project.project_deps
-    } else {
-        &source_set.project_deps
-    };
+    let project_deps = source_set
+        .project_deps
+        .as_ref()
+        .unwrap_or(&project.project_deps);
     module.depends_on = project_deps
         .iter()
         .map(|path| ModuleId::new(path, "main"))
@@ -765,7 +764,7 @@ Execution failed for task ':app:krustyModel'.
     #[test]
     fn a_source_sets_own_project_dependencies_become_its_edges() {
         let support = r#"{"path":":testsupport","name":"testsupport","projectDir":"/p/testsupport","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[{"name":"main","roots":["/p/testsupport/src/main/kotlin"],"classpath":[],"output":["/p/testsupport/build/classes/kotlin/main"],"projectDeps":[]}],"projectDeps":[]}"#;
-        let app = r#"{"path":":app","name":"app","projectDir":"/p/app","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[{"name":"main","roots":["/p/app/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/app/build/classes/kotlin/main"],"projectDeps":[":core"]},{"name":"test","roots":["/p/app/src/test/kotlin"],"classpath":["/m2/junit.jar","/p/testsupport/build/libs/testsupport.jar"],"output":["/p/app/build/classes/kotlin/test"],"projectDeps":[":core",":testsupport"]}],"projectDeps":[":core"]}"#;
+        let app = r#"{"path":":app","name":"app","projectDir":"/p/app","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[{"name":"main","roots":["/p/app/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/app/build/classes/kotlin/main"],"projectDeps":[":core"]},{"name":"test","roots":["/p/app/src/test/kotlin"],"classpath":["/m2/junit.jar","/p/testsupport/build/libs/testsupport.jar"],"output":["/p/app/build/classes/kotlin/test"],"projectDeps":[":core",":testsupport"]},{"name":"benchmark","roots":["/p/app/src/benchmark/kotlin"],"classpath":[],"output":[],"projectDeps":[]}],"projectDeps":[":core"]}"#;
         let output = format!("{SENTINEL}{support}\n{SENTINEL}{app}\nBUILD SUCCESSFUL\n");
         let model = parse_model(Path::new("/p"), &output).unwrap();
         let test = model.module(&ModuleId::new(":app", "test")).unwrap();
@@ -778,6 +777,12 @@ Execution failed for task ':app:krustyModel'.
         assert!(test.depends_on.contains(&ModuleId::new(":core", "main")));
         let main = model.module(&ModuleId::new(":app", "main")).unwrap();
         assert_eq!(main.depends_on, vec![ModuleId::new(":core", "main")]);
+        let benchmark = model.module(&ModuleId::new(":app", "benchmark")).unwrap();
+        assert_eq!(
+            benchmark.depends_on,
+            Vec::<ModuleId>::new(),
+            "an explicitly empty source-set dependency list must not inherit project-level edges"
+        );
     }
 
     #[test]
