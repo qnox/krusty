@@ -1983,6 +1983,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The arms now run inside one block whose result is judged after the guard is cleared, so a failed
   node is simply re-evaluated (and fails again) on a second read. Test:
   `streaming_signature_tests::a_failed_local_read_twice_in_a_block_does_not_trip_the_cycle_guard`.
+- **A default-bridge pick pairs back to the declaration whose realization it is.** ktor's
+  `HttpClient(CIO)`: `fun <T : HttpClientEngineConfig> HttpClient(engineFactory:
+  HttpClientEngineFactory<T>, block: HttpClientConfig<T>.() -> Unit = {})` called with the
+  defaulted lambda omitted. The top-level picker resolves such a call through the `$default`
+  bridge (`select_top_level_default_callable`, which infers `T` and marks the callable
+  `default_call`), and hands the bridge back without a selected candidate; the signature-pass
+  wrapper (`select_top_level_function_candidates_with_visibility`) then paired the bridge to a
+  base candidate by NAME and DESCRIPTOR — but the bridge carries its realization's coordinates
+  (`HttpClient$default`, the bridge descriptor), so the pairing failed for every omitted-default
+  classpath call in Pass 1, and `HttpClient(CIO)` fell through to the class constructor and
+  declined the property. Every `val client = HttpClient(CIO)` in a real project lost its inferred
+  type and each use cascaded (`cannot infer the type of property`, `unresolved reference` on the
+  client's members). The wrapper now also pairs a `default_call` callable to the candidate whose
+  `default_realization` names it. (Ranking the omitted shape in the picker instead was tried and
+  rejected: it bypasses the bridge, and the emitted call must target `name$default` with its
+  mask.) Tests: `tests/omitted_default_generic_overload_e2e.rs` (the shape as a krusty-compiled
+  library with both facades and the class; checked and run),
+  `streaming_signature_tests::a_generic_call_omitting_a_defaulted_trailing_parameter_selects_in_pass_one`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
