@@ -3174,6 +3174,26 @@ impl StreamedHeaderModule {
         &self.inventory
     }
 
+    /// Declaration roots consumed by module signature publication. Functions and properties are
+    /// file-owned; every classifier receives one publication visit because the parser inventories
+    /// nested, local, anonymous, and companion classifiers as independent stable declarations.
+    /// Non-classifier members remain reachable from their classifier root.
+    pub(crate) fn signature_roots(
+        &self,
+        source: SourceFileId,
+    ) -> impl Iterator<Item = &DeclarationStub> + '_ {
+        self.stubs.iter().filter(move |stub| {
+            if stub.source != source {
+                return false;
+            }
+            let file_owned = self
+                .declarations
+                .anchor(stub.id)
+                .is_some_and(|anchor| anchor.owner.is_none());
+            file_owned || stub.kind == DeclarationKind::Classifier
+        })
+    }
+
     /// Stable file-declaration roots for one source, in source order.
     pub(crate) fn source_declarations(&self, source: SourceFileId) -> &[DeclarationId] {
         self.source_declarations

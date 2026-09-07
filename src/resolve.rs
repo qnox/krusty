@@ -6605,10 +6605,7 @@ fn collect_signatures_with_cp_impl(
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
         let source = crate::fir::SourceFileId::from_raw(i as u32);
-        for declaration in headers.source_declarations(source) {
-            let Some(compact) = headers.stub(*declaration) else {
-                continue;
-            };
+        for compact in headers.signature_roots(source) {
             match compact.kind {
                 crate::fir::DeclarationKind::Function => {
                     let compact_function = compact;
