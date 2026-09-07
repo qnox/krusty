@@ -924,7 +924,7 @@ fn analyze_source_set_impl(
             &symbols,
             &declaration_spellings,
         );
-        crate::resolve::publish_override_plans(&mut index, &symbols);
+        crate::resolve::publish_override_plans(&mut index, symbols.libraries.as_ref());
         inherit_override_default_work(
             &mut pass1_headers,
             &index,

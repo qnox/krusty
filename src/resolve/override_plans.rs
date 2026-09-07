@@ -6,14 +6,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::SymbolTable;
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, ResolvedAppliedClassifier,
     ResolvedFunctionOverride, ResolvedFunctionOverrideTarget, ResolvedModuleIndex,
     ResolvedPropertyOverride, ResolvedPropertyOverrideTarget, ResolvedTy,
 };
 use crate::libraries::{FnKind, FunctionInfo, PropKind, PropertyInfo};
-use crate::module_symbols::ModuleSymbols;
 use crate::symbol_source::{CompositeSource, SymbolSource};
 use crate::types::{Ty, Visibility};
 
@@ -484,56 +482,6 @@ fn append_property_override_edges(
     }
 }
 
-fn property_override_plans(
-    index: &ResolvedModuleIndex,
-    source: &dyn SymbolSource,
-    class: &super::ClassSig,
-    hierarchy: &[crate::fir::ResolvedAppliedClassifier],
-) -> Vec<ResolvedPropertyOverride> {
-    let mut overrides = Vec::new();
-    let mut seen = HashSet::new();
-    for (name, implementation) in &class.declared_props {
-        let Some(declaration) = implementation.stable_declaration else {
-            continue;
-        };
-        let Some(header) = index.declaration_header(declaration) else {
-            continue;
-        };
-        if !header.flags.has(DeclarationFlags::OVERRIDE) {
-            continue;
-        }
-        let Some(implementation_id) = index.property_for_declaration(declaration) else {
-            continue;
-        };
-        let Some(implementation_type) = index.signature(declaration).and_then(|signature| {
-            ResolvedTy::new(signature.result.get().canonical_semantic()).ok()
-        }) else {
-            continue;
-        };
-        append_property_override_edges(
-            index,
-            source,
-            class.internal_name(),
-            name,
-            implementation_id,
-            implementation_type,
-            implementation.setter_name.is_some(),
-            hierarchy,
-            &mut seen,
-            &mut overrides,
-        );
-    }
-    publish_inherited_interface_property_plans(
-        index,
-        source,
-        class.internal_name(),
-        hierarchy,
-        &mut overrides,
-    );
-    overrides.sort_by_key(|edge| edge.depth);
-    overrides
-}
-
 #[allow(clippy::too_many_arguments)]
 fn append_function_override_edges(
     index: &ResolvedModuleIndex,
@@ -638,69 +586,13 @@ fn append_function_override_edges(
     }
 }
 
-fn function_override_plans(
-    index: &ResolvedModuleIndex,
-    source: &dyn SymbolSource,
-    class: &super::ClassSig,
-    hierarchy: &[crate::fir::ResolvedAppliedClassifier],
-) -> Vec<ResolvedFunctionOverride> {
-    let mut overrides = Vec::new();
-    for (name, implementations) in &class.methods {
-        for implementation in implementations {
-            if !implementation.is_override() {
-                continue;
-            }
-            let Some(declaration) = implementation.stable_declaration else {
-                continue;
-            };
-            let Some(implementation_callable) = index.callable_for_declaration(declaration) else {
-                continue;
-            };
-            let Some(implementation_signature) = index.signature(declaration) else {
-                continue;
-            };
-            let implementation_parameters = implementation_signature
-                .parameters
-                .iter()
-                .map(|parameter| parameter.get())
-                .collect::<Vec<_>>();
-            let implementation_result = implementation_signature.result.get().canonical_semantic();
-            let implementation_formals = declaration_formals(index, declaration);
-            let mut seen = HashSet::new();
-            append_function_override_edges(
-                index,
-                source,
-                class.internal_name(),
-                name,
-                implementation_callable.id,
-                &implementation_formals,
-                &implementation_parameters,
-                implementation_result,
-                implementation.is_suspend(),
-                hierarchy,
-                &mut seen,
-                &mut overrides,
-            );
-        }
-    }
-    publish_inherited_interface_function_plans(
-        index,
-        source,
-        class.internal_name(),
-        hierarchy,
-        &mut overrides,
-    );
-    overrides.sort_by_key(|edge| edge.depth);
-    overrides
-}
-
 /// Enum-entry bodies are anonymous subclasses semantically owned by the entry declaration rather
 /// than ordinary classifier headers. Their override decisions must nevertheless be frozen in Pass 1:
 /// a backend may need the exact erased super declaration to realize a bridge, and cannot rediscover
 /// that edge from a generated subclass name or descriptor.
 fn enum_entry_override_plans(
     index: &ResolvedModuleIndex,
-    source: &dyn SymbolSource,
+    platform: &dyn crate::libraries::SemanticPlatform,
 ) -> Vec<(
     DeclarationId,
     Vec<ResolvedPropertyOverride>,
@@ -724,6 +616,17 @@ fn enum_entry_override_plans(
         let Some(entry_name) = index.declaration_name(entry) else {
             continue;
         };
+        let Some(source_file) = index
+            .declaration_anchor(entry)
+            .map(|anchor| anchor.source.raw())
+        else {
+            continue;
+        };
+        let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
+        let source = CompositeSource::new(vec![
+            &module as &dyn SymbolSource,
+            platform as &dyn SymbolSource,
+        ]);
         let implementation_owner = parent_header.classifier.nested_child(entry_name);
         // The entry subclass directly extends the enum. Shift the enum's already-applied hierarchy
         // down one rung so matching sees both enum-declared abstract members and its interfaces.
@@ -767,7 +670,7 @@ fn enum_entry_override_plans(
                     };
                     append_property_override_edges(
                         index,
-                        source,
+                        &source,
                         implementation_owner,
                         name,
                         property,
@@ -791,7 +694,7 @@ fn enum_entry_override_plans(
                     let mut seen = HashSet::new();
                     append_function_override_edges(
                         index,
-                        source,
+                        &source,
                         implementation_owner,
                         name,
                         callable.id,
@@ -824,124 +727,130 @@ fn enum_entry_override_plans(
 /// signatures have been published. The matcher is the same one used for module declarations; the
 /// only difference is timing. No parser coordinate, target descriptor, or backend spelling enters
 /// the retained plan.
+fn classifier_override_plan(
+    index: &ResolvedModuleIndex,
+    platform: &dyn crate::libraries::SemanticPlatform,
+    classifier: DeclarationId,
+) -> Option<(
+    DeclarationId,
+    Vec<ResolvedPropertyOverride>,
+    Vec<ResolvedFunctionOverride>,
+)> {
+    let implementation_owner = index.classifier_header(classifier)?.classifier;
+    let hierarchy = index.classifier_hierarchy(classifier)?.to_vec();
+    let source_file = index.declaration_anchor(classifier)?.source.raw();
+    let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
+    let source = CompositeSource::new(vec![
+        &module as &dyn SymbolSource,
+        platform as &dyn SymbolSource,
+    ]);
+    let mut properties = Vec::new();
+    let mut property_seen = HashSet::new();
+    let mut functions = Vec::new();
+    for &declaration in index.owned_declarations(classifier) {
+        let Some(member) = index.declaration_header(declaration) else {
+            continue;
+        };
+        if !member.flags.has(DeclarationFlags::OVERRIDE) {
+            continue;
+        }
+        let Some(name) = index.declaration_name(declaration) else {
+            continue;
+        };
+        let Some(signature) = index.signature(declaration) else {
+            continue;
+        };
+        match member.kind {
+            DeclarationKind::Property => {
+                let Some(property) = index.property_for_declaration(declaration) else {
+                    continue;
+                };
+                let Some(property_header) = index.property(property) else {
+                    continue;
+                };
+                append_property_override_edges(
+                    index,
+                    &source,
+                    implementation_owner,
+                    name,
+                    property,
+                    signature.result,
+                    property_header.mutable,
+                    &hierarchy,
+                    &mut property_seen,
+                    &mut properties,
+                );
+            }
+            DeclarationKind::Function => {
+                let Some(callable) = index.callable_for_declaration(declaration) else {
+                    continue;
+                };
+                let parameters = signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
+                let mut seen = HashSet::new();
+                let implementation_formals = declaration_formals(index, declaration);
+                append_function_override_edges(
+                    index,
+                    &source,
+                    implementation_owner,
+                    name,
+                    callable.id,
+                    &implementation_formals,
+                    &parameters,
+                    signature.result.get().canonical_semantic(),
+                    member.flags.has(DeclarationFlags::SUSPEND),
+                    &hierarchy,
+                    &mut seen,
+                    &mut functions,
+                );
+            }
+            DeclarationKind::Classifier
+            | DeclarationKind::EnumEntry
+            | DeclarationKind::TypeAlias
+            | DeclarationKind::Constructor
+            | DeclarationKind::Accessor
+            | DeclarationKind::Initializer
+            | DeclarationKind::Script => {}
+        }
+    }
+    publish_inherited_interface_property_plans(
+        index,
+        &source,
+        implementation_owner,
+        &hierarchy,
+        &mut properties,
+    );
+    publish_inherited_interface_function_plans(
+        index,
+        &source,
+        implementation_owner,
+        &hierarchy,
+        &mut functions,
+    );
+    properties.sort_by_key(|edge| edge.depth);
+    functions.sort_by_key(|edge| edge.depth);
+    Some((classifier, properties, functions))
+}
+
 pub(crate) fn publish_checked_local_override_plans(
     index: &mut ResolvedModuleIndex,
     platform: &dyn crate::libraries::SemanticPlatform,
-    source_file: u32,
-    classifiers: &[crate::fir::DeclarationId],
+    _source_file: u32,
+    classifiers: &[DeclarationId],
 ) {
-    let plans = {
-        let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
-        let source = CompositeSource::new(vec![
-            &module as &dyn SymbolSource,
-            platform as &dyn SymbolSource,
-        ]);
-        classifiers
-            .iter()
-            .copied()
-            .filter_map(|classifier| {
-                let header = index.declaration_header(classifier)?;
-                if !header.flags.has(DeclarationFlags::LOCAL_CLASS) {
-                    return None;
-                }
-                let implementation_owner = index.classifier_header(classifier)?.classifier;
-                let hierarchy = index.classifier_hierarchy(classifier)?.to_vec();
-                let mut properties = Vec::new();
-                let mut property_seen = HashSet::new();
-                let mut functions = Vec::new();
-                for raw in 0..index.declaration_count() {
-                    let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
-                    let Some(member) = index
-                        .declaration_header(declaration)
-                        .filter(|member| member.owner == Some(classifier))
-                    else {
-                        continue;
-                    };
-                    if !member.flags.has(DeclarationFlags::OVERRIDE) {
-                        continue;
-                    }
-                    let Some(name) = index.declaration_name(declaration) else {
-                        continue;
-                    };
-                    let Some(signature) = index.signature(declaration) else {
-                        continue;
-                    };
-                    match member.kind {
-                        crate::fir::DeclarationKind::Property => {
-                            let Some(property) = index.property_for_declaration(declaration) else {
-                                continue;
-                            };
-                            let Some(property_header) = index.property(property) else {
-                                continue;
-                            };
-                            append_property_override_edges(
-                                index,
-                                &source,
-                                implementation_owner,
-                                name,
-                                property,
-                                signature.result,
-                                property_header.mutable,
-                                &hierarchy,
-                                &mut property_seen,
-                                &mut properties,
-                            );
-                        }
-                        crate::fir::DeclarationKind::Function => {
-                            let Some(callable) = index.callable_for_declaration(declaration) else {
-                                continue;
-                            };
-                            let parameters = signature
-                                .parameters
-                                .iter()
-                                .map(|parameter| parameter.get())
-                                .collect::<Vec<_>>();
-                            let mut seen = HashSet::new();
-                            let implementation_formals = declaration_formals(index, declaration);
-                            append_function_override_edges(
-                                index,
-                                &source,
-                                implementation_owner,
-                                name,
-                                callable.id,
-                                &implementation_formals,
-                                &parameters,
-                                signature.result.get().canonical_semantic(),
-                                member.flags.has(DeclarationFlags::SUSPEND),
-                                &hierarchy,
-                                &mut seen,
-                                &mut functions,
-                            );
-                        }
-                        crate::fir::DeclarationKind::Classifier
-                        | crate::fir::DeclarationKind::EnumEntry
-                        | crate::fir::DeclarationKind::TypeAlias
-                        | crate::fir::DeclarationKind::Constructor
-                        | crate::fir::DeclarationKind::Accessor
-                        | crate::fir::DeclarationKind::Initializer
-                        | crate::fir::DeclarationKind::Script => {}
-                    }
-                }
-                publish_inherited_interface_property_plans(
-                    index,
-                    &source,
-                    implementation_owner,
-                    &hierarchy,
-                    &mut properties,
-                );
-                publish_inherited_interface_function_plans(
-                    index,
-                    &source,
-                    implementation_owner,
-                    &hierarchy,
-                    &mut functions,
-                );
-                properties.sort_by_key(|edge| edge.depth);
-                functions.sort_by_key(|edge| edge.depth);
-                Some((classifier, properties, functions))
-            })
-            .collect::<Vec<_>>()
-    };
+    let plans = classifiers
+        .iter()
+        .copied()
+        .filter(|classifier| {
+            index
+                .declaration_header(*classifier)
+                .is_some_and(|header| header.flags.has(DeclarationFlags::LOCAL_CLASS))
+        })
+        .filter_map(|classifier| classifier_override_plan(index, platform, classifier))
+        .collect::<Vec<_>>();
     for (classifier, properties, functions) in plans {
         if !index.has_property_override_plan(classifier) {
             index.publish_property_overrides(classifier, properties);
@@ -952,41 +861,27 @@ pub(crate) fn publish_checked_local_override_plans(
     }
 }
 
-pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
-    let module = ModuleSymbols::new(table);
-    let source = CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
-    let classifiers = table
-        .classes
-        .values()
-        .filter_map(|class| {
-            class.stable_declaration.and_then(|declaration| {
-                // A body-local classifier whose semantic header is deferred to Pass 2 cannot own
-                // a Pass-1 override plan. Its checked lexical publication must supply the hierarchy
-                // and override identities together; publishing an empty provisional plan here would
-                // falsely make that absence final.
-                index
-                    .classifier_header(declaration)
-                    .filter(|_| {
-                        !index
-                            .declaration_header(declaration)
-                            .is_some_and(|header| header.flags.has(DeclarationFlags::LOCAL_CLASS))
-                    })
-                    .map(|_| (declaration, class))
-            })
+pub(crate) fn publish_override_plans(
+    index: &mut ResolvedModuleIndex,
+    platform: &dyn crate::libraries::SemanticPlatform,
+) {
+    let classifiers = (0..index.declaration_count())
+        .filter_map(|raw| {
+            let declaration = DeclarationId::from_raw(u32::try_from(raw).ok()?);
+            index.classifier_header(declaration)?;
+            let header = index.declaration_header(declaration)?;
+            (!header.flags.has(DeclarationFlags::LOCAL_CLASS)).then_some(declaration)
         })
         .collect::<Vec<_>>();
-
-    for (classifier, class) in classifiers {
-        let hierarchy = index
-            .classifier_hierarchy(classifier)
-            .unwrap_or_default()
-            .to_vec();
-        let properties = property_override_plans(index, &source, class, &hierarchy);
-        let functions = function_override_plans(index, &source, class, &hierarchy);
+    let plans = classifiers
+        .into_iter()
+        .filter_map(|classifier| classifier_override_plan(index, platform, classifier))
+        .collect::<Vec<_>>();
+    for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);
     }
-    for (entry, properties, functions) in enum_entry_override_plans(index, &source) {
+    for (entry, properties, functions) in enum_entry_override_plans(index, platform) {
         index.publish_property_overrides(entry, properties);
         index.publish_function_overrides(entry, functions);
     }
