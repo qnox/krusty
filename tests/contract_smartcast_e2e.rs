@@ -24,6 +24,50 @@ fn assert_rejected(src: &str) {
 }
 
 #[test]
+fn shadowing_top_level_assert_not_null_has_no_contract() {
+    const SRC: &str = "class Runtime(val status: String)\n\
+fun assertNotNull(value: Any?) {}\n\
+fun shadowed(runtime: Runtime?) = run {\n\
+    assertNotNull(runtime)\n\
+    runtime.status\n\
+}\n";
+    let jdk = common::jdk_modules();
+    let diagnostics =
+        common::front_end_diagnostics(SRC, &[common::stdlib_jar()], Some(jdk.as_path()));
+    assert_eq!(
+        diagnostics,
+        [
+            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
+            "unresolved reference 'status'.",
+        ]
+    );
+}
+
+#[test]
+fn expression_bodied_function_narrows_after_require_not_null() {
+    // The inferred result type comes from Pass 1, which must apply the contract for the rest
+    // of the block exactly as the body check does.
+    const SRC: &str = "fun first(list: List<String?>) = run {\n\
+    val head = list.firstOrNull()\n\
+    requireNotNull(head)\n\
+    head.length\n\
+}\n\
+fun second(head: String?) = run {\n\
+    checkNotNull(head)\n\
+    head.length\n\
+}\n\
+fun third(head: String?) = run {\n\
+    requireNotNull(value = head)\n\
+    head.length\n\
+}\n\
+fun box(): String = if (first(listOf(\"abc\")) == 3 && second(\"de\") == 2 && third(\"fghi\") == 4) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("contract narrowing in an inferred signature compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn not_is_null_or_empty_narrows_both_receivers() {
     const SRC: &str = "fun extract(a: String?, b: String?): Pair<String, String>? {\n\
     return if (!a.isNullOrEmpty() && !b.isNullOrEmpty()) a to b else null\n\
