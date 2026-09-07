@@ -58,7 +58,7 @@ pub(crate) use context_capture::{selected_context_values, SelectedContextSources
 use context_sensitive_resolution::expected_nested_classifier;
 use delegated_properties::select_delegate_operator;
 pub(crate) use finalized_projection::{
-    project_finalized_signatures, publish_stable_declaration_metadata,
+    project_finalized_classes, publish_stable_declaration_metadata,
 };
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,

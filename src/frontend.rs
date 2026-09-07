@@ -909,7 +909,7 @@ fn analyze_source_set_impl(
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &index, diags);
-        crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        crate::resolve::project_finalized_classes(&index, &mut symbols);
         // A `const val` initializer is a stable declaration dependency. Check each such bounded
         // fragment now, while Pass 1 still owns its AST and exact operator selections can be
         // consumed; retain only the folded payload before the signature graph and arenas die.

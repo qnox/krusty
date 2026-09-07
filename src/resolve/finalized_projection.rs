@@ -133,11 +133,11 @@ fn project_classifier_parents(
         .collect();
 }
 
-/// Make the still-active legacy checker view agree with the pending-free Pass-1 product.
+/// Make the still-active legacy class view agree with the pending-free Pass-1 product.
 ///
 /// This function may shrink as checker queries move to `ResolvedModuleIndex`; it must never grow
 /// lookup or inference behavior. The compact solver has already made every semantic decision.
-pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &mut SymbolTable) {
+pub(crate) fn project_finalized_classes(index: &ResolvedModuleIndex, table: &mut SymbolTable) {
     // Signature collection may already have populated the derived ModuleSymbols cache with the
     // provisional class shapes needed by demand-driven solving. Projection changes those classes
     // in place, so invalidate that cache as one atomic module mutation before a bounded retained
