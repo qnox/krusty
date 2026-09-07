@@ -285,22 +285,29 @@ pub(crate) fn publish_stable_declaration_metadata(
         crate::spelling::DeclaredSpellings,
     >,
 ) {
-    let classifier_hierarchies = table
-        .classes
-        .values()
-        .filter_map(|class| {
-            class.stable_declaration.and_then(|declaration| {
-                // An undemanded ordinary body-local classifier may use lexical aliases unavailable
-                // at the module boundary. Its declaration inventory survives Pass 1, but its
-                // checked classifier header and applied hierarchy are both published from the same
-                // authoritative Pass-2 body unit. Never attach the provisional legacy hierarchy to
-                // a declaration whose semantic header was deliberately deferred.
-                index.classifier_header(declaration)?;
-                Some((
-                    declaration,
-                    table.applied_hierarchy(index.classifier_self_type(declaration)?),
-                ))
-            })
+    let classifier_hierarchies = (0..index.declaration_count())
+        .filter_map(|raw| {
+            let declaration = DeclarationId::from_raw(u32::try_from(raw).ok()?);
+            // An undemanded ordinary body-local classifier may use lexical aliases unavailable at
+            // the module boundary. Its inventory survives Pass 1, but its complete header and
+            // hierarchy are published together from its authoritative Pass-2 body unit.
+            index.classifier_header(declaration)?;
+            let source_file = index.declaration_anchor(declaration)?.source.raw();
+            let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
+            let source =
+                crate::symbol_source::CompositeSource::new(vec![&module, table.libraries.as_ref()]);
+            Some((
+                declaration,
+                crate::symbol_resolver::applied_hierarchy(
+                    &source,
+                    index.classifier_self_type(declaration)?,
+                )
+                .into_iter()
+                // The source provider contributes the language root as an implicit lookup edge.
+                // The published declaration hierarchy has always contained the source-declared
+                // ancestry only; target lowering supplies its own physical root representation.
+                .filter(|(classifier, _, _)| *classifier != crate::types::wk::any()),
+            ))
         })
         .collect::<Vec<_>>();
     for (declaration, hierarchy) in classifier_hierarchies {
