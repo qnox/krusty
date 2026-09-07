@@ -5848,12 +5848,7 @@ fn compact_classifier_identity(
     stub: &crate::fir::DeclarationStub,
 ) -> Option<(String, TypeName)> {
     let source_name = headers.lookup_names.get(stub.lookup_name?)?.to_owned();
-    let package = headers.sources.get(stub.source)?.package;
-    let runtime_name = source_name.replace('.', "$");
-    Some((
-        source_name,
-        crate::types::type_name_child(package, &runtime_name),
-    ))
+    Some((source_name, headers.classifier_identity(stub.id)?))
 }
 
 /// Classifier roots visible from a compact declaration, nearest first.
