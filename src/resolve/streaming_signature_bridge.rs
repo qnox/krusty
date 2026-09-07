@@ -1591,7 +1591,7 @@ impl ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
     ) -> Option<Vec<Option<usize>>> {
         let source_indices = (0..argument_count).collect::<Vec<_>>();
-        let slots = crate::libraries::map_call_args(
+        crate::libraries::map_call_args(
             &source_indices,
             Some(names),
             &candidate.call_sig.param_names,
@@ -1601,11 +1601,7 @@ impl ProductionSignatureSemantics<'_> {
             candidate.call_sig.vararg_index,
             trailing_lambda,
         )
-        .ok()?;
-        source_indices
-            .iter()
-            .all(|source| slots.iter().any(|slot| slot == &Some(*source)))
-            .then_some(slots)
+        .ok()
     }
 
     fn selected_argument_parameters(
@@ -1624,6 +1620,21 @@ impl ProductionSignatureSemantics<'_> {
         for (parameter, source) in source_by_parameter.into_iter().enumerate() {
             if let Some(source) = source {
                 parameter_by_argument[source] = u32::try_from(parameter).ok();
+            }
+        }
+        // A slot vector retains the first positional vararg element; every later positional
+        // element is intentionally absorbed by the same declaration parameter. Selection has
+        // already validated the argument list, so any source argument not represented by a
+        // distinct slot belongs to that selected vararg.
+        if let Some(vararg) = candidate
+            .call_sig
+            .vararg_index
+            .and_then(|index| u32::try_from(index).ok())
+        {
+            for parameter in &mut parameter_by_argument {
+                if parameter.is_none() {
+                    *parameter = Some(vararg);
+                }
             }
         }
         parameter_by_argument.into_boxed_slice()
