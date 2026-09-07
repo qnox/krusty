@@ -35,7 +35,6 @@ mod constant_evaluation;
 mod context_capture;
 mod context_sensitive_resolution;
 mod delegated_properties;
-mod finalized_projection;
 mod interface_delegation;
 mod local_capture_dependencies;
 mod local_class_scope;
@@ -44,6 +43,7 @@ mod override_plans;
 mod sam_constructors;
 mod scope;
 mod source_constructors;
+mod stable_metadata;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
@@ -57,14 +57,12 @@ use constant_evaluation::{
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
 use context_sensitive_resolution::expected_nested_classifier;
 use delegated_properties::select_delegate_operator;
-pub(crate) use finalized_projection::{
-    project_finalized_classes, publish_stable_declaration_metadata,
-};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
 pub(crate) use override_plans::publish_override_plans;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
+pub(crate) use stable_metadata::publish_stable_declaration_metadata;
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
@@ -1221,55 +1219,6 @@ fn inferred_declaration_ty(ty: Ty) -> Ty {
 }
 
 impl Signature {
-    fn set_inferred_return(&mut self, ret: Ty) -> bool {
-        let ret = inferred_declaration_ty(ret);
-        // Collection can recover an exact symbolic return directly from the declaration (for
-        // example `fun <T> use(f: () -> T) = f()`). A later body pass may observe only that value's
-        // erased bound. Update the physical/checking return, but never replace a declaration-backed
-        // symbolic result with its erasure. A newly inferred symbolic shape (`List<T>`) still replaces
-        // a non-symbolic collection placeholder.
-        let inferred_generic_ret = self.generic_sig.as_ref().map(|generic| {
-            let declaration_bindings = generic
-                .formals
-                .iter()
-                .enumerate()
-                .map(|(index, formal)| {
-                    (
-                        crate::types::type_parameter_source_name(formal).to_string(),
-                        Ty::ty_param(
-                            formal,
-                            generic
-                                .formal_bounds
-                                .get(index)
-                                .and_then(|bounds| bounds.first())
-                                .copied()
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                        ),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            let ret = crate::symbol_resolver::ty_subst_keep_unbound(ret, &declaration_bindings);
-            if ty_mentions_param(generic.ret, &generic.formals)
-                && !ty_mentions_param(ret, &generic.formals)
-            {
-                generic.ret
-            } else {
-                ret
-            }
-        });
-        let changed = self.ret != ret
-            || self
-                .generic_sig
-                .as_ref()
-                .zip(inferred_generic_ret)
-                .is_some_and(|(generic, inferred)| generic.ret != inferred);
-        self.ret = ret;
-        if let Some((generic, inferred)) = self.generic_sig.as_mut().zip(inferred_generic_ret) {
-            generic.ret = inferred;
-        }
-        changed
-    }
-
     #[inline]
     pub fn vararg(&self) -> bool {
         self.flags.has(SigFlags::VARARG)
@@ -3588,8 +3537,6 @@ pub struct SymbolTable {
         HashMap<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
     >,
     module_cache_enabled: std::cell::Cell<bool>,
-    /// How many mutation brackets are open — see [`SymbolTable::begin_module_mutation`].
-    module_mutation_depth: std::cell::Cell<usize>,
     pub funs: HashMap<String, Vec<Signature>>,
     /// Declared classes by JVM internal name (e.g. `pkg/Point`, `pkg/Outer$Inner`) — two classes
     /// sharing a SIMPLE name in different packages are distinct entries, so member lookup on one
@@ -3739,7 +3686,6 @@ impl Default for SymbolTable {
             module_symbol_cache: Default::default(),
             module_shape_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
-            module_mutation_depth: std::cell::Cell::new(0),
             funs: HashMap::new(),
             classes: HashMap::new(),
             source_packages: std::collections::HashSet::new(),
@@ -3793,27 +3739,11 @@ impl SymbolTable {
         self.module_cache_enabled.get()
     }
 
-    /// Signature collection mutates the module while querying provisional declarations, so caching
-    /// is disabled there. A checker enables the cache only after its pre-inference mutation phase.
-    /// A mutation bracket NESTS: a pass that brackets its whole body can call another that brackets
-    /// its own, and the inner `finish` must not re-enable the cache while the outer pass is still
-    /// writing. The depth counter is what makes the pair safe to compose; a bare flag turned the
-    /// inner `finish` into an outer one and let the second half of the outer pass read a stale
-    /// module cache.
-    fn begin_module_mutation(&self) {
-        self.module_mutation_depth
-            .set(self.module_mutation_depth.get() + 1);
-        self.module_cache_enabled.set(false);
-        self.clear_module_symbol_cache();
-    }
-
+    /// Enable the immutable declaration cache after signature collection has completed its final
+    /// mutation. Later phases consume stable FIR for current-module declarations.
     pub(crate) fn finish_module_mutation(&self) {
-        let depth = self.module_mutation_depth.get().saturating_sub(1);
-        self.module_mutation_depth.set(depth);
         self.clear_module_symbol_cache();
-        if depth == 0 {
-            self.module_cache_enabled.set(true);
-        }
+        self.module_cache_enabled.set(true);
     }
 
     fn clear_module_symbol_cache(&self) {
