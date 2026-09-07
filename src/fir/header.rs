@@ -3129,7 +3129,10 @@ impl StreamedHeaderModule {
         let stub = self.stub(declaration)?;
         (stub.kind == DeclarationKind::Classifier).then_some(())?;
         let source_name = self.lookup_names.get(stub.lookup_name?)?;
-        if stub.flags.has(DeclarationFlags::COMPILER_GENERATED) && !source_name.contains('.') {
+        if stub.flags.has(DeclarationFlags::COMPILER_GENERATED)
+            && stub.flags.has(DeclarationFlags::COMPANION)
+            && !source_name.contains('.')
+        {
             if let Some(owner) = self.declarations.anchor(declaration)?.owner {
                 if self
                     .stub(owner)

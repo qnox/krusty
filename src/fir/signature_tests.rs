@@ -44,7 +44,9 @@ fn generated_nested_classifier_identity_comes_from_its_stable_owner() {
         initialization_order: None,
         kind: DeclarationKind::Classifier,
         visibility: crate::types::Visibility::Public,
-        flags: DeclarationFlags::default().with(DeclarationFlags::COMPILER_GENERATED, true),
+        flags: DeclarationFlags::default()
+            .with(DeclarationFlags::COMPANION, true)
+            .with(DeclarationFlags::COMPILER_GENERATED, true),
     });
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
