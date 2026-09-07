@@ -52,18 +52,9 @@ pub(in crate::resolve) fn compact_header_type_spelling(
     headers: &crate::fir::StreamedHeaderModule,
     syntax: crate::fir::HeaderTypeId,
 ) -> Option<String> {
-    let ty = headers.syntax.ty(syntax)?;
-    let crate::fir::HeaderTypeKind::Classifier { detail, .. } = ty.kind else {
-        return None;
-    };
-    let detail = headers.syntax.classifier_type(detail)?;
     headers
         .syntax
-        .type_path(detail.path)
-        .iter()
-        .map(|segment| headers.lookup_names.get(*segment))
-        .collect::<Option<Vec<_>>>()
-        .map(|segments| segments.join("."))
+        .classifier_spelling(syntax, &headers.lookup_names)
 }
 
 pub(in crate::resolve) fn collect_compact_header_type_names(

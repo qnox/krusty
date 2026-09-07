@@ -1239,6 +1239,21 @@ impl HeaderSyntaxArena {
         self.types.get(id.raw() as usize).copied()
     }
 
+    /// Source spelling of one compact classifier type. This is lookup input only; callers that
+    /// need semantic identity must still bind it through the declaration's normal scope.
+    pub fn classifier_spelling(&self, id: HeaderTypeId, names: &LookupNames) -> Option<String> {
+        let ty = self.ty(id)?;
+        let HeaderTypeKind::Classifier { detail, .. } = ty.kind else {
+            return None;
+        };
+        let detail = self.classifier_type(detail)?;
+        self.type_path(detail.path)
+            .iter()
+            .map(|segment| names.get(*segment))
+            .collect::<Option<Vec<_>>>()
+            .map(|segments| segments.join("."))
+    }
+
     /// Reconstruct one short-lived parser type for the existing resolver during migration. The
     /// caller must resolve and drop it immediately; this never reconstructs a declaration or body
     /// AST, and every child comes from the compact header arena.
@@ -4475,8 +4490,11 @@ pub fn actualized_declaration_pairs(
                 ..
             }) => (
                 receiver
-                    .and_then(|ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names))
-                    .map(|ty| ty.name)
+                    .and_then(|ty| {
+                        headers
+                            .syntax
+                            .classifier_spelling(ty, &headers.lookup_names)
+                    })
                     .unwrap_or_default(),
                 headers.syntax.parameters(parameters).len(),
             ),
@@ -4485,8 +4503,11 @@ pub fn actualized_declaration_pairs(
             }
             Some(HeaderDeclarationKind::Property { receiver, .. }) => (
                 receiver
-                    .and_then(|ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names))
-                    .map(|ty| ty.name)
+                    .and_then(|ty| {
+                        headers
+                            .syntax
+                            .classifier_spelling(ty, &headers.lookup_names)
+                    })
                     .unwrap_or_default(),
                 0,
             ),
