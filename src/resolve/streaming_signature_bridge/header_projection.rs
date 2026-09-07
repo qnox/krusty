@@ -23,7 +23,7 @@ pub(in crate::resolve) struct StreamedCallableHeader {
     pub(in crate::resolve) explicit_result: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) type_parameters: Vec<String>,
     pub(in crate::resolve) has_reified_type_parameter: bool,
-    pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
+    pub(in crate::resolve) bounds: Vec<(String, crate::fir::HeaderTypeId)>,
     pub(in crate::resolve) context_count: usize,
     pub(in crate::resolve) signature_start: u32,
 }
@@ -268,9 +268,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         .map(|bound| {
             Some((
                 headers.lookup_names.get(bound.parameter)?.to_string(),
-                headers
-                    .syntax
-                    .transient_type_ref(bound.ty, &headers.lookup_names)?,
+                bound.ty,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
@@ -307,7 +305,7 @@ pub(in crate::resolve) struct StreamedPropertyHeader {
     pub(in crate::resolve) declared_type: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) backing_field_type: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) type_parameters: Vec<String>,
-    pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
+    pub(in crate::resolve) bounds: Vec<(String, crate::fir::HeaderTypeId)>,
     pub(in crate::resolve) mutable: bool,
     pub(in crate::resolve) setter_visibility: Visibility,
 }
@@ -382,9 +380,7 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         .map(|bound| {
             Some((
                 headers.lookup_names.get(bound.parameter)?.to_string(),
-                headers
-                    .syntax
-                    .transient_type_ref(bound.ty, &headers.lookup_names)?,
+                bound.ty,
             ))
         })
         .collect::<Option<Vec<_>>>()?;

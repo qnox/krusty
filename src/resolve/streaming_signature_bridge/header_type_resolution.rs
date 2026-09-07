@@ -10,8 +10,8 @@ use crate::fir::{HeaderTypeId, StreamedHeaderModule};
 use crate::types::{Ty, TypeName};
 
 use super::super::{
-    apply_alias_expansion, classifier_over_default, default_classifier_internal, ClassNames,
-    TParams,
+    apply_alias_expansion, classifier_over_default, default_classifier_internal,
+    type_parameter_bounds, ClassNames, TParams,
 };
 use super::signature_type_syntax::SignatureTypeSyntax;
 
@@ -277,4 +277,163 @@ pub(in crate::resolve) fn header_type_bare_classifier_shape(
             syntax.definitely_non_null().unwrap_or(false),
         )
     })
+}
+
+fn compact_bound_erasure(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> Ty {
+    let any = Ty::obj("kotlin/Any");
+    let syntax = SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax);
+    if syntax.nullable() != Some(false) {
+        return any;
+    }
+    let Some(spelling) = syntax.spelling() else {
+        return any;
+    };
+    if let Some(builtin) = Ty::from_name(&spelling) {
+        return if builtin.is_specializable_bound() || builtin.is_reference() {
+            builtin
+        } else {
+            any
+        };
+    }
+    resolve(&spelling).map(Ty::obj_name).unwrap_or(any)
+}
+
+fn compact_non_nullable_bound_spelling(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+) -> Option<String> {
+    let syntax = SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax);
+    (syntax.nullable() == Some(false))
+        .then(|| syntax.spelling().map(|spelling| spelling.into_owned()))
+        .flatten()
+}
+
+pub(in crate::resolve) fn compact_tparams_from_decl_with(
+    headers: &StreamedHeaderModule,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> TParams {
+    type_parameter_bounds::erased_from_syntax(
+        names,
+        bounds,
+        &|bound| compact_non_nullable_bound_spelling(headers, *bound),
+        &|bound| compact_bound_erasure(headers, *bound, resolve),
+    )
+}
+
+pub(in crate::resolve) fn compact_tparams_from_decl_with_primary_class(
+    headers: &StreamedHeaderModule,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+    is_interface: &dyn Fn(TypeName) -> bool,
+) -> TParams {
+    type_parameter_bounds::erased_from_syntax_with_primary_class(
+        names,
+        bounds,
+        &|bound| compact_non_nullable_bound_spelling(headers, *bound),
+        &|bound| compact_bound_erasure(headers, *bound, resolve),
+        &|bound| {
+            let syntax =
+                SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, *bound);
+            syntax.nullable() == Some(false)
+                && syntax
+                    .spelling()
+                    .and_then(|spelling| resolve(&spelling))
+                    .is_some_and(|classifier| !is_interface(classifier))
+        },
+    )
+}
+
+pub(in crate::resolve) fn compact_tparams_extended_with(
+    enclosing: &TParams,
+    headers: &StreamedHeaderModule,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> TParams {
+    type_parameter_bounds::erased_extended_from_syntax(
+        enclosing,
+        names,
+        bounds,
+        &|bound| compact_non_nullable_bound_spelling(headers, *bound),
+        &|bound| header_type_bare_parameter_spelling(headers, *bound),
+        &|bound| compact_bound_erasure(headers, *bound, resolve),
+    )
+}
+
+fn compact_symbolic_tparams(
+    enclosing: &TParams,
+    headers: &StreamedHeaderModule,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> TParams {
+    TParams::symbolic_from_syntax_enclosing(
+        names,
+        bounds,
+        &|bound| header_type_bare_parameter_spelling(headers, *bound),
+        &|bound, parameter| {
+            SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, *bound)
+                .tparam_bound_semantic_with(resolve, parameter)
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+        },
+        &|name| enclosing.contains(name).then(|| enclosing.bound(name)),
+    )
+}
+
+pub(in crate::resolve) fn compact_tparams_symbolic_from_decl_with(
+    headers: &StreamedHeaderModule,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> TParams {
+    compact_symbolic_tparams(&TParams::default(), headers, names, bounds, resolve)
+}
+
+pub(in crate::resolve) fn compact_tparams_symbolic_extended_with(
+    enclosing: &TParams,
+    headers: &StreamedHeaderModule,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> TParams {
+    let declared = compact_symbolic_tparams(enclosing, headers, names, bounds, resolve);
+    let mut out = enclosing.clone();
+    for name in names {
+        out.insert_binding(name, declared.bound(name), declared.extra_bounds_of(name));
+    }
+    out
+}
+
+pub(in crate::resolve) fn compact_declared_tparam_semantic_bound(
+    headers: &StreamedHeaderModule,
+    name: &str,
+    names: &[String],
+    bounds: &[(String, HeaderTypeId)],
+    resolve: &dyn Fn(&str) -> Option<TypeName>,
+) -> Option<Ty> {
+    let mut current = name.to_string();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let bound = bounds
+            .iter()
+            .find_map(|(parameter, bound)| (parameter == &current).then_some(*bound))?;
+        if let Some(parameter) = header_type_bare_parameter_spelling(headers, bound)
+            .filter(|parameter| names.iter().any(|candidate| candidate == parameter))
+        {
+            if !seen.insert(current) {
+                return Some(Ty::obj("kotlin/Any"));
+            }
+            current = parameter;
+            continue;
+        }
+        return SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, bound)
+            .tparam_bound_semantic_with(resolve, &mut |_| None);
+    }
 }

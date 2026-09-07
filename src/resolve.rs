@@ -6640,7 +6640,8 @@ fn collect_signatures_with_cp_impl(
                         flags.has(crate::fir::DeclarationFlags::FINAL),
                         flags.has(crate::fir::DeclarationFlags::SUSPEND),
                     );
-                    let tp = TParams::from_decl_with_primary_class(
+                    let tp = compact_tparams_from_decl_with_primary_class(
+                        headers,
                         &callable_header.type_parameters,
                         &callable_header.bounds,
                         &|n| class_names.get(n),
@@ -6654,7 +6655,8 @@ fn collect_signatures_with_cp_impl(
                                     .is_some_and(|shape| shape.is_interface())
                         },
                     );
-                    let semantic_tp = TParams::symbolic_from_decl_with(
+                    let semantic_tp = compact_tparams_symbolic_from_decl_with(
+                        headers,
                         &callable_header.type_parameters,
                         &callable_header.bounds,
                         &|n| class_names.get(n),
@@ -7640,23 +7642,26 @@ fn collect_signatures_with_cp_impl(
                             );
                         }
                         let resolve = |name: &str| class_names.get(name);
-                        let btp = ctp.extended_with(
+                        let btp = compact_tparams_extended_with(
+                            &ctp,
+                            headers,
                             &property_header.type_parameters,
                             &property_header.bounds,
                             &resolve,
                         );
-                        let symbolic_btp = symbolic_ctp
-                            .symbolic_extended_with(
-                                &property_header.type_parameters,
-                                &property_header.bounds,
-                                &resolve,
-                            )
-                            .alpha_renamed_declaration(
-                                &property_header.type_parameters,
-                                table.compilation_id,
-                                i as u32,
-                                property_header.span.lo,
-                            );
+                        let symbolic_btp = compact_tparams_symbolic_extended_with(
+                            &symbolic_ctp,
+                            headers,
+                            &property_header.type_parameters,
+                            &property_header.bounds,
+                            &resolve,
+                        )
+                        .alpha_renamed_declaration(
+                            &property_header.type_parameters,
+                            table.compilation_id,
+                            i as u32,
+                            property_header.span.lo,
+                        );
                         let context_params = property_header
                             .context_parameters
                             .iter()
@@ -7909,7 +7914,9 @@ fn collect_signatures_with_cp_impl(
                             compact_member_callables[method_index],
                         )
                         .expect("a production member function must have a compact header");
-                        let mtp = ctp.extended_with(
+                        let mtp = compact_tparams_extended_with(
+                            &ctp,
+                            headers,
                             &method_header.type_parameters,
                             &method_header.bounds,
                             &|n| class_names.get(n),
@@ -7950,18 +7957,19 @@ fn collect_signatures_with_cp_impl(
                             || !captured_semantic_tparam_names.is_empty()
                             || !classifier_header.type_parameters.is_empty();
                         if has_generic_shape {
-                            let symbolic_mtp = symbolic_ctp
-                                .symbolic_extended_with(
-                                    &method_header.type_parameters,
-                                    &method_header.bounds,
-                                    &|name| class_names.get(name),
-                                )
-                                .alpha_renamed_declaration(
-                                    &method_header.type_parameters,
-                                    table.compilation_id,
-                                    i as u32,
-                                    method_header.signature_start,
-                                );
+                            let symbolic_mtp = compact_tparams_symbolic_extended_with(
+                                &symbolic_ctp,
+                                headers,
+                                &method_header.type_parameters,
+                                &method_header.bounds,
+                                &|name| class_names.get(name),
+                            )
+                            .alpha_renamed_declaration(
+                                &method_header.type_parameters,
+                                table.compilation_id,
+                                i as u32,
+                                method_header.signature_start,
+                            );
                             let ret_shape = method_header
                                 .explicit_result
                                 .map(|result| {
@@ -9051,12 +9059,14 @@ fn collect_signatures_with_cp_impl(
                         // the receiver and declared type — bind them (erased) so the receiver isn't a raw
                         // `Array` and `T` isn't mistaken for an unresolved class.
                         let resolve = |n: &str| class_names.get(n);
-                        let erased_tparams = TParams::from_decl_with(
+                        let erased_tparams = compact_tparams_from_decl_with(
+                            headers,
                             &property_header.type_parameters,
                             &property_header.bounds,
                             &resolve,
                         );
-                        let semantic_tparams = TParams::symbolic_from_decl_with(
+                        let semantic_tparams = compact_tparams_symbolic_from_decl_with(
+                            headers,
                             &property_header.type_parameters,
                             &property_header.bounds,
                             &resolve,
@@ -9153,7 +9163,8 @@ fn collect_signatures_with_cp_impl(
                             .is_some_and(|receiver| receiver.flags.nullable());
                         let accepts_nullable_receiver = receiver_is_nullable
                             || receiver_type_parameter.is_some_and(|index| {
-                                declared_tparam_semantic_bound(
+                                compact_declared_tparam_semantic_bound(
+                                    headers,
                                     &property_header.type_parameters[index],
                                     &property_header.type_parameters,
                                     &property_header.bounds,
@@ -9267,7 +9278,8 @@ fn collect_signatures_with_cp_impl(
                     // require an annotation because the lightweight signature inferer has no block flow.
                     let is_computed = has_custom_getter && !has_initializer;
                     let resolve = |name: &str| class_names.get(name);
-                    let property_tparams = TParams::symbolic_from_decl_with(
+                    let property_tparams = compact_tparams_symbolic_from_decl_with(
+                        headers,
                         &property_header.type_parameters,
                         &property_header.bounds,
                         &resolve,
@@ -10950,7 +10962,19 @@ fn streamed_function_conflict_display(
     else {
         return None;
     };
-    let mut bounds = header.bounds.iter().peekable();
+    let diagnostic_bounds = header
+        .bounds
+        .iter()
+        .map(|(owner, bound)| {
+            Some((
+                owner.clone(),
+                headers
+                    .syntax
+                    .transient_type_ref(*bound, &headers.lookup_names)?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut bounds = diagnostic_bounds.iter().peekable();
     let type_parameters = header
         .type_parameters
         .iter()
@@ -11341,10 +11365,13 @@ fn declared_member_callable_headers(
         let Some(return_ref) = header.explicit_result else {
             continue;
         };
-        let method_tparams =
-            class_tparams.extended_with(&header.type_parameters, &header.bounds, &|name| {
-                classes.get(name)
-            });
+        let method_tparams = compact_tparams_extended_with(
+            class_tparams,
+            headers,
+            &header.type_parameters,
+            &header.bounds,
+            &|name| classes.get(name),
+        );
         let ret = resolve_header_type_with(headers, return_ref, classes, &method_tparams, diags);
         let mut signature = member_signature_from_header(
             headers,
@@ -11358,16 +11385,19 @@ fn declared_member_callable_headers(
             diags,
         );
         if !header.type_parameters.is_empty() || !class_type_parameters.is_empty() {
-            let symbolic_method_tparams = symbolic_class_tparams
-                .symbolic_extended_with(&header.type_parameters, &header.bounds, &|name| {
-                    classes.get(name)
-                })
-                .alpha_renamed_declaration(
-                    &header.type_parameters,
-                    *compilation_id,
-                    *source_file,
-                    header.signature_start,
-                );
+            let symbolic_method_tparams = compact_tparams_symbolic_extended_with(
+                symbolic_class_tparams,
+                headers,
+                &header.type_parameters,
+                &header.bounds,
+                &|name| classes.get(name),
+            )
+            .alpha_renamed_declaration(
+                &header.type_parameters,
+                *compilation_id,
+                *source_file,
+                header.signature_start,
+            );
             signature.generic_sig = Some(source_generic_signature_from_header(
                 headers,
                 &header,
@@ -11541,7 +11571,9 @@ fn source_generic_signature_from_header(
                 .bounds
                 .iter()
                 .filter(|(owner, _)| owner == parameter)
-                .map(|(_, bound)| ty_of_ref(bound, classes, type_params, diags))
+                .map(|(_, bound)| {
+                    resolve_header_type_with(headers, *bound, classes, type_params, diags)
+                })
                 .collect()
         })
         .collect();
@@ -14460,7 +14492,19 @@ impl TParams {
         let mut out = self.clone();
         let mut declared = TParams::erased_with(names, bounds, resolve);
         for name in names {
-            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
+            if let Some(bound) = type_parameter_bounds::enclosing_bound_erasure(
+                self,
+                name,
+                names,
+                bounds,
+                &|bound| {
+                    (!bound.nullable()
+                        && bound.arg.is_none()
+                        && bound.targs.is_empty()
+                        && bound.fun_params.is_empty())
+                    .then(|| bound.name.clone())
+                },
+            ) {
                 declared.erasure.insert(name.clone(), bound);
             }
         }
@@ -14479,80 +14523,12 @@ impl TParams {
         bounds: &[(String, TypeRef)],
         resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
-        let erasure = names
-            .iter()
-            .map(|n| {
-                // A bound may name ANOTHER type parameter of the same declaration
-                // (`<T1 : C, T2 : T1>`): follow the chain to the first bound that is a real
-                // class/primitive so `T2` erases to `C`, not `Any`. Cycle-guarded (`<A : B, B : A>`).
-                let mut cur = n.as_str();
-                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-                let erased = loop {
-                    let b = bounds.iter().find_map(|(bn, b)| (bn == cur).then_some(b));
-                    match b {
-                        // The bound is itself a (non-nullable, un-parameterized) type parameter of this
-                        // declaration — hop to it and keep chasing.
-                        Some(tb)
-                            if !tb.nullable()
-                                && names.iter().any(|m| m == &tb.name)
-                                && seen.insert(cur) =>
-                        {
-                            cur = tb.name.as_str();
-                        }
-                        other => break tparam_bound_erasure(other, resolve),
-                    }
-                };
-                (n.clone(), erased)
-            })
-            .collect();
-        // Every bound after the first for each name. The first IS the erasure above; the rest are only
-        // reachable through `extra_bounds`, since `Ty::TyParam` holds exactly one.
-        let extra_bounds = names
-            .iter()
-            .filter_map(|n| {
-                let rest: Vec<Ty> = bounds
-                    .iter()
-                    .filter(|(bn, _)| bn == n)
-                    .skip(1)
-                    .map(|(_, b)| tparam_bound_erasure(Some(b), resolve))
-                    .filter(|ty| *ty != Ty::obj("kotlin/Any"))
-                    .collect();
-                (!rest.is_empty()).then(|| (n.clone(), rest))
-            })
-            .collect();
-        TParams {
-            erasure,
-            extra_bounds,
-        }
-    }
-
-    /// Build the physical type-parameter view used by a JVM-facing callable signature. Kotlin
-    /// permits an interface bound to be written before a concrete class bound, but classfile
-    /// erasure always uses the class bound (`T : Comparable<T>, T : Number` -> `Number`). Reorder
-    /// each parameter's bound list only for this erased view; [`Self::symbolic_from_decl_with`]
-    /// retains the complete source intersection used by inference and overload applicability.
-    pub(crate) fn from_decl_with_primary_class(
-        names: &[String],
-        bounds: &[(String, TypeRef)],
-        resolve: &dyn Fn(&str) -> Option<TypeName>,
-        is_interface: &dyn Fn(TypeName) -> bool,
-    ) -> Self {
-        let mut ordered = Vec::with_capacity(bounds.len());
-        for name in names {
-            let mut declared = bounds
-                .iter()
-                .filter(|(owner, _)| owner == name)
-                .cloned()
-                .collect::<Vec<_>>();
-            if let Some(primary) = declared.iter().position(|(_, bound)| {
-                !bound.nullable() && resolve(&bound.name).is_some_and(|name| !is_interface(name))
-            }) {
-                let class_bound = declared.remove(primary);
-                ordered.push(class_bound);
-            }
-            ordered.extend(declared);
-        }
-        Self::from_decl_with(names, &ordered, resolve)
+        type_parameter_bounds::erased_from_syntax(
+            names,
+            bounds,
+            &|bound| (!bound.nullable()).then(|| bound.name.clone()),
+            &|bound| tparam_bound_erasure(Some(bound), resolve),
+        )
     }
 
     pub(crate) fn extended_with(
@@ -14561,54 +14537,20 @@ impl TParams {
         bounds: &[(String, TypeRef)],
         resolve: &dyn Fn(&str) -> Option<TypeName>,
     ) -> Self {
-        let mut out = self.clone();
-        let mut declared = TParams::from_decl_with(names, bounds, resolve);
-        for name in names {
-            if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
-                declared.erasure.insert(name.clone(), bound);
-            }
-        }
-        out.erasure.extend(declared.erasure);
-        out.extra_bounds.extend(declared.extra_bounds);
-        out
-    }
-
-    pub(crate) fn enclosing_bound_erasure(
-        &self,
-        name: &str,
-        local_names: &[String],
-        bounds: &[(String, TypeRef)],
-    ) -> Option<Ty> {
-        let mut current = name;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            if !seen.insert(current) {
-                return None;
-            }
-            let bound = bounds
-                .iter()
-                .find_map(|(owner, bound)| (owner == current).then_some(bound))?;
-            if bound.nullable()
-                || bound.arg.is_some()
-                || !bound.targs.is_empty()
-                || !bound.fun_params.is_empty()
-            {
-                return None;
-            }
-            if local_names.iter().any(|local| local == &bound.name) {
-                current = &bound.name;
-                continue;
-            }
-            let mut erased = self.erasure.get(&bound.name).copied()?;
-            let mut bound_names = std::collections::HashSet::new();
-            while let Ty::TyParam(parameter, upper) = erased {
-                if !bound_names.insert(parameter) {
-                    return None;
-                }
-                erased = *upper;
-            }
-            return Some(erased);
-        }
+        type_parameter_bounds::erased_extended_from_syntax(
+            self,
+            names,
+            bounds,
+            &|bound| (!bound.nullable()).then(|| bound.name.clone()),
+            &|bound| {
+                (!bound.nullable()
+                    && bound.arg.is_none()
+                    && bound.targs.is_empty()
+                    && bound.fun_params.is_empty())
+                .then(|| bound.name.clone())
+            },
+            &|bound| tparam_bound_erasure(Some(bound), resolve),
+        )
     }
 
     /// Preserve type variables while inferring a declaration's semantic shape.
@@ -14756,36 +14698,6 @@ pub(crate) fn tparam_bound_erasure(
     }
 }
 
-/// Follow a declared bound through bare type-parameter references.
-pub(crate) fn declared_tparam_semantic_bound(
-    name: &str,
-    names: &[String],
-    bounds: &[(String, TypeRef)],
-    resolve: &dyn Fn(&str) -> Option<TypeName>,
-) -> Option<Ty> {
-    let mut current = name;
-    let mut seen = std::collections::HashSet::new();
-    loop {
-        let bound = bounds
-            .iter()
-            .find_map(|(parameter, bound)| (parameter == current).then_some(bound))?;
-        if !bound.nullable()
-            && !bound.definitely_non_null()
-            && bound.arg.is_none()
-            && bound.targs.is_empty()
-            && bound.fun_params.is_empty()
-            && names.iter().any(|candidate| candidate == &bound.name)
-        {
-            if !seen.insert(current) {
-                return Some(Ty::obj("kotlin/Any"));
-            }
-            current = &bound.name;
-            continue;
-        }
-        return Some(tparam_bound_semantic(bound, resolve));
-    }
-}
-
 /// Resolve a type-parameter bound without erasing nullability.
 fn tparam_bound_semantic_with(
     b: &TypeRef,
@@ -14823,10 +14735,6 @@ fn tparam_bound_semantic_with(
     } else {
         base
     }
-}
-
-fn tparam_bound_semantic(b: &TypeRef, resolve: &dyn Fn(&str) -> Option<TypeName>) -> Ty {
-    tparam_bound_semantic_with(b, resolve, &mut |_| None)
 }
 
 impl CheckerScope<'_> {

@@ -9,6 +9,135 @@ use super::TParams;
 pub(super) type ParameterLookup<'a> = dyn FnMut(&str) -> Option<Ty> + 'a;
 pub(super) type BoundSemantic<'a, B> = dyn Fn(&B, &mut ParameterLookup<'_>) -> Ty + 'a;
 
+pub(super) fn erased_from_syntax<B>(
+    names: &[String],
+    bounds: &[(String, B)],
+    chain_parameter: &dyn Fn(&B) -> Option<String>,
+    bound_erasure: &dyn Fn(&B) -> Ty,
+) -> TParams {
+    let any = Ty::obj("kotlin/Any");
+    let erasure = names
+        .iter()
+        .map(|name| {
+            let mut current = name.clone();
+            let mut seen = HashSet::new();
+            let erased = loop {
+                let Some(bound) = bounds
+                    .iter()
+                    .find_map(|(owner, bound)| (owner == &current).then_some(bound))
+                else {
+                    break any;
+                };
+                let chained = chain_parameter(bound)
+                    .filter(|candidate| names.iter().any(|name| name == candidate));
+                match chained {
+                    Some(parameter) if seen.insert(current) => current = parameter,
+                    Some(_) => break any,
+                    None => break bound_erasure(bound),
+                }
+            };
+            (name.clone(), erased)
+        })
+        .collect();
+    let extra_bounds = names
+        .iter()
+        .filter_map(|name| {
+            let rest = bounds
+                .iter()
+                .filter(|(owner, _)| owner == name)
+                .skip(1)
+                .map(|(_, bound)| bound_erasure(bound))
+                .filter(|ty| *ty != any)
+                .collect::<Vec<_>>();
+            (!rest.is_empty()).then(|| (name.clone(), rest))
+        })
+        .collect();
+    TParams {
+        erasure,
+        extra_bounds,
+    }
+}
+
+pub(super) fn erased_from_syntax_with_primary_class<B: Clone>(
+    names: &[String],
+    bounds: &[(String, B)],
+    chain_parameter: &dyn Fn(&B) -> Option<String>,
+    bound_erasure: &dyn Fn(&B) -> Ty,
+    concrete_class_bound: &dyn Fn(&B) -> bool,
+) -> TParams {
+    let mut ordered = Vec::with_capacity(bounds.len());
+    for name in names {
+        let mut declared = bounds
+            .iter()
+            .filter(|(owner, _)| owner == name)
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(primary) = declared
+            .iter()
+            .position(|(_, bound)| concrete_class_bound(bound))
+        {
+            ordered.push(declared.remove(primary));
+        }
+        ordered.extend(declared);
+    }
+    erased_from_syntax(names, &ordered, chain_parameter, bound_erasure)
+}
+
+pub(super) fn enclosing_bound_erasure<B>(
+    enclosing: &TParams,
+    name: &str,
+    local_names: &[String],
+    bounds: &[(String, B)],
+    enclosing_parameter: &dyn Fn(&B) -> Option<String>,
+) -> Option<Ty> {
+    let mut current = name.to_string();
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(current.clone()) {
+            return None;
+        }
+        let bound = bounds
+            .iter()
+            .find_map(|(owner, bound)| (owner == &current).then_some(bound))?;
+        let parameter = enclosing_parameter(bound)?;
+        if local_names.iter().any(|local| local == &parameter) {
+            current = parameter;
+            continue;
+        }
+        let mut erased = enclosing.erasure.get(&parameter).copied()?;
+        let mut bound_names = HashSet::new();
+        while let Ty::TyParam(parameter, upper) = erased {
+            if !bound_names.insert(parameter) {
+                return None;
+            }
+            erased = *upper;
+        }
+        return Some(erased);
+    }
+}
+
+pub(super) fn erased_extended_from_syntax<B>(
+    enclosing: &TParams,
+    names: &[String],
+    bounds: &[(String, B)],
+    chain_parameter: &dyn Fn(&B) -> Option<String>,
+    enclosing_parameter: &dyn Fn(&B) -> Option<String>,
+    bound_erasure: &dyn Fn(&B) -> Ty,
+) -> TParams {
+    let mut out = enclosing.clone();
+    let mut declared = erased_from_syntax(names, bounds, chain_parameter, bound_erasure);
+    for name in names {
+        if let Some(bound) =
+            enclosing_bound_erasure(enclosing, name, names, bounds, enclosing_parameter)
+        {
+            declared.erasure.insert(name.clone(), bound);
+        }
+    }
+    out.erasure.extend(declared.erasure);
+    out.extra_bounds.extend(declared.extra_bounds);
+    out
+}
+
 struct BoundBuilder<'a, B> {
     names: &'a [String],
     bounds: &'a [(String, B)],
