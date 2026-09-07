@@ -29184,7 +29184,9 @@ fun after(): Int = 3
         let file = parse_file(source, &mut diagnostics);
         assert!(diagnostics.diags.is_empty());
 
-        let selected = capture_discovery_scope(&file).declarations;
+        let scope = capture_discovery_scope(&file);
+        assert!(scope.complete);
+        let selected = scope.declarations;
         let named = file
             .decls
             .iter()
@@ -29288,7 +29290,9 @@ fun after(): Int = 2
         let file = parse(source, &tokens, &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-        let selected = capture_discovery_scope(&file).declarations;
+        let scope = capture_discovery_scope(&file);
+        assert!(scope.complete);
+        let selected = scope.declarations;
         let synthesized = file
             .anonymous_object_classes
             .values()
@@ -29344,6 +29348,7 @@ val result = object { fun value(): String = captured }
         assert!(diagnostics.diags.is_empty());
 
         let scope = capture_discovery_scope(&file);
+        assert!(scope.complete);
         assert!(scope.declarations.is_empty());
         assert!(scope.script_body);
     }
@@ -39749,6 +39754,7 @@ struct CaptureDiscoveryScope {
     declarations: std::collections::HashSet<DeclId>,
     script_body: bool,
     class_plans: std::collections::HashMap<DeclId, ClassCapturePlan>,
+    complete: bool,
 }
 
 /// Anonymous-class bodies nested under an inline callable are ordinary emission bodies, but their
@@ -39896,24 +39902,12 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
     let script_body = file
         .script_body
         .is_some_and(|body| record_expression_targets(file, &targets, [body], &mut discovered));
-    // Keep capture analysis conservative as the AST evolves. If a parser change retains an
-    // anonymous construction outside the generic declaration-root inventory, retain the old
-    // full-file semantic pass rather than silently treating that construction as capture-free.
     let complete = discovered.len() == targets.len();
     CaptureDiscoveryScope {
-        declarations: if complete {
-            declarations
-        } else {
-            file.decls.iter().copied().collect()
-        },
-        script_body: script_body || !complete,
-        // An unknown expression-bearing parser field invalidates not only declaration selection but
-        // every narrower class plan. An empty map makes callers preserve the full semantic walk.
-        class_plans: if complete {
-            class_plans
-        } else {
-            std::collections::HashMap::new()
-        },
+        declarations,
+        script_body,
+        class_plans,
+        complete,
     }
 }
 
@@ -40307,6 +40301,15 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.anonymous_lexical_scope = anonymous_lexical_scope;
     c.capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
     if capture_discovery {
+        if c.capture_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.complete)
+        {
+            c.diags.error(
+                Span::new(0, 0),
+                "krusty: incomplete anonymous-object capture inventory",
+            );
+        }
         crate::trace_compiler!(
             "fir",
             "capture discovery file={file_index} selected_roots={selected_declarations:?} owners={:?}",
