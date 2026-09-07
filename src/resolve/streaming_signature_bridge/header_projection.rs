@@ -3,6 +3,8 @@
 use super::*;
 use crate::types::Visibility;
 
+use crate::resolve::ClassNames;
+
 /// One short-lived materialization of a compact callable header for the legacy signature publisher.
 /// It contains declaration syntax only; default expressions and the body remain in the transient
 /// file until their dedicated passes are migrated. Production builds this from `HeaderSyntaxArena`,
@@ -24,7 +26,7 @@ pub(in crate::resolve) struct StreamedCallableHeader {
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) context_count: usize,
     pub(in crate::resolve) signature_start: u32,
-    pub(in crate::resolve) annotations: Vec<TypeRef>,
+    pub(in crate::resolve) annotations: crate::fir::HeaderTypeRange,
 }
 
 #[derive(Clone)]
@@ -33,9 +35,10 @@ pub(in crate::resolve) struct StreamedCallableParameter {
     pub(in crate::resolve) ty: TypeRef,
     pub(in crate::resolve) is_vararg: bool,
     pub(in crate::resolve) has_default: bool,
-    pub(in crate::resolve) annotations: Vec<TypeRef>,
-    pub(in crate::resolve) type_annotations: Vec<TypeRef>,
-    pub(in crate::resolve) annotation_class_literals: Vec<(usize, String)>,
+    pub(in crate::resolve) annotations: crate::fir::HeaderTypeRange,
+    pub(in crate::resolve) type_annotations: crate::fir::HeaderTypeRange,
+    pub(in crate::resolve) annotation_class_literals:
+        crate::fir::HeaderParameterAnnotationClassLiteralRange,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -43,6 +46,75 @@ pub(in crate::resolve) enum StreamedResultKind {
     Explicit,
     ImplicitUnit,
     Inferred,
+}
+
+fn compact_header_type_spelling(
+    headers: &crate::fir::StreamedHeaderModule,
+    syntax: crate::fir::HeaderTypeId,
+) -> Option<String> {
+    let ty = headers.syntax.ty(syntax)?;
+    let crate::fir::HeaderTypeKind::Classifier { detail, .. } = ty.kind else {
+        return None;
+    };
+    let detail = headers.syntax.classifier_type(detail)?;
+    headers
+        .syntax
+        .type_path(detail.path)
+        .iter()
+        .map(|segment| headers.lookup_names.get(*segment))
+        .collect::<Option<Vec<_>>>()
+        .map(|segments| segments.join("."))
+}
+
+pub(in crate::resolve) fn resolved_compact_annotation_identities(
+    headers: &crate::fir::StreamedHeaderModule,
+    annotations: crate::fir::HeaderTypeRange,
+    class_names: &ClassNames,
+) -> Vec<TypeName> {
+    headers
+        .syntax
+        .type_operands(annotations)
+        .iter()
+        .filter_map(|annotation| compact_header_type_spelling(headers, *annotation))
+        .filter_map(|annotation| class_names.classifier_binding(&annotation).ok())
+        .collect()
+}
+
+pub(in crate::resolve) fn compact_header_has_resolved_annotation(
+    headers: &crate::fir::StreamedHeaderModule,
+    annotations: crate::fir::HeaderTypeRange,
+    class_names: &ClassNames,
+    expected: TypeName,
+) -> bool {
+    resolved_compact_annotation_identities(headers, annotations, class_names).contains(&expected)
+}
+
+pub(in crate::resolve) fn compact_header_equality_bound(
+    headers: &crate::fir::StreamedHeaderModule,
+    parameters: &[StreamedCallableParameter],
+    class_names: &ClassNames,
+) -> Option<Ty> {
+    parameters.iter().find_map(|parameter| {
+        let annotations = headers.syntax.type_operands(parameter.annotations);
+        headers
+            .syntax
+            .parameter_annotation_class_literals(parameter.annotation_class_literals)
+            .iter()
+            .find_map(|argument| {
+                let annotation = annotations.get(argument.annotation_ordinal as usize)?;
+                let annotation = compact_header_type_spelling(headers, *annotation)?;
+                class_names
+                    .classifier_binding(&annotation)
+                    .ok()
+                    .is_some_and(|identity| identity.matches("kotlin/EqualityBound"))
+                    .then(|| {
+                        compact_header_type_spelling(headers, argument.classifier)
+                            .and_then(|classifier| class_names.classifier_binding(&classifier).ok())
+                            .map(Ty::obj_name)
+                    })
+                    .flatten()
+            })
+    })
 }
 
 /// Source-written callable declarations directly owned by one compact classifier, in semantic
@@ -98,19 +170,6 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
     else {
         return None;
     };
-    let materialize_range = |range| {
-        headers
-            .syntax
-            .type_operands(range)
-            .iter()
-            .map(|ty| {
-                headers
-                    .syntax
-                    .transient_type_ref(*ty, &headers.lookup_names)
-            })
-            .collect::<Option<Vec<_>>>()
-    };
-    let annotations = materialize_range(syntax_declaration.annotations)?;
     let (receiver, receiver_source_spelling) = match receiver {
         Some(receiver_id) => {
             let receiver = headers
@@ -136,23 +195,9 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
                     .transient_type_ref(parameter.ty, &headers.lookup_names)?,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
-                annotations: materialize_range(parameter.annotations)?,
-                type_annotations: materialize_range(parameter.type_annotations)?,
-                annotation_class_literals: headers
-                    .syntax
-                    .parameter_annotation_class_literals(parameter.annotation_class_literals)
-                    .iter()
-                    .map(|argument| {
-                        let classifier = headers
-                            .syntax
-                            .transient_type_ref(argument.classifier, &headers.lookup_names)?
-                            .name;
-                        Some((
-                            usize::try_from(argument.annotation_ordinal).ok()?,
-                            classifier,
-                        ))
-                    })
-                    .collect::<Option<Vec<_>>>()?,
+                annotations: parameter.annotations,
+                type_annotations: parameter.type_annotations,
+                annotation_class_literals: parameter.annotation_class_literals,
             })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -206,7 +251,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         bounds,
         context_count: usize::try_from(context_count).ok()?,
         signature_start,
-        annotations,
+        annotations: syntax_declaration.annotations,
     })
 }
 
@@ -260,13 +305,10 @@ pub(in crate::resolve) fn active_callable_header(function: &FunDecl) -> Streamed
                 ty: parameter.ty.clone(),
                 is_vararg: parameter.is_vararg,
                 has_default: parameter.default.is_some(),
-                annotations: parameter
-                    .annotations
-                    .iter()
-                    .map(TypeRef::from_annotation)
-                    .collect(),
-                type_annotations: Vec::new(),
-                annotation_class_literals: Vec::new(),
+                annotations: crate::fir::HeaderTypeRange::default(),
+                type_annotations: crate::fir::HeaderTypeRange::default(),
+                annotation_class_literals:
+                    crate::fir::HeaderParameterAnnotationClassLiteralRange::default(),
             })
             .collect(),
         result,
@@ -286,11 +328,7 @@ pub(in crate::resolve) fn active_callable_header(function: &FunDecl) -> Streamed
         bounds: function.type_param_bounds.clone(),
         context_count: function.context_count,
         signature_start: function.signature_span.lo,
-        annotations: function
-            .annotations
-            .iter()
-            .map(TypeRef::from_annotation)
-            .collect(),
+        annotations: crate::fir::HeaderTypeRange::default(),
     }
 }
 
@@ -311,7 +349,7 @@ pub(in crate::resolve) struct StreamedPropertyHeader {
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) mutable: bool,
     pub(in crate::resolve) setter_visibility: Visibility,
-    pub(in crate::resolve) annotations: Vec<TypeRef>,
+    pub(in crate::resolve) annotations: crate::fir::HeaderTypeRange,
 }
 
 /// Materialize a property header from stable compact identity without consulting a parser
@@ -358,15 +396,6 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         return None;
     };
     let materialize = |ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names);
-    let materialize_range = |range| {
-        headers
-            .syntax
-            .type_operands(range)
-            .iter()
-            .map(|ty| materialize(*ty))
-            .collect::<Option<Vec<_>>>()
-    };
-    let annotations = materialize_range(declaration.annotations)?;
     let (receiver, receiver_source_spelling) = match receiver {
         Some(receiver_id) => {
             let receiver = materialize(receiver_id)?;
@@ -431,7 +460,7 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         bounds,
         mutable,
         setter_visibility,
-        annotations,
+        annotations: declaration.annotations,
     })
 }
 
@@ -512,7 +541,7 @@ pub(in crate::resolve) struct StreamedClassifierParameter {
     pub(in crate::resolve) is_mutable_property: bool,
     pub(in crate::resolve) visibility: crate::types::Visibility,
     pub(in crate::resolve) is_open: bool,
-    pub(in crate::resolve) annotations: Vec<TypeRef>,
+    pub(in crate::resolve) annotations: crate::fir::HeaderTypeRange,
     pub(in crate::resolve) stable_declaration: Option<crate::fir::DeclarationId>,
 }
 
@@ -629,12 +658,7 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
                     .map_or(crate::types::Visibility::Public, |stub| stub.visibility),
                 is_open: property
                     .is_some_and(|stub| stub.flags.has(crate::fir::DeclarationFlags::OPEN)),
-                annotations: headers
-                    .syntax
-                    .type_operands(parameter.annotations)
-                    .iter()
-                    .map(|annotation| materialize(*annotation))
-                    .collect::<Option<Vec<_>>>()?,
+                annotations: parameter.annotations,
                 stable_declaration: property.map(|stub| stub.id),
             })
         })
@@ -669,23 +693,6 @@ pub(in crate::resolve) fn streamed_constructor_declaration(
         .map(|stub| stub.id)
 }
 
-pub(in crate::resolve) fn streamed_declaration_annotations(
-    headers: &crate::fir::StreamedHeaderModule,
-    declaration: crate::fir::DeclarationId,
-) -> Option<Vec<TypeRef>> {
-    let declaration = headers.syntax.declaration(declaration)?;
-    headers
-        .syntax
-        .type_operands(declaration.annotations)
-        .iter()
-        .map(|annotation| {
-            headers
-                .syntax
-                .transient_type_ref(*annotation, &headers.lookup_names)
-        })
-        .collect()
-}
-
 pub(in crate::resolve) fn streamed_constructor_parameters_by_declaration(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
@@ -706,41 +713,9 @@ pub(in crate::resolve) fn streamed_constructor_parameters_by_declaration(
                     .transient_type_ref(parameter.ty, &headers.lookup_names)?,
                 is_vararg: parameter.flags.is_vararg(),
                 has_default: parameter.flags.has_default(),
-                annotations: headers
-                    .syntax
-                    .type_operands(parameter.annotations)
-                    .iter()
-                    .map(|ty| {
-                        headers
-                            .syntax
-                            .transient_type_ref(*ty, &headers.lookup_names)
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-                type_annotations: headers
-                    .syntax
-                    .type_operands(parameter.type_annotations)
-                    .iter()
-                    .map(|ty| {
-                        headers
-                            .syntax
-                            .transient_type_ref(*ty, &headers.lookup_names)
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-                annotation_class_literals: headers
-                    .syntax
-                    .parameter_annotation_class_literals(parameter.annotation_class_literals)
-                    .iter()
-                    .map(|argument| {
-                        let classifier = headers
-                            .syntax
-                            .transient_type_ref(argument.classifier, &headers.lookup_names)?
-                            .name;
-                        Some((
-                            usize::try_from(argument.annotation_ordinal).ok()?,
-                            classifier,
-                        ))
-                    })
-                    .collect::<Option<Vec<_>>>()?,
+                annotations: parameter.annotations,
+                type_annotations: parameter.type_annotations,
+                annotation_class_literals: parameter.annotation_class_literals,
             })
         })
         .collect()

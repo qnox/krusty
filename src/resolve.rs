@@ -105,54 +105,6 @@ fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextRe
     ContextReceiver::new(ty, parameter.name.clone(), label, parameter.name == "_")
 }
 
-fn resolved_header_annotation_identities(
-    annotations: &[TypeRef],
-    class_names: &ClassNames,
-) -> Vec<TypeName> {
-    annotations
-        .iter()
-        .filter_map(|annotation| class_names.classifier_binding(&annotation.name).ok())
-        .collect()
-}
-
-fn header_type_has_annotation(
-    annotations: &[TypeRef],
-    class_names: &ClassNames,
-    expected: TypeName,
-) -> bool {
-    annotations.iter().any(|annotation| {
-        class_names
-            .get_class(&annotation.name)
-            .or_else(|| class_names.get_qualified_supertype(&annotation.name.replace('.', "/")))
-            .is_some_and(|annotation| annotation == expected)
-            || (annotation.name.contains('.')
-                && type_name(&annotation.name.replace('.', "/")) == expected)
-    })
-}
-
-fn resolved_compact_jvm_name(
-    headers: &crate::fir::StreamedHeaderModule,
-    declaration: crate::fir::DeclarationId,
-    annotations: &[TypeRef],
-    class_names: &ClassNames,
-    fallback: &str,
-) -> String {
-    annotations
-        .iter()
-        .enumerate()
-        .find(|(_, annotation)| {
-            class_names
-                .get_class(&annotation.name)
-                .is_some_and(|name| name.matches("kotlin/jvm/JvmName"))
-        })
-        .and_then(|(index, _)| {
-            headers
-                .annotation_string_arguments(declaration, index)
-                .first()
-                .map(|value| value.to_string())
-        })
-        .unwrap_or_else(|| fallback.to_string())
-}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TopLevelFunctionConflictKey {
     package: TypeName,
@@ -6865,8 +6817,9 @@ fn collect_signatures_with_cp_impl(
                             // declaration set or rediscovering `reified` in individual call paths.
                             .with_requires_splice(reified)
                             .with_has_reified_type_params(reified),
-                        annotations: resolved_header_annotation_identities(
-                            &callable_header.annotations,
+                        annotations: resolved_compact_annotation_identities(
+                            headers,
+                            callable_header.annotations,
                             &class_names,
                         ),
                         equality_bound: None,
@@ -6881,8 +6834,9 @@ fn collect_signatures_with_cp_impl(
                             .parameters
                             .iter()
                             .map(|parameter| {
-                                header_type_has_annotation(
-                                    &parameter.type_annotations,
+                                compact_header_has_resolved_annotation(
+                                    headers,
+                                    parameter.type_annotations,
                                     &class_names,
                                     type_name("kotlin/internal/Exact"),
                                 )
@@ -6892,8 +6846,9 @@ fn collect_signatures_with_cp_impl(
                             .parameters
                             .iter()
                             .map(|parameter| {
-                                header_type_has_annotation(
-                                    &parameter.type_annotations,
+                                compact_header_has_resolved_annotation(
+                                    headers,
+                                    parameter.type_annotations,
                                     &class_names,
                                     type_name("kotlin/internal/NoInfer"),
                                 )
@@ -6903,8 +6858,9 @@ fn collect_signatures_with_cp_impl(
                             .parameters
                             .iter()
                             .map(|parameter| {
-                                header_type_has_annotation(
-                                    &parameter.annotations,
+                                compact_header_has_resolved_annotation(
+                                    headers,
+                                    parameter.annotations,
                                     &class_names,
                                     type_name("kotlin/internal/ImplicitIntegerCoercion"),
                                 )
@@ -6933,13 +6889,6 @@ fn collect_signatures_with_cp_impl(
                         contract: None,
                         plugin_expression: None,
                     };
-                    let _jvm_name = resolved_compact_jvm_name(
-                        headers,
-                        stable_declaration.expect("streamed declaration identity"),
-                        &callable_header.annotations,
-                        &class_names,
-                        &function_name,
-                    );
                     // Conflict classification waits for stable inferred results below.
                     let retained = true;
                     if callable_header.receiver.is_some() {
@@ -7372,8 +7321,9 @@ fn collect_signatures_with_cp_impl(
                         .primary_parameters
                         .iter()
                         .map(|parameter| {
-                            header_type_has_annotation(
-                                &parameter.annotations,
+                            compact_header_has_resolved_annotation(
+                                headers,
+                                parameter.annotations,
                                 &primary_header_class_names,
                                 type_name("kotlin/internal/ImplicitIntegerCoercion"),
                             )
@@ -7406,8 +7356,9 @@ fn collect_signatures_with_cp_impl(
                                     visibility: header.visibility,
                                     source_visible: true,
                                     is_const: false,
-                                    annotations: resolved_header_annotation_identities(
-                                        &header.annotations,
+                                    annotations: resolved_compact_annotation_identities(
+                                        headers,
+                                        header.annotations,
                                         &class_names,
                                     ),
                                     getter_name: if classifier_flags.has(ClassFlags::ANNOTATION) {
@@ -7855,8 +7806,9 @@ fn collect_signatures_with_cp_impl(
                             is_const: property_header
                                 .flags
                                 .has(crate::fir::DeclarationFlags::CONST),
-                            annotations: resolved_header_annotation_identities(
-                                &property_header.annotations,
+                            annotations: resolved_compact_annotation_identities(
+                                headers,
+                                property_header.annotations,
                                 &class_names,
                             ),
                             getter_name: property_getter_name(&property_header.name),
@@ -7943,6 +7895,7 @@ fn collect_signatures_with_cp_impl(
                                 Ty::Unit
                             });
                         let mut signature = member_signature_from_header(
+                            headers,
                             &method_header,
                             ret,
                             &class_names,
@@ -8386,9 +8339,13 @@ fn collect_signatures_with_cp_impl(
                         .or(parenless_base.as_deref())
                         .map(&mut resolve_super)
                         .or_else(|| classifier_is_enum.then(|| type_name("kotlin/Enum")));
-                    let resolved_annotations = resolved_header_annotation_identities(
-                        &streamed_declaration_annotations(headers, compact_classifier.id)
-                            .expect("a production classifier has compact annotations"),
+                    let resolved_annotations = resolved_compact_annotation_identities(
+                        headers,
+                        headers
+                            .syntax
+                            .declaration(compact_classifier.id)
+                            .expect("a production classifier has compact annotations")
+                            .annotations,
                         &class_names,
                     );
                     let semantic_tparam_names = classifier_header
@@ -8657,8 +8614,9 @@ fn collect_signatures_with_cp_impl(
                             call_sig.implicit_integer_coercion = parameters
                                 .iter()
                                 .map(|parameter| {
-                                    header_type_has_annotation(
-                                        &parameter.annotations,
+                                    compact_header_has_resolved_annotation(
+                                        headers,
+                                        parameter.annotations,
                                         &class_names,
                                         type_name("kotlin/internal/ImplicitIntegerCoercion"),
                                     )
@@ -8684,10 +8642,15 @@ fn collect_signatures_with_cp_impl(
                             .map(|index| compact_secondary_constructors.get(index).copied())
                             .collect();
                     let primary_constructor_annotations = match primary_constructor_declaration {
-                        Some(declaration) => resolved_header_annotation_identities(
-                            &streamed_declaration_annotations(headers, declaration).expect(
-                                "a production primary constructor must have compact annotations",
-                            ),
+                        Some(declaration) => resolved_compact_annotation_identities(
+                            headers,
+                            headers
+                                .syntax
+                                .declaration(declaration)
+                                .expect(
+                                    "a production primary constructor must have compact annotations",
+                                )
+                                .annotations,
                             &class_names,
                         ),
                         None => Vec::new(),
@@ -8697,11 +8660,18 @@ fn collect_signatures_with_cp_impl(
                         .map(|declaration| {
                             let declaration = declaration
                                 .expect("a production secondary constructor has a stable identity");
-                            let annotations =
-                                streamed_declaration_annotations(headers, declaration).expect(
+                            let annotations = headers
+                                .syntax
+                                .declaration(declaration)
+                                .expect(
                                     "a production secondary constructor has compact annotations",
-                                );
-                            resolved_header_annotation_identities(&annotations, &class_names)
+                                )
+                                .annotations;
+                            resolved_compact_annotation_identities(
+                                headers,
+                                annotations,
+                                &class_names,
+                            )
                         })
                         .collect();
                     // `inner_of` is the semantic enclosing receiver, not necessarily the lexical name
@@ -9164,8 +9134,9 @@ fn collect_signatures_with_cp_impl(
                                 source_file: i as u32,
                                 package,
                                 visibility: property_visibility,
-                                annotations: resolved_header_annotation_identities(
-                                    &property_header.annotations,
+                                annotations: resolved_compact_annotation_identities(
+                                    headers,
+                                    property_header.annotations,
                                     &class_names,
                                 ),
                                 stable_declaration: Some(compact_property.id),
@@ -9276,8 +9247,9 @@ fn collect_signatures_with_cp_impl(
                         is_const,
                         is_lateinit,
                         compile_time_constant: None,
-                        implicit_integer_coercion: header_type_has_annotation(
-                            &property_header.annotations,
+                        implicit_integer_coercion: compact_header_has_resolved_annotation(
+                            headers,
+                            property_header.annotations,
                             &class_names,
                             type_name("kotlin/internal/ImplicitIntegerCoercion"),
                         ),
@@ -9290,8 +9262,9 @@ fn collect_signatures_with_cp_impl(
                         package: source_packages[i].replace('.', "/"),
                         visibility: property_visibility,
                         setter_visibility: property_header.setter_visibility,
-                        annotations: resolved_header_annotation_identities(
-                            &property_header.annotations,
+                        annotations: resolved_compact_annotation_identities(
+                            headers,
+                            property_header.annotations,
                             &class_names,
                         ),
                         stable_declaration: Some(compact_property.id),
@@ -11061,6 +11034,7 @@ fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
 /// parameter identities as every other source method.
 #[allow(clippy::too_many_arguments)]
 fn member_signature_from_header(
+    headers: &crate::fir::StreamedHeaderModule,
     header: &StreamedCallableHeader,
     ret: Ty,
     classes: &ClassNames,
@@ -11113,20 +11087,8 @@ fn member_signature_from_header(
             .with_is_final(header.flags.has(crate::fir::DeclarationFlags::FINAL))
             .with_is_suspend(header.flags.has(crate::fir::DeclarationFlags::SUSPEND))
             .with_is_abstract(header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)),
-        annotations: resolved_header_annotation_identities(&header.annotations, classes),
-        equality_bound: header.parameters.iter().find_map(|parameter| {
-            parameter
-                .annotation_class_literals
-                .iter()
-                .find_map(|(ordinal, classifier)| {
-                    let annotation = parameter.annotations.get(*ordinal)?;
-                    classes
-                        .get_class(&annotation.name)
-                        .is_some_and(|identity| identity.matches("kotlin/EqualityBound"))
-                        .then(|| classes.get_class(classifier).map(Ty::obj_name))
-                        .flatten()
-                })
-        }),
+        annotations: resolved_compact_annotation_identities(headers, header.annotations, classes),
+        equality_bound: compact_header_equality_bound(headers, &header.parameters, classes),
         vararg_index: header
             .parameters
             .iter()
@@ -11145,8 +11107,9 @@ fn member_signature_from_header(
             .parameters
             .iter()
             .map(|parameter| {
-                header_type_has_annotation(
-                    &parameter.type_annotations,
+                compact_header_has_resolved_annotation(
+                    headers,
+                    parameter.type_annotations,
                     classes,
                     type_name("kotlin/internal/Exact"),
                 )
@@ -11156,8 +11119,9 @@ fn member_signature_from_header(
             .parameters
             .iter()
             .map(|parameter| {
-                header_type_has_annotation(
-                    &parameter.type_annotations,
+                compact_header_has_resolved_annotation(
+                    headers,
+                    parameter.type_annotations,
                     classes,
                     type_name("kotlin/internal/NoInfer"),
                 )
@@ -11167,8 +11131,9 @@ fn member_signature_from_header(
             .parameters
             .iter()
             .map(|parameter| {
-                header_type_has_annotation(
-                    &parameter.annotations,
+                compact_header_has_resolved_annotation(
+                    headers,
+                    parameter.annotations,
                     classes,
                     type_name("kotlin/internal/ImplicitIntegerCoercion"),
                 )
@@ -11239,6 +11204,7 @@ fn declared_member_callable_headers(
             });
         let ret = ty_of_ref(return_ref, classes, &method_tparams, diags);
         let mut signature = member_signature_from_header(
+            headers,
             &header,
             ret,
             classes,
