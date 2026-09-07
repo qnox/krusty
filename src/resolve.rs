@@ -10681,35 +10681,29 @@ pub(crate) fn publish_checked_compile_time_constants(
     // the deferred-property publication loop. Publish their literal payloads unconditionally from
     // the bounded declaration fragment before stable metadata is projected. This stores only the
     // semantic constant and never retains the member initializer or its source coordinate.
-    let member_literals = files
-        .iter()
-        .enumerate()
-        .zip(&active_sources)
-        .filter_map(|((file_index, file), active)| Some((file_index, (*file)?, active.as_ref()?)))
-        .flat_map(|(file_index, file, active)| {
-            file.decls.iter().copied().filter_map(move |declaration| {
-                let Decl::Class(class) = file.decl(declaration) else {
-                    return None;
-                };
-                active.file_declaration(file, declaration)?;
-                Some((file_index as u32, active, declaration, class))
-            })
-        })
-        .flat_map(|(file_index, active, declaration, class)| {
-            class
-                .body_props
-                .iter()
-                .enumerate()
-                .filter(|(_, property)| property.is_const)
-                .filter_map(move |(property_index, property)| {
-                    let stable = active.class_body_property_declaration(
-                        declaration,
-                        u32::try_from(property_index).expect("too many class body properties"),
-                    )?;
-                    Some((file_index, stable, property))
-                })
-        })
-        .collect::<Vec<_>>();
+    let mut member_literals = Vec::new();
+    for (file_index, (file, active)) in files.iter().zip(&active_sources).enumerate() {
+        let (Some(file), Some(active)) = (*file, active.as_ref()) else {
+            continue;
+        };
+        let source = crate::fir::SourceFileId::from_raw(file_index as u32);
+        for &stable in index.source_inventory(source) {
+            let Some(header) = index.declaration_header(stable) else {
+                continue;
+            };
+            if header.kind != crate::fir::DeclarationKind::Property
+                || !header.flags.has(crate::fir::DeclarationFlags::CONST)
+                || index
+                    .declaration_anchor(stable)
+                    .is_none_or(|anchor| anchor.owner.is_none())
+            {
+                continue;
+            }
+            if let Some(property) = active.property(file, stable) {
+                member_literals.push((file_index as u32, stable, property));
+            }
+        }
+    }
     for (file_index, stable, property) in member_literals {
         let Some(ty) = index
             .signature(stable)
@@ -10727,39 +10721,43 @@ pub(crate) fn publish_checked_compile_time_constants(
             index.publish_compile_time_constant(stable, value);
         }
     }
-    let declarations = files
-        .iter()
-        .enumerate()
-        .zip(&active_sources)
-        .filter_map(|((file_index, file), active)| Some((file_index, (*file)?, active.as_ref()?)))
-        .flat_map(|(file_index, file, active)| {
-            file.decls.iter().copied().filter_map(move |declaration| {
-                let Decl::Property(property) = file.decl(declaration) else {
-                    return None;
-                };
-                (property.is_const && property.receiver.is_none()).then_some((
-                    file_index as u32,
-                    declaration,
-                    active.top_level_property_declaration(declaration)?,
-                    property.init?,
-                ))
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut declarations = Vec::new();
+    for (file_index, (file, active)) in files.iter().zip(&active_sources).enumerate() {
+        let (Some(file), Some(active)) = (*file, active.as_ref()) else {
+            continue;
+        };
+        let source = crate::fir::SourceFileId::from_raw(file_index as u32);
+        for &stable in index.source_inventory(source) {
+            let Some(header) = index.declaration_header(stable) else {
+                continue;
+            };
+            if header.kind != crate::fir::DeclarationKind::Property
+                || !header.flags.has(crate::fir::DeclarationFlags::CONST)
+                || index
+                    .declaration_anchor(stable)
+                    .is_none_or(|anchor| anchor.owner.is_some())
+            {
+                continue;
+            }
+            let Some(property) = active.property(file, stable) else {
+                continue;
+            };
+            if let Some(initializer) = property.init {
+                declarations.push((file_index as u32, stable, initializer, property));
+            }
+        }
+    }
     // A later constant may depend on a payload published earlier in this fixpoint. Disable the
     // derived module cache for the bounded evaluation so every checker observes the latest stable
     // declaration payload instead of a snapshot from before the preceding publication.
     for _ in 0..declarations.len() {
         let mut changed = false;
-        for &(file_index, declaration, stable, initializer) in &declarations {
+        for &(file_index, stable, initializer, property) in &declarations {
             if index.compile_time_constant(stable).is_some() {
                 continue;
             }
             let folded = {
                 let Some(file) = files[file_index as usize] else {
-                    continue;
-                };
-                let Decl::Property(property) = file.decl(declaration) else {
                     continue;
                 };
                 let mut diagnostics = DiagSink::new();
@@ -10776,6 +10774,12 @@ pub(crate) fn publish_checked_compile_time_constants(
                     &mut diagnostics,
                 );
                 let root = CheckerScope::root();
+                let Some(declaration) = active_sources[file_index as usize]
+                    .as_ref()
+                    .and_then(|active| active.top_level_property_parser_declaration(stable))
+                else {
+                    continue;
+                };
                 checker.check_property(&root, property, declaration);
                 checker.resolved_constants.get(&initializer).cloned()
             };
