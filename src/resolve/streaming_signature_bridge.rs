@@ -3882,12 +3882,9 @@ fn member_extension_receiver(function: &super::MemberExtFunSig) -> Ty {
 /// The Pass-1 signature published for a stable FUNCTION declaration, with the receiver a member
 /// extension carries.
 ///
-/// Narrowed by the declaration's spelling and owner — its class's method tables, or the
-/// top-level tables under its name — before the whole-table scan, which stays the fallback for
-/// what the narrowing cannot place (an enum-entry body member, a spelling the table keys
-/// differently). A declaration that can never own a `Signature` (a property, a classifier, …)
-/// answers `None` at once. The scan alone was linear in the module and asked once per type
-/// reference resolved, i.e. quadratic in module size.
+/// Located by the declaration's stable owner and lookup name in exactly one method table. Enum-entry
+/// body members are seeded from compact FIR instead, so a missing keyed entry is not permission to
+/// reinterpret the declaration by scanning unrelated legacy symbols.
 fn stable_function_signature<'a>(
     table: &'a SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
@@ -3902,9 +3899,9 @@ fn stable_function_signature<'a>(
     if let Some(stub) = headers.stub(declaration) {
         match stub.kind {
             DeclarationKind::Function => {}
-            // Not placed by the narrowing below; the scan decides.
-            DeclarationKind::Constructor | DeclarationKind::Accessor => {}
-            DeclarationKind::Property
+            DeclarationKind::Constructor
+            | DeclarationKind::Accessor
+            | DeclarationKind::Property
             | DeclarationKind::Classifier
             | DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias
@@ -3963,32 +3960,7 @@ fn stable_function_signature<'a>(
             }
         }
     }
-    if let Some(signature) = table
-        .funs
-        .values()
-        .flatten()
-        .chain(table.ext_funs.values().flat_map(HashMap::values).flatten())
-        .chain(
-            table
-                .classes
-                .values()
-                .flat_map(|class| class.methods.values().flatten()),
-        )
-        .find(owns)
-    {
-        return Some((signature, signature.source_receiver));
-    }
-    table
-        .classes
-        .values()
-        .flat_map(|class| class.member_ext_funs.values().flatten())
-        .find(owns_member)
-        .map(|function| {
-            (
-                function.signature(),
-                Some(member_extension_receiver(function)),
-            )
-        })
+    None
 }
 
 pub(crate) fn finalized_streamed_signature_index(
