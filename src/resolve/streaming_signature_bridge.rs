@@ -3603,26 +3603,52 @@ fn compact_classifier_parents(
 /// every `*` as `out Any?`. The compact header still owns the exact star bit and the completed symbol
 /// table owns the target parameter bound. Combine those stable Pass-1 facts at publication time;
 /// an explicitly written `out Any?` has no star bit and is therefore never rewritten.
-fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: Ty) -> Ty {
+fn compact_header_star_bounds(
+    table: &SymbolTable,
+    headers: &crate::fir::StreamedHeaderModule,
+    syntax: crate::fir::HeaderTypeId,
+    resolved: Ty,
+) -> Ty {
+    let Some(header) = headers.syntax.ty(syntax) else {
+        return resolved;
+    };
     match resolved {
-        Ty::Nullable(inner) => Ty::nullable(compact_header_star_bounds(table, syntax, *inner)),
+        Ty::Nullable(inner) => {
+            Ty::nullable(compact_header_star_bounds(table, headers, syntax, *inner))
+        }
         Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(compact_header_star_bounds(table, syntax, *inner))
+            Ty::platform_nullable(compact_header_star_bounds(table, headers, syntax, *inner))
         }
-        Ty::InProjection(inner) if !syntax.is_star_projection() => {
-            Ty::in_projection(compact_header_star_bounds(table, syntax, *inner))
+        Ty::InProjection(inner) if !header.flags.star_projection() => {
+            Ty::in_projection(compact_header_star_bounds(table, headers, syntax, *inner))
         }
-        Ty::OutProjection(inner) if !syntax.is_star_projection() => {
-            Ty::out_projection(compact_header_star_bounds(table, syntax, *inner))
+        Ty::OutProjection(inner) if !header.flags.star_projection() => {
+            Ty::out_projection(compact_header_star_bounds(table, headers, syntax, *inner))
         }
-        Ty::Obj(owner, resolved_arguments) if !syntax.targs.is_empty() => {
+        Ty::Obj(owner, resolved_arguments)
+            if matches!(header.kind, crate::fir::HeaderTypeKind::Classifier { .. }) =>
+        {
+            let crate::fir::HeaderTypeKind::Classifier { detail, .. } = header.kind else {
+                unreachable!()
+            };
+            let Some(detail) = headers.syntax.classifier_type(detail) else {
+                return Ty::Obj(owner, resolved_arguments);
+            };
+            let syntax_arguments = headers.syntax.type_operands(detail.arguments);
             let classifier = table.class_by_type_name(owner);
             let mut arguments = resolved_arguments.to_vec();
-            for index in 0..syntax.targs.len().min(arguments.len()) {
-                let argument_syntax = &syntax.targs[index];
-                if !argument_syntax.is_star_projection() {
-                    arguments[index] =
-                        compact_header_star_bounds(table, argument_syntax, arguments[index]);
+            for index in 0..syntax_arguments.len().min(arguments.len()) {
+                let argument_syntax = syntax_arguments[index];
+                let Some(argument_header) = headers.syntax.ty(argument_syntax) else {
+                    continue;
+                };
+                if !argument_header.flags.star_projection() {
+                    arguments[index] = compact_header_star_bounds(
+                        table,
+                        headers,
+                        argument_syntax,
+                        arguments[index],
+                    );
                     continue;
                 }
                 let bindings = classifier
@@ -3643,17 +3669,24 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
             }
             Ty::obj_args_name(owner, &arguments)
         }
-        Ty::Fun(function) if syntax.name == "<fun>" => {
-            let parameters = syntax
-                .fun_params
+        Ty::Fun(function) if matches!(header.kind, crate::fir::HeaderTypeKind::Function { .. }) => {
+            let crate::fir::HeaderTypeKind::Function {
+                parameters, result, ..
+            } = header.kind
+            else {
+                unreachable!()
+            };
+            let parameters = headers
+                .syntax
+                .type_operands(parameters)
                 .iter()
                 .zip(function.params.iter())
-                .map(|(syntax, resolved)| compact_header_star_bounds(table, syntax, *resolved))
+                .map(|(syntax, resolved)| {
+                    compact_header_star_bounds(table, headers, *syntax, *resolved)
+                })
                 .collect::<Vec<_>>();
-            let result = syntax
-                .arg
-                .as_deref()
-                .map(|syntax| compact_header_star_bounds(table, syntax, function.ret))
+            let result = result
+                .map(|syntax| compact_header_star_bounds(table, headers, syntax, function.ret))
                 .unwrap_or(function.ret);
             Ty::fun_with_shape(
                 parameters,
@@ -3671,16 +3704,17 @@ fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: T
 /// annotation with the semantic array slot introduced by `vararg`.
 fn compact_header_value_parameter_star_bounds(
     table: &SymbolTable,
-    syntax: &TypeRef,
+    headers: &crate::fir::StreamedHeaderModule,
+    syntax: crate::fir::HeaderTypeId,
     resolved: Ty,
     is_vararg: bool,
 ) -> Option<Ty> {
     if !is_vararg {
-        return Some(compact_header_star_bounds(table, syntax, resolved));
+        return Some(compact_header_star_bounds(table, headers, syntax, resolved));
     }
     let element = resolved.array_elem()?;
     Some(crate::types::semantic_value_parameter_ty(
-        compact_header_star_bounds(table, syntax, element),
+        compact_header_star_bounds(table, headers, syntax, element),
         true,
     ))
 }
@@ -4700,9 +4734,7 @@ pub(crate) fn finalized_streamed_signature_index(
                             "signature",
                             "explicit header parameter declaration={:?} syntax={:?} resolved={resolved:?}",
                             stub.id,
-                            headers
-                                .syntax
-                                .transient_type_ref(syntax, &headers.lookup_names),
+                            headers.syntax.ty(syntax),
                         );
                         resolved_parameters
                             .push(super::semantic_value_parameter_ty(resolved, is_vararg));
@@ -4756,31 +4788,23 @@ pub(crate) fn finalized_streamed_signature_index(
         }
         let mut invalid_vararg_shape = false;
         for (parameter, (syntax, is_vararg)) in parameters.iter_mut().zip(parameter_types) {
-            if let Some(syntax) = headers
-                .syntax
-                .transient_type_ref(syntax, &headers.lookup_names)
-            {
-                let Some(resolved) = compact_header_value_parameter_star_bounds(
-                    table, &syntax, *parameter, is_vararg,
-                ) else {
-                    invalid_vararg_shape = true;
-                    break;
-                };
-                *parameter = resolved;
-            }
+            let Some(resolved) = compact_header_value_parameter_star_bounds(
+                table, headers, syntax, *parameter, is_vararg,
+            ) else {
+                invalid_vararg_shape = true;
+                break;
+            };
+            *parameter = resolved;
         }
         if invalid_vararg_shape {
             failed.push(stub.id);
             continue;
         }
-        if let Some(syntax) = result_type.and_then(|syntax| {
-            headers
-                .syntax
-                .transient_type_ref(syntax, &headers.lookup_names)
-        }) {
+        if let Some(syntax) = result_type {
             let Some(resolved) = compact_header_value_parameter_star_bounds(
                 table,
-                &syntax,
+                headers,
+                syntax,
                 result,
                 constructor_property_vararg,
             ) else {
@@ -4789,15 +4813,8 @@ pub(crate) fn finalized_streamed_signature_index(
             };
             result = resolved;
         }
-        if let Some((syntax, resolved)) = receiver_type
-            .and_then(|syntax| {
-                headers
-                    .syntax
-                    .transient_type_ref(syntax, &headers.lookup_names)
-            })
-            .zip(receiver)
-        {
-            receiver = Some(compact_header_star_bounds(table, &syntax, resolved));
+        if let Some((syntax, resolved)) = receiver_type.zip(receiver) {
+            receiver = Some(compact_header_star_bounds(table, headers, syntax, resolved));
         }
         let compact_explicit_types = compact_local_types;
         crate::trace_compiler!(
