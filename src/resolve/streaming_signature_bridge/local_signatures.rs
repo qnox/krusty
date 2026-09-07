@@ -22,7 +22,7 @@ pub(crate) fn publish_checked_local_signatures_in_active_root(
         info,
         index,
         None,
-        Some(active),
+        active,
         Some((active, selected_root, selected_bodies)),
         None,
     )
@@ -46,7 +46,7 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
         info,
         index,
         None,
-        Some(active),
+        active,
         Some((active, selected_root, selected_bodies)),
         None,
     )
@@ -70,7 +70,7 @@ pub(crate) fn publish_checked_local_signatures(
         info,
         index,
         None,
-        Some(&active),
+        &active,
         None,
         None,
     )
@@ -83,7 +83,7 @@ pub(crate) fn publish_checked_inline_local_signatures(
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
     inline_owners: &[crate::fir::DeclarationId],
-    active: Option<&crate::fir::ActiveSourceDeclarations>,
+    active: &crate::fir::ActiveSourceDeclarations,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
     publish_checked_local_signatures_selected(
         file,
@@ -170,7 +170,7 @@ pub(crate) fn publish_checked_default_local_signatures(
         info,
         index,
         Some(&owners),
-        Some(active),
+        active,
         None,
         Some(&exact),
     )
@@ -184,7 +184,7 @@ fn publish_checked_local_signatures_selected(
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
     inline_owners: Option<&[crate::fir::DeclarationId]>,
-    active_source: Option<&crate::fir::ActiveSourceDeclarations>,
+    active: &crate::fir::ActiveSourceDeclarations,
     active_root: Option<(
         &crate::fir::ActiveSourceDeclarations,
         crate::fir::DeclarationId,
@@ -196,8 +196,6 @@ fn publish_checked_local_signatures_selected(
         CallableId, DeclarationFlags, DeclarationId, DeclarationKind, PropertyId,
         ResolvedCallableShape, ResolvedTy, ResolvedTypeParameterFlags, ResolvedValueParameterFlags,
     };
-    let active = active_source.or_else(|| active_root.map(|(active, _, _)| active));
-
     fn semantic_parameters(signature: &Signature) -> Vec<Ty> {
         signature
             .generic_sig
@@ -216,27 +214,14 @@ fn publish_checked_local_signatures_selected(
     fn enclosing_class<'a>(
         file: &'a File,
         index: &crate::fir::ResolvedModuleIndex,
-        active: Option<&crate::fir::ActiveSourceDeclarations>,
+        active: &crate::fir::ActiveSourceDeclarations,
         mut owner: Option<DeclarationId>,
     ) -> Option<(DeclarationId, DeclId, &'a ClassDecl)> {
         while let Some(declaration) = owner {
             let header = index.declaration_header(declaration)?;
             if header.kind == DeclarationKind::Classifier {
-                if let Some(active) = active {
-                    let (transient, class) = active.class(file, declaration)?;
-                    return Some((declaration, transient, class));
-                }
-                let range = index.declaration_range(declaration)?;
-                return file
-                    .decl_arena
-                    .iter()
-                    .enumerate()
-                    .find_map(|(raw, candidate)| match candidate {
-                        Decl::Class(class) if class.span == range => {
-                            Some((declaration, DeclId(raw as u32), class))
-                        }
-                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-                    });
+                let (transient, class) = active.class(file, declaration)?;
+                return Some((declaration, transient, class));
             }
             owner = header.owner;
         }
@@ -245,36 +230,22 @@ fn publish_checked_local_signatures_selected(
 
     fn source_signature<'a>(
         class: &'a ClassSig,
-        source: crate::libraries::SourceMember,
         method: &FunDecl,
         declaration: DeclarationId,
-        active: bool,
     ) -> Option<(&'a Signature, Option<Ty>)> {
         if method.receiver.is_some() {
             class
                 .member_ext_funs
                 .get(&method.name)?
                 .iter()
-                .find(|candidate| {
-                    if active {
-                        candidate.signature.stable_declaration == Some(declaration)
-                    } else {
-                        candidate.signature.source_member == Some(source)
-                    }
-                })
+                .find(|candidate| candidate.signature.stable_declaration == Some(declaration))
                 .map(|candidate| (&candidate.signature, Some(candidate.receiver_ty)))
         } else {
             class
                 .methods
                 .get(&method.name)?
                 .iter()
-                .find(|candidate| {
-                    if active {
-                        candidate.stable_declaration == Some(declaration)
-                    } else {
-                        candidate.source_member == Some(source)
-                    }
-                })
+                .find(|candidate| candidate.stable_declaration == Some(declaration))
                 .map(|candidate| (candidate, None))
         }
     }
@@ -545,13 +516,11 @@ fn publish_checked_local_signatures_selected(
                             if owners.contains(&candidate) {
                                 return true;
                             }
-                            current = active
-                                .and_then(|active| stable_parent(active, index, candidate))
-                                .or_else(|| {
-                                    index
-                                        .declaration_anchor(candidate)
-                                        .and_then(|anchor| anchor.owner)
-                                });
+                            current = stable_parent(active, index, candidate).or_else(|| {
+                                index
+                                    .declaration_anchor(candidate)
+                                    .and_then(|anchor| anchor.owner)
+                            });
                         }
                         false
                     });
@@ -607,42 +576,10 @@ fn publish_checked_local_signatures_selected(
         let class = table.and_then(|table| {
             table.classes.values().find(|candidate| {
                 candidate.source_file == source.raw()
-                    && match active {
-                        Some(_) => candidate.stable_declaration == Some(declaration),
-                        None => candidate.source_decl.is_some_and(|transient| {
-                            file.decl_arena
-                                .get(transient.0 as usize)
-                                .is_some_and(|candidate| {
-                                    matches!(candidate, Decl::Class(class) if Some(class.span) == index.declaration_range(declaration))
-                                })
-                        }),
-                    }
+                    && candidate.stable_declaration == Some(declaration)
             })
         });
-        let parser_class = match active {
-            Some(active) => active.class(file, declaration).or_else(|| {
-                let transient = class?.source_decl?;
-                match file.decl(transient) {
-                    Decl::Class(class) => Some((transient, class)),
-                    Decl::Fun(_) | Decl::Property(_) => None,
-                }
-            }),
-            None => {
-                let Some(range) = index.declaration_range(declaration) else {
-                    failed.push(declaration);
-                    continue;
-                };
-                file.decl_arena
-                    .iter()
-                    .enumerate()
-                    .find_map(|(raw, candidate)| match candidate {
-                        Decl::Class(class) if class.span == range => {
-                            Some((DeclId(raw as u32), class))
-                        }
-                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-                    })
-            }
-        };
+        let parser_class = active.class(file, declaration);
         let Some((transient, class_decl)) = parser_class else {
             crate::trace_compiler!(
                 "signature",
@@ -651,14 +588,6 @@ fn publish_checked_local_signatures_selected(
             failed.push(declaration);
             continue;
         };
-        let class = class.or_else(|| {
-            table.and_then(|table| {
-                table.classes.values().find(|candidate| {
-                    candidate.source_file == source.raw()
-                        && candidate.source_decl == Some(transient)
-                })
-            })
-        });
         let Some(class) = class else {
             // Production Pass 2 has destroyed the parser-backed signature graph. A body-local
             // classifier's already-published primary-constructor result carries its stable semantic
@@ -952,29 +881,25 @@ fn publish_checked_local_signatures_selected(
             crate::trace_compiler!(
                 "signature",
                 "local declaration has no active classifier declaration={declaration:?} anchor={anchor:?} owner_binding={:?}",
-                anchor.owner.and_then(|owner| active.and_then(|active| active.class(file, owner)))
+                anchor.owner.and_then(|owner| active.class(file, owner))
             );
             continue;
         };
         let class = table.and_then(|table| {
             table.classes.values().find(|candidate| {
                 candidate.source_file == source.raw()
-                    && match active {
-                        Some(_) => candidate.stable_declaration == Some(owner_stable),
-                        None => candidate.source_decl == Some(owner_decl),
-                    }
+                    && candidate.stable_declaration == Some(owner_stable)
             })
         });
 
-        if class.is_none() && active.is_some() {
+        if class.is_none() {
             // The production streaming path deliberately owns no Pass-1 `ClassSig`. Publish an
             // active local member from the declaration syntax plus facts produced by its checked
             // lexical body. This is declaration publication, not lookup: every target identity is
             // the stable declaration currently being consumed.
             match anchor.kind {
                 DeclarationKind::Function => {
-                    let Some(method) = active.and_then(|active| active.function(file, declaration))
-                    else {
+                    let Some(method) = active.function(file, declaration) else {
                         failed.push(declaration);
                         continue;
                     };
@@ -1102,9 +1027,7 @@ fn publish_checked_local_signatures_selected(
                     );
                 }
                 DeclarationKind::Property => {
-                    if let Some(parameter) =
-                        active.and_then(|active| active.constructor_parameter(file, declaration))
-                    {
+                    if let Some(parameter) = active.constructor_parameter(file, declaration) {
                         let ty = info
                             .resolved_declaration_type(&parameter.ty)
                             .or_else(|| info.resolved_type(&parameter.ty))
@@ -1133,7 +1056,7 @@ fn publish_checked_local_signatures_selected(
                         );
                         continue;
                     }
-                    let property = active.and_then(|active| active.property(file, declaration));
+                    let property = active.property(file, declaration);
                     let Some(property) = property else {
                         failed.push(declaration);
                         continue;
@@ -1480,10 +1403,7 @@ fn publish_checked_local_signatures_selected(
 
         match anchor.kind {
             DeclarationKind::Function => {
-                let method = match active {
-                    Some(active) => active.function(file, declaration),
-                    None => owner.methods.get(anchor.sibling as usize),
-                };
+                let method = active.function(file, declaration);
                 let Some(method) = method else {
                     failed.push(declaration);
                     continue;
@@ -1493,8 +1413,7 @@ fn publish_checked_local_signatures_selected(
                     owner: owner_decl.0,
                     method: anchor.sibling,
                 };
-                let Some((signature, receiver)) =
-                    source_signature(class, source_member, method, declaration, active.is_some())
+                let Some((signature, receiver)) = source_signature(class, method, declaration)
                 else {
                     crate::trace_compiler!(
                         "signature",
@@ -1747,19 +1666,8 @@ fn publish_checked_local_signatures_selected(
                         .values()
                         .find(|property| property.stable_declaration == Some(declaration))
                 });
-                let property = match active {
-                    Some(active) => active.property(file, declaration),
-                    None => owner.body_props.iter().find(|property| {
-                        Some(property.span) == index.declaration_range(declaration)
-                    }),
-                };
-                let parameter = match active {
-                    Some(active) => active.constructor_parameter(file, declaration),
-                    None => owner.props.iter().find(|parameter| {
-                        Some(parameter.span) == index.declaration_range(declaration)
-                            && parameter.is_property
-                    }),
-                };
+                let property = active.property(file, declaration);
+                let parameter = active.constructor_parameter(file, declaration);
                 crate::trace_compiler!(
                     "signature",
                     "publish local property declaration={declaration:?} generated={generated} body_property={:?} parameter={:?} checked_type={:?} declared_properties={:?}",
@@ -1936,17 +1844,7 @@ fn publish_checked_local_signatures_selected(
                         .declaration_header(declaration)
                         .is_some_and(|header| header.flags.has(DeclarationFlags::INLINE)),
                 );
-                let property = match active {
-                    Some(active) => active.property(file, property_declaration),
-                    None => index
-                        .declaration_range(property_declaration)
-                        .and_then(|range| {
-                            owner
-                                .body_props
-                                .iter()
-                                .find(|candidate| candidate.span == range)
-                        }),
-                };
+                let property = active.property(file, property_declaration);
                 let mut parameter_names = property
                     .into_iter()
                     .flat_map(|property| property.context_params.iter())

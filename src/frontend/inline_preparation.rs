@@ -397,8 +397,20 @@ pub(super) fn from_checked_analysis(
             );
             return None;
         };
+        let active = match crate::fir::ActiveSourceDeclarations::bind_complete_source(
+            file, source, &index,
+        ) {
+            Ok(active) => active,
+            Err(error) => {
+                crate::trace_compiler!(
+                    "fir",
+                    "Pass 1 inline-local source {raw_source} cannot bind active declarations: {error:?}",
+                );
+                return None;
+            }
+        };
         if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
-            file, source, symbols, info, &mut index, owners, None,
+            file, source, symbols, info, &mut index, owners, &active,
         ) {
             crate::trace_compiler!(
                 "fir",
@@ -569,13 +581,7 @@ pub(super) fn streaming(
             );
             let file = files.get(raw_source)?;
             if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
-                file,
-                source,
-                symbols,
-                &info,
-                &mut index,
-                owners,
-                Some(&active),
+                file, source, symbols, &info, &mut index, owners, &active,
             ) {
                 crate::trace_compiler!(
                     "fir",
