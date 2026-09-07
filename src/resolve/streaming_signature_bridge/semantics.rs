@@ -2602,6 +2602,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     };
                 return Some((
                     SelectedTopLevelCall::Callable {
+                        parameter_by_argument: Self::selected_argument_parameters(
+                            &selected,
+                            arguments,
+                            trailing_lambda,
+                        ),
                         callable: Box::new(callable),
                         source: selected.source_key,
                         declaration: selected.stable_declaration,
@@ -2641,6 +2646,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 {
                     return Some((
                         SelectedTopLevelCall::Callable {
+                            parameter_by_argument: Self::selected_argument_parameters(
+                                &selected,
+                                arguments,
+                                trailing_lambda,
+                            ),
                             callable: Box::new(callable),
                             source: selected.source_key,
                             declaration: selected.stable_declaration,
@@ -2664,6 +2674,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some((selected, callable)) = selected_top_level {
                 return Some((
                     SelectedTopLevelCall::Callable {
+                        parameter_by_argument: Self::selected_argument_parameters(
+                            &selected,
+                            arguments,
+                            trailing_lambda,
+                        ),
                         source: selected.source_key,
                         declaration: selected.stable_declaration,
                         callable: Box::new(callable),
@@ -2786,6 +2801,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some((selected, callable)) = same_module_callable() {
                 return Some((
                     SelectedTopLevelCall::Callable {
+                        parameter_by_argument: Self::selected_argument_parameters(
+                            &selected,
+                            arguments,
+                            trailing_lambda,
+                        ),
                         callable: Box::new(callable),
                         source: selected.source_key,
                         declaration: selected.stable_declaration,
@@ -2872,6 +2892,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 callable,
                 source,
                 declaration,
+                parameter_by_argument,
             } => {
                 crate::trace_compiler!(
                     "signature",
@@ -2879,6 +2900,20 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     callable.name,
                     callable.ret,
                 );
+                let contract = callable.contract.clone().or_else(|| {
+                    declaration.and_then(|declaration| {
+                        self.source_contracts.borrow().get(&declaration).cloned()
+                    })
+                });
+                if let Some(contract) = contract {
+                    self.selected_call_contracts.borrow_mut().insert(
+                        origin,
+                        super::SelectedCallContract {
+                            contract,
+                            parameter_by_argument,
+                        },
+                    );
+                }
                 if let Some(signature) =
                     self.demanded_source_signature(None, declaration, demand)?
                 {
@@ -5854,6 +5889,41 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let ty = super::super::definitely_non_null_ty(base.get());
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
+    }
+
+    fn call_proves_argument_non_null(&self, origin: crate::fir::OriginId, argument: u32) -> bool {
+        use crate::contracts::{Condition, Effect, ParamRef, ReturnsValue};
+        fn proves(condition: &Condition, argument: u32) -> bool {
+            match condition {
+                Condition::IsNull {
+                    param: ParamRef::Param(index),
+                    negated: true,
+                } => *index == argument as usize,
+                Condition::And(left, right) => proves(left, argument) || proves(right, argument),
+                _ => false,
+            }
+        }
+        let contracts = self.selected_call_contracts.borrow();
+        let Some(selected) = contracts.get(&origin) else {
+            return false;
+        };
+        let Some(argument) = selected
+            .parameter_by_argument
+            .get(argument as usize)
+            .copied()
+            .flatten()
+        else {
+            return false;
+        };
+        selected.contract.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::ConditionalReturns {
+                    returns: ReturnsValue::Any,
+                    conclusion,
+                } if proves(conclusion, argument)
+            )
+        })
     }
 
     fn substitute(

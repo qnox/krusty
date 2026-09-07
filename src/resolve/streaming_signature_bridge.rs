@@ -45,6 +45,7 @@ enum SelectedTopLevelCall {
         callable: Box<crate::libraries::LibraryCallable>,
         source: Option<(u32, u32)>,
         declaration: Option<crate::fir::DeclarationId>,
+        parameter_by_argument: Box<[Option<u32>]>,
     },
     Value(Box<crate::libraries::PropertyInfo>),
     /// Runtime value denoted by a classifier name (an object singleton or companion). Call syntax
@@ -71,6 +72,21 @@ struct ProductionSignatureSemantics<'a> {
     completed_scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
+    /// The contract of the callable selected for each top-level call, by call origin, so a
+    /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
+    selected_call_contracts: RefCell<HashMap<crate::fir::OriginId, SelectedCallContract>>,
+    /// Same-module source contracts bound before solving starts, by stable declaration, so a
+    /// call of a source function with `returns() implies (x != null)` proves as much in a
+    /// Pass-1 block as a library one. Publication into the index still happens at finalization.
+    source_contracts:
+        RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
+}
+
+struct SelectedCallContract {
+    contract: std::sync::Arc<crate::contracts::Contract>,
+    /// Selected declaration parameter for each argument in source order. The contract refers to
+    /// declaration parameters, while the compact graph retains source argument order.
+    parameter_by_argument: Box<[Option<u32>]>,
 }
 
 #[derive(Clone)]
@@ -1573,7 +1589,7 @@ impl ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
     ) -> Option<Vec<Option<usize>>> {
         let source_indices = (0..argument_count).collect::<Vec<_>>();
-        let slots = crate::libraries::map_call_args(
+        crate::libraries::map_call_args(
             &source_indices,
             Some(names),
             &candidate.call_sig.param_names,
@@ -1583,11 +1599,43 @@ impl ProductionSignatureSemantics<'_> {
             candidate.call_sig.vararg_index,
             trailing_lambda,
         )
-        .ok()?;
-        source_indices
+        .ok()
+    }
+
+    fn selected_argument_parameters(
+        candidate: &crate::libraries::FunctionInfo,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        trailing_lambda: bool,
+    ) -> Box<[Option<u32>]> {
+        let names = arguments
             .iter()
-            .all(|source| slots.iter().any(|slot| slot == &Some(*source)))
-            .then_some(slots)
+            .map(|argument| argument.name.map(str::to_owned))
+            .collect::<Vec<_>>();
+        let source_by_parameter =
+            Self::candidate_call_slots(candidate, &names, arguments.len(), trailing_lambda)
+                .expect("a selected call must retain its declaration argument mapping");
+        let mut parameter_by_argument = vec![None; arguments.len()];
+        for (parameter, source) in source_by_parameter.into_iter().enumerate() {
+            if let Some(source) = source {
+                parameter_by_argument[source] = u32::try_from(parameter).ok();
+            }
+        }
+        // A slot vector retains the first positional vararg element; every later positional
+        // element is intentionally absorbed by the same declaration parameter. Selection has
+        // already validated the argument list, so any source argument not represented by a
+        // distinct slot belongs to that selected vararg.
+        if let Some(vararg) = candidate
+            .call_sig
+            .vararg_index
+            .and_then(|index| u32::try_from(index).ok())
+        {
+            for parameter in &mut parameter_by_argument {
+                if parameter.is_none() {
+                    *parameter = Some(vararg);
+                }
+            }
+        }
+        parameter_by_argument.into_boxed_slice()
     }
 
     /// Keep only declarations whose own parameter names/defaults/vararg shape can consume the
@@ -4362,6 +4410,8 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         diagnostics: RefCell::new(Vec::new()),
+        selected_call_contracts: RefCell::new(HashMap::new()),
+        source_contracts: RefCell::new(HashMap::new()),
     };
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
@@ -5031,7 +5081,20 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         diagnostics: RefCell::new(Vec::new()),
+        selected_call_contracts: RefCell::new(HashMap::new()),
+        source_contracts: RefCell::new(HashMap::new()),
     };
+    // A source contract shapes the solver's own block evaluation (`ensure(x)` and then `x.p`),
+    // so resolve it once before solving. Publication and failure accounting consume this same
+    // result after the module index exists; neither phase retries semantic resolution.
+    let resolved_contracts = semantics.resolve_source_contracts(&source_contracts);
+    if let Ok(contracts) = &resolved_contracts {
+        semantics.source_contracts.borrow_mut().extend(
+            contracts
+                .iter()
+                .map(|(declaration, contract)| (*declaration, contract.to_arc())),
+        );
+    }
     let evaluator = crate::fir::ResolverBackedSignatureEvaluator::new(&semantics);
     let mut solver = crate::fir::SignatureSolver::new(graph, required);
     for (declaration, signature) in explicit {
@@ -6426,7 +6489,7 @@ pub(crate) fn finalized_streamed_signature_index(
         };
         index.publish_interface_delegations(declaration, delegations);
     }
-    let resolved_contracts = match semantics.resolve_source_contracts(&source_contracts) {
+    let resolved_contracts = match resolved_contracts {
         Ok(contracts) => contracts,
         Err(mut declarations) => {
             failed.append(&mut declarations);

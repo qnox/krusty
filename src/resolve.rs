@@ -19043,18 +19043,30 @@ impl<'a> Checker<'a> {
             .iter()
             .filter(|(score, ..)| score.rank == best_rank)
             .collect::<Vec<_>>();
-        let [best] = maximal.as_slice() else {
-            return maximal
-                .iter()
-                .any(|(score, ..)| score.uses_sam_conversion())
-                .then(|| {
-                    TopLevelSamSelection::Ambiguous(
-                        maximal
-                            .iter()
-                            .map(|(_, index, ..)| overloads[*index].clone())
-                            .collect(),
-                    )
-                });
+        // kotlinc's last tie-break (spec 11.7): among equally specific candidates a
+        // non-parameterized callable wins over a parameterized one. `assertDoesNotThrow(Executable)`
+        // beside `<T> assertDoesNotThrow(ThrowingSupplier<T>)` selects the former for a `{ … }` that
+        // converts to either SAM.
+        let non_generic = maximal
+            .iter()
+            .filter(|(_, index, ..)| overloads[*index].semantic_signature().formals.is_empty())
+            .collect::<Vec<_>>();
+        let best = match (maximal.as_slice(), non_generic.as_slice()) {
+            ([best], _) => best,
+            (_, [best]) => best,
+            _ => {
+                return maximal
+                    .iter()
+                    .any(|(score, ..)| score.uses_sam_conversion())
+                    .then(|| {
+                        TopLevelSamSelection::Ambiguous(
+                            maximal
+                                .iter()
+                                .map(|(_, index, ..)| overloads[*index].clone())
+                                .collect(),
+                        )
+                    });
+            }
         };
         let (score, index, params, ret, bindings) = best;
         let specialized = || {

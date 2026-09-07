@@ -5378,3 +5378,59 @@ fn assert_jvm_streaming_frontend(source: &str, stem: &str) {
     let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
 }
+
+#[test]
+fn expression_body_narrows_a_value_after_a_not_null_contract_call() {
+    let source = r#"// WITH_STDLIB
+import kotlin.contracts.ExperimentalContracts
+import kotlin.contracts.contract
+import kotlin.test.assertNotNull
+class Runtime(val status: String)
+class Backend { fun status(id: String): Runtime? = null }
+fun local(backend: Backend) = run {
+    val status = backend.status("a")
+    assertNotNull(status)
+    status.status
+}
+fun parameter(runtime: Runtime?) = run {
+    requireNotNull(runtime)
+    runtime.status
+}
+@OptIn(ExperimentalContracts::class)
+fun ensure(value: Any?) {
+    contract { returns() implies (value != null) }
+    if (value == null) throw IllegalStateException()
+}
+fun sourceContract(runtime: Runtime?) = run {
+    ensure(runtime)
+    runtime.status
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ContractNarrowedSignature")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("contract-narrowed signature regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    // `returns() implies (actual != null)` holds for the rest of the block, so the inferred
+    // result is the member's type, not a failed selection on the nullable declared type.
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    for name in ["local", "parameter", "sourceContract"] {
+        let ret = analysis
+            .symbols
+            .funs
+            .get(name)
+            .and_then(|overloads| overloads.first())
+            .map(|signature| signature.ret);
+        assert_eq!(ret, Some(Ty::obj("kotlin/String")), "{name}");
+    }
+}
