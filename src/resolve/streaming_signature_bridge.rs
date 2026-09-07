@@ -5117,9 +5117,10 @@ pub(crate) fn finalized_streamed_signature_index(
         source_contracts: RefCell::new(HashMap::new()),
     };
     // A source contract shapes the solver's own block evaluation (`ensure(x)` and then `x.p`),
-    // so bind what resolves now; the authoritative resolution and publication, with its failure
-    // accounting, stays with the finalization below.
-    if let Ok(contracts) = semantics.resolve_source_contracts(&source_contracts) {
+    // so resolve it once before solving. Publication and failure accounting consume this same
+    // result after the module index exists; neither phase retries semantic resolution.
+    let resolved_contracts = semantics.resolve_source_contracts(&source_contracts);
+    if let Ok(contracts) = &resolved_contracts {
         semantics.source_contracts.borrow_mut().extend(
             contracts
                 .iter()
@@ -6568,7 +6569,7 @@ pub(crate) fn finalized_streamed_signature_index(
         };
         index.publish_interface_delegations(declaration, delegations);
     }
-    let resolved_contracts = match semantics.resolve_source_contracts(&source_contracts) {
+    let resolved_contracts = match resolved_contracts {
         Ok(contracts) => contracts,
         Err(mut declarations) => {
             failed.append(&mut declarations);

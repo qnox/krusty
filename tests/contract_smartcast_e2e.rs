@@ -24,6 +24,26 @@ fn assert_rejected(src: &str) {
 }
 
 #[test]
+fn shadowing_top_level_assert_not_null_has_no_contract() {
+    const SRC: &str = "class Runtime(val status: String)\n\
+fun assertNotNull(value: Any?) {}\n\
+fun shadowed(runtime: Runtime?) = run {\n\
+    assertNotNull(runtime)\n\
+    runtime.status\n\
+}\n";
+    let jdk = common::jdk_modules();
+    let diagnostics =
+        common::front_end_diagnostics(SRC, &[common::stdlib_jar()], Some(jdk.as_path()));
+    assert_eq!(
+        diagnostics,
+        [
+            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
+            "unresolved reference 'status'.",
+        ]
+    );
+}
+
+#[test]
 fn expression_bodied_function_narrows_after_require_not_null() {
     // The inferred result type comes from Pass 1, which must apply the contract for the rest
     // of the block exactly as the body check does.
