@@ -1,6 +1,7 @@
 //! Active-file publication of checked local declaration signatures and captures.
 
 use super::*;
+use crate::ast::{ClassDecl, Decl, DeclId, File, FunDecl};
 use crate::resolve::TypeInfo;
 
 #[cfg(test)]

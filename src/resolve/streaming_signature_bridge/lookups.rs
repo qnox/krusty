@@ -435,11 +435,11 @@ impl ProductionSignatureSemantics<'_> {
         if !ty.mentions_error() {
             return Ok(ty);
         }
-        if let Some(diagnostic_reference) = reference.diagnostic_type_ref() {
+        if let Some(diagnostic_extent) = reference.extent() {
             if let Some(diagnostic) = self.recorded_type_diagnostic(
                 diagnostic_scope.owner,
                 diagnostic_scope.source,
-                &diagnostic_reference,
+                diagnostic_extent,
             ) {
                 return Err(diagnostic);
             }

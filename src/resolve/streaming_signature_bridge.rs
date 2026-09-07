@@ -6,7 +6,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{ClassDecl, Decl, DeclId, File, FunDecl, TypeRef};
 use crate::diag::Span;
 use crate::types::{Ty, TypeName};
 
@@ -935,23 +934,8 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
         source: crate::fir::SourceFileId,
-        reference: &TypeRef,
+        extent: Span,
     ) -> Option<crate::fir::DiagnosticId> {
-        fn extent(reference: &TypeRef, lo: &mut u32, hi: &mut u32) {
-            *lo = (*lo).min(reference.span.lo);
-            *hi = (*hi).max(reference.span.hi);
-            for component in reference
-                .fun_params
-                .iter()
-                .chain(reference.arg.iter().map(|argument| &**argument))
-                .chain(reference.targs.iter())
-            {
-                extent(component, lo, hi);
-            }
-        }
-        let mut lo = reference.span.lo;
-        let mut hi = reference.span.hi;
-        extent(reference, &mut lo, &mut hi);
         self.diagnostics
             .borrow()
             .iter()
@@ -960,8 +944,8 @@ impl ProductionSignatureSemantics<'_> {
             .find(|(_, diagnostic)| {
                 diagnostic.declaration == declaration
                     && diagnostic.file == source.raw()
-                    && lo <= diagnostic.span.lo
-                    && diagnostic.span.hi <= hi
+                    && extent.lo <= diagnostic.span.lo
+                    && diagnostic.span.hi <= extent.hi
             })
             .map(|(index, _)| crate::fir::DiagnosticId::from_raw(index as u32 + 1))
     }

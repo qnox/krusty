@@ -191,6 +191,17 @@ impl<'a> SignatureTypeSyntax<'a> {
         Some(occurrences)
     }
 
+    /// Complete source extent of this compact type tree for diagnostic de-duplication.
+    pub(super) fn extent(self) -> Option<Span> {
+        let mut extent = self.span()?;
+        for child in self.nested()? {
+            let child = child.extent()?;
+            extent.lo = extent.lo.min(child.lo);
+            extent.hi = extent.hi.max(child.hi);
+        }
+        Some(extent)
+    }
+
     /// Resolve the restricted semantic shape used for type-parameter upper bounds. Classifier
     /// identity still comes from the declaration's ordinary class-name table; local and enclosing
     /// type parameters are supplied by the shared recursive bound builder.
@@ -255,7 +266,7 @@ impl<'a> SignatureTypeSyntax<'a> {
         Some(if nullable { Ty::nullable(base) } else { base })
     }
 
-    /// AST materialization is restricted to diagnostic rendering for compact callers.
+    /// Reconstruct parser-shaped syntax only for source diagnostic rendering.
     pub(super) fn diagnostic_type_ref(self) -> Option<TypeRef> {
         self.arena.diagnostic_type_ref(self.id, self.names)
     }
