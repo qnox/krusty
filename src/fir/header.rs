@@ -14,8 +14,10 @@ use crate::features::LangFeatures;
 use crate::source::{SourceInput, SourceKind};
 use crate::types::{TypeName, Visibility};
 
+mod active_source;
 mod visibility_suppressions;
 
+pub(crate) use active_source::ActiveSourceHeaders;
 pub(crate) use visibility_suppressions::HeaderVisibilitySuppressionApplication;
 use visibility_suppressions::HeaderVisibilitySuppressionArena;
 
@@ -3555,52 +3557,6 @@ pub fn stream_file_stub_inventory(
     builder.finish()
 }
 
-/// Stable headers extracted from one parser unit, plus its short-lived parser-to-header binding.
-/// The lifetime prevents the binding from escaping the active `File`; only `stubs` enter the
-/// finished module.
-pub(crate) struct ActiveSourceHeaders<'file> {
-    source: SourceFileId,
-    stubs: Vec<DeclarationStub>,
-    primary_declarations: Vec<Option<DeclarationId>>,
-    type_parameter_declarations: std::collections::HashMap<u32, DeclarationId>,
-    enclosing_classifiers: std::collections::HashMap<DeclarationId, DeclId>,
-    direct_classifier_children: std::collections::HashMap<DeclId, Vec<DeclId>>,
-    active_file: std::marker::PhantomData<&'file File>,
-}
-
-impl ActiveSourceHeaders<'_> {
-    pub(crate) const fn source(&self) -> SourceFileId {
-        self.source
-    }
-
-    pub(crate) fn stubs(&self) -> &[DeclarationStub] {
-        &self.stubs
-    }
-
-    pub(crate) fn declaration(&self, parser: DeclId) -> Option<DeclarationId> {
-        self.primary_declarations
-            .get(parser.0 as usize)
-            .copied()
-            .flatten()
-    }
-
-    pub(crate) fn type_parameter_declaration(&self, signature_start: u32) -> Option<DeclarationId> {
-        self.type_parameter_declarations
-            .get(&signature_start)
-            .copied()
-    }
-
-    pub(crate) fn enclosing_classifier(&self, declaration: DeclarationId) -> Option<DeclId> {
-        self.enclosing_classifiers.get(&declaration).copied()
-    }
-
-    pub(crate) fn direct_classifier_children(
-        &self,
-    ) -> &std::collections::HashMap<DeclId, Vec<DeclId>> {
-        &self.direct_classifier_children
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct HeaderInventoryBuilder {
     sources: SourceMap,
@@ -3672,67 +3628,12 @@ impl HeaderInventoryBuilder {
                 Some((start, stub.id))
             })
             .collect();
-        let classifier_parsers = extracted
-            .primary_declarations
-            .iter()
-            .enumerate()
-            .filter_map(|(raw, declaration)| {
-                let declaration = (*declaration)?;
-                self.declarations
-                    .anchor(declaration)
-                    .is_some_and(|anchor| anchor.kind == DeclarationKind::Classifier)
-                    .then(|| {
-                        (
-                            declaration,
-                            DeclId(u32::try_from(raw).expect("too many parser declarations")),
-                        )
-                    })
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        let enclosing_classifier = |declaration: DeclarationId| {
-            let mut owner = self
-                .declarations
-                .anchor(declaration)
-                .and_then(|anchor| anchor.owner);
-            while let Some(candidate) = owner {
-                let anchor = self
-                    .declarations
-                    .anchor(candidate)
-                    .expect("a declaration owner must have a stable anchor");
-                if anchor.kind == DeclarationKind::Classifier {
-                    if let Some(&parser) = classifier_parsers.get(&candidate) {
-                        return Some(parser);
-                    }
-                }
-                owner = anchor.owner;
-            }
-            None
-        };
-        let mut enclosing_classifiers = std::collections::HashMap::new();
-        for stub in &extracted.stubs {
-            if let Some(parser) = enclosing_classifier(stub.id) {
-                enclosing_classifiers.insert(stub.id, parser);
-            }
-        }
-        let mut direct_classifier_children = std::collections::HashMap::new();
-        for (&declaration, &parser) in &classifier_parsers {
-            let Some(parent) = enclosing_classifier(declaration) else {
-                continue;
-            };
-            direct_classifier_children
-                .entry(parent)
-                .or_insert_with(Vec::new)
-                .push(parser);
-        }
-        Some(ActiveSourceHeaders {
-            source: source_id,
-            stubs: extracted.stubs,
-            primary_declarations: extracted.primary_declarations,
+        Some(ActiveSourceHeaders::bind(
+            source_id,
+            &self.declarations,
+            extracted,
             type_parameter_declarations,
-            enclosing_classifiers,
-            direct_classifier_children,
-            active_file: std::marker::PhantomData,
-        })
+        ))
     }
 
     fn add_file(

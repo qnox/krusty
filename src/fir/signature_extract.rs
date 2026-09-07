@@ -26,10 +26,13 @@ pub struct SignatureExtractionFailure {
 pub struct SignatureConstraintExtractor {
     graph: SignatureGraph,
     failures: Vec<SignatureExtractionFailure>,
-    source_classifiers: HashMap<crate::diag::Span, DeclarationId>,
-    source_primary_constructors: HashMap<crate::diag::Span, DeclarationId>,
-    source_functions: HashMap<crate::diag::Span, DeclarationId>,
-    source_stubs: HashMap<crate::diag::Span, DeclarationStub>,
+    source_declarations: HashMap<crate::ast::DeclId, DeclarationId>,
+    source_primary_constructors: HashMap<crate::ast::DeclId, DeclarationId>,
+    source_secondary_constructors: HashMap<(crate::ast::DeclId, u32), DeclarationId>,
+    source_constructor_properties: HashMap<(crate::ast::DeclId, u32), DeclarationId>,
+    source_methods: HashMap<(crate::ast::DeclId, u32), DeclarationId>,
+    source_body_properties: HashMap<(crate::ast::DeclId, u32), DeclarationId>,
+    source_stubs: HashMap<DeclarationId, DeclarationStub>,
     direct_classifier_children: HashMap<crate::ast::DeclId, Vec<crate::ast::DeclId>>,
     lexical_values: Vec<HashMap<Box<str>, SigExprId>>,
     lexical_callables: Vec<HashMap<Box<str>, CompactLexicalCallable>>,
@@ -155,31 +158,60 @@ impl SignatureConstraintExtractor {
     ) {
         let source = active.source();
         let stubs = active.stubs();
-        self.source_classifiers.clear();
-        self.source_classifiers.extend(
-            stubs
-                .iter()
-                .filter(|stub| stub.kind == super::DeclarationKind::Classifier)
-                .map(|stub| (stub.range, stub.id)),
-        );
-        self.source_functions.clear();
-        self.source_functions.extend(
-            stubs
-                .iter()
-                .filter(|stub| stub.kind == super::DeclarationKind::Function)
-                .map(|stub| (stub.range, stub.id)),
-        );
+        self.source_declarations.clear();
+        self.source_declarations
+            .extend((0..file.decl_arena.len()).filter_map(|raw| {
+                let parser =
+                    crate::ast::DeclId(u32::try_from(raw).expect("too many parser declarations"));
+                active.declaration(parser).map(|stable| (parser, stable))
+            }));
         self.source_primary_constructors.clear();
-        self.source_primary_constructors.extend(
-            stubs
-                .iter()
-                .filter(|stub| stub.kind == super::DeclarationKind::Constructor)
-                .filter(|stub| self.source_classifiers.contains_key(&stub.range))
-                .map(|stub| (stub.range, stub.id)),
-        );
+        self.source_secondary_constructors.clear();
+        self.source_constructor_properties.clear();
+        self.source_methods.clear();
+        self.source_body_properties.clear();
+        for raw in 0..file.decl_arena.len() {
+            let classifier =
+                crate::ast::DeclId(u32::try_from(raw).expect("too many parser declarations"));
+            let crate::ast::Decl::Class(class) = file.decl(classifier) else {
+                continue;
+            };
+            if let Some(declaration) = active.primary_constructor(classifier) {
+                self.source_primary_constructors
+                    .insert(classifier, declaration);
+            }
+            for ordinal in 0..class.secondary_ctors.len() {
+                let ordinal = u32::try_from(ordinal).expect("too many secondary constructors");
+                if let Some(declaration) = active.secondary_constructor(classifier, ordinal) {
+                    self.source_secondary_constructors
+                        .insert((classifier, ordinal), declaration);
+                }
+            }
+            for ordinal in 0..class.props.len() {
+                let ordinal = u32::try_from(ordinal).expect("too many constructor properties");
+                if let Some(declaration) = active.constructor_property(classifier, ordinal) {
+                    self.source_constructor_properties
+                        .insert((classifier, ordinal), declaration);
+                }
+            }
+            for ordinal in 0..class.methods.len() {
+                let ordinal = u32::try_from(ordinal).expect("too many classifier methods");
+                if let Some(declaration) = active.method(classifier, ordinal) {
+                    self.source_methods
+                        .insert((classifier, ordinal), declaration);
+                }
+            }
+            for ordinal in 0..class.body_props.len() {
+                let ordinal = u32::try_from(ordinal).expect("too many classifier properties");
+                if let Some(declaration) = active.body_property(classifier, ordinal) {
+                    self.source_body_properties
+                        .insert((classifier, ordinal), declaration);
+                }
+            }
+        }
         self.source_stubs.clear();
         self.source_stubs
-            .extend(stubs.iter().map(|stub| (stub.range, *stub)));
+            .extend(stubs.iter().map(|stub| (stub.id, *stub)));
         self.direct_classifier_children
             .clone_from(active.direct_classifier_children());
         // Local-class members are not published in the module index, but their inferred result may
@@ -251,10 +283,8 @@ impl SignatureConstraintExtractor {
                         crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => None,
                     });
             if let Some(function) = function {
-                if let Some((_, classifier)) = enclosing_classifier {
-                    if let Some(declaration) =
-                        self.source_classifiers.get(&classifier.span).copied()
-                    {
+                if let Some((parser_declaration, classifier)) = enclosing_classifier {
+                    if let Some(declaration) = active.declaration(parser_declaration) {
                         let receiver = self
                             .graph
                             .add_expr(SigExpr::ClassifierType { declaration, scope });
@@ -326,6 +356,14 @@ impl SignatureConstraintExtractor {
             self.local_classifier_stack.clear();
             self.extracting_local_effects.clear();
         }
+        self.source_declarations.clear();
+        self.source_primary_constructors.clear();
+        self.source_secondary_constructors.clear();
+        self.source_constructor_properties.clear();
+        self.source_methods.clear();
+        self.source_body_properties.clear();
+        self.source_stubs.clear();
+        self.direct_classifier_children.clear();
     }
 
     pub fn graph(&self) -> &SignatureGraph {
@@ -348,8 +386,16 @@ impl SignatureConstraintExtractor {
         assert!(
             self.lexical_values.is_empty()
                 && self.lexical_callables.is_empty()
-                && self.lexical_types.is_empty(),
-            "signature extraction must not retain source-local spellings"
+                && self.lexical_types.is_empty()
+                && self.source_declarations.is_empty()
+                && self.source_primary_constructors.is_empty()
+                && self.source_secondary_constructors.is_empty()
+                && self.source_constructor_properties.is_empty()
+                && self.source_methods.is_empty()
+                && self.source_body_properties.is_empty()
+                && self.source_stubs.is_empty()
+                && self.direct_classifier_children.is_empty(),
+            "signature extraction must not retain source-local parser bindings"
         );
         (self.graph, self.failures)
     }
@@ -426,19 +472,21 @@ impl SignatureConstraintExtractor {
             return Ok(());
         };
         let classifier_declaration = self
-            .source_classifiers
-            .get(&classifier_decl.span)
+            .source_declarations
+            .get(&classifier)
             .copied()
             .ok_or(ExpressionForm::Call)?;
         let enclosing_receivers = self.lexical_receivers();
         let methods = classifier_decl
             .methods
             .iter()
-            .filter(|method| method.name == spelling)
-            .cloned()
+            .enumerate()
+            .filter(|(_, method)| method.name == spelling)
+            .map(|(ordinal, method)| (ordinal, method.clone()))
             .collect::<Vec<_>>();
-        for method in methods {
-            let Some(declaration) = self.source_functions.get(&method.span).copied() else {
+        for (ordinal, method) in methods {
+            let ordinal = u32::try_from(ordinal).expect("too many classifier methods");
+            let Some(declaration) = self.source_methods.get(&(classifier, ordinal)).copied() else {
                 continue;
             };
             if self.graph.local_effect(declaration).is_some()
@@ -538,7 +586,7 @@ impl SignatureConstraintExtractor {
             if effect.determines_result && self.graph.constraint(declaration).is_none() {
                 let stub = self
                     .source_stubs
-                    .get(&method.span)
+                    .get(&declaration)
                     .copied()
                     .expect("a local inferred method must retain its compact stub");
                 let constraint_origin = origin(
@@ -580,7 +628,8 @@ impl SignatureConstraintExtractor {
         let crate::ast::Decl::Class(class) = file.decl(classifier) else {
             return Err(ExpressionForm::Block);
         };
-        let Some(classifier_declaration) = self.source_classifiers.get(&class.span).copied() else {
+        let Some(classifier_declaration) = self.source_declarations.get(&classifier).copied()
+        else {
             return Err(ExpressionForm::Block);
         };
         let source = self
@@ -598,7 +647,7 @@ impl SignatureConstraintExtractor {
         });
         let enclosing_receivers = self.lexical_receivers();
         let mut bindings = HashMap::new();
-        if let Some(&constructor) = self.source_primary_constructors.get(&class.span) {
+        if let Some(&constructor) = self.source_primary_constructors.get(&classifier) {
             for (index, parameter) in class.props.iter().enumerate() {
                 bindings.insert(
                     parameter.name.clone().into_boxed_str(),
@@ -630,6 +679,7 @@ impl SignatureConstraintExtractor {
         let extracted = (|| {
             self.register_local_classifier_explicit_types(
                 file,
+                classifier,
                 class,
                 classifier_declaration,
                 member_scope,
@@ -695,8 +745,14 @@ impl SignatureConstraintExtractor {
                     origin,
                 )?;
             }
-            for property in &class.body_props {
-                let Some(stub) = self.source_stubs.get(&property.span).copied() else {
+            for (ordinal, _property) in class.body_props.iter().enumerate() {
+                let ordinal = u32::try_from(ordinal).expect("too many classifier properties");
+                let Some(stub) = self
+                    .source_body_properties
+                    .get(&(classifier, ordinal))
+                    .and_then(|declaration| self.source_stubs.get(declaration))
+                    .copied()
+                else {
                     continue;
                 };
                 if stub.signature_inference.is_none() || self.graph.constraint(stub.id).is_some() {
@@ -747,6 +803,7 @@ impl SignatureConstraintExtractor {
     fn register_local_classifier_explicit_types(
         &mut self,
         _file: &File,
+        parser_classifier: crate::ast::DeclId,
         class: &crate::ast::ClassDecl,
         classifier: DeclarationId,
         enclosing_scope: SignatureScopeId,
@@ -795,7 +852,7 @@ impl SignatureConstraintExtractor {
         self.graph
             .add_explicit_classifier_parents(classifier, superclass, supertypes);
 
-        if let Some(&constructor) = self.source_primary_constructors.get(&class.span) {
+        if let Some(&constructor) = self.source_primary_constructors.get(&parser_classifier) {
             if class.props.iter().all(|parameter| !parameter.is_vararg) {
                 let scope = declaration_scope(self, constructor);
                 let parameters = class
@@ -807,10 +864,15 @@ impl SignatureConstraintExtractor {
                     .add_explicit_signature_types(constructor, parameters, None, None, None);
             }
         }
-        for parameter in class.props.iter().filter(|parameter| parameter.is_property) {
+        for (ordinal, parameter) in class.props.iter().enumerate() {
+            if !parameter.is_property {
+                continue;
+            }
+            let ordinal = u32::try_from(ordinal).expect("too many constructor properties");
             let Some(stub) = self
-                .source_stubs
-                .get(&parameter.span)
+                .source_constructor_properties
+                .get(&(parser_classifier, ordinal))
+                .and_then(|declaration| self.source_stubs.get(declaration))
                 .copied()
                 .filter(|stub| stub.kind == super::DeclarationKind::Property)
             else {
@@ -821,10 +883,12 @@ impl SignatureConstraintExtractor {
             self.graph
                 .add_explicit_signature_types(stub.id, [], Some(result), None, None);
         }
-        for constructor in &class.secondary_ctors {
+        for (ordinal, constructor) in class.secondary_ctors.iter().enumerate() {
+            let ordinal = u32::try_from(ordinal).expect("too many secondary constructors");
             let Some(stub) = self
-                .source_stubs
-                .get(&constructor.span)
+                .source_secondary_constructors
+                .get(&(parser_classifier, ordinal))
+                .and_then(|declaration| self.source_stubs.get(declaration))
                 .copied()
                 .filter(|stub| stub.kind == super::DeclarationKind::Constructor)
             else {
@@ -846,8 +910,13 @@ impl SignatureConstraintExtractor {
             self.graph
                 .add_explicit_signature_types(stub.id, parameters, None, None, None);
         }
-        for method in &class.methods {
-            let Some(declaration) = self.source_functions.get(&method.span).copied() else {
+        for (ordinal, method) in class.methods.iter().enumerate() {
+            let ordinal = u32::try_from(ordinal).expect("too many classifier methods");
+            let Some(declaration) = self
+                .source_methods
+                .get(&(parser_classifier, ordinal))
+                .copied()
+            else {
                 continue;
             };
             if method.params.iter().any(|parameter| parameter.is_vararg) {
@@ -875,10 +944,12 @@ impl SignatureConstraintExtractor {
                 None,
             );
         }
-        for property in &class.body_props {
+        for (ordinal, property) in class.body_props.iter().enumerate() {
+            let ordinal = u32::try_from(ordinal).expect("too many classifier properties");
             let Some(stub) = self
-                .source_stubs
-                .get(&property.span)
+                .source_body_properties
+                .get(&(parser_classifier, ordinal))
+                .and_then(|declaration| self.source_stubs.get(declaration))
                 .copied()
                 .filter(|stub| stub.kind == super::DeclarationKind::Property)
             else {
@@ -1275,8 +1346,8 @@ impl SignatureConstraintExtractor {
                 }
             } else {
                 let declaration = self
-                    .source_classifiers
-                    .get(&classifier.span)
+                    .source_declarations
+                    .get(&declaration)
                     .copied()
                     .ok_or(ExpressionForm::Call)?;
                 self.graph
@@ -1576,9 +1647,7 @@ impl SignatureConstraintExtractor {
                                     .methods
                                     .iter()
                                     .any(|method| method.name == *spelling)
-                                    .then(|| {
-                                        self.source_classifiers.get(&classifier_decl.span).copied()
-                                    })
+                                    .then(|| self.source_declarations.get(&classifier).copied())
                                     .flatten()
                             })
                         {
@@ -1623,13 +1692,14 @@ impl SignatureConstraintExtractor {
                         {
                             if let crate::ast::Decl::Class(class) = file.decl(classifier) {
                                 if let Some(declaration) =
-                                    self.source_classifiers.get(&class.span).copied()
+                                    self.source_declarations.get(&classifier).copied()
                                 {
                                     // Member-effect extraction can fail before the receiver expression
                                     // is visited. The anonymous classifier header is independent of
                                     // that member result and must still be finalized for Pass 2.
                                     self.register_local_classifier_explicit_types(
                                         file,
+                                        classifier,
                                         class,
                                         declaration,
                                         scope,
@@ -2147,7 +2217,7 @@ impl SignatureConstraintExtractor {
                                     .get(statement)
                                     .and_then(|classifier| match file.decl(*classifier) {
                                         crate::ast::Decl::Class(class) => {
-                                            self.source_classifiers.get(&class.span).copied().map(
+                                            self.source_declarations.get(classifier).copied().map(
                                                 |declaration| {
                                                     (
                                                         class
