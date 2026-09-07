@@ -3792,27 +3792,6 @@ impl HeaderInventoryBuilder {
     }
 }
 
-/// Build the same AST-free Pass-1 inventory from files an existing driver has already parsed. This
-/// is the production migration seam: callers can switch semantic decisions to stable headers before
-/// replacing their parse loop with [`stream_file_stub_inventory`]. No AST reference enters the
-/// returned value.
-pub fn inventory_parsed_source_headers(
-    sources: &[SourceInput<'_>],
-    files: &[File],
-) -> StreamedHeaderModule {
-    assert_eq!(
-        sources.len(),
-        files.len(),
-        "source/header inventory inputs must stay positionally aligned"
-    );
-    let mut builder = HeaderInventoryBuilder::default();
-    for (index, (source, file)) in sources.iter().zip(files).enumerate() {
-        let file = (source.kind != SourceKind::Java).then_some(file);
-        builder.add_source(index, source, file);
-    }
-    builder.finish()
-}
-
 /// Match top-level multiplatform headers using only compact Pass-1 facts. The returned stable ids
 /// identify expect declarations shadowed by a same-package, same-shape non-expect declaration or
 /// type alias. No parser declaration id participates in the match.

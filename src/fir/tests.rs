@@ -7,6 +7,15 @@ use crate::features::LangFeatures;
 use crate::source::SourceInput;
 use crate::types::{Ty, Visibility};
 
+fn inventory_active_file(
+    source: &SourceInput<'_>,
+    file: &crate::ast::File,
+) -> StreamedHeaderModule {
+    let mut builder = HeaderInventoryBuilder::default();
+    builder.add_source(0, source, Some(file));
+    builder.finish()
+}
+
 fn anchor(source: SourceFileId, lo: u32, kind: DeclarationKind) -> DeclarationAnchor {
     DeclarationAnchor {
         source,
@@ -773,7 +782,7 @@ fn streamed_extractor_builds_lazy_call_and_member_constraints_from_the_transient
     let sources = [SourceInput::kotlin(text).with_file_stem("Lazy")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_parsed_source_headers(&sources, std::slice::from_ref(&file));
+    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
     extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
@@ -849,7 +858,7 @@ fun localAlias(flag: Boolean) =
     let sources = [SourceInput::kotlin(text).with_file_stem("LocalAlias")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_parsed_source_headers(&sources, std::slice::from_ref(&file));
+    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
     extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
