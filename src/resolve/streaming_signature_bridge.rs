@@ -2434,20 +2434,37 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         signature: &crate::fir::ResolvedSignature,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let Some(property) = self.table.ext_props.values().flatten().find(|property| {
-            stable_declaration.map_or_else(
-                || source.is_some_and(|source| property.source == Some(source)),
-                |declaration| property.stable_declaration == Some(declaration),
-            )
-        }) else {
+        let Some(declaration) = stable_declaration else {
             crate::trace_compiler!(
                 "signature",
-                "demanded source extension property missing source={source:?} stable={stable_declaration:?}",
+                "demanded source extension property has no stable declaration source={source:?}",
             );
             return Err(Self::failure());
         };
+        let stub = self.headers.stub(declaration).ok_or_else(Self::failure)?;
+        let header = self
+            .headers
+            .syntax
+            .declaration(declaration)
+            .ok_or_else(Self::failure)?;
+        let crate::fir::HeaderDeclarationKind::Property {
+            receiver: declared_receiver,
+            ..
+        } = header.kind
+        else {
+            return Err(Self::failure());
+        };
+        let declared_receiver = self
+            .resolve_compact_header_type(
+                crate::fir::SignatureScope {
+                    owner: declaration,
+                    source: stub.source,
+                },
+                declared_receiver.ok_or_else(Self::failure)?,
+            )
+            .ok_or_else(Self::failure)?;
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        crate::symbol_resolver::unify_inferred_ty(property.receiver, receiver, &mut bindings);
+        crate::symbol_resolver::unify_inferred_ty(declared_receiver, receiver, &mut bindings);
         crate::fir::ResolvedTy::new(crate::symbol_resolver::ty_subst_keep_unbound(
             signature.result.get(),
             &bindings,
