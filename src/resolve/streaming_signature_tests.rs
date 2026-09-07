@@ -5424,13 +5424,18 @@ fun sourceContract(runtime: Runtime?) = run {
     // `returns() implies (actual != null)` holds for the rest of the block, so the inferred
     // result is the member's type, not a failed selection on the nullable declared type.
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("contract-narrowed signatures must finalize in Pass 1")
+        .module
+        .index();
     for name in ["local", "parameter", "sourceContract"] {
-        let ret = analysis
-            .symbols
-            .funs
-            .get(name)
-            .and_then(|overloads| overloads.first())
-            .map(|signature| signature.ret);
+        let ret = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find(|declaration| index.declaration_name(*declaration) == Some(name))
+            .and_then(|declaration| index.signature(declaration))
+            .map(|signature| signature.result.get());
         assert_eq!(ret, Some(Ty::obj("kotlin/String")), "{name}");
     }
 }
