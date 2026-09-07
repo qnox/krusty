@@ -1455,14 +1455,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         if let Ok(resolved) = self.resolve_type(scope, origin, syntax, graph) {
             return Ok(resolved);
         }
-        let reference = graph.transient_type_ref(syntax).ok_or_else(Self::failure)?;
-        if reference.name.contains(['.', '/', '$'])
-            || !reference.targs.is_empty()
-            || reference.arg.is_some()
-            || !reference.fun_params.is_empty()
-        {
-            return Err(Self::failure());
-        }
+        let (spelling, nullable) = graph
+            .contextual_classifier_spelling(syntax)
+            .ok_or_else(Self::failure)?;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
@@ -1472,7 +1467,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             super::super::context_sensitive_resolution::expected_nested_classifier(
                 &source,
                 expected.get(),
-                &reference.name,
+                spelling,
             )
         else {
             return Err(Self::failure());
@@ -1482,7 +1477,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             Ty::obj_name(classifier),
             expected.get(),
         );
-        let contextual = if reference.nullable() {
+        let contextual = if nullable {
             Ty::nullable(contextual)
         } else {
             contextual
