@@ -17,7 +17,7 @@ pub(in crate::resolve) struct StreamedCallableHeader {
     pub(in crate::resolve) flags: crate::fir::DeclarationFlags,
     pub(in crate::resolve) signature_inference: Option<crate::fir::InferredSignatureKind>,
     pub(in crate::resolve) receiver: Option<TypeRef>,
-    pub(in crate::resolve) receiver_source_spelling: Option<TypeRef>,
+    pub(in crate::resolve) receiver_source_spelling: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) parameters: Vec<StreamedCallableParameter>,
     pub(in crate::resolve) result: StreamedResultKind,
     pub(in crate::resolve) explicit_result: Option<TypeRef>,
@@ -233,11 +233,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
             let receiver = headers
                 .syntax
                 .transient_type_ref(receiver_id, &headers.lookup_names)?;
-            let source_spelling = headers
-                .syntax
-                .transient_source_spellings(receiver_id, &headers.lookup_names)?;
-            let source_spelling = source_spelling.get(&receiver.span).cloned();
-            (Some(receiver), source_spelling)
+            (Some(receiver), headers.syntax.source_spelling(receiver_id))
         }
         None => (None, None),
     };
@@ -321,7 +317,7 @@ pub(in crate::resolve) struct StreamedPropertyHeader {
     pub(in crate::resolve) signature_inference: Option<crate::fir::InferredSignatureKind>,
     pub(in crate::resolve) getter_declared: bool,
     pub(in crate::resolve) receiver: Option<TypeRef>,
-    pub(in crate::resolve) receiver_source_spelling: Option<TypeRef>,
+    pub(in crate::resolve) receiver_source_spelling: Option<crate::fir::HeaderTypeId>,
     pub(in crate::resolve) context_parameters: Vec<(String, TypeRef)>,
     pub(in crate::resolve) declared_type: Option<TypeRef>,
     pub(in crate::resolve) backing_field_type: Option<TypeRef>,
@@ -378,11 +374,7 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
     let (receiver, receiver_source_spelling) = match receiver {
         Some(receiver_id) => {
             let receiver = materialize(receiver_id)?;
-            let spellings = headers
-                .syntax
-                .transient_source_spellings(receiver_id, &headers.lookup_names)?;
-            let source_spelling = spellings.get(&receiver.span).cloned();
-            (Some(receiver), source_spelling)
+            (Some(receiver), headers.syntax.source_spelling(receiver_id))
         }
         None => (None, None),
     };

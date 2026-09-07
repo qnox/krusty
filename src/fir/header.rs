@@ -1231,6 +1231,11 @@ impl HeaderSyntaxArena {
         self.types.get(id.raw() as usize).copied()
     }
 
+    /// As-written compact syntax for a type rewritten by same-file alias expansion.
+    pub(crate) fn source_spelling(&self, id: HeaderTypeId) -> Option<HeaderTypeId> {
+        self.source_spellings.get(&id).copied()
+    }
+
     /// Source spelling of one compact classifier type. This is lookup input only; callers that
     /// need semantic identity must still bind it through the declaration's normal scope.
     pub fn classifier_spelling(&self, id: HeaderTypeId, names: &LookupNames) -> Option<String> {

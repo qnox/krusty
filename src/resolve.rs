@@ -6726,7 +6726,8 @@ fn collect_signatures_with_cp_impl(
                             if companion_extension {
                                 associated_companion_receiver_ty_from_spelling(
                                     receiver,
-                                    callable_header.receiver_source_spelling.as_ref(),
+                                    callable_header.receiver_source_spelling,
+                                    headers,
                                     &class_names,
                                     &semantic_tp,
                                     diags,
@@ -8975,7 +8976,8 @@ fn collect_signatures_with_cp_impl(
                         let erased_receiver = if companion_extension {
                             associated_companion_receiver_ty_from_spelling(
                                 recv_ref,
-                                property_header.receiver_source_spelling.as_ref(),
+                                property_header.receiver_source_spelling,
+                                headers,
                                 &class_names,
                                 &erased_tparams,
                                 diags,
@@ -8986,7 +8988,8 @@ fn collect_signatures_with_cp_impl(
                         let recv_ty = if companion_extension {
                             associated_companion_receiver_ty_from_spelling(
                                 recv_ref,
-                                property_header.receiver_source_spelling.as_ref(),
+                                property_header.receiver_source_spelling,
+                                headers,
                                 &class_names,
                                 &semantic_tparams,
                                 diags,
@@ -11534,14 +11537,38 @@ fn apply_alias_expansion(
 /// extension receivers still go through full alias application and arity checking.
 fn associated_companion_receiver_ty_from_spelling(
     receiver: &TypeRef,
-    source_spelling: Option<&TypeRef>,
+    source_spelling: Option<crate::fir::HeaderTypeId>,
+    headers: &crate::fir::StreamedHeaderModule,
     classes: &ClassNames,
     tparams: &TParams,
     diags: &mut DiagSink,
 ) -> Ty {
-    let spelling = source_spelling.unwrap_or(receiver);
-    if spelling.targs.is_empty() {
-        if let Some(alias) = classes.alias_expansion(&spelling.name) {
+    let alias_spelling = match source_spelling {
+        Some(source_spelling) => {
+            let spelling = headers
+                .syntax
+                .ty(source_spelling)
+                .expect("receiver source spelling must name compact syntax");
+            let crate::fir::HeaderTypeKind::Classifier { detail, .. } = spelling.kind else {
+                return ty_of_ref(receiver, classes, tparams, diags);
+            };
+            let spelling = headers
+                .syntax
+                .classifier_type(detail)
+                .expect("receiver source spelling must name a compact classifier");
+            headers
+                .syntax
+                .type_operands(spelling.arguments)
+                .is_empty()
+                .then(|| {
+                    compact_header_type_spelling(headers, source_spelling)
+                        .expect("compact receiver source spelling must retain its name")
+                })
+        }
+        None => receiver.targs.is_empty().then(|| receiver.name.clone()),
+    };
+    if let Some(alias_spelling) = alias_spelling {
+        if let Some(alias) = classes.alias_expansion(&alias_spelling) {
             return Ty::obj_name(alias.target);
         }
     }
