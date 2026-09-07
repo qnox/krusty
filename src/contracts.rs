@@ -5,11 +5,28 @@
 
 use crate::ast::{Expr, ExprId, File, Stmt, TypeRef};
 
+/// Contract-local handle for compact source type syntax. The owning frontend boundary maps this
+/// number to its packed syntax arena; the shared contract model deliberately does not depend on FIR.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct CompactSourceTypeId(u32);
+
+impl CompactSourceTypeId {
+    pub(crate) fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub(crate) fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// A contract whose source type references have all been bound to publishable semantic types.
 ///
-/// Keeping this wrapper at the phase boundary prevents an unresolved [`TypeRef`] from reaching
-/// checked FIR, common lowering, metadata, or a backend. Source decoding may temporarily produce a
-/// [`Contract`], but only this form may be retained in the stable declaration index.
+/// Keeping this wrapper at the phase boundary prevents unresolved parser or compact-header type
+/// syntax from reaching checked FIR, common lowering, metadata, or a backend. Source decoding may
+/// temporarily produce a [`Contract`], but only this form may be retained in the stable declaration
+/// index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedContract(std::sync::Arc<Contract>);
 
@@ -18,6 +35,7 @@ impl Eq for ResolvedContract {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnpublishableContract {
     SourceType,
+    CompactSourceType,
     PendingType,
     ErrorType,
 }
@@ -28,6 +46,9 @@ impl ResolvedContract {
             match condition {
                 Condition::IsType { ty, .. } => match ty {
                     ConditionType::Source(_) => Err(UnpublishableContract::SourceType),
+                    ConditionType::CompactSource(_) => {
+                        Err(UnpublishableContract::CompactSourceType)
+                    }
                     ConditionType::Metadata(ty) if ty.mentions_pending() => {
                         Err(UnpublishableContract::PendingType)
                     }
@@ -97,53 +118,71 @@ pub struct Contract {
 }
 
 impl Contract {
-    /// Map the temporary source type references produced by DSL decoding to semantic types.
-    ///
-    /// Pass 1 invokes this while the declaration's lexical type scope is live and then requires
-    /// [`ResolvedContract::new`] to succeed before publishing the contract. The legacy whole-file
-    /// resolver also uses it while that migration path remains; checked FIR, lowering, metadata,
-    /// and backends must never receive a surviving `Source` variant.
-    pub fn with_resolved_types(
+    /// Replace parser-owned contract type references with compact source syntax while the source
+    /// body is active. The returned contract is still temporary and must be semantically resolved
+    /// before [`ResolvedContract::new`] accepts it.
+    pub(crate) fn with_compact_source_types(
         &self,
-        resolve: &mut dyn FnMut(&TypeRef) -> Option<crate::types::Ty>,
+        add: &mut dyn FnMut(&TypeRef) -> CompactSourceTypeId,
+    ) -> Contract {
+        self.map_condition_types(&mut |ty| match ty {
+            ConditionType::Source(reference) => ConditionType::CompactSource(add(reference)),
+            ty => ty.clone(),
+        })
+    }
+
+    /// Bind compact contract type syntax in the declaring function's signature scope.
+    pub(crate) fn with_resolved_compact_source_types(
+        &self,
+        resolve: &mut dyn FnMut(CompactSourceTypeId) -> Option<crate::types::Ty>,
+    ) -> Contract {
+        self.map_condition_types(&mut |ty| match ty {
+            ConditionType::CompactSource(reference) => resolve(*reference)
+                .map(ConditionType::Metadata)
+                .unwrap_or(ConditionType::CompactSource(*reference)),
+            ty => ty.clone(),
+        })
+    }
+
+    fn map_condition_types(
+        &self,
+        map_type: &mut dyn FnMut(&ConditionType) -> ConditionType,
     ) -> Contract {
         fn map(
-            c: &Condition,
-            resolve: &mut dyn FnMut(&TypeRef) -> Option<crate::types::Ty>,
+            condition: &Condition,
+            map_type: &mut dyn FnMut(&ConditionType) -> ConditionType,
         ) -> Condition {
-            match c {
+            match condition {
                 Condition::IsType { param, ty, negated } => Condition::IsType {
                     param: *param,
-                    ty: match ty {
-                        ConditionType::Source(r) => resolve(r)
-                            .map(ConditionType::Metadata)
-                            .unwrap_or_else(|| ConditionType::Source(r.clone())),
-                        m => m.clone(),
-                    },
+                    ty: map_type(ty),
                     negated: *negated,
                 },
-                Condition::And(l, r) => {
-                    Condition::And(Box::new(map(l, resolve)), Box::new(map(r, resolve)))
-                }
-                Condition::Or(l, r) => {
-                    Condition::Or(Box::new(map(l, resolve)), Box::new(map(r, resolve)))
-                }
-                c => c.clone(),
+                Condition::And(left, right) => Condition::And(
+                    Box::new(map(left, map_type)),
+                    Box::new(map(right, map_type)),
+                ),
+                Condition::Or(left, right) => Condition::Or(
+                    Box::new(map(left, map_type)),
+                    Box::new(map(right, map_type)),
+                ),
+                condition => condition.clone(),
             }
         }
+
         Contract {
             effects: self
                 .effects
                 .iter()
-                .map(|e| match e {
+                .map(|effect| match effect {
                     Effect::ConditionalReturns {
                         returns,
                         conclusion,
                     } => Effect::ConditionalReturns {
                         returns: *returns,
-                        conclusion: map(conclusion, resolve),
+                        conclusion: map(conclusion, map_type),
                     },
-                    e => e.clone(),
+                    effect => effect.clone(),
                 })
                 .collect(),
         }
@@ -262,12 +301,14 @@ pub enum Condition {
     Or(Box<Condition>, Box<Condition>),
 }
 
-/// The type in an `is`-conclusion at the decoding boundary. Source DSL decoding temporarily carries
-/// an unresolved AST reference only until Pass 1 binds it in the declaring function's lexical type
-/// scope. Stable source contracts and metadata contracts both carry the semantic form.
+/// The type in an `is`-conclusion at the decoding boundary. Source DSL decoding first sees a parser
+/// reference, production immediately packs it as `CompactSource`, and signature finalization binds
+/// that node in the declaring function's lexical scope. Stable source contracts and metadata
+/// contracts both carry the semantic form.
 #[derive(Clone, Debug)]
 pub enum ConditionType {
     Source(TypeRef),
+    CompactSource(CompactSourceTypeId),
     Metadata(crate::types::Ty),
 }
 
@@ -279,6 +320,7 @@ impl PartialEq for ConditionType {
             (ConditionType::Source(a), ConditionType::Source(b)) => {
                 a.name == b.name && a.flags == b.flags
             }
+            (ConditionType::CompactSource(a), ConditionType::CompactSource(b)) => a == b,
             (ConditionType::Metadata(a), ConditionType::Metadata(b)) => a == b,
             _ => false,
         }

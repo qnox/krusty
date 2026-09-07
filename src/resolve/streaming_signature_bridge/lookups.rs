@@ -80,19 +80,6 @@ impl ProductionSignatureSemantics<'_> {
     /// The classifier a DOTTED spelling names, walking nested children from an in-scope root:
     /// `Container.Nested` is `Container$Nested`. Every intermediate segment must itself exist as a
     /// classifier, so a value-qualified spelling falls through to receiver folding untouched.
-    /// A type reference resolved WITHOUT a body checker: a type parameter of the owning declaration
-    /// chain, or a classifier reachable through this file's import scope, with its type arguments
-    /// resolved the same way. Returns `None` for the forms that still need the checker so the caller
-    /// can fall back rather than publish a wrong type.
-    pub(super) fn signature_type_ref(
-        &self,
-        scope: crate::fir::SignatureScope,
-        lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
-    ) -> Option<Ty> {
-        self.signature_type_syntax_at(scope, lexical, SignatureTypeSyntax::parser(reference), true)
-    }
-
     /// Locate the first declaration type component whose compact lookup fails. The packed header
     /// owns every component span, so Pass 1 can diagnose `Outer<Missing>` at `Missing` without
     /// retaining source text or blaming the otherwise valid outer classifier.

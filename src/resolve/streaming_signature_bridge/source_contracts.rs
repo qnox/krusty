@@ -10,13 +10,14 @@ use crate::ast::{Decl, Expr, File, FunBody, Stmt};
 
 use super::ProductionSignatureSemantics;
 
-#[derive(Clone, Debug)]
 pub(crate) struct SourceContractCandidate {
     declaration: crate::fir::DeclarationId,
     source: crate::fir::SourceFileId,
     callee: Box<str>,
     shadowed_by_parameter: bool,
     contract: crate::contracts::Contract,
+    syntax: crate::fir::HeaderSyntaxArena,
+    names: crate::fir::LookupNames,
 }
 
 /// Decode contract-shaped first statements while the bounded Pass-1 parser unit is active.
@@ -65,6 +66,13 @@ pub(crate) fn extract_source_contract_candidates(
                 &function.name,
                 function.receiver.is_some(),
             )?;
+            let mut syntax = crate::fir::HeaderSyntaxArena::default();
+            let mut names = crate::fir::LookupNames::default();
+            let contract = contract.with_compact_source_types(&mut |reference| {
+                crate::contracts::CompactSourceTypeId::from_raw(
+                    syntax.add_type(reference, &mut names).raw(),
+                )
+            });
             Some(SourceContractCandidate {
                 declaration,
                 source: active.source(),
@@ -74,6 +82,8 @@ pub(crate) fn extract_source_contract_candidates(
                     .iter()
                     .any(|parameter| parameter.name == *callee),
                 contract,
+                syntax,
+                names,
             })
         })
         .collect()
@@ -121,14 +131,26 @@ impl ProductionSignatureSemantics<'_> {
             if !intrinsic {
                 continue;
             }
-            let contract = candidate.contract.with_resolved_types(&mut |reference| {
-                self.with_signature_type_scope(scope, |lexical| {
-                    self.signature_type_ref(scope, lexical, reference)
-                })
-                .ok()
-                .flatten()
-                .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
-            });
+            let contract =
+                candidate
+                    .contract
+                    .with_resolved_compact_source_types(&mut |reference| {
+                        self.with_signature_type_scope(scope, |lexical| {
+                            self.signature_type_syntax_at(
+                                scope,
+                                lexical,
+                                super::SignatureTypeSyntax::compact(
+                                    &candidate.syntax,
+                                    &candidate.names,
+                                    crate::fir::HeaderTypeId::from_raw(reference.raw()),
+                                ),
+                                true,
+                            )
+                        })
+                        .ok()
+                        .flatten()
+                        .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
+                    });
             match crate::contracts::ResolvedContract::new(contract) {
                 Ok(contract) => resolved.push((candidate.declaration, contract)),
                 Err(error) => {
@@ -188,5 +210,10 @@ mod tests {
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].declaration, stable);
+        assert_eq!(
+            crate::contracts::ResolvedContract::new(candidates[0].contract.clone()),
+            Err(crate::contracts::UnpublishableContract::CompactSourceType),
+            "the Pass-1 candidate must own compact header syntax, not a parser TypeRef"
+        );
     }
 }
