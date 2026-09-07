@@ -26,7 +26,6 @@ pub(in crate::resolve) struct StreamedCallableHeader {
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) context_count: usize,
     pub(in crate::resolve) signature_start: u32,
-    pub(in crate::resolve) annotations: crate::fir::HeaderTypeRange,
 }
 
 #[derive(Clone)]
@@ -116,6 +115,27 @@ pub(in crate::resolve) fn resolved_compact_annotation_identities(
         .filter_map(|annotation| compact_header_type_spelling(headers, *annotation))
         .filter_map(|annotation| class_names.classifier_binding(&annotation).ok())
         .collect()
+}
+
+pub(in crate::resolve) fn resolved_compact_declaration_annotations(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::DeclarationId,
+    class_names: &ClassNames,
+) -> Vec<TypeName> {
+    let header = headers
+        .syntax
+        .declaration(declaration)
+        .expect("a projected source declaration must retain compact header syntax");
+    resolved_compact_annotation_identities(headers, header.annotations, class_names)
+}
+
+pub(in crate::resolve) fn compact_declaration_has_resolved_annotation(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::DeclarationId,
+    class_names: &ClassNames,
+    expected: TypeName,
+) -> bool {
+    resolved_compact_declaration_annotations(headers, declaration, class_names).contains(&expected)
 }
 
 pub(in crate::resolve) fn compact_header_has_resolved_annotation(
@@ -289,7 +309,6 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         bounds,
         context_count: usize::try_from(context_count).ok()?,
         signature_start,
-        annotations: syntax_declaration.annotations,
     })
 }
 
@@ -310,7 +329,6 @@ pub(in crate::resolve) struct StreamedPropertyHeader {
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) mutable: bool,
     pub(in crate::resolve) setter_visibility: Visibility,
-    pub(in crate::resolve) annotations: crate::fir::HeaderTypeRange,
 }
 
 /// Materialize a property header from stable compact identity without consulting a parser
@@ -421,7 +439,6 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         bounds,
         mutable,
         setter_visibility,
-        annotations: declaration.annotations,
     })
 }
 

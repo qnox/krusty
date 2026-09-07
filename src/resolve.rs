@@ -6794,9 +6794,9 @@ fn collect_signatures_with_cp_impl(
                             // declaration set or rediscovering `reified` in individual call paths.
                             .with_requires_splice(reified)
                             .with_has_reified_type_params(reified),
-                        annotations: resolved_compact_annotation_identities(
+                        annotations: resolved_compact_declaration_annotations(
                             headers,
-                            callable_header.annotations,
+                            callable_header.declaration,
                             &class_names,
                         ),
                         equality_bound: None,
@@ -7782,9 +7782,9 @@ fn collect_signatures_with_cp_impl(
                             is_const: property_header
                                 .flags
                                 .has(crate::fir::DeclarationFlags::CONST),
-                            annotations: resolved_compact_annotation_identities(
+                            annotations: resolved_compact_declaration_annotations(
                                 headers,
-                                property_header.annotations,
+                                property_header.declaration,
                                 &class_names,
                             ),
                             getter_name: property_getter_name(&property_header.name),
@@ -9110,9 +9110,9 @@ fn collect_signatures_with_cp_impl(
                                 source_file: i as u32,
                                 package,
                                 visibility: property_visibility,
-                                annotations: resolved_compact_annotation_identities(
+                                annotations: resolved_compact_declaration_annotations(
                                     headers,
-                                    property_header.annotations,
+                                    property_header.declaration,
                                     &class_names,
                                 ),
                                 stable_declaration: Some(compact_property.id),
@@ -9223,9 +9223,9 @@ fn collect_signatures_with_cp_impl(
                         is_const,
                         is_lateinit,
                         compile_time_constant: None,
-                        implicit_integer_coercion: compact_header_has_resolved_annotation(
+                        implicit_integer_coercion: compact_declaration_has_resolved_annotation(
                             headers,
-                            property_header.annotations,
+                            property_header.declaration,
                             &class_names,
                             type_name("kotlin/internal/ImplicitIntegerCoercion"),
                         ),
@@ -9238,9 +9238,9 @@ fn collect_signatures_with_cp_impl(
                         package: source_packages[i].replace('.', "/"),
                         visibility: property_visibility,
                         setter_visibility: property_header.setter_visibility,
-                        annotations: resolved_compact_annotation_identities(
+                        annotations: resolved_compact_declaration_annotations(
                             headers,
-                            property_header.annotations,
+                            property_header.declaration,
                             &class_names,
                         ),
                         stable_declaration: Some(compact_property.id),
@@ -11063,7 +11063,7 @@ fn member_signature_from_header(
             .with_is_final(header.flags.has(crate::fir::DeclarationFlags::FINAL))
             .with_is_suspend(header.flags.has(crate::fir::DeclarationFlags::SUSPEND))
             .with_is_abstract(header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)),
-        annotations: resolved_compact_annotation_identities(headers, header.annotations, classes),
+        annotations: resolved_compact_declaration_annotations(headers, header.declaration, classes),
         equality_bound: compact_header_equality_bound(headers, &header.parameters, classes),
         vararg_index: header
             .parameters
