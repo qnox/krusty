@@ -73,6 +73,15 @@ struct ProductionSignatureSemantics<'a> {
     completed_scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
+    /// The contract of the callable selected for each top-level call, by call origin, so a
+    /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
+    selected_call_contracts:
+        RefCell<HashMap<crate::fir::OriginId, std::sync::Arc<crate::contracts::Contract>>>,
+    /// Same-module source contracts bound before solving starts, by stable declaration, so a
+    /// call of a source function with `returns() implies (x != null)` proves as much in a
+    /// Pass-1 block as a library one. Publication into the index still happens at finalization.
+    source_contracts:
+        RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
 }
 
 #[derive(Clone)]
@@ -4433,6 +4442,8 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         diagnostics: RefCell::new(Vec::new()),
+        selected_call_contracts: RefCell::new(HashMap::new()),
+        source_contracts: RefCell::new(HashMap::new()),
     };
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
@@ -5102,7 +5113,19 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         diagnostics: RefCell::new(Vec::new()),
+        selected_call_contracts: RefCell::new(HashMap::new()),
+        source_contracts: RefCell::new(HashMap::new()),
     };
+    // A source contract shapes the solver's own block evaluation (`ensure(x)` and then `x.p`),
+    // so bind what resolves now; the authoritative resolution and publication, with its failure
+    // accounting, stays with the finalization below.
+    if let Ok(contracts) = semantics.resolve_source_contracts(&source_contracts) {
+        semantics.source_contracts.borrow_mut().extend(
+            contracts
+                .iter()
+                .map(|(declaration, contract)| (*declaration, contract.to_arc())),
+        );
+    }
     let evaluator = crate::fir::ResolverBackedSignatureEvaluator::new(&semantics);
     let mut solver = crate::fir::SignatureSolver::new(graph, required);
     for (declaration, signature) in explicit {

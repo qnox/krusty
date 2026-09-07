@@ -24,6 +24,26 @@ fn assert_rejected(src: &str) {
 }
 
 #[test]
+fn expression_bodied_function_narrows_after_require_not_null() {
+    // The inferred result type comes from Pass 1, which must apply the contract for the rest
+    // of the block exactly as the body check does.
+    const SRC: &str = "fun first(list: List<String?>) = run {\n\
+    val head = list.firstOrNull()\n\
+    requireNotNull(head)\n\
+    head.length\n\
+}\n\
+fun second(head: String?) = run {\n\
+    checkNotNull(head)\n\
+    head.length\n\
+}\n\
+fun box(): String = if (first(listOf(\"abc\")) == 3 && second(\"de\") == 2) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("contract narrowing in an inferred signature compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
 fn not_is_null_or_empty_narrows_both_receivers() {
     const SRC: &str = "fun extract(a: String?, b: String?): Pair<String, String>? {\n\
     return if (!a.isNullOrEmpty() && !b.isNullOrEmpty()) a to b else null\n\

@@ -256,6 +256,15 @@ pub enum SigExpr {
     },
     Nullable(SigExprId),
     NonNullable(SigExprId),
+    /// A value read after an expression-statement call whose contract proves it non-null for the
+    /// rest of the block (`assertNotNull(x)`, `requireNotNull(x)`, a same-module
+    /// `returns() implies (x != null)`). The callee is only known once `call` is selected, so the
+    /// proof is deferred to evaluation; without it the read keeps `value`'s type.
+    ContractNarrowed {
+        value: SigExprId,
+        call: SigExprId,
+        argument: u32,
+    },
     Substitute {
         base: SigExprId,
         substitutions: SubstitutionRange,
@@ -1133,6 +1142,14 @@ pub trait SignatureSemantics {
     fn make_nullable(&self, base: ResolvedTy) -> Result<ResolvedTy, DiagnosticId>;
 
     fn make_non_nullable(&self, base: ResolvedTy) -> Result<ResolvedTy, DiagnosticId>;
+
+    /// Whether the callable selected for the call at `origin` carries a
+    /// `returns() implies (<argument> != null)` contract effect for its positional `argument`.
+    /// Consulted after the call itself evaluated; a semantics that keeps no selection state
+    /// proves nothing.
+    fn call_proves_argument_non_null(&self, _origin: OriginId, _argument: u32) -> bool {
+        false
+    }
 
     fn substitute(
         &self,

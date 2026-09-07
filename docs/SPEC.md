@@ -1859,6 +1859,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A signature-pass block applies a call's `returns() implies (x != null)` contract.** An
+  expression-bodied function whose result is a block-ish lambda (`fun t() = runBlocking { … }`,
+  `= runTest { … }`, `= run { … }` — the shape of most test functions) gets its return type from
+  the Pass-1 signature solver, which evaluates the block on its own compact model. That model
+  narrowed `if (x != null)` but not a contract call: after `assertNotNull(status)` a later
+  `status.status` was selected on the declared `ServerRuntime?`, the member selection failed with
+  a real diagnostic, and the whole function's signature failed — `unresolved reference` on a
+  member kotlinc accepts, once per such read (fourteen in one real test source set), plus a
+  `cannot infer the return type` on the test itself when the read was the result. The extractor
+  now rebinds every lexical value (a local or a parameter) that is a positional argument of an
+  expression-statement call through a `ContractNarrowed` node; at evaluation the node consults the
+  contract of the callable actually selected for that call (`selected_call_contracts`, recorded
+  by origin at selection) and yields the definitely-non-null type only when an effect
+  `returns() implies (param_i != null)` names that argument. `assertNotNull`, `requireNotNull`,
+  `checkNotNull` and a same-module source contract all qualify; a same-module `assertNotNull`
+  without a contract narrows nothing and the read is rejected as kotlinc rejects it. Named
+  arguments decline (a contract parameter index is positional). The body check still applies its
+  own flow narrowing in Pass 2; Pass 1 only has to agree on the result type, so the emitted
+  bytes of such a body do not change under this rule (the inline `run { … }` shape itself still
+  carries the known inline-lambda residues: the `$i$a$-run` marker local, the inlined
+  `requireNotNull` body, and a `checkcast` kotlinc omits on an unused generic result). Tests:
+  `streaming_signature_tests::expression_body_narrows_a_value_after_a_not_null_contract_call`,
+  `…::a_shadowing_callee_without_a_contract_does_not_narrow_in_pass_one`,
+  `tests/contract_smartcast_e2e.rs::expression_bodied_function_narrows_after_require_not_null`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
