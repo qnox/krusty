@@ -8,7 +8,7 @@ use super::super::*;
 /// for Pass 2.
 pub(crate) fn finalize_streamed_top_level_conflicts(
     headers: &crate::fir::StreamedHeaderModule,
-    table: &mut SymbolTable,
+    table: &SymbolTable,
     diags: &mut DiagSink,
 ) {
     #[derive(Clone)]
@@ -101,25 +101,5 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         );
     }
 
-    commit_top_level_conflict_groups(table, &groups, &pending, reserved_diagnostic_bytes, diags);
-    table.conflicting_top_level_key_by_source.clear();
-    for entry in entries {
-        let Some(source_declaration) = entry.signature.source_decl else {
-            continue;
-        };
-        let Some(key) = TopLevelFunctionConflictKey::from_signature(&entry.signature, entry.name)
-        else {
-            continue;
-        };
-        let local = entry.signature.visibility.is_private() || entry.entry_point;
-        let retained_for_recovery = table
-            .conflicting_top_level_candidates
-            .get(&key)
-            .is_some_and(|candidates| !local || candidates.by_file.contains_key(&entry.source));
-        if retained_for_recovery {
-            table
-                .conflicting_top_level_key_by_source
-                .insert((entry.source, source_declaration.0), key);
-        }
-    }
+    emit_top_level_conflict_groups(&groups, &pending, reserved_diagnostic_bytes, diags);
 }

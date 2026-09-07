@@ -767,11 +767,6 @@ impl TopLevelFunctionConflictGroups {
     }
 }
 
-#[derive(Clone, Default)]
-struct TopLevelFunctionConflictCandidates {
-    by_file: HashMap<u32, Vec<TopLevelFunctionConflictCandidate>>,
-}
-
 #[derive(Clone, Copy)]
 struct PendingTopLevelFunctionConflict {
     group: usize,
@@ -3600,10 +3595,6 @@ pub struct SymbolTable {
     /// How many mutation brackets are open — see [`SymbolTable::begin_module_mutation`].
     module_mutation_depth: std::cell::Cell<usize>,
     pub funs: HashMap<String, Vec<Signature>>,
-    conflicting_top_level_keys: std::collections::HashSet<TopLevelFunctionConflictKey>,
-    conflicting_top_level_key_by_source: HashMap<(u32, u32), TopLevelFunctionConflictKey>,
-    conflicting_top_level_candidates:
-        HashMap<TopLevelFunctionConflictKey, TopLevelFunctionConflictCandidates>,
     /// Declared classes by JVM internal name (e.g. `pkg/Point`, `pkg/Outer$Inner`) — two classes
     /// sharing a SIMPLE name in different packages are distinct entries, so member lookup on one
     /// never evicts the other. This is a strict invariant: source aliases live in the separate
@@ -3758,9 +3749,6 @@ impl Default for SymbolTable {
             module_cache_enabled: std::cell::Cell::new(false),
             module_mutation_depth: std::cell::Cell::new(0),
             funs: HashMap::new(),
-            conflicting_top_level_keys: std::collections::HashSet::new(),
-            conflicting_top_level_key_by_source: HashMap::new(),
-            conflicting_top_level_candidates: HashMap::new(),
             classes: HashMap::new(),
             source_packages: std::collections::HashSet::new(),
             source_class_headers: HashMap::new(),
@@ -9908,13 +9896,7 @@ fn report_conflicting_top_level_overloads(
     pending: &HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
     reserved_message_bytes: usize,
     diags: &mut DiagSink,
-) -> std::collections::HashSet<TopLevelFunctionConflictKey> {
-    let conflicting_keys = groups
-        .groups
-        .iter()
-        .filter(|(_, group)| group.conflicts)
-        .map(|(key, _)| key.clone())
-        .collect();
+) {
     let mut retained_message_bytes = reserved_message_bytes;
     let saved_file = diags.current_file();
     let mut pending = pending.iter().collect::<Vec<_>>();
@@ -10000,36 +9982,15 @@ fn report_conflicting_top_level_overloads(
         diags.error(current.diagnostic_span, message);
     }
     diags.set_file(saved_file);
-    conflicting_keys
 }
 
-fn commit_top_level_conflict_groups(
-    table: &mut SymbolTable,
+fn emit_top_level_conflict_groups(
     groups: &TopLevelFunctionConflictGroups,
     pending: &HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
     reserved_message_bytes: usize,
     diags: &mut DiagSink,
 ) {
-    table.conflicting_top_level_keys =
-        report_conflicting_top_level_overloads(groups, pending, reserved_message_bytes, diags);
-    table.conflicting_top_level_candidates = groups
-        .groups
-        .iter()
-        .filter(|(key, _)| table.conflicting_top_level_keys.contains(key))
-        .map(|(key, group)| {
-            (
-                key.clone(),
-                TopLevelFunctionConflictCandidates {
-                    by_file: group
-                        .files
-                        .iter()
-                        .filter(|&(_, state)| !state.candidates.is_empty())
-                        .map(|(&file, state)| (file, state.candidates.clone()))
-                        .collect(),
-                },
-            )
-        })
-        .collect();
+    report_conflicting_top_level_overloads(groups, pending, reserved_message_bytes, diags);
 }
 
 pub(crate) fn map_call_sig_args_with_trailing(
