@@ -7759,7 +7759,7 @@ fn collect_signatures_with_cp_impl(
                                     setter_visibility: property_header
                                         .mutable
                                         .then_some(property_header.setter_visibility),
-                                    stable_declaration: property_header.declaration,
+                                    stable_declaration: Some(property_header.declaration),
                                     source_member: None,
                                     getter: None,
                                     setter: None,
@@ -7813,7 +7813,7 @@ fn collect_signatures_with_cp_impl(
                                     .has(crate::fir::DeclarationFlags::ABSTRACT),
                             context_params,
                             source_member: None,
-                            stable_declaration: property_header.declaration,
+                            stable_declaration: Some(property_header.declaration),
                         };
                         if declared_property.context_params.is_empty() {
                             declared_props.insert(property_header.name.clone(), declared_property);
@@ -11130,7 +11130,7 @@ fn member_signature_from_header(
         visibility: header.visibility,
         context_count: header.context_count,
         source_decl: None,
-        stable_declaration: header.declaration,
+        stable_declaration: Some(header.declaration),
         source_file: Some(source_file),
         source_member,
         source_receiver: None,
@@ -11245,16 +11245,10 @@ fn declared_member_callable_headers(
 /// parameter (`fun <T> use(f: () -> T) = f()`). In both cases the declaration says `T`; publishing
 /// the body's erased `Any?` would discard the constraint needed by callers.
 fn inferred_return_type_parameter(file: &File, function: &FunDecl) -> Option<String> {
-    let header = active_callable_header(function);
-    inferred_return_type_parameter_from_header(file, function, &header)
-}
-
-fn inferred_return_type_parameter_from_header(
-    file: &File,
-    function: &FunDecl,
-    header: &StreamedCallableHeader,
-) -> Option<String> {
-    if header.result != StreamedResultKind::Inferred || header.type_parameters.is_empty() {
+    if function.ret.is_some()
+        || !matches!(function.body, FunBody::Expr(_))
+        || function.type_params.is_empty()
+    {
         return None;
     }
     let FunBody::Expr(body) = &function.body else {
@@ -11265,13 +11259,13 @@ fn inferred_return_type_parameter_from_header(
     // this legacy refinement must not reopen (or index) the discarded body.
     let body = file.expr_arena.get(body.0 as usize)?;
     let returned_type = match body {
-        Expr::Name(name) if name == "this" => header.receiver.as_ref()?,
+        Expr::Name(name) if name == "this" => function.receiver.as_ref()?,
         Expr::Name(name) => {
             let parameter = function
                 .params
                 .iter()
                 .position(|parameter| &parameter.name == name)?;
-            &header.parameters.get(parameter)?.ty
+            &function.params.get(parameter)?.ty
         }
         Expr::Call { callee, .. } => {
             let Expr::Name(name) = file.expr_arena.get(callee.0 as usize)? else {
@@ -11281,7 +11275,7 @@ fn inferred_return_type_parameter_from_header(
                 .params
                 .iter()
                 .position(|parameter| &parameter.name == name)?;
-            let parameter = &header.parameters.get(parameter)?.ty;
+            let parameter = &function.params.get(parameter)?.ty;
             if parameter.name != "<fun>" && parameter.fun_params.is_empty() {
                 return None;
             }
@@ -11289,8 +11283,8 @@ fn inferred_return_type_parameter_from_header(
         }
         _ => return None,
     };
-    header
-        .type_parameters
+    function
+        .type_params
         .iter()
         .find(|type_parameter| {
             *type_parameter == &returned_type.name && returned_type.targs.is_empty()
@@ -11307,24 +11301,20 @@ fn source_generic_signature_from_tparams(
     inferred_ret_tparam: Option<String>,
     formal_bounds: Vec<Vec<Ty>>,
 ) -> GenericSig {
-    let header = active_callable_header(function);
-    let bindings = header
-        .type_parameters
+    let bindings = function
+        .type_params
         .iter()
         .map(|source| (source.clone(), type_params.bound(source)))
         .collect::<HashMap<_, _>>();
-    let ret = if header.explicit_result.is_some() {
+    let ret = if function.ret.is_some() {
         resolved_ret
     } else {
         crate::symbol_resolver::ty_subst_keep_unbound(resolved_ret, &bindings)
     };
-    let ret = match (header.result, inferred_ret_tparam) {
-        (StreamedResultKind::Inferred, Some(name)) => type_params.bound(&name),
-        _ => ret,
-    };
+    let ret = inferred_ret_tparam.map_or(ret, |name| type_params.bound(&name));
     GenericSig {
-        formals: header
-            .type_parameters
+        formals: function
+            .type_params
             .iter()
             .filter_map(|source| type_params.bound(source).ty_param_name())
             .map(str::to_string)

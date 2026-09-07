@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{ClassDecl, Decl, DeclId, File, FunBody, FunDecl, TypeRef};
+use crate::ast::{ClassDecl, Decl, DeclId, File, FunDecl, TypeRef};
 use crate::diag::Span;
 use crate::types::{Ty, TypeName};
 

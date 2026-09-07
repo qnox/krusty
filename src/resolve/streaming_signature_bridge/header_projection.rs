@@ -11,7 +11,7 @@ use crate::resolve::ClassNames;
 /// making the compact copy authoritative for explicit callable types during the transition.
 #[derive(Clone)]
 pub(in crate::resolve) struct StreamedCallableHeader {
-    pub(in crate::resolve) declaration: Option<crate::fir::DeclarationId>,
+    pub(in crate::resolve) declaration: crate::fir::DeclarationId,
     pub(in crate::resolve) name: String,
     pub(in crate::resolve) visibility: Visibility,
     pub(in crate::resolve) flags: crate::fir::DeclarationFlags,
@@ -274,7 +274,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         })
         .collect::<Option<Vec<_>>>()?;
     Some(StreamedCallableHeader {
-        declaration: Some(stub.id),
+        declaration: stub.id,
         name,
         visibility: stub.visibility,
         flags: stub.flags,
@@ -293,85 +293,8 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
     })
 }
 
-pub(in crate::resolve) fn active_callable_header(function: &FunDecl) -> StreamedCallableHeader {
-    let result = match (&function.ret, &function.body) {
-        (Some(_), _) => StreamedResultKind::Explicit,
-        (None, FunBody::Expr(_)) => StreamedResultKind::Inferred,
-        (None, FunBody::Block(_) | FunBody::None) => StreamedResultKind::ImplicitUnit,
-    };
-    StreamedCallableHeader {
-        declaration: None,
-        name: function.name.clone(),
-        visibility: function.visibility,
-        flags: crate::fir::DeclarationFlags::default()
-            .with(crate::fir::DeclarationFlags::INLINE, function.is_inline())
-            .with(crate::fir::DeclarationFlags::FINAL, function.is_final())
-            .with(crate::fir::DeclarationFlags::OPEN, function.is_open())
-            .with(
-                crate::fir::DeclarationFlags::OVERRIDE,
-                function.is_override(),
-            )
-            .with(
-                crate::fir::DeclarationFlags::ABSTRACT,
-                function.is_abstract(),
-            )
-            .with(crate::fir::DeclarationFlags::SUSPEND, function.is_suspend())
-            .with(crate::fir::DeclarationFlags::TAILREC, function.is_tailrec())
-            .with(
-                crate::fir::DeclarationFlags::OPERATOR,
-                function.is_operator(),
-            )
-            .with(crate::fir::DeclarationFlags::INFIX, function.is_infix())
-            .with(
-                crate::fir::DeclarationFlags::COMPANION,
-                function.is_companion_extension(),
-            ),
-        signature_inference: match (&function.ret, &function.body) {
-            (None, FunBody::Expr(_)) if function.receiver.is_some() => {
-                Some(crate::fir::InferredSignatureKind::ExtensionExpression)
-            }
-            (None, FunBody::Expr(_)) => Some(crate::fir::InferredSignatureKind::ExpressionFunction),
-            (Some(_), _) | (None, FunBody::Block(_) | FunBody::None) => None,
-        },
-        receiver: function.receiver.clone(),
-        receiver_source_spelling: None,
-        parameters: function
-            .params
-            .iter()
-            .map(|parameter| StreamedCallableParameter {
-                name: parameter.name.clone(),
-                ty: parameter.ty.clone(),
-                is_vararg: parameter.is_vararg,
-                has_default: parameter.default.is_some(),
-                annotations: crate::fir::HeaderTypeRange::default(),
-                type_annotations: crate::fir::HeaderTypeRange::default(),
-                annotation_class_literals:
-                    crate::fir::HeaderParameterAnnotationClassLiteralRange::default(),
-            })
-            .collect(),
-        result,
-        explicit_result: function.ret.clone(),
-        type_parameters: function.type_params.clone(),
-        type_parameter_flags: function
-            .type_params
-            .iter()
-            .map(|parameter| {
-                crate::fir::HeaderTypeParameterFlags::from_semantics(
-                    crate::types::TypeVariance::Invariant,
-                    function.non_null_type_params.contains(parameter),
-                    function.reified_type_params.contains(parameter),
-                )
-            })
-            .collect(),
-        bounds: function.type_param_bounds.clone(),
-        context_count: function.context_count,
-        signature_start: function.signature_span.lo,
-        annotations: crate::fir::HeaderTypeRange::default(),
-    }
-}
-
 pub(in crate::resolve) struct StreamedPropertyHeader {
-    pub(in crate::resolve) declaration: Option<crate::fir::DeclarationId>,
+    pub(in crate::resolve) declaration: crate::fir::DeclarationId,
     pub(in crate::resolve) name: String,
     pub(in crate::resolve) span: Span,
     pub(in crate::resolve) visibility: Visibility,
@@ -482,7 +405,7 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
         })
         .collect::<Option<Vec<_>>>()?;
     Some(StreamedPropertyHeader {
-        declaration: Some(property_stub.id),
+        declaration: property_stub.id,
         name,
         span: property_stub.range,
         visibility: property_stub.visibility,

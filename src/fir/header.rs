@@ -743,14 +743,6 @@ impl HeaderTypeParameterFlags {
         flags
     }
 
-    pub(crate) fn from_semantics(
-        variance: crate::types::TypeVariance,
-        non_null: bool,
-        reified: bool,
-    ) -> Self {
-        Self::new(variance, non_null, reified)
-    }
-
     pub const fn is_in(self) -> bool {
         self.0 & Self::IN != 0
     }
