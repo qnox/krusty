@@ -2828,24 +2828,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 if let Some(signature) =
                     self.demanded_source_signature(None, declaration, demand)?
                 {
-                    let context_count = self
-                        .table
-                        .funs
-                        .values()
-                        .flatten()
-                        .find(|candidate| {
-                            declaration.map_or_else(
-                                || {
-                                    source.is_some_and(|(file, source_declaration)| {
-                                        candidate.source_file == Some(file)
-                                            && candidate.source_decl
-                                                == Some(DeclId(source_declaration))
-                                    })
-                                },
-                                |declaration| candidate.stable_declaration == Some(declaration),
-                            )
+                    let context_count = declaration
+                        .and_then(|declaration| self.headers.syntax.declaration(declaration))
+                        .and_then(|header| match header.kind {
+                            crate::fir::HeaderDeclarationKind::Callable {
+                                context_count, ..
+                            } => Some(context_count as usize),
+                            crate::fir::HeaderDeclarationKind::Classifier { .. }
+                            | crate::fir::HeaderDeclarationKind::Property { .. }
+                            | crate::fir::HeaderDeclarationKind::Constructor { .. }
+                            | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
                         })
-                        .map(|candidate| candidate.context_count)
                         .unwrap_or_default()
                         .min(signature.parameters.len());
                     let parameters = signature.parameters[context_count..]
