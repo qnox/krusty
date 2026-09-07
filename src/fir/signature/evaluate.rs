@@ -103,7 +103,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 spread: argument.spread,
                 integer_literal: evaluated_integer_literal(semantics, argument.value, graph, memo),
                 lambda: argument.lambda,
-                contextual_call: matches!(graph.expr(argument.value), Some(SigExpr::Call { .. })),
+                contextual_call: matches!(
+                    graph.expr(argument.value),
+                    Some(SigExpr::Call { .. } | SigExpr::MemberCall { .. })
+                ),
             }))
         }
 
@@ -607,6 +610,23 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     memo,
                     computing,
                 )),
+                SigExpr::MemberCall {
+                    receiver,
+                    target,
+                    arguments,
+                    origin,
+                } => Some(evaluate_member_call(
+                    semantics,
+                    receiver,
+                    target,
+                    arguments,
+                    origin,
+                    Some(expected),
+                    graph,
+                    demand,
+                    memo,
+                    computing,
+                )),
                 SigExpr::NonNullable(base) => evaluate_expression_with_expected(
                     semantics, base, expected, graph, demand, memo, computing,
                 )
@@ -647,6 +667,108 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     evaluated
                 })()),
                 _ => None,
+            }
+        }
+
+        /// A member call, under the expectation the graph recorded for it or an override supplied
+        /// by an enclosing argument position (`repo.delete(scope.any())` hands `String` down).
+        #[allow(clippy::too_many_arguments)]
+        fn evaluate_member_call<S: SignatureSemantics>(
+            semantics: &S,
+            receiver: SigExprId,
+            target: DeferredMemberSelectionId,
+            arguments: CallArgumentRange,
+            origin: OriginId,
+            expected_override: Option<ResolvedTy>,
+            graph: &SignatureGraph,
+            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            memo: &mut HashMap<SigExprId, ResolvedTy>,
+            computing: &mut std::collections::HashSet<SigExprId>,
+        ) -> Result<ResolvedTy, DiagnosticId> {
+            let receiver =
+                evaluate_expression(semantics, receiver, graph, demand, memo, computing)?;
+            let selection = graph
+                .member_selection(target)
+                .expect("a deferred member-call selection must belong to its graph");
+            debug_assert_eq!(selection.origin, origin);
+            let scope = graph
+                .scope(selection.scope)
+                .expect("a deferred member-call scope must belong to its graph");
+            let spelling = graph
+                .name(selection.spelling)
+                .expect("a deferred member-call spelling must belong to its graph");
+            let mut resolved_type_arguments = Vec::new();
+            for argument in graph.operands(selection.type_arguments).iter().copied() {
+                resolved_type_arguments.push(evaluate_expression(
+                    semantics, argument, graph, demand, memo, computing,
+                )?);
+            }
+            let expected = match (expected_override, selection.expected) {
+                (Some(expected), _) => Some(expected),
+                (None, Some(expected)) => Some(evaluate_expression(
+                    semantics, expected, graph, demand, memo, computing,
+                )?),
+                (None, None) => None,
+            };
+            let probes = graph
+                .call_arguments(arguments)
+                .iter()
+                .map(|argument| argument_probe(semantics, argument, graph, demand, memo, computing))
+                .collect::<Result<Vec<_>, _>>()?;
+            let expectations = semantics.member_call_argument_expectations(
+                scope,
+                spelling,
+                origin,
+                receiver,
+                &probes,
+                &resolved_type_arguments,
+                selection.trailing_lambda,
+                expected,
+                demand,
+            )?;
+            let mut resolved_arguments = Vec::new();
+            for (index, argument) in graph.call_arguments(arguments).iter().enumerate() {
+                resolved_arguments.push(materialize_argument(
+                    semantics,
+                    argument,
+                    expectations.get(index).copied().flatten(),
+                    graph,
+                    demand,
+                    memo,
+                    computing,
+                )?);
+            }
+            let selected = semantics.select_member_call(
+                scope,
+                spelling,
+                origin,
+                receiver,
+                &resolved_arguments,
+                &resolved_type_arguments,
+                selection.trailing_lambda,
+                expected,
+                demand,
+            )?;
+            if let Some(effect) = selected
+                .declaration
+                .and_then(|declaration| graph.local_effect(declaration))
+            {
+                semantics.enter_scoped_receiver(scope.owner, receiver);
+                let evaluated =
+                    evaluate_expression(semantics, effect.result, graph, demand, memo, computing);
+                semantics.exit_scoped_receiver(scope.owner);
+                let effect_result = evaluated?;
+                Ok(if effect.determines_result {
+                    effect_result
+                } else {
+                    selected
+                        .ty
+                        .ok_or_else(|| semantics.missing_signature_diagnostic(scope.owner))?
+                })
+            } else {
+                selected
+                    .ty
+                    .ok_or_else(|| semantics.missing_signature_diagnostic(scope.owner))
             }
         }
 
@@ -910,102 +1032,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         target,
                         arguments,
                         origin,
-                    } => {
-                        let receiver = evaluate_expression(
-                            semantics, receiver, graph, demand, memo, computing,
-                        )?;
-                        let selection = graph
-                            .member_selection(target)
-                            .expect("a deferred member-call selection must belong to its graph");
-                        debug_assert_eq!(selection.origin, origin);
-                        let scope = graph
-                            .scope(selection.scope)
-                            .expect("a deferred member-call scope must belong to its graph");
-                        let spelling = graph
-                            .name(selection.spelling)
-                            .expect("a deferred member-call spelling must belong to its graph");
-                        let mut resolved_type_arguments = Vec::new();
-                        for argument in graph.operands(selection.type_arguments).iter().copied() {
-                            resolved_type_arguments.push(evaluate_expression(
-                                semantics, argument, graph, demand, memo, computing,
-                            )?);
-                        }
-                        let expected = match selection.expected {
-                            Some(expected) => Some(evaluate_expression(
-                                semantics, expected, graph, demand, memo, computing,
-                            )?),
-                            None => None,
-                        };
-                        let probes = graph
-                            .call_arguments(arguments)
-                            .iter()
-                            .map(|argument| {
-                                argument_probe(semantics, argument, graph, demand, memo, computing)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let expectations = semantics.member_call_argument_expectations(
-                            scope,
-                            spelling,
-                            origin,
-                            receiver,
-                            &probes,
-                            &resolved_type_arguments,
-                            selection.trailing_lambda,
-                            expected,
-                            demand,
-                        )?;
-                        let mut resolved_arguments = Vec::new();
-                        for (index, argument) in graph.call_arguments(arguments).iter().enumerate()
-                        {
-                            resolved_arguments.push(materialize_argument(
-                                semantics,
-                                argument,
-                                expectations.get(index).copied().flatten(),
-                                graph,
-                                demand,
-                                memo,
-                                computing,
-                            )?);
-                        }
-                        let selected = semantics.select_member_call(
-                            scope,
-                            spelling,
-                            origin,
-                            receiver,
-                            &resolved_arguments,
-                            &resolved_type_arguments,
-                            selection.trailing_lambda,
-                            expected,
-                            demand,
-                        )?;
-                        if let Some(effect) = selected
-                            .declaration
-                            .and_then(|declaration| graph.local_effect(declaration))
-                        {
-                            semantics.enter_scoped_receiver(scope.owner, receiver);
-                            let evaluated = evaluate_expression(
-                                semantics,
-                                effect.result,
-                                graph,
-                                demand,
-                                memo,
-                                computing,
-                            );
-                            semantics.exit_scoped_receiver(scope.owner);
-                            let effect_result = evaluated?;
-                            Ok(if effect.determines_result {
-                                effect_result
-                            } else {
-                                selected.ty.ok_or_else(|| {
-                                    semantics.missing_signature_diagnostic(scope.owner)
-                                })?
-                            })
-                        } else {
-                            selected
-                                .ty
-                                .ok_or_else(|| semantics.missing_signature_diagnostic(scope.owner))
-                        }
-                    }
+                    } => evaluate_member_call(
+                        semantics, receiver, target, arguments, origin, None, graph, demand, memo,
+                        computing,
+                    ),
                     SigExpr::Binary {
                         operator,
                         lhs,

@@ -2176,6 +2176,28 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[Ty],
         explicit_type_arguments: &[Ty],
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        self.apply_demanded_member_expecting(
+            receiver,
+            member,
+            signature,
+            arguments,
+            explicit_type_arguments,
+            None,
+        )
+    }
+
+    /// [`Self::apply_demanded_member`] under the call's expectation: a result-only formal the
+    /// arguments leave open (`any<T>()` filling an `Instant` parameter) binds from the expected
+    /// result, as the source-callable path already does.
+    fn apply_demanded_member_expecting(
+        &self,
+        receiver: Ty,
+        member: &crate::libraries::LibraryMember,
+        signature: &crate::fir::ResolvedSignature,
+        arguments: &[Ty],
+        explicit_type_arguments: &[Ty],
+        expected: Option<Ty>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let source_file = member
             .source_member
             .map(crate::libraries::SourceMember::file)
@@ -2214,6 +2236,20 @@ impl ProductionSignatureSemantics<'_> {
             );
         }
         let result = self.apply_dispatch_receiver(receiver, member, signature.result.get());
+        if let Some(expected) = expected {
+            if result.mentions_ty_param() {
+                let mut from_result = crate::symbol_resolver::GSigBinds::new();
+                crate::symbol_resolver::unify_inferred_ty_with_source(
+                    &semantic_source,
+                    result,
+                    expected,
+                    &mut from_result,
+                );
+                for (formal, actual) in from_result {
+                    bindings.entry(formal).or_insert(actual);
+                }
+            }
+        }
         crate::trace_compiler!(
             "signature",
             "apply demanded member receiver={receiver:?} member_owner={:?} arguments={arguments:?} bindings={bindings:?} signature_result={:?} dispatch_result={result:?}",
