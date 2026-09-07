@@ -51974,7 +51974,7 @@ impl<'a> Checker<'a> {
             self.declare_scoped_property(property_scope, property, false);
         }
         let outer_internal = type_name(&class_internal(self.file, &outer.name));
-        let entry_owner = type_name(&format!("{}${}", outer_internal.render(), entry.name));
+        let entry_owner = type_name_nested_child(outer_internal, &entry.name);
         let mut properties = Vec::new();
         for (field, property) in entry
             .props
@@ -52027,14 +52027,12 @@ impl<'a> Checker<'a> {
             return;
         };
         let receiver = Ty::obj_name(type_name(&class_internal(self.file, &owner.name)));
-        let entry_owner = type_name(&format!(
-            "{}${}",
+        let entry_owner = type_name_nested_child(
             receiver
                 .obj_internal()
-                .expect("enum receiver has a classifier")
-                .render(),
-            entry.name
-        ));
+                .expect("enum receiver has a classifier"),
+            &entry.name,
+        );
         for (method_index, method) in entry.methods.iter().enumerate() {
             let stable_declaration = self.active_declarations.enum_entry_method_declaration(
                 owner_declaration,
@@ -54019,7 +54017,7 @@ impl<'a> Checker<'a> {
     fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
         // Probe the current class and its structural lexical owners in nearest-first order.
         for outer in self.lexical_source_class_names() {
-            let candidate = type_name(&format!("{}${name}", outer.render()));
+            let candidate = type_name_nested_child(outer, name);
             if self.resolver().classifier(candidate).is_some() {
                 return Some(candidate);
             }
@@ -60544,13 +60542,10 @@ impl<'a> Checker<'a> {
                     let entry_receiver = scope
                         .this_ty()
                         .expect("an enum entry body has its enum receiver");
-                    let entry_owner = type_name(&format!(
-                        "{}${}",
-                        current_owner
-                            .expect("enum class must have a source owner")
-                            .render(),
-                        entry.name
-                    ));
+                    let entry_owner = type_name_nested_child(
+                        current_owner.expect("enum class must have a source owner"),
+                        &entry.name,
+                    );
                     for (method_index, method) in entry.methods.iter().enumerate() {
                         let stable_declaration =
                             self.active_declarations.enum_entry_method_declaration(
