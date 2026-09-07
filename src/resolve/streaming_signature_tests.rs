@@ -5468,7 +5468,6 @@ fun statement(scope: Scope<List<String>>) = exec { scope returns emptyList() }
     }
 }
 
-
 #[test]
 fn a_failing_statement_does_not_fail_the_inferred_result_of_its_block() {
     let source = r#"// WITH_STDLIB
