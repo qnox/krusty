@@ -280,6 +280,10 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
 pub(crate) fn publish_stable_declaration_metadata(
     index: &mut ResolvedModuleIndex,
     table: &SymbolTable,
+    declaration_spellings: &std::collections::HashMap<
+        DeclarationId,
+        crate::spelling::DeclaredSpellings,
+    >,
 ) {
     let classifier_hierarchies = table
         .classes
@@ -302,7 +306,7 @@ pub(crate) fn publish_stable_declaration_metadata(
     for (declaration, hierarchy) in classifier_hierarchies {
         index.publish_classifier_hierarchy(declaration, hierarchy);
     }
-    for (&declaration, spellings) in &table.stable_declared_spellings {
+    for (&declaration, spellings) in declaration_spellings {
         index.publish_declaration_spellings(declaration, spellings.clone());
     }
     for (declaration, suppressions) in table.visibility_suppressed_declarations() {

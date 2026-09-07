@@ -3630,10 +3630,6 @@ pub struct SymbolTable {
     /// modules. A class's entry covers its header (supertypes, primary-constructor parameters,
     /// type-parameter bounds); its members are keyed separately in [`Self::member_spellings`].
     pub declared_spellings: HashMap<(u32, DeclId), crate::spelling::DeclaredSpellings>,
-    /// The same declaration spelling facts keyed by stable Pass-1 identity. This is the only form
-    /// allowed past the parser seam; the legacy parser-keyed map remains for non-streamed analysis.
-    pub stable_declared_spellings:
-        HashMap<crate::fir::DeclarationId, crate::spelling::DeclaredSpellings>,
     /// The same, for class members, keyed by the exact AST coordinate lowering already uses.
     pub member_spellings:
         HashMap<crate::libraries::SourceMember, crate::spelling::DeclaredSpellings>,
@@ -3752,7 +3748,6 @@ impl Default for SymbolTable {
             source_alias_fqns: HashMap::new(),
             source_alias_expansions: HashMap::new(),
             declared_spellings: HashMap::new(),
-            stable_declared_spellings: HashMap::new(),
             member_spellings: HashMap::new(),
             alias_expansion_spellings: HashMap::new(),
             props: HashMap::new(),
@@ -6228,12 +6223,18 @@ fn signature_collection_declarations(
         .collect()
 }
 
+pub(crate) struct CollectedStreamedSignatures {
+    pub(crate) symbols: SymbolTable,
+    pub(crate) declaration_spellings:
+        HashMap<crate::fir::DeclarationId, crate::spelling::DeclaredSpellings>,
+}
+
 pub(crate) fn collect_streamed_signatures_with_cp(
     headers: &crate::fir::StreamedHeaderModule,
     local_contexts: &[PassOneLocalClassContext],
     libraries: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
-) -> SymbolTable {
+) -> CollectedStreamedSignatures {
     crate::wide_stack::on_wide_stack(move || {
         collect_signatures_with_cp_impl(headers, local_contexts, libraries, diags)
     })
@@ -6271,7 +6272,7 @@ fn collect_signatures_with_cp_impl(
     local_contexts: &[PassOneLocalClassContext],
     libraries: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
-) -> SymbolTable {
+) -> CollectedStreamedSignatures {
     let frontend_plugins = crate::plugins::enabled_plugins("main");
     let file_type_aliases = (0..headers.sources.len())
         .map(|file_index| {
@@ -9569,7 +9570,8 @@ fn collect_signatures_with_cp_impl(
     // the read erased to the parameter's bound — `x` published `Any`. Pre-inferring first gives the
     // run something to read; the pass after collection still runs and still refines, because this is
     // a fixpoint rather than a single sweep.
-    collect_compact_declared_spellings(&mut table, headers, &file_class_names);
+    let declaration_spellings =
+        collect_compact_declared_spellings(&table, headers, &file_class_names);
     collect_stable_visibility_suppressions(&mut table, headers);
 
     table.class_names = class_names;
@@ -9577,7 +9579,10 @@ fn collect_signatures_with_cp_impl(
         compact_cycle_span(internal, signature, headers, components)
     });
     table.finish_module_mutation();
-    table
+    CollectedStreamedSignatures {
+        symbols: table,
+        declaration_spellings,
+    }
 }
 
 /// Project `@Suppress` visibility flags onto stable declarations after annotation names have been
@@ -28945,12 +28950,13 @@ mod tests {
         class.secondary_ctors[0].params[0].ty.name = "String".to_string();
         class.type_aliases.clear();
 
-        let symbols = collect_streamed_signatures_with_cp(
+        let collected = collect_streamed_signatures_with_cp(
             &headers,
             &local_contexts,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
         );
+        let symbols = collected.symbols;
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         let signature = &symbols.funs["use"][0];
         assert_eq!(signature.params, [Ty::Int]);
@@ -28973,8 +28979,8 @@ mod tests {
             })
             .expect("stable carry declaration")
             .id;
-        let carry_spellings = symbols
-            .stable_declared_spellings
+        let carry_spellings = collected
+            .declaration_spellings
             .get(&carry_declaration)
             .expect("compact carry metadata spellings");
         assert_eq!(carry_spellings.ret.alias, Some(type_name("Cargo")));

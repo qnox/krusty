@@ -864,12 +864,14 @@ fn analyze_source_set_impl(
             file.release_body_arenas();
         }
     }
-    let mut symbols = crate::resolve::collect_streamed_signatures_with_cp(
+    let collected_signatures = crate::resolve::collect_streamed_signatures_with_cp(
         &pass1_headers,
         &local_class_contexts,
         platform,
         diags,
     );
+    let mut symbols = collected_signatures.symbols;
+    let declaration_spellings = collected_signatures.declaration_spellings;
     if multiplatform {
         report_unmatched_expect_roots(
             &pass1_headers,
@@ -917,7 +919,11 @@ fn analyze_source_set_impl(
             &mut index,
             &mut symbols,
         );
-        crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
+        crate::resolve::publish_stable_declaration_metadata(
+            &mut index,
+            &symbols,
+            &declaration_spellings,
+        );
         crate::resolve::publish_override_plans(&mut index, &symbols);
         inherit_override_default_work(
             &mut pass1_headers,

@@ -5130,7 +5130,8 @@ fn compact_symbol_collection_never_dereferences_released_body_arenas() {
         std::slice::from_ref(&local_context),
         Box::new(EmptySymbolSource),
         &mut diagnostics,
-    );
+    )
+    .symbols;
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(symbols

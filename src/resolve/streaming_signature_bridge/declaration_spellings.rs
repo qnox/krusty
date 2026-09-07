@@ -152,10 +152,10 @@ fn bound_spellings(
 
 /// Populate only stable declaration-keyed metadata sidecars from the compact Pass-1 inventory.
 pub(in crate::resolve) fn collect_compact_declared_spellings(
-    table: &mut SymbolTable,
+    table: &SymbolTable,
     headers: &StreamedHeaderModule,
     file_class_names: &[ClassNames],
-) {
+) -> std::collections::HashMap<DeclarationId, DeclaredSpellings> {
     let expansions = table.alias_expansion_spellings.clone();
     let classifier_types = table
         .classes
@@ -181,7 +181,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         completed_scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
     };
-    let mut records = Vec::new();
+    let mut records = std::collections::HashMap::new();
     for stub in &headers.stubs {
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
             continue;
@@ -400,9 +400,8 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
             }
         })();
         if let Some(record) = record.filter(|record| !record.is_none()) {
-            records.push((stub.id, record));
+            records.insert(stub.id, record);
         }
     }
-    drop(semantics);
-    table.stable_declared_spellings.extend(records);
+    records
 }
