@@ -19,13 +19,17 @@ jobs:
   # conformance (zero miscompiles). Identical to the local/hook gate (`just ci`).
   ci:
     runs-on: ubuntu-latest
+    env:
+      # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
+      # instrumenting compiler on the same immutable nightly.
+      KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: install coverage tooling
-        run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+        run: rustup toolchain install "$KRUSTY_COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
       # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
       # (~75s of the ci job).
       - uses: taiki-e/install-action@v2
