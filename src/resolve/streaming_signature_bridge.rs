@@ -77,6 +77,7 @@ struct ProductionSignatureSemantics<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
     table: &'a SymbolTable,
     classifier_types: &'a HashMap<crate::fir::DeclarationId, crate::types::TypeName>,
+    classifier_declarations: &'a HashMap<crate::types::TypeName, crate::fir::DeclarationId>,
     parameters: HashMap<crate::fir::DeclarationId, Box<[crate::fir::ResolvedTy]>>,
     extension_receivers: &'a HashMap<crate::fir::DeclarationId, crate::fir::ResolvedTy>,
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
@@ -3229,9 +3230,9 @@ impl ProductionSignatureSemantics<'_> {
                                         }
                                     }
                                     let enclosing_is_local = self
-                                        .table
-                                        .class_by_type_name(enclosing)
-                                        .and_then(|classifier| classifier.stable_declaration)
+                                        .classifier_declarations
+                                        .get(&enclosing)
+                                        .copied()
                                         .is_some_and(|declaration| {
                                             self.headers.stub(declaration).is_some_and(|stub| {
                                                 stub.flags
@@ -3251,12 +3252,7 @@ impl ProductionSignatureSemantics<'_> {
                         }
                         return receivers;
                     };
-                    let Some(outer_declaration) = self
-                        .table
-                        .classes
-                        .get(&outer)
-                        .and_then(|outer| outer.stable_declaration)
-                    else {
+                    let Some(&outer_declaration) = self.classifier_declarations.get(&outer) else {
                         return Vec::new();
                     };
                     owner = outer_declaration;
@@ -4193,6 +4189,10 @@ pub(crate) fn finalized_streamed_signature_index(
         })
         .collect::<Vec<_>>();
     let classifier_types = headers.classifier_identities().collect::<HashMap<_, _>>();
+    let classifier_declarations = classifier_types
+        .iter()
+        .map(|(declaration, classifier)| (*classifier, *declaration))
+        .collect::<HashMap<_, _>>();
     let suppressed_generated_callables = headers
         .stubs
         .iter()
@@ -4256,6 +4256,7 @@ pub(crate) fn finalized_streamed_signature_index(
         headers,
         table,
         classifier_types: &classifier_types,
+        classifier_declarations: &classifier_declarations,
         parameters: HashMap::new(),
         extension_receivers: &empty_extension_receivers,
         source_orders: HashMap::new(),
@@ -4822,6 +4823,7 @@ pub(crate) fn finalized_streamed_signature_index(
         headers,
         table,
         classifier_types: &classifier_types,
+        classifier_declarations: &classifier_declarations,
         parameters: inferred_parameters,
         extension_receivers: &resolved_receivers,
         source_orders,

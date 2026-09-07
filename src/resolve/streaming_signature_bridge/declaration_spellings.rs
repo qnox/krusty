@@ -286,11 +286,16 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
 ) -> std::collections::HashMap<DeclarationId, DeclaredSpellings> {
     let expansions = table.alias_expansion_spellings.clone();
     let classifier_types = headers.classifier_identities().collect();
+    let classifier_declarations = headers
+        .classifier_identities()
+        .map(|(declaration, classifier)| (classifier, declaration))
+        .collect();
     let empty_receivers = std::collections::HashMap::new();
     let semantics = super::ProductionSignatureSemantics {
         headers,
         table,
         classifier_types: &classifier_types,
+        classifier_declarations: &classifier_declarations,
         parameters: std::collections::HashMap::new(),
         extension_receivers: &empty_receivers,
         source_orders: std::collections::HashMap::new(),
