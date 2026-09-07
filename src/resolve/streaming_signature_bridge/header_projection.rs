@@ -22,7 +22,7 @@ pub(in crate::resolve) struct StreamedCallableHeader {
     pub(in crate::resolve) result: StreamedResultKind,
     pub(in crate::resolve) explicit_result: Option<TypeRef>,
     pub(in crate::resolve) type_parameters: Vec<String>,
-    pub(in crate::resolve) type_parameter_flags: Vec<crate::fir::HeaderTypeParameterFlags>,
+    pub(in crate::resolve) has_reified_type_parameter: bool,
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) context_count: usize,
     pub(in crate::resolve) signature_start: u32,
@@ -272,10 +272,9 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         .iter()
         .map(|parameter| headers.lookup_names.get(parameter.name).map(str::to_string))
         .collect::<Option<Vec<_>>>()?;
-    let type_parameter_flags = compact_type_parameters
+    let has_reified_type_parameter = compact_type_parameters
         .iter()
-        .map(|parameter| parameter.flags)
-        .collect();
+        .any(|parameter| parameter.flags.is_reified());
     let bounds = headers
         .syntax
         .bounds(bounds)
@@ -301,7 +300,7 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
         result,
         explicit_result,
         type_parameters,
-        type_parameter_flags,
+        has_reified_type_parameter,
         bounds,
         context_count: usize::try_from(context_count).ok()?,
         signature_start,
@@ -522,7 +521,7 @@ pub(in crate::resolve) struct StreamedClassifierHeader {
     pub(in crate::resolve) bounds: Vec<(String, TypeRef)>,
     pub(in crate::resolve) supertypes: Vec<TypeRef>,
     pub(in crate::resolve) base: Option<TypeRef>,
-    pub(in crate::resolve) delegated_interfaces: Vec<TypeRef>,
+    pub(in crate::resolve) delegated_interfaces: Vec<usize>,
     pub(in crate::resolve) primary_parameters: Vec<StreamedClassifierParameter>,
 }
 
@@ -597,7 +596,11 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
         .syntax
         .interface_delegations(delegations)
         .iter()
-        .map(|delegation| supertypes.get(delegation.supertype as usize).cloned())
+        .map(|delegation| {
+            let supertype = delegation.supertype as usize;
+            supertypes.get(supertype)?;
+            Some(supertype)
+        })
         .collect::<Option<Vec<_>>>()?;
     let primary_parameters = headers
         .syntax

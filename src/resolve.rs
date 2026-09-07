@@ -6618,10 +6618,7 @@ fn collect_signatures_with_cp_impl(
                     let companion_extension = callable_header
                         .flags
                         .has(crate::fir::DeclarationFlags::COMPANION);
-                    let reified = callable_header
-                        .type_parameter_flags
-                        .iter()
-                        .any(|flags| flags.is_reified());
+                    let reified = callable_header.has_reified_type_parameter;
                     let flags = callable_header.flags;
                     let (is_inline, is_operator, is_infix, is_override, is_final, is_suspend) = (
                         flags.has(crate::fir::DeclarationFlags::INLINE),
@@ -8755,7 +8752,8 @@ fn collect_signatures_with_cp_impl(
                             delegated_interfaces: classifier_header
                                 .delegated_interfaces
                                 .iter()
-                                .map(|interface| {
+                                .map(|&supertype| {
+                                    let interface = &classifier_header.supertypes[supertype];
                                     ty_of_ref(interface, &header_class_names, &symbolic_ctp, diags)
                                 })
                                 .collect(),
@@ -10801,15 +10799,23 @@ fn streamed_function_conflict_display(
     let stub = headers.stub(declaration)?;
     let header = streamed_callable_header_by_declaration(headers, declaration)?;
     let name = headers.lookup_names.get(stub.lookup_name?)?;
+    let compact = headers.syntax.declaration(declaration)?;
+    let crate::fir::HeaderDeclarationKind::Callable {
+        type_parameters: compact_type_parameters,
+        ..
+    } = compact.kind
+    else {
+        return None;
+    };
     let mut bounds = header.bounds.iter().peekable();
     let type_parameters = header
         .type_parameters
         .iter()
-        .zip(&header.type_parameter_flags)
+        .zip(headers.syntax.type_parameters(compact_type_parameters))
         .map(|(parameter, flags)| FunctionTypeParameterDisplay {
             name: parameter,
-            reified: flags.is_reified(),
-            non_null: flags.is_non_null(),
+            reified: flags.flags.is_reified(),
+            non_null: flags.flags.is_non_null(),
             bound: match bounds.peek() {
                 Some((bound_name, _)) if bound_name == parameter => {
                     bounds.next().map(|(_, bound)| bound)
