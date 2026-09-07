@@ -5562,3 +5562,47 @@ fun sourceContract(runtime: Runtime?) = run {
         assert_eq!(ret, Some(Ty::obj("kotlin/String")), "{name}");
     }
 }
+
+#[test]
+fn a_failed_local_read_twice_in_a_block_does_not_trip_the_cycle_guard() {
+    // The initializer fails; the failed node is read by a statement (dropped as a non-fatal
+    // effect) and again by a later one. The evaluator's acyclicity guard must not mistake the
+    // second read for a cycle: a member call that fails at selection leaves its arm through `?`,
+    // and `val (k, v) = it.split("=", limit = 2)` read twice was a worker panic on a real project.
+    let source = r#"// WITH_STDLIB
+fun use(value: Any) {}
+fun twice() = run {
+    val v = undefinedCall()
+    use(v)
+    v
+}
+fun destructured(line: String) = run {
+    val (first, second) = line.undefinedMember(limit = 2)
+    use(first)
+    use(second)
+    1
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("FailedLocalReadTwice")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("failed local read regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let _ = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(
+        diagnostics
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.msg.contains("undefinedCall")),
+        "{:?}",
+        diagnostics.diags
+    );
+}

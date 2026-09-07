@@ -668,180 +668,191 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let node = graph
                 .expr(expression)
                 .expect("a signature expression id must belong to its graph");
-            let ty = match node {
-                SigExpr::Known(ty) => Ok(ty),
-                SigExpr::IntegerLiteral(_) => Ok(ResolvedTy::new(Ty::Int)
-                    .expect("the built-in Int literal type is always publishable")),
-                SigExpr::DeclarationType(declaration) => {
-                    demand(declaration).map(|signature| signature.result)
-                }
-                SigExpr::ClassifierType { declaration, scope } => {
-                    let scope = graph
-                        .scope(scope)
-                        .expect("a classifier type must retain its declaration scope");
-                    semantics.classifier_type(declaration, scope)
-                }
-                SigExpr::Parameter { declaration, index } => semantics
-                    .declaration_parameters(declaration)?
-                    .get(index as usize)
-                    .copied()
-                    .ok_or_else(|| semantics.missing_signature_diagnostic(declaration)),
-                SigExpr::Type {
-                    syntax,
-                    scope,
-                    origin,
-                } => {
-                    let scope = graph
-                        .scope(scope)
-                        .expect("a compact type expression must retain its declaration scope");
-                    semantics.resolve_type(scope, origin, syntax, graph)
-                }
-                SigExpr::ContextualType {
-                    expected,
-                    syntax,
-                    scope,
-                    origin,
-                } => {
-                    let expected =
-                        evaluate_expression(semantics, expected, graph, demand, memo, computing)?;
-                    let scope = graph
-                        .scope(scope)
-                        .expect("a contextual type expression must retain its declaration scope");
-                    semantics.resolve_contextual_type(scope, origin, syntax, expected, graph)
-                }
-                SigExpr::Value(selection) => {
-                    let selection = graph
-                        .value_selection(selection)
-                        .expect("a deferred value selection must belong to its graph");
-                    let scope = graph
-                        .scope(selection.scope)
-                        .expect("a deferred value scope must belong to its graph");
-                    let spelling = graph
-                        .name(selection.spelling)
-                        .expect("a deferred value spelling must belong to its graph");
-                    let expected = match selection.expected {
-                        Some(expected) => Some(evaluate_expression(
+            // Every `?` inside the arms must still leave the guard: a failed node is dropped by a
+            // sequence effect and may be read again by the block's result.
+            let ty = (|| -> Result<ResolvedTy, DiagnosticId> {
+                match node {
+                    SigExpr::Known(ty) => Ok(ty),
+                    SigExpr::IntegerLiteral(_) => Ok(ResolvedTy::new(Ty::Int)
+                        .expect("the built-in Int literal type is always publishable")),
+                    SigExpr::DeclarationType(declaration) => {
+                        demand(declaration).map(|signature| signature.result)
+                    }
+                    SigExpr::ClassifierType { declaration, scope } => {
+                        let scope = graph
+                            .scope(scope)
+                            .expect("a classifier type must retain its declaration scope");
+                        semantics.classifier_type(declaration, scope)
+                    }
+                    SigExpr::Parameter { declaration, index } => semantics
+                        .declaration_parameters(declaration)?
+                        .get(index as usize)
+                        .copied()
+                        .ok_or_else(|| semantics.missing_signature_diagnostic(declaration)),
+                    SigExpr::Type {
+                        syntax,
+                        scope,
+                        origin,
+                    } => {
+                        let scope = graph
+                            .scope(scope)
+                            .expect("a compact type expression must retain its declaration scope");
+                        semantics.resolve_type(scope, origin, syntax, graph)
+                    }
+                    SigExpr::ContextualType {
+                        expected,
+                        syntax,
+                        scope,
+                        origin,
+                    } => {
+                        let expected = evaluate_expression(
                             semantics, expected, graph, demand, memo, computing,
-                        )?),
-                        None => None,
-                    };
-                    semantics.select_value(scope, spelling, selection.origin, expected, demand)
-                }
-                SigExpr::Call { target, arguments } => evaluate_call(
-                    semantics, target, arguments, None, graph, demand, memo, computing,
-                ),
-                SigExpr::CallableReference(target) => {
-                    let selection = graph
-                        .callable_selection(target)
-                        .expect("a deferred callable-reference selection must belong to its graph");
-                    let expected = selection
-                        .expected
-                        .map(|expected| {
-                            evaluate_expression(semantics, expected, graph, demand, memo, computing)
-                        })
-                        .transpose()?;
-                    evaluate_callable_reference(
-                        semantics, expression, expected, graph, demand, memo, computing,
-                    )
-                }
-                SigExpr::BoundCallableReference { target, .. } => {
-                    let selection = graph.callable_selection(target).expect(
+                        )?;
+                        let scope = graph.scope(scope).expect(
+                            "a contextual type expression must retain its declaration scope",
+                        );
+                        semantics.resolve_contextual_type(scope, origin, syntax, expected, graph)
+                    }
+                    SigExpr::Value(selection) => {
+                        let selection = graph
+                            .value_selection(selection)
+                            .expect("a deferred value selection must belong to its graph");
+                        let scope = graph
+                            .scope(selection.scope)
+                            .expect("a deferred value scope must belong to its graph");
+                        let spelling = graph
+                            .name(selection.spelling)
+                            .expect("a deferred value spelling must belong to its graph");
+                        let expected = match selection.expected {
+                            Some(expected) => Some(evaluate_expression(
+                                semantics, expected, graph, demand, memo, computing,
+                            )?),
+                            None => None,
+                        };
+                        semantics.select_value(scope, spelling, selection.origin, expected, demand)
+                    }
+                    SigExpr::Call { target, arguments } => evaluate_call(
+                        semantics, target, arguments, None, graph, demand, memo, computing,
+                    ),
+                    SigExpr::CallableReference(target) => {
+                        let selection = graph.callable_selection(target).expect(
+                            "a deferred callable-reference selection must belong to its graph",
+                        );
+                        let expected = selection
+                            .expected
+                            .map(|expected| {
+                                evaluate_expression(
+                                    semantics, expected, graph, demand, memo, computing,
+                                )
+                            })
+                            .transpose()?;
+                        evaluate_callable_reference(
+                            semantics, expression, expected, graph, demand, memo, computing,
+                        )
+                    }
+                    SigExpr::BoundCallableReference { target, .. } => {
+                        let selection = graph.callable_selection(target).expect(
                         "a deferred bound callable-reference selection must belong to its graph",
                     );
-                    let expected = selection
-                        .expected
-                        .map(|expected| {
-                            evaluate_expression(semantics, expected, graph, demand, memo, computing)
-                        })
-                        .transpose()?;
-                    evaluate_callable_reference(
-                        semantics, expression, expected, graph, demand, memo, computing,
-                    )
-                }
-                SigExpr::ClassLiteral {
-                    receiver,
-                    classifier,
-                    scope,
-                    root,
-                } => {
-                    let use_value = match (classifier, root) {
-                        (Some(_), Some(root)) => {
-                            let scope = graph
-                                .scope(scope)
-                                .expect("a class literal scope must belong to its graph");
-                            let root = graph
-                                .name(root)
-                                .expect("a class literal root must belong to its graph");
-                            semantics.class_literal_receiver_is_value(scope, root)?
-                        }
-                        (None, None) => true,
-                        (Some(_), None) | (None, Some(_)) => {
-                            unreachable!("class literal classifier and root must travel together")
-                        }
-                    };
-                    let selected = if use_value {
-                        receiver
-                    } else {
-                        classifier.expect("a classifier candidate must exist")
-                    };
-                    let selected =
-                        evaluate_expression(semantics, selected, graph, demand, memo, computing)?;
-                    semantics.class_literal_type(selected, !use_value)
-                }
-                SigExpr::Member {
-                    receiver,
-                    lookup,
-                    origin,
-                } => {
-                    let selection = graph
-                        .member_selection(lookup)
-                        .expect("a deferred member selection must belong to its graph");
-                    debug_assert_eq!(selection.origin, origin);
-                    let scope = graph
-                        .scope(selection.scope)
-                        .expect("a deferred member scope must belong to its graph");
-                    let spelling = graph
-                        .name(selection.spelling)
-                        .expect("a deferred member spelling must belong to its graph");
-                    // `::property.isInitialized` is a compiler-defined operation on the selected
-                    // `lateinit` DECLARATION, not an ordinary member of the reflective property's
-                    // runtime type. Preserve that semantic selection in Pass 1 instead of reducing
-                    // the reference to `KProperty*` and asking library lookup to rediscover it.
-                    if spelling == "isInitialized" {
-                        match graph.expr(receiver) {
-                            Some(SigExpr::CallableReference(target)) => {
-                                let reference = graph.callable_selection(target).expect(
+                        let expected = selection
+                            .expected
+                            .map(|expected| {
+                                evaluate_expression(
+                                    semantics, expected, graph, demand, memo, computing,
+                                )
+                            })
+                            .transpose()?;
+                        evaluate_callable_reference(
+                            semantics, expression, expected, graph, demand, memo, computing,
+                        )
+                    }
+                    SigExpr::ClassLiteral {
+                        receiver,
+                        classifier,
+                        scope,
+                        root,
+                    } => {
+                        let use_value = match (classifier, root) {
+                            (Some(_), Some(root)) => {
+                                let scope = graph
+                                    .scope(scope)
+                                    .expect("a class literal scope must belong to its graph");
+                                let root = graph
+                                    .name(root)
+                                    .expect("a class literal root must belong to its graph");
+                                semantics.class_literal_receiver_is_value(scope, root)?
+                            }
+                            (None, None) => true,
+                            (Some(_), None) | (None, Some(_)) => {
+                                unreachable!(
+                                    "class literal classifier and root must travel together"
+                                )
+                            }
+                        };
+                        let selected = if use_value {
+                            receiver
+                        } else {
+                            classifier.expect("a classifier candidate must exist")
+                        };
+                        let selected = evaluate_expression(
+                            semantics, selected, graph, demand, memo, computing,
+                        )?;
+                        semantics.class_literal_type(selected, !use_value)
+                    }
+                    SigExpr::Member {
+                        receiver,
+                        lookup,
+                        origin,
+                    } => {
+                        let selection = graph
+                            .member_selection(lookup)
+                            .expect("a deferred member selection must belong to its graph");
+                        debug_assert_eq!(selection.origin, origin);
+                        let scope = graph
+                            .scope(selection.scope)
+                            .expect("a deferred member scope must belong to its graph");
+                        let spelling = graph
+                            .name(selection.spelling)
+                            .expect("a deferred member spelling must belong to its graph");
+                        // `::property.isInitialized` is a compiler-defined operation on the selected
+                        // `lateinit` DECLARATION, not an ordinary member of the reflective property's
+                        // runtime type. Preserve that semantic selection in Pass 1 instead of reducing
+                        // the reference to `KProperty*` and asking library lookup to rediscover it.
+                        if spelling == "isInitialized" {
+                            match graph.expr(receiver) {
+                                Some(SigExpr::CallableReference(target)) => {
+                                    let reference = graph.callable_selection(target).expect(
                                     "a deferred callable-reference selection must belong to its graph",
                                 );
-                                let reference_scope = graph.scope(reference.scope).expect(
+                                    let reference_scope = graph.scope(reference.scope).expect(
                                     "a deferred callable-reference scope must belong to its graph",
                                 );
-                                let reference_spelling = graph.name(reference.spelling).expect(
+                                    let reference_spelling = graph.name(reference.spelling).expect(
                                     "a deferred callable-reference spelling must belong to its graph",
                                 );
-                                return semantics.select_lateinit_initialized(
-                                    reference_scope,
-                                    reference_spelling,
-                                    reference.origin,
-                                    None,
-                                    false,
-                                    demand,
-                                );
-                            }
-                            Some(SigExpr::BoundCallableReference {
-                                receiver,
-                                classifier,
-                                scope: reference_scope,
-                                root,
-                                target,
-                            }) => {
-                                let reference = graph.callable_selection(target).expect(
+                                    return semantics.select_lateinit_initialized(
+                                        reference_scope,
+                                        reference_spelling,
+                                        reference.origin,
+                                        None,
+                                        false,
+                                        demand,
+                                    );
+                                }
+                                Some(SigExpr::BoundCallableReference {
+                                    receiver,
+                                    classifier,
+                                    scope: reference_scope,
+                                    root,
+                                    target,
+                                }) => {
+                                    let reference = graph.callable_selection(target).expect(
                                     "a deferred callable-reference selection must belong to its graph",
                                 );
-                                let reference_spelling = graph.name(reference.spelling).expect(
+                                    let reference_spelling = graph.name(reference.spelling).expect(
                                     "a deferred callable-reference spelling must belong to its graph",
                                 );
-                                let use_value = match (classifier, root) {
+                                    let use_value = match (classifier, root) {
                                     (Some(_), Some(root)) => {
                                         let reference_scope = graph.scope(reference_scope).expect(
                                             "a qualified callable-reference scope must belong to its graph",
@@ -860,399 +871,421 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                         "callable-reference classifier and root must travel together"
                                     ),
                                 };
-                                let selected = if use_value {
-                                    receiver
-                                } else {
-                                    classifier.expect("a classifier candidate must exist")
-                                };
-                                let selected = evaluate_expression(
-                                    semantics, selected, graph, demand, memo, computing,
-                                )?;
-                                let reference_scope = graph.scope(reference.scope).expect(
+                                    let selected = if use_value {
+                                        receiver
+                                    } else {
+                                        classifier.expect("a classifier candidate must exist")
+                                    };
+                                    let selected = evaluate_expression(
+                                        semantics, selected, graph, demand, memo, computing,
+                                    )?;
+                                    let reference_scope = graph.scope(reference.scope).expect(
                                     "a deferred callable-reference scope must belong to its graph",
                                 );
-                                return semantics.select_lateinit_initialized(
-                                    reference_scope,
-                                    reference_spelling,
-                                    reference.origin,
-                                    Some(selected),
-                                    !use_value,
-                                    demand,
-                                );
+                                    return semantics.select_lateinit_initialized(
+                                        reference_scope,
+                                        reference_spelling,
+                                        reference.origin,
+                                        Some(selected),
+                                        !use_value,
+                                        demand,
+                                    );
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        let receiver = evaluate_expression(
+                            semantics, receiver, graph, demand, memo, computing,
+                        )?;
+                        let expected = match selection.expected {
+                            Some(expected) => Some(evaluate_expression(
+                                semantics, expected, graph, demand, memo, computing,
+                            )?),
+                            None => None,
+                        };
+                        semantics.select_member(scope, spelling, origin, receiver, expected, demand)
                     }
-                    let receiver =
-                        evaluate_expression(semantics, receiver, graph, demand, memo, computing)?;
-                    let expected = match selection.expected {
-                        Some(expected) => Some(evaluate_expression(
-                            semantics, expected, graph, demand, memo, computing,
-                        )?),
-                        None => None,
-                    };
-                    semantics.select_member(scope, spelling, origin, receiver, expected, demand)
-                }
-                SigExpr::MemberCall {
-                    receiver,
-                    target,
-                    arguments,
-                    origin,
-                } => {
-                    let receiver =
-                        evaluate_expression(semantics, receiver, graph, demand, memo, computing)?;
-                    let selection = graph
-                        .member_selection(target)
-                        .expect("a deferred member-call selection must belong to its graph");
-                    debug_assert_eq!(selection.origin, origin);
-                    let scope = graph
-                        .scope(selection.scope)
-                        .expect("a deferred member-call scope must belong to its graph");
-                    let spelling = graph
-                        .name(selection.spelling)
-                        .expect("a deferred member-call spelling must belong to its graph");
-                    let mut resolved_type_arguments = Vec::new();
-                    for argument in graph.operands(selection.type_arguments).iter().copied() {
-                        resolved_type_arguments.push(evaluate_expression(
-                            semantics, argument, graph, demand, memo, computing,
-                        )?);
-                    }
-                    let expected = match selection.expected {
-                        Some(expected) => Some(evaluate_expression(
-                            semantics, expected, graph, demand, memo, computing,
-                        )?),
-                        None => None,
-                    };
-                    let probes = graph
-                        .call_arguments(arguments)
-                        .iter()
-                        .map(|argument| {
-                            argument_probe(semantics, argument, graph, demand, memo, computing)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let expectations = semantics.member_call_argument_expectations(
-                        scope,
-                        spelling,
-                        origin,
+                    SigExpr::MemberCall {
                         receiver,
-                        &probes,
-                        &resolved_type_arguments,
-                        selection.trailing_lambda,
-                        expected,
-                        demand,
-                    )?;
-                    let mut resolved_arguments = Vec::new();
-                    for (index, argument) in graph.call_arguments(arguments).iter().enumerate() {
-                        resolved_arguments.push(materialize_argument(
-                            semantics,
-                            argument,
-                            expectations.get(index).copied().flatten(),
-                            graph,
-                            demand,
-                            memo,
-                            computing,
-                        )?);
-                    }
-                    let selected = semantics.select_member_call(
-                        scope,
-                        spelling,
+                        target,
+                        arguments,
                         origin,
-                        receiver,
-                        &resolved_arguments,
-                        &resolved_type_arguments,
-                        selection.trailing_lambda,
-                        expected,
-                        demand,
-                    )?;
-                    if let Some(effect) = selected
-                        .declaration
-                        .and_then(|declaration| graph.local_effect(declaration))
-                    {
-                        semantics.enter_scoped_receiver(scope.owner, receiver);
-                        let evaluated = evaluate_expression(
-                            semantics,
-                            effect.result,
-                            graph,
+                    } => {
+                        let receiver = evaluate_expression(
+                            semantics, receiver, graph, demand, memo, computing,
+                        )?;
+                        let selection = graph
+                            .member_selection(target)
+                            .expect("a deferred member-call selection must belong to its graph");
+                        debug_assert_eq!(selection.origin, origin);
+                        let scope = graph
+                            .scope(selection.scope)
+                            .expect("a deferred member-call scope must belong to its graph");
+                        let spelling = graph
+                            .name(selection.spelling)
+                            .expect("a deferred member-call spelling must belong to its graph");
+                        let mut resolved_type_arguments = Vec::new();
+                        for argument in graph.operands(selection.type_arguments).iter().copied() {
+                            resolved_type_arguments.push(evaluate_expression(
+                                semantics, argument, graph, demand, memo, computing,
+                            )?);
+                        }
+                        let expected = match selection.expected {
+                            Some(expected) => Some(evaluate_expression(
+                                semantics, expected, graph, demand, memo, computing,
+                            )?),
+                            None => None,
+                        };
+                        let probes = graph
+                            .call_arguments(arguments)
+                            .iter()
+                            .map(|argument| {
+                                argument_probe(semantics, argument, graph, demand, memo, computing)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let expectations = semantics.member_call_argument_expectations(
+                            scope,
+                            spelling,
+                            origin,
+                            receiver,
+                            &probes,
+                            &resolved_type_arguments,
+                            selection.trailing_lambda,
+                            expected,
                             demand,
-                            memo,
-                            computing,
-                        );
-                        semantics.exit_scoped_receiver(scope.owner);
-                        let effect_result = evaluated?;
-                        Ok(if effect.determines_result {
-                            effect_result
+                        )?;
+                        let mut resolved_arguments = Vec::new();
+                        for (index, argument) in graph.call_arguments(arguments).iter().enumerate()
+                        {
+                            resolved_arguments.push(materialize_argument(
+                                semantics,
+                                argument,
+                                expectations.get(index).copied().flatten(),
+                                graph,
+                                demand,
+                                memo,
+                                computing,
+                            )?);
+                        }
+                        let selected = semantics.select_member_call(
+                            scope,
+                            spelling,
+                            origin,
+                            receiver,
+                            &resolved_arguments,
+                            &resolved_type_arguments,
+                            selection.trailing_lambda,
+                            expected,
+                            demand,
+                        )?;
+                        if let Some(effect) = selected
+                            .declaration
+                            .and_then(|declaration| graph.local_effect(declaration))
+                        {
+                            semantics.enter_scoped_receiver(scope.owner, receiver);
+                            let evaluated = evaluate_expression(
+                                semantics,
+                                effect.result,
+                                graph,
+                                demand,
+                                memo,
+                                computing,
+                            );
+                            semantics.exit_scoped_receiver(scope.owner);
+                            let effect_result = evaluated?;
+                            Ok(if effect.determines_result {
+                                effect_result
+                            } else {
+                                selected.ty.ok_or_else(|| {
+                                    semantics.missing_signature_diagnostic(scope.owner)
+                                })?
+                            })
                         } else {
-                            selected.ty.ok_or_else(|| {
-                                semantics.missing_signature_diagnostic(scope.owner)
-                            })?
-                        })
-                    } else {
-                        selected
-                            .ty
-                            .ok_or_else(|| semantics.missing_signature_diagnostic(scope.owner))
-                    }
-                }
-                SigExpr::Binary {
-                    operator,
-                    lhs,
-                    rhs,
-                    scope,
-                    origin,
-                } => {
-                    // Evaluate both independent operands even when the first one fails. Production
-                    // semantics records source diagnostics while evaluating a dependency (for
-                    // example, both eager reads in `val x = later + after`); returning after the
-                    // left failure would make diagnostic completeness depend on operand order.
-                    let lhs = evaluate_expression(semantics, lhs, graph, demand, memo, computing);
-                    let rhs = evaluate_expression(semantics, rhs, graph, demand, memo, computing);
-                    let (lhs, rhs) = match (lhs, rhs) {
-                        (Ok(lhs), Ok(rhs)) => (lhs, rhs),
-                        (Err(diagnostic), _) | (Ok(_), Err(diagnostic)) => {
-                            return Err(diagnostic);
+                            selected
+                                .ty
+                                .ok_or_else(|| semantics.missing_signature_diagnostic(scope.owner))
                         }
-                    };
-                    let scope = graph
-                        .scope(scope)
-                        .expect("a binary signature expression must retain its declaration scope");
-                    semantics.select_binary(scope, operator, origin, lhs, rhs, demand)
-                }
-                SigExpr::Invoke {
-                    callee,
-                    arguments,
-                    scope,
-                    origin,
-                } => {
-                    let callee =
-                        evaluate_expression(semantics, callee, graph, demand, memo, computing)?;
-                    let probes = graph
-                        .call_arguments(arguments)
-                        .iter()
-                        .map(|argument| {
-                            argument_probe(semantics, argument, graph, demand, memo, computing)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let scope = graph
-                        .scope(scope)
-                        .expect("an invoke signature expression must retain its declaration scope");
-                    let expectations =
-                        semantics.invoke_argument_expectations(scope, callee, &probes)?;
-                    let mut resolved_arguments = Vec::new();
-                    for (index, argument) in graph.call_arguments(arguments).iter().enumerate() {
-                        resolved_arguments.push(materialize_argument(
-                            semantics,
-                            argument,
-                            expectations.get(index).copied().flatten(),
-                            graph,
-                            demand,
-                            memo,
-                            computing,
-                        )?);
                     }
-                    semantics.select_invoke(scope, origin, callee, &resolved_arguments, demand)
-                }
-                SigExpr::Function {
-                    parameters,
-                    result,
-                    context_count,
-                    has_receiver,
-                    suspend,
-                } => {
-                    let mut resolved_parameters = Vec::new();
-                    for parameter in graph.operands(parameters).iter().copied() {
-                        resolved_parameters.push(evaluate_expression(
-                            semantics, parameter, graph, demand, memo, computing,
-                        )?);
+                    SigExpr::Binary {
+                        operator,
+                        lhs,
+                        rhs,
+                        scope,
+                        origin,
+                    } => {
+                        // Evaluate both independent operands even when the first one fails. Production
+                        // semantics records source diagnostics while evaluating a dependency (for
+                        // example, both eager reads in `val x = later + after`); returning after the
+                        // left failure would make diagnostic completeness depend on operand order.
+                        let lhs =
+                            evaluate_expression(semantics, lhs, graph, demand, memo, computing);
+                        let rhs =
+                            evaluate_expression(semantics, rhs, graph, demand, memo, computing);
+                        let (lhs, rhs) = match (lhs, rhs) {
+                            (Ok(lhs), Ok(rhs)) => (lhs, rhs),
+                            (Err(diagnostic), _) | (Ok(_), Err(diagnostic)) => {
+                                return Err(diagnostic);
+                            }
+                        };
+                        let scope = graph.scope(scope).expect(
+                            "a binary signature expression must retain its declaration scope",
+                        );
+                        semantics.select_binary(scope, operator, origin, lhs, rhs, demand)
                     }
-                    let result =
-                        evaluate_expression(semantics, result, graph, demand, memo, computing)?;
-                    semantics.make_function_type(
-                        &resolved_parameters,
+                    SigExpr::Invoke {
+                        callee,
+                        arguments,
+                        scope,
+                        origin,
+                    } => {
+                        let callee =
+                            evaluate_expression(semantics, callee, graph, demand, memo, computing)?;
+                        let probes = graph
+                            .call_arguments(arguments)
+                            .iter()
+                            .map(|argument| {
+                                argument_probe(semantics, argument, graph, demand, memo, computing)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let scope = graph.scope(scope).expect(
+                            "an invoke signature expression must retain its declaration scope",
+                        );
+                        let expectations =
+                            semantics.invoke_argument_expectations(scope, callee, &probes)?;
+                        let mut resolved_arguments = Vec::new();
+                        for (index, argument) in graph.call_arguments(arguments).iter().enumerate()
+                        {
+                            resolved_arguments.push(materialize_argument(
+                                semantics,
+                                argument,
+                                expectations.get(index).copied().flatten(),
+                                graph,
+                                demand,
+                                memo,
+                                computing,
+                            )?);
+                        }
+                        semantics.select_invoke(scope, origin, callee, &resolved_arguments, demand)
+                    }
+                    SigExpr::Function {
+                        parameters,
                         result,
                         context_count,
                         has_receiver,
                         suspend,
-                    )
-                }
-                SigExpr::ContextualParameter(declaration) => {
-                    Err(semantics.missing_signature_diagnostic(declaration))
-                }
-                SigExpr::ContextualFunction { parameters, .. } => {
-                    let declaration = graph
-                        .operands(parameters)
-                        .iter()
-                        .find_map(|parameter| match graph.expr(*parameter) {
-                            Some(SigExpr::ContextualParameter(declaration)) => Some(declaration),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| DeclarationId::from_raw(0));
-                    Err(semantics.missing_signature_diagnostic(declaration))
-                }
-                SigExpr::ScopedReceiver {
-                    receiver,
-                    result,
-                    scope,
-                } => {
-                    let receiver =
-                        evaluate_expression(semantics, receiver, graph, demand, memo, computing)?;
-                    let scope = graph
-                        .scope(scope)
-                        .expect("a scoped receiver must retain its declaration scope");
-                    semantics.enter_scoped_receiver(scope.owner, receiver);
-                    let evaluated =
-                        evaluate_expression(semantics, result, graph, demand, memo, computing);
-                    semantics.exit_scoped_receiver(scope.owner);
-                    evaluated
-                }
-                SigExpr::Sequence { effects, result } => {
-                    crate::trace_compiler!(
-                        "signature",
-                        "evaluate sequence effects={:?} result={result:?} result_node={:?}",
-                        graph.operands(effects),
-                        graph.expr(result),
-                    );
-                    // An effect is evaluated for the constraints it contributes, not for its
-                    // own success: kotlinc infers `fun f() = run { broken(); 1 }` as `Int` and
-                    // reports `broken()` from the body check. A later expression that depends
-                    // on a failed effect fails on its own read of it.
-                    for effect in graph.operands(effects).iter().copied() {
-                        let _ =
-                            evaluate_expression(semantics, effect, graph, demand, memo, computing);
+                    } => {
+                        let mut resolved_parameters = Vec::new();
+                        for parameter in graph.operands(parameters).iter().copied() {
+                            resolved_parameters.push(evaluate_expression(
+                                semantics, parameter, graph, demand, memo, computing,
+                            )?);
+                        }
+                        let result =
+                            evaluate_expression(semantics, result, graph, demand, memo, computing)?;
+                        semantics.make_function_type(
+                            &resolved_parameters,
+                            result,
+                            context_count,
+                            has_receiver,
+                            suspend,
+                        )
                     }
-                    evaluate_expression(semantics, result, graph, demand, memo, computing)
-                }
-                SigExpr::Delegate {
-                    declaration,
-                    delegate,
-                    scope,
-                    origin,
-                    local,
-                } => {
-                    let delegate =
-                        evaluate_expression(semantics, delegate, graph, demand, memo, computing)?;
-                    let scope = graph
-                        .scope(scope)
-                        .expect("a delegated signature must retain its declaration scope");
-                    semantics.select_delegate(declaration, scope, origin, delegate, local, demand)
-                }
-                SigExpr::Join {
-                    operands,
-                    scope,
-                    origin,
-                } => {
-                    let operand_expressions = graph.operands(operands).to_vec();
-                    let mut resolved_operands = Vec::new();
-                    for operand in operand_expressions.iter().copied() {
-                        resolved_operands.push(evaluate_expression(
-                            semantics, operand, graph, demand, memo, computing,
-                        )?);
+                    SigExpr::ContextualParameter(declaration) => {
+                        Err(semantics.missing_signature_diagnostic(declaration))
                     }
-                    let scope = graph
-                        .scope(scope)
-                        .expect("a signature join scope must belong to its graph");
-                    // Conditional branches constrain return-only generic calls in either source
-                    // order. First evaluate every branch freely, then re-evaluate only a branch
-                    // whose result is the semantic supertype of its siblings. Supplying that
-                    // narrower sibling as the ordinary call-result expectation lets the resolver's
-                    // generic inference specialize `materialize<T>()`; concrete or incompatible
-                    // calls remain unchanged. Iteration computes the small branch-local fixed point
-                    // without adding a second inference algorithm to the graph evaluator.
-                    for _ in 0..resolved_operands.len() {
-                        let mut changed = false;
-                        for (index, &operand) in operand_expressions.iter().enumerate() {
-                            let siblings = resolved_operands
-                                .iter()
-                                .enumerate()
-                                .filter(|(other, _)| *other != index)
-                                .map(|(_, sibling)| *sibling)
-                                .collect::<Vec<_>>();
-                            let Some(first_sibling) = siblings.first().copied() else {
-                                continue;
-                            };
-                            let sibling = if siblings.len() == 1 {
-                                first_sibling
-                            } else {
-                                semantics.least_upper_bound(scope, origin, &siblings)?
-                            };
-                            let current = resolved_operands[index];
-                            let joined =
-                                semantics.least_upper_bound(scope, origin, &[current, sibling])?;
-                            crate::trace_compiler!(
+                    SigExpr::ContextualFunction { parameters, .. } => {
+                        let declaration = graph
+                            .operands(parameters)
+                            .iter()
+                            .find_map(|parameter| match graph.expr(*parameter) {
+                                Some(SigExpr::ContextualParameter(declaration)) => {
+                                    Some(declaration)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| DeclarationId::from_raw(0));
+                        Err(semantics.missing_signature_diagnostic(declaration))
+                    }
+                    SigExpr::ScopedReceiver {
+                        receiver,
+                        result,
+                        scope,
+                    } => {
+                        let receiver = evaluate_expression(
+                            semantics, receiver, graph, demand, memo, computing,
+                        )?;
+                        let scope = graph
+                            .scope(scope)
+                            .expect("a scoped receiver must retain its declaration scope");
+                        semantics.enter_scoped_receiver(scope.owner, receiver);
+                        let evaluated =
+                            evaluate_expression(semantics, result, graph, demand, memo, computing);
+                        semantics.exit_scoped_receiver(scope.owner);
+                        evaluated
+                    }
+                    SigExpr::Sequence { effects, result } => {
+                        crate::trace_compiler!(
+                            "signature",
+                            "evaluate sequence effects={:?} result={result:?} result_node={:?}",
+                            graph.operands(effects),
+                            graph.expr(result),
+                        );
+                        // An effect is evaluated for the constraints it contributes, not for its
+                        // own success: kotlinc infers `fun f() = run { broken(); 1 }` as `Int` and
+                        // reports `broken()` from the body check. A later expression that depends
+                        // on a failed effect fails on its own read of it.
+                        for effect in graph.operands(effects).iter().copied() {
+                            let _ = evaluate_expression(
+                                semantics, effect, graph, demand, memo, computing,
+                            );
+                        }
+                        evaluate_expression(semantics, result, graph, demand, memo, computing)
+                    }
+                    SigExpr::Delegate {
+                        declaration,
+                        delegate,
+                        scope,
+                        origin,
+                        local,
+                    } => {
+                        let delegate = evaluate_expression(
+                            semantics, delegate, graph, demand, memo, computing,
+                        )?;
+                        let scope = graph
+                            .scope(scope)
+                            .expect("a delegated signature must retain its declaration scope");
+                        semantics.select_delegate(
+                            declaration,
+                            scope,
+                            origin,
+                            delegate,
+                            local,
+                            demand,
+                        )
+                    }
+                    SigExpr::Join {
+                        operands,
+                        scope,
+                        origin,
+                    } => {
+                        let operand_expressions = graph.operands(operands).to_vec();
+                        let mut resolved_operands = Vec::new();
+                        for operand in operand_expressions.iter().copied() {
+                            resolved_operands.push(evaluate_expression(
+                                semantics, operand, graph, demand, memo, computing,
+                            )?);
+                        }
+                        let scope = graph
+                            .scope(scope)
+                            .expect("a signature join scope must belong to its graph");
+                        // Conditional branches constrain return-only generic calls in either source
+                        // order. First evaluate every branch freely, then re-evaluate only a branch
+                        // whose result is the semantic supertype of its siblings. Supplying that
+                        // narrower sibling as the ordinary call-result expectation lets the resolver's
+                        // generic inference specialize `materialize<T>()`; concrete or incompatible
+                        // calls remain unchanged. Iteration computes the small branch-local fixed point
+                        // without adding a second inference algorithm to the graph evaluator.
+                        for _ in 0..resolved_operands.len() {
+                            let mut changed = false;
+                            for (index, &operand) in operand_expressions.iter().enumerate() {
+                                let siblings = resolved_operands
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(other, _)| *other != index)
+                                    .map(|(_, sibling)| *sibling)
+                                    .collect::<Vec<_>>();
+                                let Some(first_sibling) = siblings.first().copied() else {
+                                    continue;
+                                };
+                                let sibling = if siblings.len() == 1 {
+                                    first_sibling
+                                } else {
+                                    semantics.least_upper_bound(scope, origin, &siblings)?
+                                };
+                                let current = resolved_operands[index];
+                                let joined = semantics.least_upper_bound(
+                                    scope,
+                                    origin,
+                                    &[current, sibling],
+                                )?;
+                                crate::trace_compiler!(
                                 "signature",
                                 "conditional constraint operand={operand:?} current={:?} sibling={:?} joined={:?}",
                                 current.get(),
                                 sibling.get(),
                                 joined.get(),
                             );
-                            if current == sibling
-                                || (!current.get().mentions_ty_param() && joined != current)
-                            {
-                                continue;
+                                if current == sibling
+                                    || (!current.get().mentions_ty_param() && joined != current)
+                                {
+                                    continue;
+                                }
+                                let Some(Ok(rebound)) = evaluate_expression_with_expected(
+                                    semantics, operand, sibling, graph, demand, memo, computing,
+                                ) else {
+                                    continue;
+                                };
+                                if rebound != current {
+                                    resolved_operands[index] = rebound;
+                                    changed = true;
+                                }
                             }
-                            let Some(Ok(rebound)) = evaluate_expression_with_expected(
-                                semantics, operand, sibling, graph, demand, memo, computing,
-                            ) else {
-                                continue;
-                            };
-                            if rebound != current {
-                                resolved_operands[index] = rebound;
-                                changed = true;
+                            if !changed {
+                                break;
                             }
                         }
-                        if !changed {
-                            break;
+                        semantics.least_upper_bound(scope, origin, &resolved_operands)
+                    }
+                    SigExpr::Nullable(base) => semantics.make_nullable(evaluate_expression(
+                        semantics, base, graph, demand, memo, computing,
+                    )?),
+                    SigExpr::NonNullable(base) => semantics.make_non_nullable(evaluate_expression(
+                        semantics, base, graph, demand, memo, computing,
+                    )?),
+                    SigExpr::ContractNarrowed {
+                        value,
+                        call,
+                        argument,
+                    } => {
+                        // The call statement is also a sequence effect ahead of this read, so its
+                        // selection is memoized; a failed call narrows nothing and reports itself.
+                        let selected =
+                            evaluate_expression(semantics, call, graph, demand, memo, computing)
+                                .is_ok();
+                        let value =
+                            evaluate_expression(semantics, value, graph, demand, memo, computing)?;
+                        let proven = selected
+                            && call_selection_origin(graph, call).is_some_and(|origin| {
+                                semantics.call_proves_argument_non_null(origin, argument)
+                            });
+                        if proven {
+                            semantics.make_non_nullable(value)
+                        } else {
+                            Ok(value)
                         }
                     }
-                    semantics.least_upper_bound(scope, origin, &resolved_operands)
-                }
-                SigExpr::Nullable(base) => semantics.make_nullable(evaluate_expression(
-                    semantics, base, graph, demand, memo, computing,
-                )?),
-                SigExpr::NonNullable(base) => semantics.make_non_nullable(evaluate_expression(
-                    semantics, base, graph, demand, memo, computing,
-                )?),
-                SigExpr::ContractNarrowed {
-                    value,
-                    call,
-                    argument,
-                } => {
-                    // The call statement is also a sequence effect ahead of this read, so its
-                    // selection is memoized; a failed call narrows nothing and reports itself.
-                    let selected =
-                        evaluate_expression(semantics, call, graph, demand, memo, computing)
-                            .is_ok();
-                    let value =
-                        evaluate_expression(semantics, value, graph, demand, memo, computing)?;
-                    let proven = selected
-                        && call_selection_origin(graph, call).is_some_and(|origin| {
-                            semantics.call_proves_argument_non_null(origin, argument)
-                        });
-                    if proven {
-                        semantics.make_non_nullable(value)
-                    } else {
-                        Ok(value)
+                    SigExpr::Substitute {
+                        base,
+                        substitutions,
+                    } => {
+                        let base =
+                            evaluate_expression(semantics, base, graph, demand, memo, computing)?;
+                        let mut resolved_substitutions = Vec::new();
+                        for substitution in graph.substitutions(substitutions) {
+                            let value = evaluate_expression(
+                                semantics,
+                                substitution.value,
+                                graph,
+                                demand,
+                                memo,
+                                computing,
+                            )?;
+                            resolved_substitutions.push((substitution.parameter, value));
+                        }
+                        semantics.substitute(base, &resolved_substitutions)
                     }
                 }
-                SigExpr::Substitute {
-                    base,
-                    substitutions,
-                } => {
-                    let base =
-                        evaluate_expression(semantics, base, graph, demand, memo, computing)?;
-                    let mut resolved_substitutions = Vec::new();
-                    for substitution in graph.substitutions(substitutions) {
-                        let value = evaluate_expression(
-                            semantics,
-                            substitution.value,
-                            graph,
-                            demand,
-                            memo,
-                            computing,
-                        )?;
-                        resolved_substitutions.push((substitution.parameter, value));
-                    }
-                    semantics.substitute(base, &resolved_substitutions)
-                }
-            };
+            })();
             computing.remove(&expression);
             if ty.is_err() {
                 crate::trace_compiler!(
