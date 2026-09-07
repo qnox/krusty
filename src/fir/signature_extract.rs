@@ -11,7 +11,7 @@ use super::coverage::ExpressionForm;
 use super::{
     DeclarationId, DeclarationStub, DeferredCallableSelection, DeferredMemberSelection,
     DeferredValueSelection, OriginId, ResolvedTy, SigCallArgument, SigExpr, SigExprId,
-    SignatureGraph, SignatureScope, SignatureScopeId, SourceFileId,
+    SignatureGraph, SignatureScope, SignatureScopeId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,7 +30,7 @@ pub struct SignatureConstraintExtractor {
     source_primary_constructors: HashMap<crate::diag::Span, DeclarationId>,
     source_functions: HashMap<crate::diag::Span, DeclarationId>,
     source_stubs: HashMap<crate::diag::Span, DeclarationStub>,
-    direct_classifier_parents: HashMap<crate::ast::DeclId, crate::ast::DeclId>,
+    direct_classifier_children: HashMap<crate::ast::DeclId, Vec<crate::ast::DeclId>>,
     lexical_values: Vec<HashMap<Box<str>, SigExprId>>,
     lexical_callables: Vec<HashMap<Box<str>, CompactLexicalCallable>>,
     lexical_types: Vec<HashMap<Box<str>, CompactLexicalType>>,
@@ -147,13 +147,14 @@ impl SignatureConstraintExtractor {
         Some(self.graph.add_expr(SigExpr::Value(selection)))
     }
 
-    pub fn extract_file(
+    pub(crate) fn extract_file(
         &mut self,
         file: &File,
-        source: SourceFileId,
-        stubs: &[DeclarationStub],
+        active: &super::ActiveSourceHeaders<'_>,
         mut origin: impl FnMut(crate::diag::Span) -> OriginId,
     ) {
+        let source = active.source();
+        let stubs = active.stubs();
         self.source_classifiers.clear();
         self.source_classifiers.extend(
             stubs
@@ -179,31 +180,8 @@ impl SignatureConstraintExtractor {
         self.source_stubs.clear();
         self.source_stubs
             .extend(stubs.iter().map(|stub| (stub.range, *stub)));
-        self.direct_classifier_parents.clear();
-        let classifiers = file
-            .decls
-            .iter()
-            .copied()
-            .filter_map(|declaration| match file.decl(declaration) {
-                crate::ast::Decl::Class(classifier) => Some((declaration, classifier.span)),
-                crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => None,
-            })
-            .collect::<Vec<_>>();
-        for &(child, child_span) in &classifiers {
-            let parent = classifiers
-                .iter()
-                .copied()
-                .filter(|(candidate, candidate_span)| {
-                    *candidate != child
-                        && candidate_span.lo <= child_span.lo
-                        && child_span.hi <= candidate_span.hi
-                })
-                .min_by_key(|(_, span)| span.hi - span.lo)
-                .map(|(parent, _)| parent);
-            if let Some(parent) = parent {
-                self.direct_classifier_parents.insert(child, parent);
-            }
-        }
+        self.direct_classifier_children
+            .clone_from(active.direct_classifier_children());
         // Local-class members are not published in the module index, but their inferred result may
         // be demanded by an enclosing non-local signature (for example, a function returning the
         // result of a method on an anonymous-object property). Such a constraint is registered
@@ -265,28 +243,15 @@ impl SignatureConstraintExtractor {
                     parameters.insert(parameter.name.clone().into_boxed_str(), value);
                 }
             }
-            let enclosing_classifier = file
-                .decls
-                .iter()
-                .copied()
-                .filter_map(|declaration| match file.decl(declaration) {
-                    crate::ast::Decl::Class(classifier)
-                        if classifier.span.lo <= stub.range.lo
-                            && stub.range.hi <= classifier.span.hi =>
-                    {
-                        Some((
-                            classifier.span.hi - classifier.span.lo,
-                            declaration,
-                            classifier,
-                        ))
-                    }
-                    crate::ast::Decl::Class(_)
-                    | crate::ast::Decl::Fun(_)
-                    | crate::ast::Decl::Property(_) => None,
-                })
-                .min_by_key(|(length, _, _)| *length);
+            let enclosing_classifier =
+                active
+                    .enclosing_classifier(stub.id)
+                    .and_then(|declaration| match file.decl(declaration) {
+                        crate::ast::Decl::Class(classifier) => Some((declaration, classifier)),
+                        crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => None,
+                    });
             if let Some(function) = function {
-                if let Some((_, _, classifier)) = enclosing_classifier {
+                if let Some((_, classifier)) = enclosing_classifier {
                     if let Some(declaration) =
                         self.source_classifiers.get(&classifier.span).copied()
                     {
@@ -308,7 +273,7 @@ impl SignatureConstraintExtractor {
                     parameters.insert(format!("this@{}", function.name).into_boxed_str(), receiver);
                 }
             }
-            if let Some((_, declaration, _)) = enclosing_classifier {
+            if let Some((declaration, _)) = enclosing_classifier {
                 self.local_classifier_stack.push(declaration);
             }
             self.lexical_values.push(parameters);
@@ -697,14 +662,11 @@ impl SignatureConstraintExtractor {
             // locals and ordinary nested/inner member classes. Walk only DIRECT children. Scanning
             // every descendant at every level revisits a depth-N anonymous chain through every
             // ancestor subset (exponential work); direct containment was derived once per file.
-            let mut nested = file
-                .decls
-                .iter()
-                .copied()
-                .filter(|declaration| {
-                    self.direct_classifier_parents.get(declaration) == Some(&classifier)
-                })
-                .collect::<Vec<_>>();
+            let mut nested = self
+                .direct_classifier_children
+                .get(&classifier)
+                .cloned()
+                .unwrap_or_default();
             nested.sort_unstable_by_key(|declaration| match file.decl(*declaration) {
                 crate::ast::Decl::Class(candidate) => candidate.span.lo,
                 crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => u32::MAX,

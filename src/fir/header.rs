@@ -3563,6 +3563,8 @@ pub(crate) struct ActiveSourceHeaders<'file> {
     stubs: Vec<DeclarationStub>,
     primary_declarations: Vec<Option<DeclarationId>>,
     type_parameter_declarations: std::collections::HashMap<u32, DeclarationId>,
+    enclosing_classifiers: std::collections::HashMap<DeclarationId, DeclId>,
+    direct_classifier_children: std::collections::HashMap<DeclId, Vec<DeclId>>,
     active_file: std::marker::PhantomData<&'file File>,
 }
 
@@ -3586,6 +3588,16 @@ impl ActiveSourceHeaders<'_> {
         self.type_parameter_declarations
             .get(&signature_start)
             .copied()
+    }
+
+    pub(crate) fn enclosing_classifier(&self, declaration: DeclarationId) -> Option<DeclId> {
+        self.enclosing_classifiers.get(&declaration).copied()
+    }
+
+    pub(crate) fn direct_classifier_children(
+        &self,
+    ) -> &std::collections::HashMap<DeclId, Vec<DeclId>> {
+        &self.direct_classifier_children
     }
 }
 
@@ -3660,11 +3672,65 @@ impl HeaderInventoryBuilder {
                 Some((start, stub.id))
             })
             .collect();
+        let classifier_parsers = extracted
+            .primary_declarations
+            .iter()
+            .enumerate()
+            .filter_map(|(raw, declaration)| {
+                let declaration = (*declaration)?;
+                self.declarations
+                    .anchor(declaration)
+                    .is_some_and(|anchor| anchor.kind == DeclarationKind::Classifier)
+                    .then(|| {
+                        (
+                            declaration,
+                            DeclId(u32::try_from(raw).expect("too many parser declarations")),
+                        )
+                    })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let enclosing_classifier = |declaration: DeclarationId| {
+            let mut owner = self
+                .declarations
+                .anchor(declaration)
+                .and_then(|anchor| anchor.owner);
+            while let Some(candidate) = owner {
+                let anchor = self
+                    .declarations
+                    .anchor(candidate)
+                    .expect("a declaration owner must have a stable anchor");
+                if anchor.kind == DeclarationKind::Classifier {
+                    if let Some(&parser) = classifier_parsers.get(&candidate) {
+                        return Some(parser);
+                    }
+                }
+                owner = anchor.owner;
+            }
+            None
+        };
+        let mut enclosing_classifiers = std::collections::HashMap::new();
+        for stub in &extracted.stubs {
+            if let Some(parser) = enclosing_classifier(stub.id) {
+                enclosing_classifiers.insert(stub.id, parser);
+            }
+        }
+        let mut direct_classifier_children = std::collections::HashMap::new();
+        for (&declaration, &parser) in &classifier_parsers {
+            let Some(parent) = enclosing_classifier(declaration) else {
+                continue;
+            };
+            direct_classifier_children
+                .entry(parent)
+                .or_insert_with(Vec::new)
+                .push(parser);
+        }
         Some(ActiveSourceHeaders {
             source: source_id,
             stubs: extracted.stubs,
             primary_declarations: extracted.primary_declarations,
             type_parameter_declarations,
+            enclosing_classifiers,
+            direct_classifier_children,
             active_file: std::marker::PhantomData,
         })
     }

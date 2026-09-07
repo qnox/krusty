@@ -21,14 +21,20 @@ fn signature_graph_bytes(source: &str) -> usize {
     let mut diagnostics = DiagSink::new();
     let mut extractor = crate::fir::SignatureConstraintExtractor::default();
     let mut origins = crate::fir::OriginStore::default();
-    let _headers = crate::fir::stream_file_stub_inventory(
-        &inputs,
+    let file = parse_source_kind(
+        source,
+        SourceKind::Kotlin,
         &LangFeatures::new(),
         &mut diagnostics,
-        |source, file, stubs| {
-            extractor.extract_file(file, source, stubs, |span| origins.source(source, span));
-        },
     );
+    let mut builder = crate::fir::HeaderInventoryBuilder::default();
+    let active = builder
+        .add_source(0, &inputs[0], Some(&file))
+        .expect("Kotlin test source must produce headers");
+    let source = active.source();
+    extractor.extract_file(&file, &active, |span| origins.source(source, span));
+    drop(active);
+    let _headers = builder.finish();
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
     extractor.graph().storage_payload_bytes()
 }

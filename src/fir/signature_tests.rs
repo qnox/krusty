@@ -12,6 +12,22 @@ fn inventory_active_file(
     builder.finish()
 }
 
+fn extract_active_file(
+    source: &SourceInput<'_>,
+    file: &crate::ast::File,
+    extractor: &mut SignatureConstraintExtractor,
+    origins: &mut OriginStore,
+) -> StreamedHeaderModule {
+    let mut builder = HeaderInventoryBuilder::default();
+    let active = builder
+        .add_source(0, source, Some(file))
+        .expect("Kotlin test source must produce headers");
+    let source = active.source();
+    extractor.extract_file(file, &active, |span| origins.source(source, span));
+    drop(active);
+    builder.finish()
+}
+
 #[test]
 fn generated_nested_classifier_identity_comes_from_its_stable_owner() {
     let text = "package sample\nclass Foo";
@@ -76,12 +92,9 @@ fun inferred() = transform<String>(
     let sources = [SourceInput::kotlin(text).with_file_stem("CallShape")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
+    let _headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);
@@ -116,12 +129,9 @@ fn compact_binary_arguments_retain_integer_literal_leaves_until_semantic_evaluat
     let sources = [SourceInput::kotlin(text).with_file_stem("IntegerConstant")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
+    let _headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);
@@ -157,12 +167,9 @@ fun cmp(d: JDerived) =
     let sources = [SourceInput::kotlin(text).with_file_stem("QualifiedCallChain")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
+    let _headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);
@@ -189,12 +196,9 @@ fun bar1(bar: IBar<Int>) = bar.bar(1)
     let sources = [SourceInput::kotlin(text).with_file_stem("GenericFunInterfaces")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
+    let _headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);
@@ -220,7 +224,6 @@ inline fun inferred() = run {
     let sources = [SourceInput::kotlin(text).with_file_stem("AnonymousInLambda")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let anonymous = file
         .anonymous_object_classes
         .values()
@@ -231,17 +234,15 @@ inline fun inferred() = run {
         panic!("anonymous declaration must be a classifier")
     };
     let method = anonymous.methods.first().expect("anonymous member");
+    let mut origins = OriginStore::default();
+    let mut extractor = SignatureConstraintExtractor::default();
+    let headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
     let declaration = headers
         .stubs
         .iter()
         .find(|stub| stub.kind == DeclarationKind::Function && stub.range == method.span)
         .expect("anonymous member stub")
         .id;
-    let mut origins = OriginStore::default();
-    let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);
@@ -267,12 +268,9 @@ fun bound(value: String) = value::class
     let sources = [SourceInput::kotlin(text).with_file_stem("ClassLiteralSignatures")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
+    let _headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);
@@ -303,12 +301,9 @@ fun Any.lengthOrMinusOne() = if (this is Array<*>) size else -1
     let sources = [SourceInput::kotlin(text).with_file_stem("ThisSmartcastSignature")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
+    let _headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);
@@ -342,12 +337,9 @@ fun <E, A> Either<E, A>.getOrElse(default: A) = when (this) {
     let sources = [SourceInput::kotlin(text).with_file_stem("ContextualTypeSignature")];
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(text, &mut diagnostics);
-    let headers = inventory_active_file(&sources[0], &file);
     let mut origins = OriginStore::default();
     let mut extractor = SignatureConstraintExtractor::default();
-    extractor.extract_file(&file, SourceFileId::from_raw(0), &headers.stubs, |span| {
-        origins.source(SourceFileId::from_raw(0), span)
-    });
+    let _headers = extract_active_file(&sources[0], &file, &mut extractor, &mut origins);
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert_eq!(extractor.failures(), []);

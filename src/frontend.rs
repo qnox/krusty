@@ -796,7 +796,7 @@ fn analyze_source_set_impl(
                 &file,
                 &active_headers,
             ));
-            signature_constraints.extract_file(&file, source, stubs, |span| {
+            signature_constraints.extract_file(&file, &active_headers, |span| {
                 pass1_builder.source_origin(source, span)
             });
             // Compact signature extraction has consumed every ordinary expression dependency for
