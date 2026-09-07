@@ -79648,7 +79648,12 @@ impl<'a> Checker<'a> {
         // same name, even a receiver introduced inside its scope (`val headers = …; get(url) {
         // headers.forEach … }` reads the map, not `HttpRequestBuilder.headers`); only a
         // receiver-derived binding — an outer class's own property — yields to an inner receiver.
-        if lookup.is_some_and(|binding| !matches!(binding.origin, ReceiverFnValueOrigin::Local)) {
+        if lookup.is_some_and(|binding| {
+            !matches!(
+                binding.origin,
+                ReceiverFnValueOrigin::Local | ReceiverFnValueOrigin::ClassStorage(_)
+            )
+        }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))

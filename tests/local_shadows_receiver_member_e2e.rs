@@ -28,11 +28,17 @@ fun parameter(headers: Map<String, String>): Int {\n\
 class Outer(val x: Int) {\n\
     fun read(): Int { var r = 0; build { r = x }; return r }\n\
 }\n\
+fun captured(): Int {\n\
+    val x = 9\n\
+    class Local { fun read(): Int { var r = 0; build { r = x }; return r } }\n\
+    return Local().read()\n\
+}\n\
 fun box(): String {\n\
     val l = local()\n\
     val p = parameter(mapOf(\"k\" to \"v\"))\n\
     val o = Outer(1).read()\n\
-    return if (l == 4 && p == 1 && o == 7) \"OK\" else \"FAIL: $l $p $o\"\n\
+    val c = captured()\n\
+    return if (l == 4 && p == 1 && o == 7 && c == 9) \"OK\" else \"FAIL: $l $p $o $c\"\n\
 }\n";
     let diagnostics = common::front_end_diagnostics_files_with_stdlib(&[SRC]);
     assert_eq!(diagnostics, Vec::<String>::new());

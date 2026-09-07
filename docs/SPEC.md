@@ -1967,9 +1967,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`headers`, `url`, `body`, `size` in every ktor builder), and the reads on the wrong type cascaded
   (`unresolved reference 'forEach'`, `cannot destructure`, `unresolved reference 'keys'`). The probe
   now runs only for a receiver-derived binding — an outer class's own property, which an inner
-  implicit receiver's member does shadow, as before. Bytes for the shapes are unchanged beside the
+  implicit receiver's member does shadow, as before. A lexical local remains lexical after a local
+  class materializes its capture as `ClassStorage`. Bytes for the shapes are unchanged beside the
   known captured-`Ref` initialization residue. Test: `tests/local_shadows_receiver_member_e2e.rs`
-  (a local, a parameter, and an outer property, each pinned by the value the box run reads).
+  (a local, parameter, materialized local-class capture, and outer property, each pinned by the
+  value the box run reads).
+- **The signature evaluator's acyclicity guard clears on every exit, not only on success.** The
+  solver guards against a cyclic compact graph by marking each expression while it is being
+  evaluated. Inside the evaluation arms every `?` returned early WITHOUT unmarking, so a node that
+  failed stayed marked. That was invisible while any failure aborted the whole declaration; once a
+  failed statement effect is dropped and evaluation continues (the rule above), a later reader of
+  the same node — `val (k, v) = it.split("=", limit = 2)` inside `= runBlocking { … }`, where the
+  member call declines in Pass 1 and both destructured components read it — tripped the guard as a
+  cycle and PANICKED the analysis worker (`exit status: 101`, five source sets of a real project).
+  The arms now run inside one block whose result is judged after the guard is cleared, so a failed
+  node is simply re-evaluated (and fails again) on a second read. Test:
+  `streaming_signature_tests::a_failed_local_read_twice_in_a_block_does_not_trip_the_cycle_guard`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
