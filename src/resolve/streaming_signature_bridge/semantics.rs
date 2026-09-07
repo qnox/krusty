@@ -434,7 +434,7 @@ impl ProductionSignatureSemantics<'_> {
 
     /// Construct a compact callable's semantic generic signature from the same lexical header scope
     /// used to resolve its written parameter and result types.
-    fn compact_callable_generic_signature(
+    pub(super) fn compact_callable_generic_signature(
         &self,
         declaration: crate::fir::DeclarationId,
         signature: &crate::fir::ResolvedSignature,

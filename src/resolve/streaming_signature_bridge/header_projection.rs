@@ -210,22 +210,6 @@ pub(in crate::resolve) fn streamed_callable_header_by_declaration(
     })
 }
 
-pub(in crate::resolve) fn streamed_callable_signature_span(
-    headers: &crate::fir::StreamedHeaderModule,
-    declaration: crate::fir::DeclarationId,
-) -> Option<crate::diag::Span> {
-    let declaration = headers.syntax.declaration(declaration)?;
-    let crate::fir::HeaderDeclarationKind::Callable {
-        signature_start,
-        signature_end,
-        ..
-    } = declaration.kind
-    else {
-        return None;
-    };
-    Some(crate::diag::Span::new(signature_start, signature_end))
-}
-
 pub(in crate::resolve) fn active_callable_header(function: &FunDecl) -> StreamedCallableHeader {
     let result = match (&function.ret, &function.body) {
         (Some(_), _) => StreamedResultKind::Explicit,

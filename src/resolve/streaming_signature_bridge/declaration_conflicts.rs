@@ -19,6 +19,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         name: String,
         function: crate::libraries::FunctionInfo,
         entry_point: bool,
+        diagnostic_span: crate::diag::Span,
     }
 
     let mut entries = Vec::new();
@@ -40,14 +41,27 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         let Some(function) = symbols.top_level_function_for_declaration(stub.id) else {
             continue;
         };
-        let header = streamed_callable_header_by_declaration(headers, stub.id)
+        let header = headers
+            .syntax
+            .declaration(stub.id)
             .expect("a top-level function must retain its compact callable header");
+        let crate::fir::HeaderDeclarationKind::Callable {
+            receiver,
+            type_parameters,
+            context_count,
+            signature_start,
+            signature_end,
+            ..
+        } = header.kind
+        else {
+            unreachable!("a top-level function stub owns callable compact syntax")
+        };
         let params = function.semantic_params();
         let entry_point = is_kotlin_main_entry_point_shape(
             name,
-            header.receiver.is_some(),
-            header.type_parameters.len(),
-            header.context_count,
+            receiver.is_some(),
+            headers.syntax.type_parameters(type_parameters).len(),
+            context_count as usize,
             &params,
             function.ret.apply(function.callable.ret),
         );
@@ -58,6 +72,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
             name: name.to_string(),
             function,
             entry_point,
+            diagnostic_span: crate::diag::Span::new(signature_start, signature_end),
         });
     }
 
@@ -81,8 +96,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
                 declaration: TopLevelFunctionConflictDecl {
                     file: entry.source,
                     declaration: entry.declaration,
-                    diagnostic_span: streamed_callable_signature_span(headers, entry.declaration)
-                        .expect("a top-level callable must retain its signature origin"),
+                    diagnostic_span: entry.diagnostic_span,
                 },
                 private: entry.function.visibility.is_private(),
                 entry_point: entry.entry_point,

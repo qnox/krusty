@@ -2244,46 +2244,92 @@ impl ProductionSignatureSemantics<'_> {
             explicit_type_arguments,
             expected,
         } = call;
-        let Some(callable) = self
-            .table
-            .funs
-            .values()
-            .flatten()
-            .chain(
-                self.table
-                    .ext_funs
-                    .values()
-                    .flat_map(HashMap::values)
-                    .flatten(),
-            )
-            .find(|callable| {
-                stable_declaration.map_or_else(
-                    || {
-                        source.is_some_and(|(file, declaration)| {
-                            callable.source_file == Some(file)
-                                && callable.source_decl == Some(DeclId(declaration))
-                        })
-                    },
-                    |declaration| callable.stable_declaration == Some(declaration),
-                )
-            })
-        else {
+        let Some(declaration) = stable_declaration else {
             crate::trace_compiler!(
                 "signature",
-                "demanded source callable missing source={source:?}",
+                "demanded source callable has no stable declaration source={source:?}",
             );
             return Err(Self::failure());
         };
-        let source_file = callable
-            .source_file
-            .expect("a demanded source callable retains its source file");
+        let stub = self.headers.stub(declaration).ok_or_else(Self::failure)?;
+        let anchor = self
+            .headers
+            .declarations
+            .anchor(declaration)
+            .ok_or_else(Self::failure)?;
+        let (generic, declared_receiver, context_count, vararg_index) =
+            if let Some(header) = self.headers.syntax.declaration(declaration) {
+                let crate::fir::HeaderDeclarationKind::Callable {
+                    receiver,
+                    parameters,
+                    type_parameters,
+                    context_count,
+                    ..
+                } = header.kind
+                else {
+                    return Err(Self::failure());
+                };
+                let generic = if self
+                    .headers
+                    .syntax
+                    .type_parameters(type_parameters)
+                    .is_empty()
+                {
+                    None
+                } else {
+                    Some(self.compact_callable_generic_signature(declaration, signature)?)
+                };
+                let scope = crate::fir::SignatureScope {
+                    owner: declaration,
+                    source: stub.source,
+                };
+                let declared_receiver = receiver
+                    .map(|receiver| {
+                        self.resolve_compact_header_type(scope, receiver)
+                            .ok_or_else(Self::failure)
+                    })
+                    .transpose()?;
+                let vararg_index = self
+                    .headers
+                    .syntax
+                    .parameters(parameters)
+                    .iter()
+                    .position(|parameter| parameter.flags.is_vararg());
+                (
+                    generic,
+                    declared_receiver,
+                    context_count as usize,
+                    vararg_index,
+                )
+            } else {
+                if !stub
+                    .flags
+                    .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                {
+                    return Err(Self::failure());
+                }
+                let (callable, receiver) = generated_function_signature(
+                    self.table,
+                    self.headers,
+                    self.classifier_types,
+                    declaration,
+                )
+                .ok_or_else(Self::failure)?;
+                (
+                    callable.generic_sig.clone(),
+                    receiver,
+                    callable.context_count,
+                    callable.vararg_index,
+                )
+            };
+        let source_file = anchor.source.raw();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source_file);
         let semantic_source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        if let Some(generic) = callable.generic_sig.as_ref() {
+        if let Some(generic) = generic.as_ref() {
             bindings.extend(
                 generic
                     .formals
@@ -2292,7 +2338,7 @@ impl ProductionSignatureSemantics<'_> {
                     .zip(explicit_type_arguments.iter().copied()),
             );
         }
-        if let (Some(generic), Some(expected)) = (callable.generic_sig.as_ref(), expected) {
+        if let (Some(generic), Some(expected)) = (generic.as_ref(), expected) {
             let oracle = crate::symbol_resolver::SourceOracle(&semantic_source);
             if let Some(inferred) =
                 crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
@@ -2325,7 +2371,7 @@ impl ProductionSignatureSemantics<'_> {
                 );
             }
         }
-        if let (Some(declared), Some(actual)) = (callable.source_receiver, receiver) {
+        if let (Some(declared), Some(actual)) = (declared_receiver, receiver) {
             crate::symbol_resolver::unify_inferred_ty_with_source(
                 &semantic_source,
                 declared,
@@ -2333,10 +2379,8 @@ impl ProductionSignatureSemantics<'_> {
                 &mut bindings,
             );
         }
-        let context_count = callable.context_count.min(signature.parameters.len());
-        let visible_vararg = callable
-            .vararg_index
-            .and_then(|index| index.checked_sub(context_count));
+        let context_count = context_count.min(signature.parameters.len());
+        let visible_vararg = vararg_index.and_then(|index| index.checked_sub(context_count));
         for (argument_index, argument) in arguments.iter().enumerate() {
             if *argument == Ty::Error {
                 continue;
