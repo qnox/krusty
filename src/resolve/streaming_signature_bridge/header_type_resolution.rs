@@ -1,10 +1,8 @@
-//! Semantic resolution of declaration types for the transitional publisher.
+//! Semantic resolution of compact declaration types for the transitional publisher.
 //!
-//! Parser and compact callers share this algorithm through `SignatureTypeSyntax`. Compact Pass 1
-//! therefore consumes `HeaderTypeId` directly without either rebuilding parser `TypeRef` trees or
-//! introducing a second type resolver during the migration.
+//! Every Pass-1 declaration consumer enters through this resolver with `HeaderTypeId`; recursive
+//! source-alias substitution stays inside the same algorithm and never rebuilds parser type trees.
 
-use crate::ast::TypeRef;
 use crate::diag::DiagSink;
 use crate::fir::{HeaderTypeId, StreamedHeaderModule};
 use crate::types::{Ty, TypeName};
@@ -14,6 +12,12 @@ use super::super::{
     type_parameter_bounds, ClassNames, TParams,
 };
 use super::signature_type_syntax::SignatureTypeSyntax;
+use super::StreamedTypeAliasHeader;
+
+struct CompactAliasResolution<'a> {
+    headers: &'a StreamedHeaderModule,
+    visible: &'a [StreamedTypeAliasHeader],
+}
 
 fn classifier_for_syntax(
     name: &str,
@@ -32,6 +36,8 @@ fn projected_argument(
     classes: &ClassNames,
     tparams: &TParams,
     diags: &mut DiagSink,
+    aliases: Option<&CompactAliasResolution<'_>>,
+    alias_depth: u32,
 ) -> Ty {
     let star = argument
         .star_projection()
@@ -39,7 +45,7 @@ fn projected_argument(
     let resolved = if star {
         Ty::Error
     } else {
-        resolve_signature_type_with(argument, classes, tparams, diags)
+        resolve_signature_type_with_aliases(argument, classes, tparams, diags, aliases, alias_depth)
     };
     argument
         .projected(resolved, Ty::nullable(Ty::obj("kotlin/Any")))
@@ -51,6 +57,17 @@ pub(in crate::resolve) fn resolve_signature_type_with(
     classes: &ClassNames,
     tparams: &TParams,
     diags: &mut DiagSink,
+) -> Ty {
+    resolve_signature_type_with_aliases(reference, classes, tparams, diags, None, 0)
+}
+
+fn resolve_signature_type_with_aliases(
+    reference: SignatureTypeSyntax<'_>,
+    classes: &ClassNames,
+    tparams: &TParams,
+    diags: &mut DiagSink,
+    aliases: Option<&CompactAliasResolution<'_>>,
+    alias_depth: u32,
 ) -> Ty {
     let Some(name) = reference.spelling() else {
         return Ty::Error;
@@ -65,11 +82,53 @@ pub(in crate::resolve) fn resolve_signature_type_with(
         );
         return Ty::Error;
     }
+    let arguments = reference.arguments().unwrap_or_default();
+    let selected_alias = (alias_depth <= 8
+        && !tparams.contains(&name)
+        && reference.function_shape().flatten().is_none())
+    .then_some(aliases)
+    .flatten()
+    .and_then(|aliases| {
+        aliases
+            .visible
+            .iter()
+            .rev()
+            .find(|alias| alias.name == name && alias.type_parameters.len() == arguments.len())
+            .map(|alias| (aliases, alias))
+    });
+    if let Some((aliases, alias)) = selected_alias {
+        let mut alias_tparams = tparams.clone();
+        for (formal, argument) in alias.type_parameters.iter().zip(arguments.iter().copied()) {
+            let argument = projected_argument(
+                argument,
+                classes,
+                tparams,
+                diags,
+                Some(aliases),
+                alias_depth + 1,
+            );
+            alias_tparams.insert_binding(formal, argument, Vec::new());
+        }
+        let target = SignatureTypeSyntax::compact(
+            &aliases.headers.syntax,
+            &aliases.headers.lookup_names,
+            alias.target,
+        );
+        let expanded = resolve_signature_type_with_aliases(
+            target,
+            classes,
+            &alias_tparams,
+            diags,
+            Some(aliases),
+            alias_depth + 1,
+        );
+        let base = expanded.projection_inner().unwrap_or(expanded);
+        return apply_reference_flags(reference, base);
+    }
     let (resolved_classifier, failed_segment) = match classes.classifier_binding(&name) {
         Ok(classifier) => (Some(classifier), None),
         Err(segment) => (None, Some(segment.to_owned())),
     };
-    let arguments = reference.arguments().unwrap_or_default();
     let scoped = if tparams.contains(&name) {
         Some(tparams.bound(&name))
     } else {
@@ -77,7 +136,9 @@ pub(in crate::resolve) fn resolve_signature_type_with(
             let arguments = arguments
                 .iter()
                 .copied()
-                .map(|argument| projected_argument(argument, classes, tparams, diags))
+                .map(|argument| {
+                    projected_argument(argument, classes, tparams, diags, aliases, alias_depth)
+                })
                 .collect::<Vec<_>>();
             apply_alias_expansion(
                 classes,
@@ -99,7 +160,14 @@ pub(in crate::resolve) fn resolve_signature_type_with(
                 if parameter.star_projection() == Some(true) {
                     Ty::nullable(Ty::obj("kotlin/Any"))
                 } else {
-                    resolve_signature_type_with(parameter, classes, tparams, diags)
+                    resolve_signature_type_with_aliases(
+                        parameter,
+                        classes,
+                        tparams,
+                        diags,
+                        aliases,
+                        alias_depth,
+                    )
                 }
             })
             .collect::<Vec<_>>();
@@ -107,7 +175,14 @@ pub(in crate::resolve) fn resolve_signature_type_with(
             if result.star_projection() == Some(true) {
                 Ty::nullable(Ty::obj("kotlin/Any"))
             } else {
-                resolve_signature_type_with(result, classes, tparams, diags)
+                resolve_signature_type_with_aliases(
+                    result,
+                    classes,
+                    tparams,
+                    diags,
+                    aliases,
+                    alias_depth,
+                )
             }
         });
         Ty::fun_with_shape(
@@ -133,7 +208,9 @@ pub(in crate::resolve) fn resolve_signature_type_with(
             let arguments = arguments
                 .iter()
                 .copied()
-                .map(|argument| projected_argument(argument, classes, tparams, diags))
+                .map(|argument| {
+                    projected_argument(argument, classes, tparams, diags, aliases, alias_depth)
+                })
                 .collect::<Vec<_>>();
             apply_alias_expansion(
                 classes,
@@ -155,6 +232,10 @@ pub(in crate::resolve) fn resolve_signature_type_with(
         );
         Ty::Error
     };
+    apply_reference_flags(reference, base)
+}
+
+fn apply_reference_flags(reference: SignatureTypeSyntax<'_>, base: Ty) -> Ty {
     let base = if reference.definitely_non_null() == Some(true) {
         match base {
             Ty::TyParam(name, bound) => Ty::ty_param(name, bound.non_null()),
@@ -170,6 +251,48 @@ pub(in crate::resolve) fn resolve_signature_type_with(
     }
 }
 
+pub(in crate::resolve) fn resolve_header_type_alias_target_with(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+    visible_aliases: &[StreamedTypeAliasHeader],
+    classes: &ClassNames,
+    tparams: &TParams,
+    diags: &mut DiagSink,
+) -> Ty {
+    resolve_signature_type_with_aliases(
+        SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax),
+        classes,
+        tparams,
+        diags,
+        Some(&CompactAliasResolution {
+            headers,
+            visible: visible_aliases,
+        }),
+        0,
+    )
+}
+
+pub(in crate::resolve) fn resolve_header_type_alias_argument_with(
+    headers: &StreamedHeaderModule,
+    syntax: HeaderTypeId,
+    visible_aliases: &[StreamedTypeAliasHeader],
+    classes: &ClassNames,
+    tparams: &TParams,
+    diags: &mut DiagSink,
+) -> Ty {
+    projected_argument(
+        SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax),
+        classes,
+        tparams,
+        diags,
+        Some(&CompactAliasResolution {
+            headers,
+            visible: visible_aliases,
+        }),
+        0,
+    )
+}
+
 pub(in crate::resolve) fn resolve_header_type_with(
     headers: &StreamedHeaderModule,
     syntax: HeaderTypeId,
@@ -179,20 +302,6 @@ pub(in crate::resolve) fn resolve_header_type_with(
 ) -> Ty {
     resolve_signature_type_with(
         SignatureTypeSyntax::compact(&headers.syntax, &headers.lookup_names, syntax),
-        classes,
-        tparams,
-        diags,
-    )
-}
-
-pub(in crate::resolve) fn resolve_parser_type_with(
-    reference: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    diags: &mut DiagSink,
-) -> Ty {
-    resolve_signature_type_with(
-        SignatureTypeSyntax::parser(reference),
         classes,
         tparams,
         diags,

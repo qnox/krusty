@@ -4742,6 +4742,64 @@ fun nested(value: Boxed<Cargo>): Boxed<Cargo> = value
 }
 
 #[test]
+fn compact_alias_headers_expand_generic_chains_without_parser_types() {
+    let source = r#"
+class PairBox<A, B>
+typealias Base<T> = PairBox<T, T>
+typealias Chain<T> = Base<T?>
+typealias Handler<T> = (T) -> Chain<T>
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("CompactAliasHeaders")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("compact alias headers must finalize in Pass 1")
+        .module
+        .index();
+    let chain = index
+        .type_alias_by_identity(crate::types::type_name("Chain"))
+        .expect("generic alias chain header");
+    let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+    assert_eq!(
+        chain.expansion.get(),
+        Ty::obj_args(
+            "PairBox",
+            &[Ty::nullable(parameter), Ty::nullable(parameter)]
+        )
+    );
+    assert_eq!(
+        chain.expansion_spelling.alias,
+        Some(crate::types::type_name("Base"))
+    );
+    let handler = index
+        .type_alias_by_identity(crate::types::type_name("Handler"))
+        .expect("function alias header");
+    assert_eq!(
+        handler.expansion.get(),
+        Ty::fun(
+            vec![parameter],
+            Ty::obj_args(
+                "PairBox",
+                &[Ty::nullable(parameter), Ty::nullable(parameter)]
+            ),
+        )
+    );
+    assert_eq!(
+        handler.expansion_spelling.args[1].alias,
+        Some(crate::types::type_name("Chain"))
+    );
+}
+
+#[test]
 fn nested_builder_constraints_finalize_the_enclosing_signature() {
     let source = r#"fun <A, B> build(block: Builder<A>.() -> B): Provider<A, B> =
             object : Provider<A, B> { override fun value(): A = "OK" as A }

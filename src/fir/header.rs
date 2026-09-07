@@ -1256,10 +1256,12 @@ impl HeaderSyntaxArena {
             .map(|segments| segments.join("."))
     }
 
-    /// Reconstruct one short-lived parser type for the existing resolver during migration. The
-    /// caller must resolve and drop it immediately; this never reconstructs a declaration or body
-    /// AST, and every child comes from the compact header arena.
-    pub fn transient_type_ref(&self, id: HeaderTypeId, names: &LookupNames) -> Option<TypeRef> {
+    /// Reconstruct one short-lived parser type solely for source diagnostic rendering.
+    pub(crate) fn diagnostic_type_ref(
+        &self,
+        id: HeaderTypeId,
+        names: &LookupNames,
+    ) -> Option<TypeRef> {
         let ty = self.ty(id)?;
         let flags = TrFlags::default()
             .with_nullable(ty.flags.nullable())
@@ -1284,10 +1286,10 @@ impl HeaderSyntaxArena {
                     .join(".");
                 let mut targs = Vec::new();
                 for argument in self.type_operands(detail.arguments) {
-                    targs.push(self.transient_type_ref(*argument, names)?);
+                    targs.push(self.diagnostic_type_ref(*argument, names)?);
                 }
                 let arg = match abbreviated_argument {
-                    Some(argument) => Some(Box::new(self.transient_type_ref(argument, names)?)),
+                    Some(argument) => Some(Box::new(self.diagnostic_type_ref(argument, names)?)),
                     None => None,
                 };
                 (name, arg, targs, Vec::new(), 0)
@@ -1299,10 +1301,10 @@ impl HeaderSyntaxArena {
             } => {
                 let mut fun_params = Vec::new();
                 for parameter in self.type_operands(parameters) {
-                    fun_params.push(self.transient_type_ref(*parameter, names)?);
+                    fun_params.push(self.diagnostic_type_ref(*parameter, names)?);
                 }
                 let arg = match result {
-                    Some(result) => Some(Box::new(self.transient_type_ref(result, names)?)),
+                    Some(result) => Some(Box::new(self.diagnostic_type_ref(result, names)?)),
                     None => None,
                 };
                 ("<fun>".into(), arg, Vec::new(), fun_params, context_count)

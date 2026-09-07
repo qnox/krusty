@@ -6079,29 +6079,45 @@ pub(crate) fn collect_streamed_signatures_with_cp(
 }
 
 fn resolve_source_alias_expansion(
-    target: &TypeRef,
+    headers: &crate::fir::StreamedHeaderModule,
+    target: crate::fir::HeaderTypeId,
     formals: &[String],
-    visible_aliases: &[(String, Vec<String>, TypeRef)],
+    visible_aliases: &[StreamedTypeAliasHeader],
     names: &ClassNames,
     known_spellings: &HashMap<TypeName, (crate::spelling::Spelled, Vec<String>, Ty)>,
     diags: &mut DiagSink,
 ) -> Option<(Ty, crate::spelling::Spelled)> {
     let symbolic =
         TParams::symbolic_from_decl_with(formals, &[], &|candidate| names.get_class(candidate));
-    let mut target_spellings = HashMap::new();
-    let expanded_target =
-        crate::parser::expanded_type_alias_target(visible_aliases, target, &mut target_spellings);
-    let expansion = ty_of_ref(&expanded_target, names, &symbolic, diags);
+    let expansion = resolve_header_type_alias_target_with(
+        headers,
+        target,
+        visible_aliases,
+        names,
+        &symbolic,
+        diags,
+    );
     if expansion == Ty::Error {
         return None;
     }
-    let spelling = spelling_of_ref(
-        &expanded_target,
+    let spelling = compact_type_spelling_with(
+        headers,
+        target,
         names,
         &symbolic,
         known_spellings,
-        &target_spellings,
-    );
+        false,
+        &mut |argument| {
+            resolve_header_type_alias_argument_with(
+                headers,
+                argument,
+                visible_aliases,
+                names,
+                &symbolic,
+                &mut DiagSink::new(),
+            )
+        },
+    )?;
     Some((expansion, spelling))
 }
 
@@ -6171,9 +6187,11 @@ fn collect_signatures_with_cp_impl(
             .get(crate::fir::SourceFileId::from_raw(source as u32))
             .map(|file| file.package)
             .unwrap_or(TypeName::ROOT);
-        for (alias, _, target) in aliases {
-            if target.name != "<fun>" && !target.name.is_empty() {
-                user_aliases.insert(crate::types::type_name_child(package, alias));
+        for alias in aliases {
+            if header_type_spelling(headers, alias.target)
+                .is_some_and(|target| target != "<fun>" && !target.is_empty())
+            {
+                user_aliases.insert(crate::types::type_name_child(package, &alias.name));
             }
         }
     }
@@ -6385,11 +6403,14 @@ fn collect_signatures_with_cp_impl(
     let mut source_alias_identities: Vec<(String, TypeName)> = Vec::new();
     for file_index in 0..source_packages.len() {
         let alias_package = &source_packages[file_index];
-        for (alias, _, target) in &file_type_aliases[file_index] {
-            if target.name == "<fun>" || target.name.is_empty() {
+        for alias in &file_type_aliases[file_index] {
+            let Some(target) = header_type_spelling(headers, alias.target) else {
+                continue;
+            };
+            if target == "<fun>" {
                 continue;
             }
-            alias_map.insert(alias.clone(), target.name.clone());
+            alias_map.insert(alias.name.clone(), target.clone());
             // A FULLY QUALIFIED spelling (`app.Cargo`) reaches name resolution intact — the parse
             // seam expands only simple spellings — and qualified resolution answers it with the
             // alias's OWN declaration, because an alias declaration is a name a package contains.
@@ -6398,7 +6419,7 @@ fn collect_signatures_with_cp_impl(
             // exactly as the bare one does. Without this the emitted descriptor named `app/Cargo`,
             // a class nothing declares or emits.
             if !alias_package.is_empty() {
-                alias_map.insert(format!("{alias_package}.{alias}"), target.name.clone());
+                alias_map.insert(format!("{alias_package}.{}", alias.name), target);
             }
         }
         // Identities come from `type_alias_fun`, not `type_aliases`: the latter records only aliases
@@ -6406,18 +6427,18 @@ fn collect_signatures_with_cp_impl(
         // whose target has no class name) is absent from it — and it abbreviates like any other.
         let package = &source_packages[file_index];
         let internal = package.replace('.', "/");
-        for (alias, _, _) in &file_type_aliases[file_index] {
+        for alias in &file_type_aliases[file_index] {
             let qualified = if internal.is_empty() {
-                alias.clone()
+                alias.name.clone()
             } else {
-                format!("{internal}/{alias}")
+                format!("{internal}/{}", alias.name)
             };
             let identity = crate::types::type_name(&qualified);
-            source_alias_identities.push((alias.clone(), identity));
+            source_alias_identities.push((alias.name.clone(), identity));
             // A use site may spell the alias fully qualified (`app.Cargo`); kotlinc abbreviates it
             // identically, so the dotted spelling resolves to the same declaration.
             if !package.is_empty() {
-                source_alias_identities.push((format!("{package}.{alias}"), identity));
+                source_alias_identities.push((format!("{package}.{}", alias.name), identity));
             }
         }
     }
@@ -9452,14 +9473,14 @@ fn collect_signatures_with_cp_impl(
     // alias key would violate the class table's internal-name invariant and make hierarchy walks,
     // module providers, and direct lookups disagree about the same table.
     for file_index in 0..source_packages.len() {
-        for (alias, _, _) in &file_type_aliases[file_index] {
+        for alias in &file_type_aliases[file_index] {
             if let Some(internal) = file_class_names[file_index]
-                .get_class(alias)
+                .get_class(&alias.name)
                 .filter(|internal| table.classes.contains_key(internal))
             {
                 table
                     .source_class_aliases
-                    .insert((file_index as u32, alias.clone()), internal);
+                    .insert((file_index as u32, alias.name.clone()), internal);
             }
         }
         // Resolve every alias declaration to the one authoritative expansion consumed by metadata.
@@ -9470,13 +9491,15 @@ fn collect_signatures_with_cp_impl(
         let mut visible_aliases = Vec::new();
         // Qualified spellings are absolute and independent of import precedence.
         for (declaration_file_index, declaration_package) in source_packages.iter().enumerate() {
-            for (name, formals, target) in &file_type_aliases[declaration_file_index] {
+            for alias in &file_type_aliases[declaration_file_index] {
                 let qualified = if declaration_package.is_empty() {
-                    name.clone()
+                    alias.name.clone()
                 } else {
-                    format!("{declaration_package}.{name}")
+                    format!("{declaration_package}.{}", alias.name)
                 };
-                visible_aliases.push((qualified, formals.clone(), target.clone()));
+                let mut visible = alias.clone();
+                visible.name = qualified;
+                visible_aliases.push(visible);
             }
         }
         // Star imports contribute below same-package declarations.
@@ -9511,23 +9534,26 @@ fn collect_signatures_with_cp_impl(
             for (declaration_file_index, declaration_package) in source_packages.iter().enumerate()
             {
                 let declaration_package = declaration_package.replace('.', "/");
-                for (name, formals, target) in &file_type_aliases[declaration_file_index] {
+                for alias in &file_type_aliases[declaration_file_index] {
                     let qualified = if declaration_package.is_empty() {
-                        name.clone()
+                        alias.name.clone()
                     } else {
-                        format!("{declaration_package}/{name}")
+                        format!("{declaration_package}/{}", alias.name)
                     };
                     if qualified == internal_path {
-                        visible_aliases.push((spelling.clone(), formals.clone(), target.clone()));
+                        let mut visible = alias.clone();
+                        visible.name = spelling.clone();
+                        visible_aliases.push(visible);
                     }
                 }
             }
         }
-        for (alias, formals, target) in &file_type_aliases[file_index] {
+        for alias in &file_type_aliases[file_index] {
             let names = &file_class_names[file_index];
             let Some((expansion, expansion_spelling)) = resolve_source_alias_expansion(
-                target,
-                formals,
+                headers,
+                alias.target,
+                &alias.type_parameters,
                 &visible_aliases,
                 names,
                 &table.alias_expansion_spellings,
@@ -9536,9 +9562,9 @@ fn collect_signatures_with_cp_impl(
                 continue;
             };
             let fqn = if package.is_empty() {
-                alias.clone()
+                alias.name.clone()
             } else {
-                format!("{package}/{alias}")
+                format!("{package}/{}", alias.name)
             };
             let identity = type_name(&fqn);
             if let Some(target) = expansion.kotlin_class_internal() {
@@ -9546,14 +9572,15 @@ fn collect_signatures_with_cp_impl(
             }
             table
                 .source_alias_expansions
-                .insert(identity, (formals.clone(), expansion));
+                .insert(identity, (alias.type_parameters.clone(), expansion));
             // Recorded unconditionally: even a right-hand side that spells no alias carries the
             // formals and expansion a use site needs to place ITS spellings into the parameter
             // positions (`typealias Boxed<T> = PBox<T, T>` spells nothing, yet `Boxed<Cargo>`
             // abbreviates both expanded arguments).
-            table
-                .alias_expansion_spellings
-                .insert(identity, (expansion_spelling, formals.clone(), expansion));
+            table.alias_expansion_spellings.insert(
+                identity,
+                (expansion_spelling, alias.type_parameters.clone(), expansion),
+            );
         }
         // Nested aliases inhabit their declaring classifier's lexical namespace. Their semantic
         // identity follows the slash-separated path recorded by an explicit import; the expansion,
@@ -9660,7 +9687,7 @@ fn base_class_type_ref(base: &str, type_args: &[TypeRef], span: Span) -> TypeRef
     }
 }
 
-/// A name-only type-parameter scope: [`spelling_of_ref`] asks a `TParams` exactly one question —
+/// A name-only type-parameter scope: compact spelling publication asks a `TParams` exactly one question —
 /// does this spelling name a type parameter (and therefore never an alias) — so the bounds it
 /// carries are irrelevant here.
 fn spelling_scope(type_params: &[String]) -> TParams {
@@ -10977,7 +11004,7 @@ fn streamed_function_conflict_display(
                 owner.clone(),
                 headers
                     .syntax
-                    .transient_type_ref(*bound, &headers.lookup_names)?,
+                    .diagnostic_type_ref(*bound, &headers.lookup_names)?,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
@@ -11004,7 +11031,7 @@ fn streamed_function_conflict_display(
         .map(|parameter| {
             headers
                 .syntax
-                .transient_type_ref(parameter.ty, &headers.lookup_names)
+                .diagnostic_type_ref(parameter.ty, &headers.lookup_names)
         })
         .collect::<Option<Vec<_>>>()?;
     let parameters = header
@@ -11022,7 +11049,7 @@ fn streamed_function_conflict_display(
         Some(receiver) => Some(
             headers
                 .syntax
-                .transient_type_ref(receiver, &headers.lookup_names)?,
+                .diagnostic_type_ref(receiver, &headers.lookup_names)?,
         ),
         None => None,
     };
@@ -11030,7 +11057,7 @@ fn streamed_function_conflict_display(
         Some(result) => Some(
             headers
                 .syntax
-                .transient_type_ref(result, &headers.lookup_names)?,
+                .diagnostic_type_ref(result, &headers.lookup_names)?,
         ),
         None => None,
     };
@@ -11600,7 +11627,7 @@ fn source_generic_signature_from_header(
 }
 
 /// The phase-independent leaf of a `TypeRef`, resolved identically by every type resolver (signature
-/// collection's [`ty_of_ref_with`], the checker's `type_ref_ty`, and the lowerer's `ty_of`): a function
+/// declaration-signature resolution, the checker's `type_ref_ty`, and the lowerer's `ty_of`): a function
 /// type `(A)->R`, a builtin scalar/`String`/`Unit`, or a primitive array (`IntArray`). Returns `None`
 /// for a class / `Array<T>` / type-parameter reference — each phase resolves those against its own class
 /// table — and does NOT apply nullability (the boxable-vs-error policy is phase-specific). `recurse`
@@ -11779,184 +11806,6 @@ fn associated_companion_receiver_ty_from_spelling(
     resolve_signature_type_with(receiver, classes, tparams, diags)
 }
 
-fn ty_of_ref(r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink) -> Ty {
-    ty_of_ref_with(r, classes, tparams, diags)
-}
-
-/// The SOURCE SPELLING of a declared type, walked in parallel with [`ty_of_ref_with`] over the same
-/// `TypeRef` — the sidecar `@Metadata` needs to write `Type.abbreviated_type` (see
-/// [`crate::spelling::Spelled`]).
-///
-/// This is a SEPARATE walk rather than an extra return value from `ty_of_ref_with` deliberately:
-/// that function is on the hot path of every signature collection and every checker query, and the
-/// spelling is wanted only where a declaration is published to metadata. Diagnostics are suppressed
-/// here for the same reason — `ty_of_ref_with` has already reported anything wrong with this
-/// `TypeRef`, and reporting twice would double every type error in a declared position.
-pub(crate) fn spelling_of_ref(
-    r: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
-) -> Spelled {
-    let mut sink = DiagSink::new();
-    spelling_of_ref_with(
-        r,
-        classes,
-        tparams,
-        expansions,
-        spellings,
-        &mut |argument| type_argument_of_ref(argument, classes, tparams, &mut sink),
-    )
-}
-
-/// [`spelling_of_ref`] with declaration-scoped semantic argument resolution supplied by the
-/// caller. Compact Pass-1 headers use this form so alias arguments are bound by the same lexical
-/// resolver as the declaration signature instead of being looked up again in a file-global map.
-pub(crate) fn spelling_of_ref_with(
-    r: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
-    resolve_argument: &mut dyn FnMut(&TypeRef) -> Ty,
-) -> Spelled {
-    // Two ways a reference can name an alias, and they are mutually exclusive:
-    //
-    //  * a SAME-FILE alias was already rewritten to its target by the parse seam, which parked the
-    //    original spelling in `File::alias_spellings` — `r.name` now names the target;
-    //  * an alias declared in a sibling file or on the classpath is never rewritten, so `r.name`
-    //    still spells it and only name resolution can say so.
-    //
-    // An import path names a declaration rather than using the type, and gets no abbreviation.
-    let spelled = spellings.get(&r.span).unwrap_or(r);
-    // A type parameter shadows any same-named alias, and is never itself one.
-    if tparams.contains(&spelled.name) {
-        return Spelled {
-            definitely_non_null: spelled.definitely_non_null(),
-            ..Spelled::default()
-        };
-    }
-    // Arrow syntax (`(A) -> B`) spells a function type structurally, so the NODE itself names no
-    // alias — but its components can (`(Cargo) -> Cargo`). The metadata arguments of a function
-    // type are synthesized as `params… + ret`, so the component spellings are laid out in that
-    // order for the encoder to consume positionally. A SUSPEND function type's tail is the CPS
-    // `Continuation`/`Any?` pair instead of the return, so its return spelling has no slot.
-    //
-    // This is tested on the SPELLED node, not the resolved one: `typealias Handler<T> = (T) ->
-    // String` leaves an arrow type behind after the parse seam expands it, and the alias the
-    // source actually wrote is exactly what must survive that.
-    if !spelled.fun_params.is_empty() || spelled.name == "<fun>" {
-        let mut args: Vec<Spelled> = spelled
-            .fun_params
-            .iter()
-            .map(|parameter| {
-                spelling_of_ref_with(
-                    parameter,
-                    classes,
-                    tparams,
-                    expansions,
-                    spellings,
-                    resolve_argument,
-                )
-            })
-            .collect();
-        if !spelled.fun_suspend() {
-            args.push(
-                spelled
-                    .arg
-                    .as_deref()
-                    .map(|ret| {
-                        spelling_of_ref_with(
-                            ret,
-                            classes,
-                            tparams,
-                            expansions,
-                            spellings,
-                            resolve_argument,
-                        )
-                    })
-                    .unwrap_or_default(),
-            );
-        }
-        return Spelled {
-            definitely_non_null: spelled.definitely_non_null(),
-            alias: None,
-            alias_args: Vec::new(),
-            args,
-        };
-    }
-    let alias = (!r.is_import())
-        .then(|| classes.alias_identity(&spelled.name))
-        .flatten();
-    // Argument spellings come from the SPELLED node: at an aliased reference these are the
-    // as-written arguments, whose arity may differ from the expansion's.
-    let argument_spellings: Vec<Spelled> = spelled
-        .targs
-        .iter()
-        .map(|argument| {
-            spelling_of_ref_with(
-                argument,
-                classes,
-                tparams,
-                expansions,
-                spellings,
-                resolve_argument,
-            )
-        })
-        .collect();
-    let Some(alias) = alias else {
-        return Spelled {
-            definitely_non_null: spelled.definitely_non_null(),
-            alias: None,
-            alias_args: Vec::new(),
-            // Without an alias at this node the expanded type's arguments ARE the spelled ones,
-            // position for position.
-            args: argument_spellings,
-        };
-    };
-    // At an aliased node the two argument lists diverge: the abbreviated `Type` takes the
-    // AS-SPELLED arguments (`Boxed<Int>` -> one), while the expanded type takes the alias's
-    // right-hand side applied to them (`PBox<Int, Int>` -> two). Recover each spelled argument's
-    // `Ty` through the ordinary resolution path, discarding diagnostics as described above.
-    let alias_args: Vec<(Ty, Spelled)> = spelled
-        .targs
-        .iter()
-        .zip(argument_spellings)
-        .map(|(argument, spelling)| (resolve_argument(argument), spelling))
-        .collect();
-    let expansion_args = expansion_arg_spellings(
-        expansions
-            .get(&alias)
-            .map(|(rhs, formals, expansion)| (rhs, formals.as_slice(), *expansion))
-            .or_else(|| {
-                classes.alias_expansion(&spelled.name).map(|classpath| {
-                    (
-                        &classpath.expansion_spelling,
-                        classpath.formals.as_slice(),
-                        classpath.expansion,
-                    )
-                })
-            }),
-        &alias_args,
-    );
-    Spelled {
-        definitely_non_null: spelled.definitely_non_null(),
-        alias: Some(alias),
-        alias_args,
-        // The expansion's argument spellings come from TWO places. A right-hand side that spells an
-        // alias in a fixed position supplies it directly (`typealias CargoBox = PBox<Cargo, Cargo>`
-        // abbreviates both expanded arguments as `Cargo`). A position holding one of the alias's
-        // own PARAMETERS instead takes the spelling THIS use site wrote there (`typealias Boxed<T>
-        // = PBox<T, T>` spells no alias itself, yet `Boxed<Cargo>` abbreviates both).
-        //
-        // A SOURCE alias's template comes from the module's own map; a CLASSPATH alias's comes from
-        // its recorded expansion, whose right-hand-side spellings the metadata decoder recovers
-        // from the dependency's `Type.abbreviated_type`.
-        args: expansion_args,
-    }
-}
-
 /// Place a use site's argument spellings into an alias expansion's PARAMETER positions, keeping the
 /// right-hand side's own spelling everywhere else. See the call site for why both sources exist.
 fn expansion_arg_spellings(
@@ -12053,25 +11902,6 @@ fn substitute_expansion_spelling(
         alias_args,
         args,
     }
-}
-
-fn type_argument_of_ref(
-    argument: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    diags: &mut DiagSink,
-) -> Ty {
-    let ty = ty_of_ref_with(argument, classes, tparams, diags);
-    projected_typeref_argument(argument, ty, Ty::nullable(Ty::obj("kotlin/Any")))
-}
-
-fn ty_of_ref_with(
-    r: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    diags: &mut DiagSink,
-) -> Ty {
-    resolve_parser_type_with(r, classes, tparams, diags)
 }
 
 /// Result of typechecking a file: the type assigned to every expression node.

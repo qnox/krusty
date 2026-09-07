@@ -347,7 +347,7 @@ impl<'a> SignatureTypeSyntax<'a> {
     pub(super) fn diagnostic_type_ref(self) -> Option<TypeRef> {
         match self {
             Self::Parser(reference) => Some(reference.clone()),
-            Self::Compact { arena, names, id } => arena.transient_type_ref(id, names),
+            Self::Compact { arena, names, id } => arena.diagnostic_type_ref(id, names),
         }
     }
 }

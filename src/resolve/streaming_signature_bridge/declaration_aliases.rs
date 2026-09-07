@@ -4,7 +4,7 @@ use super::super::{
     compact_classifier_identity, resolve_source_alias_expansion, ClassNames,
     PassOneLocalClassContext, SymbolTable,
 };
-use super::streamed_type_alias_header_by_declaration;
+use super::{streamed_type_alias_header_by_declaration, StreamedTypeAliasHeader};
 use crate::diag::DiagSink;
 use crate::fir::{DeclarationKind, SourceFileId, StreamedHeaderModule};
 
@@ -14,7 +14,7 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
     local_contexts: Option<&[PassOneLocalClassContext]>,
     file_class_names: &[ClassNames],
     source: SourceFileId,
-    visible_file_aliases: &[(String, Vec<String>, crate::ast::TypeRef)],
+    visible_file_aliases: &[StreamedTypeAliasHeader],
     diags: &mut DiagSink,
 ) {
     let aliases = headers
@@ -26,9 +26,8 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
             if headers.declarations.anchor(owner)?.kind != DeclarationKind::Classifier {
                 return None;
             }
-            let (name, formals, target) =
-                streamed_type_alias_header_by_declaration(headers, stub.id)?;
-            Some((stub.id, owner, name, formals, target))
+            let header = streamed_type_alias_header_by_declaration(headers, stub.id)?;
+            Some((stub.id, owner, header))
         })
         .collect::<Vec<_>>();
     let Some(base_names) = file_class_names.get(source.raw() as usize) else {
@@ -36,7 +35,7 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
     };
     let context = local_contexts.and_then(|contexts| contexts.get(source.raw() as usize));
 
-    for (_, owner, alias, formals, target) in &aliases {
+    for (_, owner, alias_header) in &aliases {
         let Some(owner_stub) = headers.stub(*owner) else {
             continue;
         };
@@ -47,10 +46,8 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
         visible_aliases.extend(
             aliases
                 .iter()
-                .filter(|(_, candidate_owner, ..)| candidate_owner == owner)
-                .map(|(_, _, name, formals, target)| {
-                    (name.clone(), formals.clone(), target.clone())
-                }),
+                .filter(|(_, candidate_owner, _)| candidate_owner == owner)
+                .map(|(_, _, header)| header.clone()),
         );
 
         let mut names = base_names.clone();
@@ -88,8 +85,9 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
         }
 
         let Some((expansion, expansion_spelling)) = resolve_source_alias_expansion(
-            target,
-            formals,
+            headers,
+            alias_header.target,
+            &alias_header.type_parameters,
             &visible_aliases,
             &names,
             &table.alias_expansion_spellings,
@@ -100,15 +98,20 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
         // A type alias is a declaration in the classifier's Kotlin type namespace, not a runtime
         // nested class. Its qualified identity therefore uses an ordinary name-tree child (`/`),
         // never the backend nested-class (`$`) relation.
-        let identity = crate::types::type_name_child(owner_identity, alias);
+        let identity = crate::types::type_name_child(owner_identity, &alias_header.name);
         if let Some(target) = expansion.kotlin_class_internal() {
             table.source_alias_fqns.insert(identity, target);
         }
         table
             .source_alias_expansions
-            .insert(identity, (formals.clone(), expansion));
-        table
-            .alias_expansion_spellings
-            .insert(identity, (expansion_spelling, formals.clone(), expansion));
+            .insert(identity, (alias_header.type_parameters.clone(), expansion));
+        table.alias_expansion_spellings.insert(
+            identity,
+            (
+                expansion_spelling,
+                alias_header.type_parameters.clone(),
+                expansion,
+            ),
+        );
     }
 }

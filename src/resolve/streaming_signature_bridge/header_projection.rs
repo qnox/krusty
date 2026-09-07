@@ -404,13 +404,18 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
     })
 }
 
-/// Materialize one source's top-level alias declarations while Pass 1 still owns the temporary
-/// compact signature graph. Signature collection resolves these shapes into stable semantic alias
-/// headers; the graph and these reconstructed `TypeRef`s are destroyed before Pass 2 begins.
+#[derive(Clone)]
+pub(in crate::resolve) struct StreamedTypeAliasHeader {
+    pub(in crate::resolve) name: String,
+    pub(in crate::resolve) type_parameters: Vec<String>,
+    pub(in crate::resolve) target: crate::fir::HeaderTypeId,
+}
+
+/// Project one source's top-level alias declarations from the compact signature graph.
 pub(crate) fn streamed_pass_one_file_type_aliases(
     headers: &crate::fir::StreamedHeaderModule,
     source: crate::fir::SourceFileId,
-) -> Option<Vec<(String, Vec<String>, TypeRef)>> {
+) -> Option<Vec<StreamedTypeAliasHeader>> {
     headers
         .stubs
         .iter()
@@ -438,10 +443,11 @@ pub(crate) fn streamed_pass_one_file_type_aliases(
                 .iter()
                 .map(|parameter| headers.lookup_names.get(parameter.name).map(str::to_string))
                 .collect::<Option<Vec<_>>>()?;
-            let target = headers
-                .syntax
-                .transient_type_ref(target, &headers.lookup_names)?;
-            Some((name, type_parameters, target))
+            Some(StreamedTypeAliasHeader {
+                name,
+                type_parameters,
+                target,
+            })
         })
         .collect()
 }
@@ -449,7 +455,7 @@ pub(crate) fn streamed_pass_one_file_type_aliases(
 pub(in crate::resolve) fn streamed_type_alias_header_by_declaration(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
-) -> Option<(String, Vec<String>, TypeRef)> {
+) -> Option<StreamedTypeAliasHeader> {
     let stub = headers.stub(declaration)?;
     let name = headers.lookup_names.get(stub.lookup_name?)?.to_owned();
     let header = headers.syntax.declaration(declaration)?;
@@ -466,10 +472,11 @@ pub(in crate::resolve) fn streamed_type_alias_header_by_declaration(
         .iter()
         .map(|parameter| headers.lookup_names.get(parameter.name).map(str::to_owned))
         .collect::<Option<Vec<_>>>()?;
-    let target = headers
-        .syntax
-        .transient_type_ref(target, &headers.lookup_names)?;
-    Some((name, type_parameters, target))
+    Some(StreamedTypeAliasHeader {
+        name,
+        type_parameters,
+        target,
+    })
 }
 
 pub(in crate::resolve) struct StreamedClassifierParameter {
@@ -552,10 +559,7 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
             ))
         })
         .collect::<Option<Vec<_>>>()?;
-    let supertypes = headers
-        .syntax
-        .type_operands(supertypes)
-        .to_vec();
+    let supertypes = headers.syntax.type_operands(supertypes).to_vec();
     let delegated_interfaces = headers
         .syntax
         .interface_delegations(delegations)

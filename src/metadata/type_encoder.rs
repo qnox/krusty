@@ -428,7 +428,7 @@ fn encode_type_with_parameter(
                 arguments.push(signature.ret);
             }
             // A function type's metadata arguments are SYNTHESIZED (`params… + ret`, or the CPS
-            // `Continuation`/`Any?` pair for a suspend one). `spelling_of_ref` lays an arrow type's
+            // `Continuation`/`Any?` pair for a suspend one). Spelling publication lays an arrow type's
             // component spellings out in that same order, so they zip positionally; a spelling that
             // came from a NAMED alias has no argument list and contributes nothing here, which is
             // right — its arguments belong to the abbreviation, not to the expansion.

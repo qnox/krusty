@@ -88,8 +88,42 @@ fn spelling(
         (Spelled, Vec<String>, crate::types::Ty),
     >,
 ) -> Option<Spelled> {
+    let signature_scope = crate::fir::SignatureScope {
+        owner: scope_owner,
+        source: headers.declarations.anchor(scope_owner)?.source,
+    };
+    compact_type_spelling_with(
+        headers,
+        ty,
+        classes,
+        scope,
+        expansions,
+        true,
+        &mut |argument| {
+            semantics
+                .resolve_explicit_header_type(signature_scope, argument)
+                .unwrap_or(crate::types::Ty::Error)
+        },
+    )
+}
+
+pub(in crate::resolve) fn compact_type_spelling_with(
+    headers: &StreamedHeaderModule,
+    ty: HeaderTypeId,
+    classes: &ClassNames,
+    scope: &TParams,
+    expansions: &std::collections::HashMap<
+        crate::types::TypeName,
+        (Spelled, Vec<String>, crate::types::Ty),
+    >,
+    use_source_spelling: bool,
+    resolve_argument: &mut dyn FnMut(HeaderTypeId) -> crate::types::Ty,
+) -> Option<Spelled> {
     let expanded = headers.syntax.ty(ty)?;
-    let spelled_id = headers.syntax.source_spelling(ty).unwrap_or(ty);
+    let spelled_id = use_source_spelling
+        .then(|| headers.syntax.source_spelling(ty))
+        .flatten()
+        .unwrap_or(ty);
     let spelled = headers.syntax.ty(spelled_id)?;
     let spelled_name = headers
         .syntax
@@ -113,27 +147,27 @@ fn spelling(
             .type_operands(parameters)
             .iter()
             .map(|parameter| {
-                spelling(
+                compact_type_spelling_with(
                     headers,
-                    semantics,
-                    scope_owner,
                     *parameter,
                     classes,
                     scope,
                     expansions,
+                    use_source_spelling,
+                    resolve_argument,
                 )
             })
             .collect::<Option<Vec<_>>>()?;
         if !spelled.flags.suspend_function() {
             args.push(match result {
-                Some(result) => spelling(
+                Some(result) => compact_type_spelling_with(
                     headers,
-                    semantics,
-                    scope_owner,
                     result,
                     classes,
                     scope,
                     expansions,
+                    use_source_spelling,
+                    resolve_argument,
                 )?,
                 None => Spelled::default(),
             });
@@ -157,14 +191,14 @@ fn spelling(
     let argument_spellings = arguments
         .iter()
         .map(|argument| {
-            spelling(
+            compact_type_spelling_with(
                 headers,
-                semantics,
-                scope_owner,
                 *argument,
                 classes,
                 scope,
                 expansions,
+                use_source_spelling,
+                resolve_argument,
             )
         })
         .collect::<Option<Vec<_>>>()?;
@@ -179,21 +213,10 @@ fn spelling(
             args: argument_spellings,
         });
     };
-    let signature_scope = crate::fir::SignatureScope {
-        owner: scope_owner,
-        source: headers.declarations.anchor(scope_owner)?.source,
-    };
     let alias_args = arguments
         .iter()
         .zip(argument_spellings)
-        .map(|(argument, spelling)| {
-            (
-                semantics
-                    .resolve_explicit_header_type(signature_scope, *argument)
-                    .unwrap_or(crate::types::Ty::Error),
-                spelling,
-            )
-        })
+        .map(|(argument, spelling)| (resolve_argument(*argument), spelling))
         .collect::<Vec<_>>();
     let expansion_args = expansion_arg_spellings(
         expansions
