@@ -54,7 +54,7 @@ fn never_entered_while_emits_no_body() {
 /// body — the `emit_when` half of the same rule as [`never_entered_while_emits_no_body`].
 ///
 /// A `const val` is what reaches the emitter as `IrExpr::Const(IrConst::Boolean(false))`; a literal
-/// `if (false)` is folded away earlier, in `ir_lower`. Both results are kotlinc's.
+/// `if (false)` is folded away earlier, in `fir_lower`. Both results are kotlinc's.
 #[test]
 fn never_selected_when_branch_emits_no_body() {
     const SRC: &str = "const val FLAG = false\n\

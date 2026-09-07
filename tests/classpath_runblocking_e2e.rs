@@ -5,7 +5,7 @@
 //!     two parameters (a defaulted `context` + the `block`). `default_omit_lambda_param_indices` aligns the
 //!     trailing lambda to the LAST parameter (omitting leading defaults) so the checker's lambda helpers
 //!     type the block and the call resolves to `BuildersKt.runBlocking$default`.
-//!  2. LOWERING (`ir_lower.rs`): the block is `suspend CoroutineScope.() -> T`, erased in the descriptor to
+//!  2. LOWERING (`fir_lower.rs`): the block is `suspend CoroutineScope.() -> T`, erased in the descriptor to
 //!     a bare `Function2` (no `suspend` flag). `lower_arg` detects the suspend lambda STRUCTURALLY (its
 //!     checked type ends in a `Continuation`), strips it, and routes to `lower_suspend_lambda` — building a
 //!     real `SuspendLambda` state machine (the CoroutineScope receiver is modeled as the value parameter).

@@ -5,9 +5,8 @@
 
 use crate::ast::File;
 use crate::diag::Diagnostic;
-use crate::frontend::{FrontendSymbols, FrontendTypeInfo};
+use crate::frontend::FrontendTypeInfo;
 use crate::ir::IrFile;
-use crate::runtime::TargetRuntime;
 use std::fmt;
 
 const TRUNCATION_NOTICE: &str = "\n\n[dump truncated: output limit reached]\n";
@@ -24,28 +23,21 @@ pub struct DumpInput<'a> {
     pub ir: Result<&'a IrFile, &'a str>,
 }
 
-/// One checked file, plus everything lowering it needs.
+/// One inspected file and an optional IR captured from the production streaming compiler.
 ///
-/// This is the input a caller holding a finished analysis already has: the callers must not have to
-/// know how the IR section is produced, only which file they want dumped.
+/// Inspection never re-lowers a retained AST. A caller that did not capture common IR while the
+/// checked FIR body was live supplies the reason the IR section is unavailable.
 pub struct FileDumpInput<'a> {
     /// Workspace-relative path shown in the heading.
     pub label: &'a str,
     pub source: &'a str,
     pub file: &'a File,
-    /// Index of `file` within the analyzed source set; lowering stamps it into IR spans.
-    pub file_index: usize,
     pub info: Option<&'a FrontendTypeInfo>,
-    pub symbols: &'a FrontendSymbols,
-    pub runtime: &'a dyn TargetRuntime,
     pub diagnostics: &'a [Diagnostic],
+    pub ir: Result<&'a IrFile, &'a str>,
 }
 
-/// Lower the checked file and render its dump document.
-///
-/// Lowering lives here rather than in the caller because the IR section owns its own failure modes:
-/// an unchecked file, a reported bail, and a silent `None` all have to become one displayable
-/// reason, and that mapping is a property of the document, not of whoever asked for it.
+/// Render an inspected file and the common IR captured by its streaming compilation, when present.
 pub fn render_file_dump(input: &FileDumpInput<'_>) -> String {
     render_file_dump_with_limit(input, usize::MAX)
 }
@@ -56,45 +48,6 @@ pub fn render_file_dump(input: &FileDumpInput<'_>) -> String {
 /// intermediate `String` has already been built. The LSP uses this form because source size alone
 /// does not bound debug expansion: a long resolved type name may be repeated for many expressions.
 pub fn render_file_dump_with_limit(input: &FileDumpInput<'_>, max_bytes: usize) -> String {
-    let bail = std::cell::RefCell::new(String::new());
-    // The compile pipeline only lowers files whose check produced no errors (`emit_checked`), so
-    // lowering's internal asserts assume an error-free handoff — an unresolved type, for example,
-    // records no resolved `Ty` for its reference. Uphold the same precondition here.
-    let has_errors = input
-        .diagnostics
-        .iter()
-        .any(|d| d.severity == crate::diag::Severity::Error);
-    // Lowering asserts on handoff invariants by panicking; a dump exists to debug exactly the
-    // files that break invariants, so a panic becomes the IR section's reason instead of killing
-    // the process (the LSP analysis worker runs this on its main thread).
-    let mut panicked = String::new();
-    let lowered = match (input.info, has_errors) {
-        (Some(info), false) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::ir_lower::lower_file_at_reporting(
-                input.file,
-                input.file_index as u32,
-                info,
-                input.symbols,
-                input.runtime,
-                &bail,
-            )
-        }))
-        .unwrap_or_else(|payload| {
-            panicked = format!("lowering panicked: {}", panic_message(payload.as_ref()));
-            None
-        }),
-        _ => None,
-    };
-    let bail_reason = bail.borrow();
-    let ir = match lowered.as_ref() {
-        Some(ir) => Ok(ir),
-        None if input.info.is_none() => Err("file was not checked"),
-        None if has_errors => Err("file has frontend errors (see Checker section)"),
-        None if !panicked.is_empty() => Err(panicked.as_str()),
-        None if bail_reason.is_empty() => Err("lowering produced no IR and no reason"),
-        None => Err(bail_reason.as_str()),
-    };
-
     render_dump_with_limit(
         &DumpInput {
             label: input.label,
@@ -102,19 +55,10 @@ pub fn render_file_dump_with_limit(input: &FileDumpInput<'_>, max_bytes: usize) 
             file: input.file,
             info: input.info,
             diagnostics: input.diagnostics,
-            ir,
+            ir: input.ir,
         },
         max_bytes,
     )
-}
-
-/// The human-readable text of a caught panic payload (`panic!` carries `&str` or `String`).
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload")
 }
 
 /// Render the dump document.
@@ -282,24 +226,52 @@ fn line_column(source: &str, offset: usize) -> (u32, u32) {
 mod tests {
     use super::*;
     use crate::diag::{DiagSink, Severity, Span};
-    use crate::frontend::{check_file, collect_signatures, parse_source_with_detected_features};
-    use crate::ir_lower::lower_file;
+    use crate::frontend::{
+        analyze_source_set_with_features, parse_source_with_detected_features, SourceInput,
+        SourceSetAnalysis,
+    };
     use crate::libraries::EmptySymbolSource;
+
+    fn sample_ir() -> IrFile {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(crate::ir::IrExpr::Const(crate::ir::IrConst::String(
+            "OK".to_string().into(),
+        )));
+        ir.functions.push(crate::ir::IrFunction {
+            name: "box".to_string(),
+            params: Vec::new(),
+            ret: crate::types::Ty::String,
+            body: Some(value),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir
+    }
+
+    fn checked(source: &str, diags: &mut DiagSink) -> SourceSetAnalysis {
+        analyze_source_set_with_features(
+            &[SourceInput::kotlin(source)],
+            Box::new(EmptySymbolSource),
+            &crate::features::LangFeatures::default(),
+            diags,
+        )
+    }
 
     #[test]
     fn renders_all_three_sections_with_a_lowered_ir() {
         let source = "fun box(): String = \"OK\"\n";
         let mut diags = DiagSink::new();
-        let files = [parse_source_with_detected_features(source, &mut diags)];
-        let mut symbols = collect_signatures(&files, &mut diags);
-        let info = check_file(&files[0], &mut symbols, &mut diags);
-        let ir = lower_file(&files[0], &info, &symbols, &EmptySymbolSource).expect("lowers");
+        let analysis = checked(source, &mut diags);
+        let file = &analysis.files[0];
+        let info = analysis.types[0].as_ref().expect("checked file");
+        let ir = sample_ir();
 
         let text = render_dump(&DumpInput {
             label: "src/Main.kt",
             source,
-            file: &files[0],
-            info: Some(&info),
+            file,
+            info: Some(info),
             diagnostics: &[],
             ir: Ok(&ir),
         });
@@ -318,15 +290,15 @@ mod tests {
     fn ir_bail_reason_replaces_the_ir_body() {
         let source = "fun box(): String = \"OK\"\n";
         let mut diags = DiagSink::new();
-        let files = [parse_source_with_detected_features(source, &mut diags)];
-        let mut symbols = collect_signatures(&files, &mut diags);
-        let info = check_file(&files[0], &mut symbols, &mut diags);
+        let analysis = checked(source, &mut diags);
+        let file = &analysis.files[0];
+        let info = analysis.types[0].as_ref().expect("checked file");
 
         let text = render_dump(&DumpInput {
             label: "src/Main.kt",
             source,
-            file: &files[0],
-            info: Some(&info),
+            file,
+            info: Some(info),
             diagnostics: &[],
             ir: Err("lower_expr: unsupported Expr::Wild"),
         });
@@ -372,22 +344,21 @@ mod tests {
     }
 
     #[test]
-    fn a_file_dump_lowers_the_checked_file_itself() {
+    fn a_file_dump_renders_captured_streaming_ir() {
         let source = "fun box(): String = \"OK\"\n";
         let mut diags = DiagSink::new();
-        let files = [parse_source_with_detected_features(source, &mut diags)];
-        let mut symbols = collect_signatures(&files, &mut diags);
-        let info = check_file(&files[0], &mut symbols, &mut diags);
+        let analysis = checked(source, &mut diags);
+        let file = &analysis.files[0];
+        let info = analysis.types[0].as_ref().expect("checked file");
 
+        let ir = sample_ir();
         let text = render_file_dump(&FileDumpInput {
             label: "src/Main.kt",
             source,
-            file: &files[0],
-            file_index: 0,
-            info: Some(&info),
-            symbols: &symbols,
-            runtime: &EmptySymbolSource,
+            file,
+            info: Some(info),
             diagnostics: &[],
+            ir: Ok(&ir),
         });
 
         assert!(text.contains("\n## IR\n"), "{text}");
@@ -398,18 +369,15 @@ mod tests {
     fn a_file_dump_names_the_reason_an_unchecked_file_has_no_ir() {
         let source = "fun box(): String = \"OK\"\n";
         let mut diags = DiagSink::new();
-        let files = [parse_source_with_detected_features(source, &mut diags)];
-        let symbols = collect_signatures(&files, &mut diags);
+        let analysis = checked(source, &mut diags);
 
         let text = render_file_dump(&FileDumpInput {
             label: "src/Main.kt",
             source,
-            file: &files[0],
-            file_index: 0,
+            file: &analysis.files[0],
             info: None,
-            symbols: &symbols,
-            runtime: &EmptySymbolSource,
             diagnostics: &[],
+            ir: Err("file was not checked"),
         });
 
         assert!(text.contains("not lowered: file was not checked"), "{text}");
@@ -490,20 +458,17 @@ mod tests {
         let source =
             "abstract class GreetTask {\n    abstract val outputFile: RegularFileProperty\n}\n";
         let mut diags = DiagSink::new();
-        let files = [parse_source_with_detected_features(source, &mut diags)];
-        let mut symbols = collect_signatures(&files, &mut diags);
-        let info = check_file(&files[0], &mut symbols, &mut diags);
+        let analysis = checked(source, &mut diags);
+        let info = analysis.types[0].as_ref().expect("checked file");
         assert!(diags.has_errors(), "the probe source must fail its check");
 
         let text = render_file_dump(&FileDumpInput {
             label: "src/GreetTask.kt",
             source,
-            file: &files[0],
-            file_index: 0,
-            info: Some(&info),
-            symbols: &symbols,
-            runtime: &EmptySymbolSource,
+            file: &analysis.files[0],
+            info: Some(info),
             diagnostics: &diags.diags,
+            ir: Err("file has frontend errors (see Checker section)"),
         });
 
         assert!(
@@ -518,31 +483,24 @@ mod tests {
     }
 
     #[test]
-    fn a_panic_during_lowering_becomes_the_ir_sections_reason() {
-        // Defense in depth: if a caller loses the diagnostics (or lowering breaks an invariant on
-        // an error-free file), the panic must render as the IR section's reason, not kill the
-        // process — the LSP analysis worker runs dumps on its main thread.
+    fn an_inspection_dump_explains_that_common_ir_was_not_captured() {
         let source =
             "abstract class GreetTask {\n    abstract val outputFile: RegularFileProperty\n}\n";
         let mut diags = DiagSink::new();
-        let files = [parse_source_with_detected_features(source, &mut diags)];
-        let mut symbols = collect_signatures(&files, &mut diags);
-        let info = check_file(&files[0], &mut symbols, &mut diags);
+        let analysis = checked(source, &mut diags);
+        let info = analysis.types[0].as_ref().expect("checked file");
 
         let text = render_file_dump(&FileDumpInput {
             label: "src/GreetTask.kt",
             source,
-            file: &files[0],
-            file_index: 0,
-            info: Some(&info),
-            symbols: &symbols,
-            runtime: &EmptySymbolSource,
-            // Empty on purpose: the error gate must not fire, forcing lowering to panic.
+            file: &analysis.files[0],
+            info: Some(info),
             diagnostics: &[],
+            ir: Err("common IR was not captured during streaming compilation"),
         });
 
         assert!(
-            text.contains("not lowered: lowering panicked: checked type reference missing"),
+            text.contains("not lowered: common IR was not captured during streaming compilation"),
             "{text}"
         );
         assert!(!text.contains("functions ("), "{text}");

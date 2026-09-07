@@ -1802,12 +1802,6 @@ fn enum_entry_property_anonymous_object_captures_prior_entry_storage() {
     let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
     let (mut index, mut inline_bodies, _default_arguments, mut sources) =
         streamed.module.into_parts();
-    crate::resolve::publish_discovered_local_capture_declarations(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &mut analysis.symbols,
-        &mut index,
-    );
     let info = analysis.types[0].as_ref().expect("checked source");
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
@@ -1855,12 +1849,6 @@ fn anonymous_object_nested_inner_class_publishes_outer_capture_dependent_signatu
     let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
     let (mut index, mut inline_bodies, _default_arguments, mut sources) =
         streamed.module.into_parts();
-    crate::resolve::publish_discovered_local_capture_declarations(
-        &analysis.files[0],
-        SourceFileId::from_raw(0),
-        &mut analysis.symbols,
-        &mut index,
-    );
     let info = analysis.types[0].as_ref().expect("checked source");
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
@@ -1905,11 +1893,10 @@ fn public_anonymous_result_call_uses_the_finalized_stable_approximation() {
     }
 "#;
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("PublicAnonymousResult")],
         super::test_support::jvm_semantics(),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
@@ -1927,7 +1914,7 @@ fn public_anonymous_result_call_uses_the_finalized_stable_approximation() {
         .expect("stable public foo signature");
     assert_eq!(foo.result.get(), Ty::obj("kotlin/Any"));
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
 }
 
@@ -1939,16 +1926,15 @@ fn production_stream_does_not_publish_anonymous_super_arguments_as_properties() 
                       return foo(\"OK\", intArrayOf(1, 2)).s\n\
                   }\n";
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("AnonymousSuperCapture")],
         super::test_support::jvm_semantics(),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1971,7 +1957,7 @@ fn production_stream_republishes_anonymous_delegate_as_synthetic_constructor_par
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1993,7 +1979,7 @@ fn production_stream_infers_nested_classifier_companion_invoke() {
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2015,7 +2001,7 @@ fn production_stream_finalizes_defaulted_member_through_interface_delegation() {
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "signatures must finalize");
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2040,7 +2026,7 @@ fn production_stream_checks_expect_constructor_default_against_actual_signature(
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2053,16 +2039,15 @@ fn qualified_array_factory_is_folded_as_annotation_array_payload() {
         fun box(): String = "OK"
     "#;
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("QualifiedAnnotationArray")],
         super::test_support::jvm_semantics(),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2081,16 +2066,15 @@ fn annotation_folding_uses_resolved_enum_identity_for_every_source_spelling() {
         fun limited() {}
     "#;
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("EnumAnnotationArguments")],
         super::test_support::jvm_semantics(),
         &LangFeatures::from_source(source),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2111,16 +2095,15 @@ fn expected_classifier_resolves_a_java_static_property_as_a_semantic_property() 
         SourceInput::kotlin(kotlin).with_file_stem("ExpectedJavaProperty"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         super::test_support::jvm_semantics(),
         &LangFeatures::from_source(kotlin),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2153,7 +2136,7 @@ fn accessor_property_inherited_through_java_keeps_exact_source_accessor_targets(
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2210,11 +2193,10 @@ fn pass_one_prepares_inline_members_of_parser_hoisted_nested_classifiers() {
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("NestedInlinePreparation")];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2238,11 +2220,10 @@ fn pass_one_checks_anonymous_member_bodies_owned_by_an_inline_function() {
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("InlineAnonymousBody")];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2289,7 +2270,7 @@ fn production_stream_captures_unnamed_context_in_crossinline_lambda() {
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2310,7 +2291,7 @@ fn production_stream_types_contextual_sam_lambda_with_implicit_receiver() {
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2331,7 +2312,7 @@ fn production_stream_publishes_cross_file_suspend_function_fun_interface() {
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }

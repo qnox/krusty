@@ -646,9 +646,10 @@ impl DefinitionSymbols {
         }
         for ((receiver, name), signatures) in &symbols.ext_props {
             for signature in signatures {
-                let Some(target) =
-                    definitions.declaration_target(signature.source.0, signature.source.1)
-                else {
+                let Some((source_file, declaration)) = signature.source else {
+                    continue;
+                };
+                let Some(target) = definitions.declaration_target(source_file, declaration) else {
                     continue;
                 };
                 definitions

@@ -26,7 +26,6 @@ pub mod fir;
 pub mod fir_lower;
 pub mod frontend;
 pub mod ir;
-pub mod ir_lower;
 pub mod ir_print;
 pub mod java_source;
 pub mod js;

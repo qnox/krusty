@@ -1919,6 +1919,8 @@ pub struct FunctionInfo {
     /// Source declaration key for a callable from the current compilation module. Classpath callables
     /// leave this unset.
     pub source_key: Option<(u32, u32)>,
+    /// Declaring source file for a current-module callable, independent of parser arena identity.
+    pub source_file: Option<u32>,
     /// Stable declaration identity for a callable from the current compilation. This is independent
     /// of parser arenas and is the identity checked FIR retains.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
@@ -2150,6 +2152,7 @@ impl FunctionInfo {
             default_values: Vec::new(),
             context_count: 0,
             source_key: None,
+            source_file: None,
             stable_declaration: None,
             source_member: None,
             implicit_classifier_callable: None,

@@ -627,27 +627,6 @@ impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
     }
 }
 
-/// Checked adapter used by the legacy syntax-lowering path while it remains available to tests.
-pub struct SymbolSourceClassifiers<'a> {
-    source: &'a dyn SymbolSource,
-}
-
-impl<'a> SymbolSourceClassifiers<'a> {
-    pub fn new(source: &'a dyn SymbolSource) -> Self {
-        Self { source }
-    }
-}
-
-impl BackendClassifierSource for SymbolSourceClassifiers<'_> {
-    fn classifier(&self, classifier: TypeName) -> Option<Arc<BackendClassifierFact>> {
-        let shape = self.source.classifier(classifier)?;
-        validate_classifier(classifier, &shape).unwrap_or_else(|error| {
-            panic!("classifier crossed the backend boundary with invalid types: {error:?}")
-        });
-        Some(Arc::new(BackendClassifierFact::from_library(&shape)))
-    }
-}
-
 fn validate_classifier(classifier: TypeName, shape: &LibraryType) -> Result<(), BackendFactError> {
     let mut saw_pending = false;
     let mut saw_error = false;
@@ -924,8 +903,8 @@ mod tests {
             .classifier(classifier)
             .expect("stable classifier");
         let provider = crate::module_symbols::ModuleSymbols::new(&analysis.symbols);
-        let legacy = provider.classifier(classifier).expect("module classifier");
-        let legacy = BackendClassifierFact::from_library(&legacy);
-        assert_eq!(*stable, legacy);
+        let projected = provider.classifier(classifier).expect("module classifier");
+        let projected = BackendClassifierFact::from_library(&projected);
+        assert_eq!(*stable, projected);
     }
 }

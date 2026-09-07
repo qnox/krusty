@@ -1,4 +1,4 @@
-//! End-to-end "box" coverage targeting `src/ir_lower.rs` lowering and `src/jvm/ir_emit.rs` emit
+//! End-to-end "box" coverage targeting `src/fir_lower.rs` lowering and `src/jvm/ir_emit.rs` emit
 //! edge cases: Long/Double arithmetic and numeric promotion, arrays (including 2D and primitive
 //! arrays), nested generics, smart-cast chains, `when` supertype unification, string building,
 //! `tailrec`, elvis / safe-call chains, non-local returns and bit-ops combined with arithmetic.

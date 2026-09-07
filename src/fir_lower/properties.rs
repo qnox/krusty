@@ -1671,7 +1671,7 @@ fn materialize_member_property(
             false
         };
         // A synthesized class's CAPTURE already owns a field, spliced in with its constructor
-        // argument when the class was lowered. `install_anonymous_object_captures` also registers
+        // argument when the class was lowered. Checked local-signature publication also registers
         // each capture as a synthetic property, so emitting a field for that property again gives
         // the class two identically-named fields and the JVM refuses to load it
         // (`ClassFormatError: Duplicate field name`). Reuse the existing field instead.

@@ -12,8 +12,6 @@ mod common;
 
 #[path = "box_vendored_e2e.rs"]
 mod box_vendored_e2e;
-#[path = "ir_blockers.rs"]
-mod ir_blockers;
 #[path = "kotlin_box_ir_jvm_conformance.rs"]
 mod kotlin_box_ir_jvm_conformance;
 #[path = "ksp_real_e2e.rs"]

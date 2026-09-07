@@ -305,6 +305,17 @@ pub fn compile_in_process(
     (report.diagnostics.is_empty() && !report.classes.is_empty()).then_some(report.classes)
 }
 
+#[allow(dead_code)]
+pub fn compile_in_process_with_diagnostics(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> (Vec<(String, Vec<u8>)>, Vec<String>) {
+    let report = compile_in_process_report(src, stem, cp_jars, jdk_modules);
+    (report.classes, report.diagnostics)
+}
+
 struct InProcessEmissionReport {
     artifacts: Vec<krusty::compiler::Artifact>,
     diagnostics: Vec<String>,
@@ -339,6 +350,46 @@ fn emit_in_process<B: krusty::compiler::Backend>(
             .map(|diagnostic| diagnostic.msg)
             .collect(),
     }
+}
+
+/// Capture common IR at the real backend boundary. Tests that inspect or deliberately mutate IR
+/// use this backend instead of reconstructing semantics from the retained inspection AST.
+#[allow(dead_code)]
+pub fn capture_common_ir(
+    src: &str,
+    stem: &str,
+    platform: Box<dyn krusty::libraries::SemanticPlatform>,
+) -> (Vec<krusty::ir::IrFile>, Vec<String>) {
+    #[derive(Clone)]
+    struct CaptureBackend(std::rc::Rc<std::cell::RefCell<Vec<krusty::ir::IrFile>>>);
+
+    impl krusty::compiler::Backend for CaptureBackend {
+        type State = ();
+
+        fn lower_ir_file(
+            &self,
+            file: krusty::backend::CheckedIrFile<'_>,
+            _state: &mut Self::State,
+            _diags: &mut krusty::diag::DiagSink,
+        ) -> Vec<krusty::compiler::Artifact> {
+            self.0.borrow_mut().push(file.ir);
+            Vec::new()
+        }
+
+        fn finalize(
+            &self,
+            _state: Self::State,
+            _module_name: &str,
+        ) -> Vec<krusty::compiler::Artifact> {
+            Vec::new()
+        }
+    }
+
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let backend = CaptureBackend(captured.clone());
+    let report = emit_in_process(src, stem, platform, &backend);
+    let files = std::mem::take(&mut *captured.borrow_mut());
+    (files, report.diagnostics)
 }
 
 struct InProcessCompileReport {
@@ -381,6 +432,16 @@ pub fn compile_in_process_files(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    compile_in_process_files_target(sources, cp_jars, jdk_modules, None)
+}
+
+#[allow(dead_code)]
+pub fn compile_in_process_files_target(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    class_major: Option<u16>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
     use krusty::source::SourceInput;
 
@@ -397,17 +458,16 @@ pub fn compile_in_process_files(
         .collect::<Vec<_>>();
     let cp = cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         platform,
         &krusty::features::LangFeatures::default(),
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(cp),
+        &krusty::jvm::JvmBackend::new(cp).with_class_major(class_major),
         "main",
         &mut diags,
     );
@@ -477,12 +537,8 @@ pub fn compile_in_process_metadata_cp_module_target(
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let features = krusty::features::LangFeatures::from_source(src);
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
-        &inputs,
-        platform,
-        &features,
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
-        &mut diags,
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs, platform, &features, &mut diags,
     );
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
@@ -601,7 +657,7 @@ pub fn backend_outcome_in_process(
 #[allow(dead_code)]
 pub fn compile_js_in_process(src: &str, stem: &str) -> Result<String, Vec<String>> {
     let platform = Box::new(krusty::libraries::EmptySymbolSource);
-    let backend = krusty::js::JsBackend::new(krusty::libraries::EmptySymbolSource);
+    let backend = krusty::js::JsBackend::new();
     let report = emit_in_process(src, stem, platform, &backend);
     if !report.diagnostics.is_empty() {
         return Err(report.diagnostics);
@@ -644,7 +700,7 @@ pub fn front_end_diagnostics_with_friend_paths(
         paths,
         friend_paths.to_vec(),
     ));
-    front_end_diagnostics_files_with_classpath(&[src], cp, |_, _| {})
+    front_end_diagnostics_files_with_classpath(&[src], cp)
 }
 
 /// Multi-file form of [`front_end_diagnostics`]. All signatures are collected before every file is
@@ -654,57 +710,44 @@ pub fn front_end_diagnostics_files(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
-    front_end_diagnostics_files_with_prepare(sources, cp_jars, jdk_modules, |_, _| {})
+    front_end_diagnostics_files_with_prepare(sources, cp_jars, jdk_modules)
 }
 
 /// Shared production-shaped diagnostic path. The preparation callback is the only difference
 /// between a frontend-only consumer and a backend-aware batch compile; parsing, feature handling,
 /// expect/actual stripping, signature inference, checking, and diagnostic deduplication stay in
-/// `frontend::analyze_source_set_with_features_and_prepare` instead of being copied into the test
+/// `frontend::analyze_source_set_with_features` instead of being copied into the test
 /// harness.
-fn front_end_diagnostics_files_with_prepare<F>(
+fn front_end_diagnostics_files_with_prepare(
     sources: &[&str],
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
-    prepare: F,
-) -> Vec<String>
-where
-    F: FnOnce(&[krusty::ast::File], &mut krusty::frontend::FrontendSymbols),
-{
+) -> Vec<String> {
     let cp = cached_classpath(cp_jars, jdk_modules);
-    front_end_diagnostics_files_with_classpath(sources, cp, prepare)
+    front_end_diagnostics_files_with_classpath(sources, cp)
 }
 
-fn front_end_diagnostics_files_with_classpath<F>(
+fn front_end_diagnostics_files_with_classpath(
     sources: &[&str],
     cp: std::rc::Rc<Classpath>,
-    prepare: F,
-) -> Vec<String>
-where
-    F: FnOnce(&[krusty::ast::File], &mut krusty::frontend::FrontendSymbols),
-{
+) -> Vec<String> {
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
     let inputs = sources
         .iter()
         .map(|source| krusty::frontend::SourceInput::kotlin(source))
         .collect::<Vec<_>>();
     let mut diags = krusty::diag::DiagSink::new();
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         platform,
         &krusty::features::LangFeatures::new(),
-        prepare,
         &mut diags,
     );
     let _ = krusty::compiler::check_frontend_only(analysis, &mut diags);
     diags.diags.iter().map(|d| d.msg.clone()).collect()
 }
 
-/// Multi-file checker diagnostics WITH module facade registration (`prepare_module_symbols`,
-/// which the backend drivers run before checking) — cross-file resolution then sees the same
-/// positive and negative facade registration as a real compile, unlike
-/// [`front_end_diagnostics_files`]. For asserting a cross-file resolution diagnostic. `None`
-/// (→ skip) when the toolchain is absent.
+/// Multi-file diagnostics through the production streaming frontend.
 #[allow(dead_code)]
 pub fn module_front_end_diagnostics(sources: &[(&str, &str)]) -> Option<Vec<String>> {
     let stdlib = stdlib_jar();
@@ -713,15 +756,10 @@ pub fn module_front_end_diagnostics(sources: &[(&str, &str)]) -> Option<Vec<Stri
         .iter()
         .map(|(_, source)| *source)
         .collect::<Vec<_>>();
-    let stems = sources
-        .iter()
-        .map(|(stem, _)| (*stem).to_string())
-        .collect::<Vec<_>>();
     Some(front_end_diagnostics_files_with_prepare(
         &source_texts,
         &[stdlib],
         Some(jdk.as_path()),
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
     ))
 }
 
@@ -1884,11 +1922,10 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     let jdk = krusty::toolchain::jdk_modules();
     let cp = cached_classpath(&[stdlib_jar()], jdk.as_deref());
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         platform,
         &krusty::features::LangFeatures::default(),
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
     let outputs = krusty::compiler::emit_analyzed(
@@ -2360,18 +2397,21 @@ pub fn inspect_checker_with_classpath<T>(
     ) -> T,
 ) -> (Vec<String>, T) {
     use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
+    use krusty::frontend::{analyze_source_set_with_features, SourceInput};
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(main);
-    let toks = krusty::lexer::lex(main, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        main, &toks, &mut diags, &features,
-    )];
     let cp = std::rc::Rc::new(Classpath::new(classpath));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    let info = check_file(&files[0], &mut syms, &mut diags);
-    let inspected = inspect(&files[0], &info, &syms);
+    let analysis = analyze_source_set_with_features(
+        &[SourceInput::kotlin(main)],
+        platform,
+        &features,
+        &mut diags,
+    );
+    let info = analysis.types[0]
+        .as_ref()
+        .expect("inspection analysis must retain checked type information");
+    let inspected = inspect(&analysis.files[0], info, &analysis.symbols);
     (
         diags.diags.iter().map(|m| m.msg.clone()).collect(),
         inspected,

@@ -358,61 +358,6 @@ impl StreamedHeaderModule {
         )
     }
 
-    /// Select inline body units while compact headers still own declaration ancestry. This is used
-    /// before signature finalization only for inline capture preparation; ordinary bodies remain
-    /// untouched until their active Pass-2 file.
-    pub(crate) fn inline_body_ranges(&self, source_count: usize) -> BodyCheckSelection {
-        let mut roots = vec![std::collections::HashSet::new(); source_count];
-        let mut bodies = vec![std::collections::HashSet::new(); source_count];
-        let mut stable_bodies = vec![std::collections::HashSet::new(); source_count];
-        let inline_declarations = self
-            .stubs
-            .iter()
-            .filter(|stub| stub.body.is_some() && stub.flags.has(super::DeclarationFlags::INLINE))
-            .map(|stub| stub.id)
-            .collect::<std::collections::HashSet<_>>();
-        for stub in self.stubs.iter().filter(|stub| stub.body.is_some()) {
-            let mut declaration = Some(stub.id);
-            let mut retained_by_inline_owner = false;
-            while let Some(candidate) = declaration {
-                retained_by_inline_owner |= inline_declarations.contains(&candidate);
-                declaration = self
-                    .declarations
-                    .anchor(candidate)
-                    .and_then(|anchor| anchor.owner);
-            }
-            if !retained_by_inline_owner {
-                continue;
-            }
-            if let Some(selected) = bodies.get_mut(stub.source.raw() as usize) {
-                selected.insert(stub.range);
-            }
-            if let Some(selected) = stable_bodies.get_mut(stub.source.raw() as usize) {
-                selected.insert(stub.id);
-            }
-            let mut declaration = stub.id;
-            loop {
-                let anchor = self
-                    .declarations
-                    .anchor(declaration)
-                    .expect("every inline body must retain a stable declaration anchor");
-                let Some(owner) = anchor.owner else {
-                    if let Some(selected) = roots.get_mut(anchor.source.raw() as usize) {
-                        selected.insert(anchor.range);
-                    }
-                    break;
-                };
-                declaration = owner;
-            }
-        }
-        BodyCheckSelection {
-            roots,
-            bodies,
-            stable_bodies,
-            payload_roots: std::collections::HashMap::new(),
-        }
-    }
-
     /// Consume temporary Pass-1 header state after signature solving. The returned executable
     /// inventory exists only long enough to prepare retained inline FIR; ordinary syntax is later
     /// rediscovered directly from the sequential Pass-2 parser stream.

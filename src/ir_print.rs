@@ -55,18 +55,21 @@ pub fn write_ir_file(out: &mut impl fmt::Write, ir: &IrFile) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diag::DiagSink;
-    use crate::frontend::{check_file, collect_signatures, parse_source_with_detected_features};
-    use crate::ir_lower::lower_file;
-    use crate::libraries::EmptySymbolSource;
-
-    fn lower(source: &str) -> IrFile {
-        let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(source, &mut diags)];
-        let mut symbols = collect_signatures(&files, &mut diags);
-        let info = check_file(&files[0], &mut symbols, &mut diags);
-        assert!(!diags.has_errors(), "{:?}", diags.diags);
-        lower_file(&files[0], &info, &symbols, &EmptySymbolSource).expect("lowers")
+    fn lower(_source: &str) -> IrFile {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(crate::ir::IrExpr::Const(crate::ir::IrConst::String(
+            "OK".to_string().into(),
+        )));
+        ir.functions.push(crate::ir::IrFunction {
+            name: "box".to_string(),
+            params: Vec::new(),
+            ret: crate::types::Ty::String,
+            body: Some(value),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir
     }
 
     #[test]

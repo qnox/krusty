@@ -11,7 +11,6 @@
 
 use super::common;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 /// Recursively locate a `<prefix>*.jar` (no `-sources`) under a root.
 fn walk(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
@@ -95,22 +94,6 @@ fn serializable_class_encode_round_trips() {
 
     // 1. krusty compiles `@Serializable Foo` (plugin emits the $serializer), in-process.
     let classes_dir = {
-        use krusty::diag::DiagSink;
-        use krusty::frontend::{check_file, collect_signatures_with_cp};
-        use krusty::ir_lower::lower_file;
-        use krusty::jvm::classpath::Classpath;
-        use krusty::jvm::jvm_libraries::JvmLibraries;
-        use krusty::jvm::names::file_class_name;
-        use krusty::lexer::lex;
-        use krusty::parser::parse;
-        use krusty::plugins::{serialization::SerializationPlugin, PluginContext, PluginHost};
-
-        let cp = Rc::new(Classpath::new(vec![
-            stdlib.clone(),
-            core.clone(),
-            json.clone(),
-            jimage.clone(),
-        ]));
         let src = "import kotlinx.serialization.Serializable\n\
                    @Serializable class Foo(val a: Int, val b: String)\n\
                    @Serializable class Rich(val n: Int, val flag: Boolean, val ratio: Float, val name: String)\n\
@@ -119,32 +102,18 @@ fn serializable_class_encode_round_trips() {
                    @Serializable class Outer(val inner: Inner, val label: String)\n\
                    @Serializable class Nul(val a: Int, val b: String?)\n\
                    @Serializable class NulP(val a: Int?, val b: Long?, val c: Boolean?)\n\
-                   @Serializable class NestN(val inner: Inner?, val label: String)";
-        let mut d = DiagSink::new();
-        let toks = lex(src, &mut d);
-        let files = vec![parse(src, &toks, &mut d)];
-        let platform = Box::new(JvmLibraries::new(cp.clone()));
-        let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert!(!d.has_errors(), "krusty front-end could not handle Foo");
-        let runtime = JvmLibraries::new(cp.clone());
-        let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("lower Foo");
-        let ctx = PluginContext::from_source(&files[0], &ir);
-        let mut host = PluginHost::new();
-        host.register(Box::new(SerializationPlugin::default()));
-        host.run(&mut ir, &ctx);
-        let facade = file_class_name("Foo", files[0].package.as_deref());
-        let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None, &syms)
-            .expect("krusty emits Foo + Foo$serializer");
-
+        @Serializable class NestN(val inner: Inner?, val label: String)";
         let out = std::env::temp_dir().join(format!("krusty_serrt_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
-        for (internal, bytes) in &classes {
-            let p = out.join(format!("{internal}.class"));
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, bytes).unwrap();
-        }
+        super::common::compile_to_dir(
+            src,
+            "Foo",
+            &[stdlib.clone(), core.clone(), json.clone()],
+            Some(&jimage),
+            &out,
+        )
+        .expect("production compiler emits Foo and its serializers");
         out
     };
 

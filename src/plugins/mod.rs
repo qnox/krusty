@@ -612,26 +612,6 @@ pub trait IrPlugin {
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext<'_>) {}
 }
 
-/// Run the natively-supported compiler-extension plugins over a freshly-lowered `IrFile`, driven by
-/// the file's source annotations.
-pub fn run_enabled(
-    ir: &mut IrFile,
-    file: &crate::ast::File,
-    module_name: &str,
-    class_name_resolver: &ClassNameResolver<'_>,
-    target_type_descriptor: fn(Ty) -> Option<String>,
-) {
-    let ctx = PluginContext::from_source_with_class_resolver(file, ir, Some(class_name_resolver))
-        .with_target_type_descriptor(target_type_descriptor);
-    if ctx.classes_with_simple("Serializable").is_empty() {
-        return;
-    }
-    // The `write$Self$<module>` helper is mangled with the compilation's module name (kotlinc's >=1.6
-    // ABI); thread it so it matches the real Gradle module, not the "main" default.
-    let host = enabled_plugins(module_name);
-    host.run(ir, &ctx);
-}
-
 /// Run native backend plugins from frontend-checked common IR only. Production streaming emission
 /// uses this entry: annotation names and values have already been resolved and folded, so neither a
 /// reparsed declaration nor source spelling participates in plugin realization.

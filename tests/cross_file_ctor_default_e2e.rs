@@ -7,65 +7,12 @@
 
 use super::common;
 
-use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
-use krusty::jvm::names::file_class_name;
-
 /// Compile two sources as one module (mirrors the conformance harness's `compile_multifile`): parse
 /// each, collect signatures across BOTH, then check + lower + emit each file.
 fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let sl = common::stdlib_jar();
     let jdk = common::jdk_modules();
-
-    let mut diags = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(a);
-    let parse = |s: &str, d: &mut DiagSink| {
-        let toks = krusty::lexer::lex(s, d);
-        krusty::parser::parse_with_features(s, &toks, d, &features)
-    };
-    let files = vec![parse(a, &mut diags), parse(b, &mut diags)];
-    if diags.has_errors() {
-        return None;
-    }
-    let cp_paths = vec![sl, jdk];
-    let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    if diags.has_errors() {
-        return None;
-    }
-    // Cross-file top-level function facades (so a call in one file resolves the other's `fun`).
-    let stems = ["AKt", "BKt"];
-    for (i, file) in files.iter().enumerate() {
-        let facade = file_class_name(stems[i], file.package.as_deref());
-        for &d in &file.decls {
-            if let krusty::ast::Decl::Fun(f) = file.decl(d) {
-                if f.receiver.is_none() && !f.is_inline() {
-                    let facade_name = krusty::types::type_name(&facade);
-                    syms.fn_facades_by_decl.insert((i as u32, d.0), facade_name);
-                    syms.fn_facades.insert(f.name.clone(), facade_name);
-                }
-            }
-        }
-    }
-    let mut all = Vec::new();
-    for (i, file) in files.iter().enumerate() {
-        diags.set_file(i as u32);
-        let info = check_file(file, &mut syms, &mut diags);
-        if diags.has_errors() {
-            return None;
-        }
-        let facade = file_class_name(stems[i], file.package.as_deref());
-        let runtime = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
-        let mut ir = krusty::ir_lower::lower_file_at(file, i as u32, &info, &syms, &runtime)?;
-        // Shared post-lowering pass pipeline (jvm/backend.rs); unlowerable shape → skip.
-        krusty::jvm::backend::run_backend_passes(&mut ir, file, &facade, "main", &syms, &cp)
-            .ok()?;
-        all.extend(krusty::jvm::ir_emit::emit_all(
-            &ir, &facade, &*cp, None, &syms,
-        )?);
-    }
-    Some(all)
+    common::compile_in_process_files(&[("A.kt", a), ("B.kt", b)], &[sl], Some(jdk.as_path()))
 }
 
 fn run_two(a: &str, b: &str) -> Option<String> {

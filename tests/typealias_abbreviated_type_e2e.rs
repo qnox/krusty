@@ -24,19 +24,22 @@ fn resolution_records_the_alias_a_declared_type_spelled() {
         \n\
         fun make(c: Cargo): Cargo = c\n";
     let mut diags = krusty::diag::DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(SRC);
-    let tokens = krusty::lexer::lex(SRC, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        SRC, &tokens, &mut diags, &features,
-    )];
-    let symbols = krusty::frontend::collect_signatures(&files, &mut diags);
-    let make = files[0]
+    let inputs = [krusty::frontend::SourceInput::kotlin(SRC)];
+    let analysis = krusty::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(krusty::libraries::EmptySymbolSource),
+        &krusty::features::LangFeatures::default(),
+        &mut diags,
+    );
+    let file = &analysis.files[0];
+    let make = file
         .decls
         .iter()
         .copied()
-        .find(|&d| matches!(files[0].decl(d), Decl::Fun(f) if f.name == "make"))
+        .find(|&d| matches!(file.decl(d), Decl::Fun(f) if f.name == "make"))
         .expect("the fixture declares `make`");
-    let spellings = symbols
+    let spellings = analysis
+        .symbols
         .declared_spellings
         .get(&(0, make))
         .expect("a declaration spelling a typealias must be recorded");

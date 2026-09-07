@@ -20,9 +20,7 @@ impl Checker<'_> {
         primary: &[Ty],
         secondary: &[Vec<Ty>],
     ) {
-        let Some(index) = self.resolved_index else {
-            return;
-        };
+        let index = self.resolved_index;
         let context_count = class.context_params.len();
         let mut constructors = Vec::with_capacity(secondary.len() + 1);
 
@@ -184,10 +182,11 @@ impl Checker<'_> {
         {
             return Some(supertype);
         }
-        if let Some(superclass) = self.resolved_index.and_then(|index| {
+        if let Some(superclass) = (|| {
+            let index = self.resolved_index;
             let declaration = index.classifier_declaration(current)?;
             index.classifier_header(declaration)?.superclass
-        }) {
+        })() {
             return Some(superclass.get());
         }
         let source = self.fed_source();
@@ -226,9 +225,7 @@ impl Checker<'_> {
         owner: crate::fir::DeclarationId,
         declaration: Option<&ClassDecl>,
     ) -> Vec<CtorDelegationCandidate> {
-        let Some(index) = self.resolved_index else {
-            return Vec::new();
-        };
+        let index = self.resolved_index;
         let mut candidates = Vec::new();
         let secondary_count = declaration.map_or(0, |class| class.secondary_ctors.len());
         for sibling in 0..=secondary_count {
@@ -435,7 +432,7 @@ impl Checker<'_> {
                 },
                 context_count: self
                     .resolved_index
-                    .and_then(|index| index.callable_for_declaration(stable))
+                    .callable_for_declaration(stable)
                     .map_or(0, |callable| {
                         callable.shape.context_parameter_count as usize
                     }),
@@ -462,7 +459,7 @@ impl Checker<'_> {
         declaration: Option<crate::fir::DeclarationId>,
         parameter_count: usize,
     ) -> Option<(Vec<String>, Vec<bool>, Option<usize>, Vec<bool>)> {
-        let index = self.resolved_index?;
+        let index = self.resolved_index;
         let callable = index.callable_for_declaration(declaration?)?;
         let parameters = (0..parameter_count)
             .map(|ordinal| {
@@ -514,80 +511,6 @@ impl Checker<'_> {
                     })
             })
             .collect()
-    }
-
-    pub(super) fn source_class_decl_by_internal(&self, internal: TypeName) -> Option<ClassDecl> {
-        let stable = self
-            .resolver()
-            .classifier(internal)
-            .filter(|classifier| classifier.source_file.is_some());
-        let legacy = self
-            .module
-            .legacy_symbols()
-            .and_then(|symbols| symbols.class_by_type_name(internal));
-        let source_file = stable
-            .as_ref()
-            .and_then(|classifier| classifier.source_file)
-            .or_else(|| legacy.as_ref().map(|signature| signature.source_file))?;
-        let stable_declaration = stable
-            .as_ref()
-            .and_then(|classifier| classifier.stable_declaration)
-            .or_else(|| {
-                legacy
-                    .as_ref()
-                    .and_then(|signature| signature.stable_declaration)
-            });
-        if source_file == self.file_index {
-            if let Some(active) = self.active_declarations {
-                return active
-                    .class(self.file, stable_declaration?)
-                    .map(|(_, class)| class.clone());
-            }
-        }
-        let Some(signature) = legacy else {
-            crate::trace_compiler!(
-                "resolve",
-                "source class declaration is unavailable outside the active Pass-2 unit internal={internal}"
-            );
-            return None;
-        };
-        let Some(declaration) = signature.source_decl else {
-            crate::trace_compiler!(
-                "resolve",
-                "source class declaration missing arena identity internal={internal} file={}",
-                signature.source_file,
-            );
-            return None;
-        };
-        let file = if source_file == self.file_index {
-            self.file
-        } else {
-            let Some(file) = self
-                .source_files
-                .and_then(|files| files.get(source_file as usize))
-            else {
-                crate::trace_compiler!(
-                    "resolve",
-                    "source class declaration missing file internal={internal} wanted={} current={} files={}",
-                    source_file,
-                    self.file_index,
-                    self.source_files.map_or(0, <[File]>::len),
-                );
-                return None;
-            };
-            file
-        };
-        match file.decl(declaration) {
-            Decl::Class(class) => Some(class.clone()),
-            declaration_kind => {
-                crate::trace_compiler!(
-                    "resolve",
-                    "source class declaration identity mismatch internal={internal} file={} declaration={declaration:?} kind={declaration_kind:?}",
-                    signature.source_file,
-                );
-                None
-            }
-        }
     }
 
     pub(super) fn semantic_lambda_receiver_flags(params: &[Ty]) -> Vec<bool> {
@@ -660,218 +583,5 @@ impl Checker<'_> {
                 .fun_params
                 .iter()
                 .any(|argument| Self::type_ref_mentions_type_param(argument, tparams))
-    }
-
-    pub(super) fn source_constructor_candidates(
-        &self,
-        scope: &CheckerScope<'_>,
-        declaration: Option<&ClassDecl>,
-        class: &ClassSig,
-    ) -> Vec<CtorDelegationCandidate> {
-        let mut candidates = Vec::new();
-        if class.has_primary_ctor {
-            let stable_facts = self.stable_constructor_parameter_facts(
-                class.primary_constructor_declaration,
-                class.ctor_params.len(),
-            );
-            let checked_shapes = self.checked_primary_constructor_shapes(declaration);
-            let primary_params = checked_shapes
-                .as_ref()
-                .map(|shapes| shapes.iter().map(|(shape, _)| *shape).collect())
-                .unwrap_or_else(|| class.ctor_params.clone());
-            let constraint_shapes = checked_shapes
-                .as_deref()
-                .unwrap_or(class.ctor_param_shapes.as_slice());
-            candidates.push(CtorDelegationCandidate {
-                target: ResolvedCtorDelegationTarget::ThisPrimary {
-                    params: primary_params.clone(),
-                },
-                context_count: 0,
-                param_names: class
-                    .ctor_param_names
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect(),
-                defaults: class
-                    .ctor_param_names
-                    .iter()
-                    .map(|(_, has_default)| *has_default)
-                    .collect(),
-                vararg: class.ctor_vararg,
-                supports_default_abi: true,
-                low_priority: self
-                    .stable_declaration_has_annotation(
-                        class.primary_constructor_declaration,
-                        "kotlin/internal/LowPriorityInOverloadResolution",
-                    )
-                    .unwrap_or_else(|| {
-                        declaration
-                            .and_then(|declaration| declaration.primary_ctor_annotations.as_ref())
-                            .is_some_and(|annotations| {
-                                self.has_low_priority_annotation(scope, annotations)
-                            })
-                    }),
-                parameter_constraints: constraint_shapes
-                    .iter()
-                    .map(|(shape, _)| Self::constructor_shape_constraint(*shape))
-                    .collect(),
-                implicit_integer_coercion: stable_facts.as_ref().map_or_else(
-                    || {
-                        declaration.map_or_else(
-                            || vec![false; primary_params.len()],
-                            |declaration| {
-                                declaration
-                                    .props
-                                    .iter()
-                                    .map(|parameter| {
-                                        self.parameter_has_implicit_integer_coercion(
-                                            scope,
-                                            &parameter.annotations,
-                                        )
-                                    })
-                                    .collect()
-                            },
-                        )
-                    },
-                    |(_, _, _, implicit)| implicit.clone(),
-                ),
-                lambda_receivers: declaration.map_or_else(
-                    || Self::semantic_lambda_receiver_flags(&primary_params),
-                    |declaration| {
-                        declaration
-                            .props
-                            .iter()
-                            .map(|parameter| parameter.ty.fun_has_receiver())
-                            .collect()
-                    },
-                ),
-            });
-        }
-        for (index, params) in class.secondary_ctors.iter().enumerate() {
-            let constructor =
-                declaration.and_then(|declaration| declaration.secondary_ctors.get(index));
-            let stable_declaration = class
-                .secondary_constructor_declarations
-                .get(index)
-                .copied()
-                .flatten();
-            let stable_facts =
-                self.stable_constructor_parameter_facts(stable_declaration, params.len());
-            candidates.push(CtorDelegationCandidate {
-                target: ResolvedCtorDelegationTarget::ThisSecondary {
-                    index,
-                    params: params.clone(),
-                },
-                context_count: 0,
-                param_names: constructor.map_or_else(
-                    || {
-                        stable_facts.as_ref().map_or_else(
-                            || {
-                                (0..params.len())
-                                    .map(|ordinal| format!("p{ordinal}"))
-                                    .collect()
-                            },
-                            |(names, _, _, _)| names.clone(),
-                        )
-                    },
-                    |constructor| {
-                        constructor
-                            .params
-                            .iter()
-                            .map(|parameter| parameter.name.clone())
-                            .collect()
-                    },
-                ),
-                defaults: constructor.map_or_else(
-                    || {
-                        stable_facts.as_ref().map_or_else(
-                            || vec![false; params.len()],
-                            |(_, defaults, _, _)| defaults.clone(),
-                        )
-                    },
-                    |constructor| {
-                        constructor
-                            .params
-                            .iter()
-                            .map(|parameter| parameter.default.is_some())
-                            .collect()
-                    },
-                ),
-                vararg: constructor
-                    .and_then(|constructor| {
-                        constructor
-                            .params
-                            .iter()
-                            .position(|parameter| parameter.is_vararg)
-                    })
-                    .or_else(|| stable_facts.as_ref().and_then(|(_, _, vararg, _)| *vararg)),
-                supports_default_abi: class.value_field.is_none(),
-                low_priority: self
-                    .stable_declaration_has_annotation(
-                        stable_declaration,
-                        "kotlin/internal/LowPriorityInOverloadResolution",
-                    )
-                    .unwrap_or_else(|| {
-                        constructor.is_some_and(|constructor| {
-                            self.has_low_priority_annotation(scope, &constructor.annotations)
-                        })
-                    }),
-                parameter_constraints: constructor.map_or_else(
-                    || {
-                        class
-                            .secondary_ctor_shapes
-                            .get(index)
-                            .unwrap_or(params)
-                            .iter()
-                            .copied()
-                            .map(Self::constructor_shape_constraint)
-                            .collect()
-                    },
-                    |constructor| {
-                        constructor
-                            .params
-                            .iter()
-                            .map(|parameter| {
-                                Self::constructor_parameter_constraint(
-                                    &parameter.ty,
-                                    &declaration.expect("constructor syntax owner").type_params,
-                                )
-                            })
-                            .collect()
-                    },
-                ),
-                implicit_integer_coercion: stable_facts.as_ref().map_or_else(
-                    || {
-                        constructor.map_or_else(
-                            || vec![false; params.len()],
-                            |constructor| {
-                                constructor
-                                    .params
-                                    .iter()
-                                    .map(|parameter| {
-                                        self.parameter_has_implicit_integer_coercion(
-                                            scope,
-                                            &parameter.annotations,
-                                        )
-                                    })
-                                    .collect()
-                            },
-                        )
-                    },
-                    |(_, _, _, implicit)| implicit.clone(),
-                ),
-                lambda_receivers: constructor.map_or_else(
-                    || Self::semantic_lambda_receiver_flags(params),
-                    |constructor| {
-                        constructor
-                            .params
-                            .iter()
-                            .map(|parameter| parameter.ty.fun_has_receiver())
-                            .collect()
-                    },
-                ),
-            });
-        }
-        candidates
     }
 }

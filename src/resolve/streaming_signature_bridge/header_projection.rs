@@ -229,7 +229,7 @@ pub(in crate::resolve) fn streamed_callable_signature_span(
     Some(crate::diag::Span::new(signature_start, signature_end))
 }
 
-pub(in crate::resolve) fn legacy_callable_header(function: &FunDecl) -> StreamedCallableHeader {
+pub(in crate::resolve) fn active_callable_header(function: &FunDecl) -> StreamedCallableHeader {
     let result = match (&function.ret, &function.body) {
         (Some(_), _) => StreamedResultKind::Explicit,
         (None, FunBody::Expr(_)) => StreamedResultKind::Inferred,
@@ -454,91 +454,6 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
     })
 }
 
-pub(in crate::resolve) fn legacy_property_header(property: &PropDecl) -> StreamedPropertyHeader {
-    StreamedPropertyHeader {
-        declaration: None,
-        name: property.name.clone(),
-        span: property.span,
-        visibility: property.visibility,
-        flags: crate::fir::DeclarationFlags::default()
-            .with(crate::fir::DeclarationFlags::EXTERNAL, property.is_external)
-            .with(crate::fir::DeclarationFlags::EXPECT, property.is_expect)
-            .with(crate::fir::DeclarationFlags::CONST, property.is_const)
-            .with(crate::fir::DeclarationFlags::OPEN, property.is_open)
-            .with(crate::fir::DeclarationFlags::OVERRIDE, property.is_override)
-            .with(crate::fir::DeclarationFlags::ABSTRACT, property.is_abstract)
-            .with(crate::fir::DeclarationFlags::MUTABLE, property.is_var)
-            .with(crate::fir::DeclarationFlags::LATEINIT, property.is_lateinit)
-            .with(
-                crate::fir::DeclarationFlags::DELEGATED,
-                property.delegate.is_some(),
-            )
-            .with(
-                crate::fir::DeclarationFlags::EXPLICIT_BACKING_FIELD,
-                property.explicit_backing_field.is_some(),
-            )
-            .with(
-                crate::fir::DeclarationFlags::CUSTOM_GETTER,
-                property.getter.is_some(),
-            )
-            .with(
-                crate::fir::DeclarationFlags::GETTER_READS_BACKING_FIELD,
-                property.getter_reads_field,
-            )
-            .with(
-                crate::fir::DeclarationFlags::CUSTOM_SETTER,
-                property.setter.is_some(),
-            )
-            .with(
-                crate::fir::DeclarationFlags::SETTER_HAS_BODY,
-                property
-                    .setter
-                    .as_ref()
-                    .is_some_and(|setter| setter.body.is_some()),
-            )
-            .with(
-                crate::fir::DeclarationFlags::HAS_INITIALIZER,
-                property.init.is_some(),
-            )
-            .with(
-                crate::fir::DeclarationFlags::COMPANION,
-                property.is_companion_extension,
-            ),
-        signature_inference: None,
-        getter_declared: property.getter_declared,
-        receiver: property.receiver.clone(),
-        receiver_source_spelling: None,
-        context_parameters: property
-            .context_params
-            .iter()
-            .map(|parameter| (parameter.name.clone(), parameter.ty.clone()))
-            .collect(),
-        declared_type: property.declared_ty().cloned(),
-        backing_field_type: property
-            .explicit_backing_field
-            .as_ref()
-            .and_then(|field| field.ty.clone()),
-        type_parameters: property.type_params.clone(),
-        bounds: property.type_param_bounds.clone(),
-        mutable: property.is_var,
-        setter_visibility: property
-            .setter
-            .as_ref()
-            .map_or(property.visibility, |setter| {
-                if setter.is_private {
-                    Visibility::Private
-                } else {
-                    property.visibility
-                }
-            }),
-        annotations: property
-            .annotations
-            .iter()
-            .map(TypeRef::from_annotation)
-            .collect(),
-    }
-}
-
 /// Materialize one source's top-level alias declarations while Pass 1 still owns the temporary
 /// compact signature graph. Signature collection resolves these shapes into stable semantic alias
 /// headers; the graph and these reconstructed `TypeRef`s are destroyed before Pass 2 begins.
@@ -581,8 +496,6 @@ pub(crate) fn streamed_pass_one_file_type_aliases(
         .collect()
 }
 
-/// Materialize one type-alias header by stable declaration identity. This covers nested/local
-/// classifier aliases that do not belong to a file-level alias list.
 pub(in crate::resolve) fn streamed_type_alias_header_by_declaration(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
@@ -792,72 +705,6 @@ pub(in crate::resolve) fn streamed_declaration_annotations(
         .collect()
 }
 
-pub(in crate::resolve) fn legacy_classifier_header(class: &ClassDecl) -> StreamedClassifierHeader {
-    StreamedClassifierHeader {
-        type_parameters: class.type_params.clone(),
-        lexical_type_parameter_captures: class.lexical_type_parameter_captures.clone(),
-        type_parameter_variances: class.type_param_variances.clone(),
-        bounds: class.type_param_bounds.clone(),
-        supertypes: class.supertypes.clone(),
-        base: class.base_class.as_ref().map(|base| TypeRef {
-            name: base.clone(),
-            flags: crate::ast::TrFlags::default(),
-            arg: None,
-            targs: class.base_type_args.clone(),
-            span: class.base_class_span.unwrap_or(class.span),
-            fun_params: Vec::new(),
-            fun_context_count: 0,
-        }),
-        delegated_interfaces: class
-            .interface_delegations
-            .iter()
-            .filter_map(|delegation| {
-                class
-                    .supertypes
-                    .iter()
-                    .find(|supertype| supertype.name == delegation.interface)
-                    .cloned()
-            })
-            .collect(),
-        primary_parameters: class
-            .props
-            .iter()
-            .map(|parameter| StreamedClassifierParameter {
-                name: parameter.name.clone(),
-                ty: parameter.ty.clone(),
-                is_vararg: parameter.is_vararg,
-                has_default: parameter.default.is_some(),
-                is_property: parameter.is_property,
-                is_mutable_property: parameter.is_var,
-                visibility: parameter.visibility,
-                is_open: parameter.is_open,
-                annotations: parameter
-                    .annotations
-                    .iter()
-                    .map(TypeRef::from_annotation)
-                    .collect(),
-                stable_declaration: None,
-            })
-            .collect(),
-    }
-}
-
-pub(in crate::resolve) fn streamed_secondary_constructor_parameters(
-    headers: &crate::fir::StreamedHeaderModule,
-    owner: crate::fir::DeclarationId,
-    sibling: u32,
-) -> Option<Vec<StreamedCallableParameter>> {
-    let stub = headers.owned_stubs(owner).find(|stub| {
-        stub.kind == crate::fir::DeclarationKind::Constructor
-            && headers
-                .declarations
-                .stable_anchor(stub.id)
-                .is_some_and(|anchor| anchor.sibling == sibling)
-    })?;
-    streamed_constructor_parameters_by_declaration(headers, stub.id)
-}
-
-/// Materialize constructor parameters from stable compact identity.
 pub(in crate::resolve) fn streamed_constructor_parameters_by_declaration(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,

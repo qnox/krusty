@@ -684,7 +684,6 @@ fun box() = Reader(Value::read)
             .with_file_stem("Reader"),
         SourceInput::kotlin(kotlin).with_file_stem("MemberReferenceSignature"),
     ];
-    let stems = ["Reader".to_string(), "MemberReferenceSignature".to_string()];
     let mut paths = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
     paths.push(
         crate::toolchain::jdk_modules()
@@ -692,11 +691,10 @@ fun box() = Reader(Value::read)
     );
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -731,16 +729,14 @@ class App {
 }
 "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("ExplicitMemberTypeArgument")];
-    let stems = ["ExplicitMemberTypeArgument".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -1434,11 +1430,10 @@ fun <T, R> test(emitter: MaybeCallbacks<R>) {
 "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("NestedAnonymousDelegation")];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1473,11 +1468,10 @@ class Callable<T> : suspend (T) -> String {
         crate::toolchain::classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::from_source(source),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1753,7 +1747,7 @@ fun make(): A {
         "an ordinary local constructor header is Pass-2 lexical work"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1801,7 +1795,7 @@ fun make(): Any {
         "the ordinary anonymous classifier's lexical parent belongs to Pass 2"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1884,7 +1878,7 @@ fun box(): String {
         "an explicit ordinary body must not enter the Pass-1 signature graph"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2290,7 +2284,6 @@ fn java_static_field_qualifier_becomes_a_value_before_member_selection() {
         }
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("StaticFieldSignatureReceiver")];
-    let stems = ["StaticFieldSignatureReceiver".to_string()];
     let mut paths = crate::toolchain::classpath_jars_for(source);
     paths.push(
         crate::toolchain::jdk_modules()
@@ -2298,11 +2291,10 @@ fn java_static_field_qualifier_becomes_a_value_before_member_selection() {
     );
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -2328,7 +2320,6 @@ fn java_source_static_call_finalizes_through_classifier_candidates() {
             .with_file_stem("J"),
         SourceInput::kotlin("fun box() = J.value()").with_file_stem("JavaStaticSignature"),
     ];
-    let stems = ["J".to_string(), "JavaStaticSignature".to_string()];
     let mut paths = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
     paths.push(
         crate::toolchain::jdk_modules()
@@ -2336,11 +2327,10 @@ fn java_source_static_call_finalizes_through_classifier_candidates() {
     );
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -2737,14 +2727,12 @@ fn inferred_property_reference_finalizes_before_body_streaming() {
         val reference = ::top"#,
     )
     .with_file_stem("PropertyReferenceSignature")];
-    let stems = ["PropertyReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -2768,14 +2756,12 @@ fn companion_lateinit_reference_finalizes_inferred_boolean_signature() {
         }"#,
     )
     .with_file_stem("CompanionLateinitSignature")];
-    let stems = ["CompanionLateinitSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::from_source(inputs[0].text),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -2802,16 +2788,14 @@ fn inferred_signature_invokes_nominal_constructor_reference_through_callable_sha
         fun result() = (::Made).let { it() }"#,
     )
     .with_file_stem("ConstructorReferenceInvokeSignature")];
-    let stems = ["ConstructorReferenceInvokeSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -2852,16 +2836,14 @@ fn inferred_signatures_select_nested_and_unbound_inner_constructor_references() 
         fun innerResult() = (Outer::Inner).let { it(Outer(), "inner") }.result"#,
     )
     .with_file_stem("NestedConstructorReferenceSignature")];
-    let stems = ["NestedConstructorReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -2987,16 +2969,14 @@ fn qualified_companion_singleton_reference_is_bound_during_signature_solving() {
         fun result() = (Owner.Companion::value).let { it() }"#,
     )
     .with_file_stem("BoundCompanionReferenceSignature")];
-    let stems = ["BoundCompanionReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3014,14 +2994,12 @@ fn object_property_reference_is_bound_in_the_signature_graph() {
         val reference = Owner::value"#,
     )
     .with_file_stem("ObjectPropertyReferenceSignature")];
-    let stems = ["ObjectPropertyReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3056,16 +3034,14 @@ fn natural_bound_callable_reference_prefers_the_member_rung_over_extensions() {
         val bound = ""::plus"#,
     )
     .with_file_stem("NaturalMemberCallableReferenceSignature")];
-    let stems = ["NaturalMemberCallableReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3096,16 +3072,14 @@ class Child : Base<String>("") {
 }
 "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("InnerClassLiteralSignature")];
-    let stems = ["InnerClassLiteralSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3161,16 +3135,14 @@ fn delegated_signature_checks_bound_property_reference_against_reflective_parame
         }
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("BoundPropertyDelegateSignature")];
-    let stems = ["BoundPropertyDelegateSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3197,14 +3169,12 @@ fn nested_object_value_resolves_in_a_delegated_signature() {
         val result by Outer.Delegate"#,
     )
     .with_file_stem("NestedObjectDelegateSignature")];
-    let stems = ["NestedObjectDelegateSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3229,14 +3199,12 @@ fn extension_delegate_conventions_receive_the_property_extension_receiver() {
         }"#,
     )
     .with_file_stem("ExtensionDelegateSignature")];
-    let stems = ["ExtensionDelegateSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3274,14 +3242,12 @@ fn same_named_delegated_extensions_form_distinct_signature_dependencies() {
         fun result() = Left.label + Right.label"#,
     )
     .with_file_stem("OverloadedExtensionDelegateSignature")];
-    let stems = ["OverloadedExtensionDelegateSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3318,14 +3284,12 @@ fn inline_delegate_preparation_does_not_commit_unchecked_constructor_types() {
         fun result() = Concrete("K").label"#,
     )
     .with_file_stem("InlineDelegatePreparation")];
-    let stems = ["InlineDelegatePreparation".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3352,14 +3316,12 @@ fn explicit_generic_constructor_shapes_a_trailing_lambda_signature() {
         val inferred = Holder<Item> { item -> item.value() }"#,
     )
     .with_file_stem("GenericConstructorLambdaSignature")];
-    let stems = ["GenericConstructorLambdaSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3381,14 +3343,12 @@ fn expected_callable_reference_specializes_a_postponed_generic_argument() {
         fun box() = intersect(C1(), C2()).let(::id).toString()"#,
     )
     .with_file_stem("ExpectedCallableReferenceSignature")];
-    let stems = ["ExpectedCallableReferenceSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3595,7 +3555,7 @@ fn pcla_constraints_and_conditional_sibling_finalize_an_inferred_function() {
         .expect("inferred signature");
     assert_eq!(inferred.result.get(), Ty::String);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 }
@@ -3637,7 +3597,7 @@ fn pcla_receiver_constraints_cross_nested_local_classifier_scopes() {
         .expect("inferred signature");
     assert_eq!(inferred.result.get().type_args(), &[Ty::String]);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 }
@@ -3779,16 +3739,14 @@ fn compact_graph_finalizes_an_extension_property_after_legacy_approximation_decl
             get() = columns.toMutableSet()
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("CapturedExtensionPropertySignature")];
-    let stems = ["CapturedExtensionPropertySignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -3945,16 +3903,14 @@ fn inherited_generic_member_extension_is_visible_inside_a_receiver_lambda() {
         }
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("InheritedMemberExtensionSignature")];
-    let stems = ["InheritedMemberExtensionSignature".to_string()];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
         crate::toolchain::classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -4727,11 +4683,10 @@ fn nested_builder_constraints_finalize_the_enclosing_signature() {
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("NestedBuilderSignature")];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -4756,7 +4711,7 @@ fn nested_builder_constraints_finalize_the_enclosing_signature() {
         inferred.result.get().type_args(),
         &[Ty::obj("kotlin/Any"), Ty::obj("kotlin/Any")]
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 }
@@ -4805,16 +4760,15 @@ fn star_captured_self_bound_keeps_the_callers_type_parameter_in_checked_fir() {
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("CapturedSelfBound")];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 }
@@ -4836,16 +4790,15 @@ fn postponed_generic_result_preserves_its_non_null_formal_bound() {
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("PostponedBound")];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 }
@@ -4869,13 +4822,12 @@ fn dependency_extension_constraints_finalize_the_enclosing_generic_signature() {
         classpath.push(jdk);
     }
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
             std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
         )),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -4921,13 +4873,12 @@ fn bounded_contract_declaration_publishes_by_stable_identity() {
         classpath.push(jdk);
     }
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
             std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
         )),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -4959,7 +4910,7 @@ fn bounded_contract_declaration_publishes_by_stable_identity() {
         panic!("unexpected resolved contract: {contract:?}");
     };
     assert_eq!(*ty, Ty::obj("Status$Error"));
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 }
@@ -4995,18 +4946,17 @@ fn pass_one_contract_is_visible_when_caller_source_streams_first() {
         classpath.push(jdk);
     }
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
             std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
         )),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert_eq!(census.bodies, 4);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
@@ -5060,11 +5010,10 @@ fn alias_star_projection_publishes_target_bound_and_reads_without_projection_wra
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("AliasStarBound")];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -5170,13 +5119,15 @@ fn compact_symbol_collection_never_dereferences_released_body_arenas() {
         .add_source(0, &input, Some(&file))
         .expect("valid Kotlin source must produce compact headers");
     let headers = builder.finish();
+    let local_context = super::pass_one_local_class_context(&file, &headers.stubs);
 
     file.release_body_arenas();
     assert!(file.expr_arena.is_empty());
     assert!(file.stmt_arena.is_empty());
-    let symbols = super::collect_signatures_with_cp_headers(
-        std::slice::from_ref(&file),
+    drop(file);
+    let symbols = super::collect_streamed_signatures_with_cp(
         &headers,
+        std::slice::from_ref(&local_context),
         Box::new(EmptySymbolSource),
         &mut diagnostics,
     );
@@ -5342,18 +5293,16 @@ fn nested_generic_member_signature_uses_its_published_type_parameter_identity() 
         }
     "#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("NestedGenericMemberIdentity")];
-    let stems = ["NestedGenericMemberIdentity".to_string()];
     let mut paths = crate::toolchain::classpath_jars_for(source);
     if let Some(jdk) = crate::jvm::classpath::platform_jdk_modules(None) {
         paths.push(jdk);
     }
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::from_source(source),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
@@ -5405,28 +5354,26 @@ fn assert_streaming_frontend(source: &str, stem: &str) {
     );
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
 }
 
 fn assert_jvm_streaming_frontend(source: &str, stem: &str) {
     let inputs = [SourceInput::kotlin(source).with_file_stem(stem)];
-    let stems = [stem.to_string()];
     let mut paths = crate::toolchain::classpath_jars_for(source);
     if let Some(jdk) = crate::jvm::classpath::platform_jdk_modules(None) {
         paths.push(jdk);
     }
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &LangFeatures::from_source(source),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.is_conformant(), "{:?}", census.failures);
 }

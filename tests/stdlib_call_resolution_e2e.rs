@@ -11,7 +11,7 @@
 use super::common;
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
+use krusty::frontend::{analyze_source_set_with_features, SourceInput};
 use krusty::symbol_source::SymbolSource;
 
 /// Compile-check `src` against the shared toolchain classpath; return any error diagnostics' messages.
@@ -28,14 +28,14 @@ fn resolve_errors(src: &str) -> Option<Vec<String>> {
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(src);
-    let toks = krusty::lexer::lex(src, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        src, &toks, &mut diags, &features,
-    )];
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    let _ = check_file(&files[0], &mut syms, &mut diags);
+    let _ = analyze_source_set_with_features(
+        &[SourceInput::kotlin(src)],
+        platform,
+        &features,
+        &mut diags,
+    );
     Some(
         diags
             .diags

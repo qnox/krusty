@@ -263,13 +263,12 @@ fun box(): String = J().name()
     ];
     let stems = vec!["Main".to_string(), "J".to_string()];
     let mut diagnostics = krusty::diag::DiagSink::new();
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
             classpath.clone(),
         )),
         &krusty::features::LangFeatures::new(),
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
     let outputs = krusty::compiler::emit_analyzed(

@@ -3,11 +3,10 @@ use super::*;
 fn production_module(source: &str) -> crate::fir::FrontendModule {
     let inputs = [SourceInput::kotlin(source).with_file_stem("Retention")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);

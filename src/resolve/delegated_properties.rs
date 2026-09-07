@@ -11,19 +11,6 @@ enum DelegateGetValueAttempt {
     RetryWithReceiver(Ty),
 }
 
-pub(super) fn select_delegate_operator_return(
-    resolver: &crate::symbol_resolver::SymbolResolver,
-    receiver: Ty,
-    name: &str,
-    args: &[Ty],
-) -> Option<Ty> {
-    match select_delegate_operator(resolver, receiver, name, args) {
-        crate::symbol_resolver::CandidateSelection::Selected((_, ret)) => Some(ret),
-        crate::symbol_resolver::CandidateSelection::None
-        | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
-    }
-}
-
 /// Select one delegated-property convention from the normalized member/extension family. Operator
 /// filtering precedes applicability, so a same-named ordinary function cannot displace the
 /// convention declaration.
@@ -493,7 +480,7 @@ impl Checker<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> Option<(Ty, Ty)> {
-        let index = self.resolved_index?;
+        let index = self.resolved_index;
         let owner = index.declaration_anchor(declaration)?.owner?;
         let classifier = index.classifier_header(owner)?.classifier;
         let arguments = index

@@ -1,5 +1,5 @@
 //! End-to-end box tests aimed at less-common but supported lowering/emit branches in
-//! `src/ir_lower.rs` and `src/jvm/ir_emit.rs`: numeric conversions & edge values, bit ops,
+//! `src/fir_lower.rs` and `src/jvm/ir_emit.rs`: numeric conversions & edge values, bit ops,
 //! string ops, exotic control-flow shapes, collection/array operations, and misc language
 //! constructs. Each `box()` returns "OK"; compiled in-process and round-tripped on the JVM.
 

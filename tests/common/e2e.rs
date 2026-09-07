@@ -135,11 +135,10 @@ pub fn front_end_diagnostics_inputs(
     let cp = common::cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
     let mut diagnostics = krusty::diag::DiagSink::new();
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         inputs,
         platform,
         &krusty::features::LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     let _ = krusty::compiler::check_frontend_only(analysis, &mut diagnostics);

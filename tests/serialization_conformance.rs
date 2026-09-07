@@ -21,7 +21,6 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::rc::Rc;
 
 use super::common;
 
@@ -31,16 +30,6 @@ use super::common;
 /// interface with bridges (the crux of finishing serialization conformance).
 #[test]
 fn serializer_object_emits_wellformed_bytecode() {
-    use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
-    use krusty::ir_lower::lower_file;
-    use krusty::jvm::classpath::Classpath;
-    use krusty::jvm::jvm_libraries::JvmLibraries;
-    use krusty::jvm::names::file_class_name;
-    use krusty::lexer::lex;
-    use krusty::parser::parse;
-    use krusty::plugins::{serialization::SerializationPlugin, PluginContext, PluginHost};
-
     let Some((core, json, std)) = runtime_jars() else {
         eprintln!("skipping: serialization runtime jars not in local cache");
         return;
@@ -49,35 +38,11 @@ fn serializer_object_emits_wellformed_bytecode() {
         eprintln!("skipping: no JAVA_HOME/lib/modules");
         return;
     };
-    let cp = Rc::new(Classpath::new(vec![std, core, json, jimage]));
+    let classpath = vec![std, core, json];
 
     let src = "import kotlinx.serialization.Serializable\n@Serializable class Foo(val a: Int, val b: String)";
-    let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
-    let info = check_file(&files[0], &mut syms, &mut d);
-    if d.has_errors() {
-        eprintln!("skipping: krusty could not lower Foo (front-end gap)");
-        return;
-    }
-    let runtime = JvmLibraries::new(cp.clone());
-    let Some(mut ir) = lower_file(&files[0], &info, &syms, &runtime) else {
-        eprintln!("skipping: Foo outside IR subset");
-        return;
-    };
-
-    let ctx = PluginContext::from_source(&files[0], &ir);
-    let mut host = PluginHost::new();
-    host.register(Box::new(SerializationPlugin::default()));
-    host.run(&mut ir, &ctx);
-
-    let facade = file_class_name("Foo", files[0].package.as_deref());
-    let classes = krusty::jvm::ir_emit::emit_all(&ir, &facade, &*cp, None, &syms);
-    let Some(classes) = classes else {
-        panic!("EMIT GAP: emit_all returned None for the serializer object (gap #7 — emitter does not yet support this construct)");
-    };
+    let classes = common::compile_in_process(src, "Foo", &classpath, Some(&jimage))
+        .expect("production compiler emits Foo and its serializer");
     let ser = classes
         .iter()
         .find(|(n, _)| n.contains("Foo$$serializer"))

@@ -4,10 +4,12 @@
 //! classes and extensions) and answers the same unified symbol query as a compiled
 //! library does — so module code federates with libraries through one
 //! [`crate::symbol_source::CompositeSource`] instead of the
-//! scattered "user-first, else library" branching. Every callable is stamped [`Origin::Module`] so the
-//! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
+//! scattered "user-first, else library" branching. Module candidates retain semantic source
+//! identity; physical file-facade ownership is assigned by a backend after checked IR exists.
 
-use crate::frontend::{FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, Signature};
+use crate::frontend::{
+    FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, Signature, SourcePropertySig,
+};
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig,
     InlineKind, LibraryCallable, LibraryMember, LibraryType, Origin, ParamList, PropKind,
@@ -38,58 +40,6 @@ impl<'a> ModuleSymbols<'a> {
             syms,
             source_file: Some(source_file),
         }
-    }
-
-    pub(crate) fn type_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
-        self.syms.source_alias_expansions.get(&identity).cloned()
-    }
-
-    pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
-        self.syms
-            .classes
-            .values()
-            .find_map(|class| {
-                let index = class
-                    .type_params()
-                    .iter()
-                    .position(|parameter| parameter == identity)?;
-                class.type_parameter_extra_bounds.get(index).cloned()
-            })
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn annotation_retention(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::AnnotationRetention> {
-        self.syms.annotation_retention(classifier)
-    }
-
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.syms.annotation_targets(classifier)
-    }
-
-    /// Temporary Pass-1 graph access for inference-only checker operations. The streamed module
-    /// provider has no corresponding operation and therefore cannot retain this graph.
-    pub(crate) fn pass_one_symbols(&self) -> &'a FrontendSymbols {
-        self.syms
-    }
-
-    /// The declaring facade of a top-level `name`, if the multi-file driver recorded one. `None` means
-    /// "the file being compiled" — the lowerer then resolves it as a same-file local.
-    fn facade_of(&self, name: &str) -> Option<TypeName> {
-        self.syms.fn_facades.get(name).copied()
-    }
-
-    fn facade_of_sig(&self, name: &str, sig: &Signature) -> TypeName {
-        sig.source_file
-            .zip(sig.source_decl)
-            .and_then(|(file, decl)| self.syms.fn_facades_by_decl.get(&(file, decl.0)).copied())
-            .or_else(|| self.facade_of(name))
-            .unwrap_or_else(|| type_name(""))
     }
 
     /// Build the classifier half of this provider's single symbol record. Kept private so callers
@@ -577,14 +527,14 @@ impl<'a> ModuleSymbols<'a> {
     }
 
     /// The module's TOP-LEVEL function overloads of `name` as [`FunctionInfo`]s — every `fun name(...)`
-    /// declared at file scope, each stamped with its declaring facade [`Origin::Module`]. The building
+    /// declared at file scope, each stamped as [`Origin::Module`]. The building
     /// block `resolve_symbols`/`resolve_top_level` share, so the source answers a name without the old
     /// receiver-indexed `functions()` API.
     pub fn top_level_overloads(&self, name: &str) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         if let Some(sigs) = self.syms.funs.get(name) {
             for sig in sigs {
-                let owner = self.facade_of_sig(name, sig);
+                let owner = TypeName::ROOT;
                 let origin = Origin::Module { facade: owner };
                 overloads.push(fn_info(
                     FnKind::TopLevel,
@@ -603,6 +553,24 @@ impl<'a> ModuleSymbols<'a> {
         overloads
     }
 
+    fn top_level_signature<'b>(
+        &'b self,
+        name: &str,
+        function: &FunctionInfo,
+    ) -> Option<&'b Signature> {
+        self.syms.funs.get(name)?.iter().find(|signature| {
+            function
+                .stable_declaration
+                .is_some_and(|declaration| signature.stable_declaration == Some(declaration))
+                || function.source_key.is_some_and(|(file, declaration)| {
+                    signature.source_file == Some(file)
+                        && signature
+                            .source_decl
+                            .is_some_and(|source| source.0 == declaration)
+                })
+        })
+    }
+
     pub fn top_level_overloads_in_scope(
         &self,
         name: &str,
@@ -611,15 +579,7 @@ impl<'a> ModuleSymbols<'a> {
         self.top_level_overloads(name)
             .into_iter()
             .filter(|fi| {
-                fi.source_key
-                    .and_then(|(file, decl)| {
-                        self.syms.funs.get(name).and_then(|sigs| {
-                            sigs.iter().find(|sig| {
-                                sig.source_file == Some(file)
-                                    && sig.source_decl.is_some_and(|d| d.0 == decl)
-                            })
-                        })
-                    })
+                self.top_level_signature(name, fi)
                     .is_some_and(|sig| packages.iter().any(|pkg| pkg.matches(&sig.package)))
             })
             .collect()
@@ -635,9 +595,9 @@ impl<'a> ModuleSymbols<'a> {
             .into_iter()
             .filter(|function| {
                 !function.visibility.is_private()
-                    || function
-                        .source_key
-                        .is_some_and(|(file, _)| Some(file) == self.source_file)
+                    || self
+                        .top_level_signature(name, function)
+                        .is_some_and(|signature| signature.source_file == self.source_file)
             })
             .collect()
     }
@@ -959,6 +919,7 @@ fn fn_info(
             .source_file
             .zip(sig.source_decl)
             .map(|(file, decl)| (file, decl.0)),
+        source_file: sig.source_file,
         stable_declaration: sig.stable_declaration,
         source_member: sig.source_member,
         flags: FnFlags {
@@ -1163,16 +1124,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             self.top_level_overloads(&name)
                 .into_iter()
                 .filter(|function| {
-                    function
-                        .source_key
-                        .and_then(|(file, decl)| {
-                            self.syms.funs.get(&name).and_then(|signatures| {
-                                signatures.iter().find(|signature| {
-                                    signature.source_file == Some(file)
-                                        && signature.source_decl.is_some_and(|id| id.0 == decl)
-                                })
-                            })
-                        })
+                    self.top_level_signature(&name, function)
                         .is_some_and(|signature| {
                             package.is_some_and(|package| package.matches(&signature.package))
                         })
@@ -1274,69 +1226,72 @@ impl SymbolSource for ModuleSymbols<'_> {
                 }
             }
         }
-        for (&source, property) in &self.syms.source_props {
-            if property.name != name
-                || !package.is_some_and(|package| package.matches(&property.package))
-                || (property.visibility.is_private() && self.source_file != Some(source.0))
-            {
-                continue;
-            }
-            let owner = self
-                .syms
-                .prop_facades_by_decl
-                .get(&source)
-                .copied()
-                .unwrap_or_else(|| type_name(""));
-            let getter = source_property_getter(
-                owner,
-                crate::names::property_getter_name(&name),
-                property.context_params.clone(),
-                property.ty,
-                false,
-            );
-            let setter = property.is_var.then(|| {
-                let mut params = property.context_params.clone();
-                params.push(stored_value_ty(property.ty));
-                source_callable(
+        let mut push_source_property =
+            |source: Option<(u32, u32)>, property: &SourcePropertySig| {
+                if property.name != name
+                    || !package.is_some_and(|package| package.matches(&property.package))
+                    || (property.visibility.is_private()
+                        && self.source_file != Some(property.source_file))
+                {
+                    return;
+                }
+                let owner = TypeName::ROOT;
+                let getter = source_property_getter(
                     owner,
-                    crate::names::property_setter_name(&name),
-                    params,
-                    Ty::Unit,
+                    crate::names::property_getter_name(&name),
+                    property.context_params.clone(),
+                    property.ty,
                     false,
-                )
-            });
-            // An explicit backing field is a stable source-level smart-cast only while this
-            // compilation can see the final property's declaration. The accessor ABI and metadata
-            // remain nominal (`property.ty`); only the selected read expression gets the narrower
-            // field type.
-            let read_ty = (self.source_file == Some(source.0))
-                .then_some(property.storage_ty)
-                .flatten()
-                .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
-                .unwrap_or(property.ty);
-            properties.push(PropertyInfo {
-                name: name.clone(),
-                kind: PropKind::TopLevel,
-                receiver: None,
-                formals: property.formals.clone(),
-                ty: read_ty,
-                context_count: property.context_params.len(),
-                context_param_names: property.context_param_names.clone(),
-                getter,
-                setter,
-                setter_visibility: property.setter_visibility,
-                is_const: property.is_const,
-                compile_time_constant: property.compile_time_constant.clone(),
-                visibility: property.visibility,
-                owner,
-                receiver_rank: 0,
-                source_key: Some(source),
-                stable_declaration: property.stable_declaration,
-                getter_declaration: None,
-                setter_declaration: None,
-                source_member: None,
-                accessor_derived: false,
-            });
+                );
+                let setter = property.is_var.then(|| {
+                    let mut params = property.context_params.clone();
+                    params.push(stored_value_ty(property.ty));
+                    source_callable(
+                        owner,
+                        crate::names::property_setter_name(&name),
+                        params,
+                        Ty::Unit,
+                        false,
+                    )
+                });
+                // An explicit backing field is a stable source-level smart-cast only while this
+                // compilation can see the final property's declaration. The accessor ABI and metadata
+                // remain nominal (`property.ty`); only the selected read expression gets the narrower
+                // field type.
+                let read_ty = (self.source_file == Some(property.source_file))
+                    .then_some(property.storage_ty)
+                    .flatten()
+                    .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
+                    .unwrap_or(property.ty);
+                properties.push(PropertyInfo {
+                    name: name.clone(),
+                    kind: PropKind::TopLevel,
+                    receiver: None,
+                    formals: property.formals.clone(),
+                    ty: read_ty,
+                    context_count: property.context_params.len(),
+                    context_param_names: property.context_param_names.clone(),
+                    getter,
+                    setter,
+                    setter_visibility: property.setter_visibility,
+                    is_const: property.is_const,
+                    compile_time_constant: property.compile_time_constant.clone(),
+                    visibility: property.visibility,
+                    owner,
+                    receiver_rank: 0,
+                    source_key: source,
+                    stable_declaration: property.stable_declaration,
+                    getter_declaration: None,
+                    setter_declaration: None,
+                    source_member: None,
+                    accessor_derived: false,
+                });
+            };
+        for (&source, property) in &self.syms.source_props {
+            push_source_property(Some(source), property);
+        }
+        for property in self.syms.stable_source_props.values() {
+            push_source_property(None, property);
         }
         for ((_, property_name), signatures) in &self.syms.ext_props {
             if property_name != &name {
@@ -1350,16 +1305,11 @@ impl SymbolSource for ModuleSymbols<'_> {
                 if (!package.is_some_and(|package| package.matches(&property.package))
                     && !imported_associated)
                     || (property.visibility.is_private()
-                        && self.source_file != Some(property.source.0))
+                        && self.source_file != Some(property.source_file))
                 {
                     continue;
                 }
-                let owner = self
-                    .syms
-                    .ext_prop_facades_by_decl
-                    .get(&property.source)
-                    .copied()
-                    .unwrap_or_else(|| type_name(""));
+                let owner = TypeName::ROOT;
                 let mut getter_params = vec![property.receiver];
                 getter_params.extend(property.context_params.iter().copied());
                 let getter = source_property_getter(
@@ -1425,7 +1375,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     visibility: property.visibility,
                     owner,
                     receiver_rank: 0,
-                    source_key: Some(property.source),
+                    source_key: property.source,
                     stable_declaration: property.stable_declaration,
                     getter_declaration: None,
                     setter_declaration: None,
@@ -1484,7 +1434,8 @@ impl SymbolSource for ModuleSymbols<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::{CtorDefaultValue, FrontendClassFlags, FrontendExtPropSig, SigFlags};
+    use crate::frontend::{FrontendClassFlags, FrontendExtPropSig};
+    use crate::resolve::{CtorDefaultValue, SigFlags};
     use std::collections::{HashMap, HashSet};
 
     fn sig(params: Vec<Ty>, ret: Ty) -> Signature {
@@ -1770,8 +1721,6 @@ mod tests {
         twice.source_decl = Some(crate::ast::DeclId(1));
         twice.package = "demo".into();
         st.funs.insert("twice".into(), vec![twice]);
-        st.fn_facades_by_decl
-            .insert((0, 1), type_name("demo/DemoKt"));
         st.finish_module_mutation();
         let m = ModuleSymbols::new(&st);
         let namespace = SymbolNamespace::Package(type_name("demo"));
@@ -1797,9 +1746,6 @@ mod tests {
         only_here.source_decl = Some(crate::ast::DeclId(1));
         only_here.package = "demo".into();
         first.funs.insert("onlyHere".into(), vec![only_here]);
-        first
-            .fn_facades_by_decl
-            .insert((0, 1), type_name("demo/FirstKt"));
         first.finish_module_mutation();
 
         let second = FrontendSymbols::default();
@@ -1901,23 +1847,6 @@ mod tests {
         );
         let m = ModuleSymbols::new(&st);
         assert_eq!(m.top_level_overloads("f").len(), 2);
-    }
-
-    #[test]
-    fn cross_file_facade_flows_into_origin() {
-        let mut st = FrontendSymbols::default();
-        st.funs.insert("helper".into(), vec![sig(vec![], Ty::Unit)]);
-        st.fn_facades
-            .insert("helper".into(), crate::types::type_name("pkg/AKt"));
-        let m = ModuleSymbols::new(&st);
-        let o = &m.top_level_overloads("helper")[0];
-        assert!(o.callable.owner.matches("pkg/AKt"));
-        assert_eq!(
-            o.callable.origin,
-            Origin::Module {
-                facade: type_name("pkg/AKt")
-            }
-        );
     }
 
     #[test]
@@ -2167,7 +2096,8 @@ mod tests {
                     setter_name: Some("setLabel".into()),
                     context_params: Vec::new(),
                     accepts_nullable_receiver: false,
-                    source: (0, 3),
+                    source: Some((0, 3)),
+                    source_file: 0,
                     package: "one".into(),
                     visibility: Visibility::Private,
                     annotations: Vec::new(),
@@ -2185,7 +2115,8 @@ mod tests {
                     setter_name: None,
                     context_params: Vec::new(),
                     accepts_nullable_receiver: false,
-                    source: (1, 4),
+                    source: Some((1, 4)),
+                    source_file: 1,
                     package: "two".into(),
                     visibility: Visibility::Public,
                     annotations: Vec::new(),
@@ -2194,13 +2125,6 @@ mod tests {
                 },
             ],
         );
-        symbols
-            .ext_prop_facades_by_decl
-            .insert((0, 3), type_name("one/FirstKt"));
-        symbols
-            .ext_prop_facades_by_decl
-            .insert((1, 4), type_name("two/SecondKt"));
-
         let private = match ModuleSymbols::for_file(&symbols, 0)
             .symbols(SymbolNamespace::Package(type_name("one")), "label")
             .callables
@@ -2211,7 +2135,7 @@ mod tests {
         };
         assert_eq!(private.len(), 1);
         assert_eq!(private[0].source_key, Some((0, 3)));
-        assert!(private[0].owner.matches("one/FirstKt"));
+        assert_eq!(private[0].owner, TypeName::ROOT);
         assert!(private[0].setter.is_some());
 
         assert!(matches!(
@@ -2230,7 +2154,7 @@ mod tests {
         };
         assert_eq!(public.len(), 1);
         assert_eq!(public[0].source_key, Some((1, 4)));
-        assert!(public[0].owner.matches("two/SecondKt"));
+        assert_eq!(public[0].owner, TypeName::ROOT);
     }
 
     #[test]

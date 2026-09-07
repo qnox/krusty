@@ -18,7 +18,7 @@
 /// recursive passes from silently drifting to mutually incompatible acceptance limits.
 pub(crate) const MAX_SEMANTIC_EXPR_DEPTH: u32 = 500;
 
-/// The largest measured unoptimized recursive frame is approximately 21 KiB (`ir_lower`'s
+/// The largest measured unoptimized recursive frame is approximately 21 KiB (`fir_lower`'s
 /// `expr_inner`, which grew as contract and inline-facade handling moved into the dispatcher),
 /// and a `&&`/`||` chain level stacks `expr` + `expr_inner` + the binary-op helper, over 32 KiB
 /// per level in an unoptimized build. The 500-level guard can therefore consume more than 16 MiB.

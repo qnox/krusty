@@ -226,7 +226,6 @@ impl ActiveSourceDeclarations {
     /// [`ActiveSourceCursor`]; this adapter exists for Pass-1 inline checking and focused tests
     /// whose syntax arena is already live. The returned table is still transient and contains
     /// parser indices rather than source coordinates.
-    #[cfg(test)]
     pub(crate) fn bind_complete_source(
         file: &File,
         source: SourceFileId,

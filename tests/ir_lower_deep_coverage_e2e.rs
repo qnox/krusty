@@ -1,4 +1,4 @@
-//! Deep end-to-end codegen coverage for `src/ir_lower.rs` and `src/jvm/ir_emit.rs`, round-tripped on
+//! Deep end-to-end codegen coverage for `src/fir_lower.rs` and `src/jvm/ir_emit.rs`, round-tripped on
 //! a real JVM. Each test is a self-contained `fun box(): String` returning "OK", compiled with the
 //! in-process krusty pipeline and run under the persistent JVM runner (`common::compile_and_run_box`).
 //!

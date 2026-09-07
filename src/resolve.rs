@@ -21,9 +21,8 @@ use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_
 use crate::spelling::Spelled;
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::{CachedCompositeSource, SymbolQueryCache, SymbolSource};
-use crate::type_engine::{DeclKey, DeclineReason, Resolution, TypeEngine};
 use crate::types::{
-    existing_type_name, ty_mentions_param, type_name, type_name_nested_child, wk, Ty, TypeName,
+    existing_type_name, ty_mentions_param, type_name, type_name_nested_child, Ty, TypeName,
     Visibility,
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
@@ -36,7 +35,6 @@ mod constant_evaluation;
 mod context_capture;
 mod context_sensitive_resolution;
 mod delegated_properties;
-mod dependency_platform;
 mod finalized_projection;
 mod interface_delegation;
 mod local_capture_dependencies;
@@ -58,8 +56,7 @@ use constant_evaluation::{
 };
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
 use context_sensitive_resolution::expected_nested_classifier;
-use delegated_properties::{select_delegate_operator, select_delegate_operator_return};
-pub(crate) use dependency_platform::DependencyPlatform;
+use delegated_properties::select_delegate_operator;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
@@ -71,14 +68,13 @@ use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
-    finalized_streamed_signature_index, install_streamed_anonymous_capture_declarations,
-    install_streamed_plugin_declarations, publish_checked_default_local_signatures,
-    publish_checked_inline_local_signatures, publish_checked_local_signatures_in_pass_two_root,
+    finalized_streamed_signature_index, install_streamed_plugin_declarations,
+    publish_checked_default_local_signatures, publish_checked_inline_local_signatures,
+    publish_checked_local_signatures_in_pass_two_root,
 };
 #[cfg(test)]
 pub(crate) use streaming_signature_bridge::{
     publish_checked_local_signatures, publish_checked_local_signatures_in_active_root,
-    publish_discovered_local_capture_declarations,
 };
 
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
@@ -111,16 +107,6 @@ fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextRe
     ContextReceiver::new(ty, parameter.name.clone(), label, parameter.name == "_")
 }
 
-fn resolved_annotation_identities(
-    annotations: &[AnnotationRef],
-    class_names: &ClassNames,
-) -> Vec<TypeName> {
-    annotations
-        .iter()
-        .filter_map(|annotation| class_names.get_class(&annotation.name))
-        .collect()
-}
-
 fn resolved_header_annotation_identities(
     annotations: &[TypeRef],
     class_names: &ClassNames,
@@ -144,90 +130,6 @@ fn header_type_has_annotation(
             || (annotation.name.contains('.')
                 && type_name(&annotation.name.replace('.', "/")) == expected)
     })
-}
-
-fn has_implicit_integer_coercion_annotation(
-    annotations: &[AnnotationRef],
-    class_names: &ClassNames,
-) -> bool {
-    annotations
-        .iter()
-        .filter_map(|annotation| class_names.get_class(&annotation.name))
-        .any(|annotation| annotation.matches("kotlin/internal/ImplicitIntegerCoercion"))
-}
-
-/// The classifier named by Kotlin's compiler-known `@EqualityBound(C::class)` parameter
-/// annotation. This is declaration-header information: callers and data-flow analysis must not
-/// reopen a body to recover it.
-fn declared_equality_bound(file: &File, parameter: &Param, class_names: &ClassNames) -> Option<Ty> {
-    let annotation = parameter.annotations.iter().position(|annotation| {
-        class_names
-            .get_class(&annotation.name)
-            .is_some_and(|identity| identity.matches("kotlin/EqualityBound"))
-    })?;
-    let argument = *parameter.annotation_args.get(annotation)?.first()?;
-    let Expr::CallableRef {
-        receiver: Some(receiver),
-        name,
-    } = file.expr(argument)
-    else {
-        return None;
-    };
-    if name != "class" {
-        return None;
-    }
-    let mut segments = Vec::new();
-    qualifier_expression_segments(file, *receiver, &mut segments).ok()?;
-    let spelling = segments
-        .iter()
-        .map(|(_, segment)| segment.as_str())
-        .collect::<Vec<_>>()
-        .join(".");
-    class_names.get_class(&spelling).map(Ty::obj_name)
-}
-
-fn has_type_annotation(
-    file: &File,
-    span: Span,
-    class_names: &ClassNames,
-    expected: TypeName,
-) -> bool {
-    file.type_annotations
-        .get(&span.lo)
-        .into_iter()
-        .flatten()
-        .any(|annotation| {
-            class_names
-                .get_class(&annotation.name)
-                .or_else(|| class_names.get_qualified_supertype(&annotation.name.replace('.', "/")))
-                .is_some_and(|annotation| annotation == expected)
-                || (annotation.name.contains('.')
-                    && type_name(&annotation.name.replace('.', "/")) == expected)
-        })
-}
-
-fn resolved_jvm_name(file: &File, function: &FunDecl, class_names: &ClassNames) -> String {
-    let annotation = function
-        .annotations
-        .iter()
-        .enumerate()
-        .find(|(_, annotation)| {
-            class_names
-                .get_class(&annotation.name)
-                .is_some_and(|name| name.matches("kotlin/jvm/JvmName"))
-        });
-    annotation
-        .and_then(|(index, _)| {
-            function
-                .annotation_args
-                .get(index)
-                .and_then(|arguments| arguments.first())
-                .and_then(|&argument| match file.expr(argument) {
-                    Expr::StringLit(value) => value.as_str().map(str::to_string),
-                    _ => None,
-                })
-        })
-        .unwrap_or_else(|| function.name.clone())
 }
 
 fn resolved_compact_jvm_name(
@@ -810,29 +712,17 @@ fn callable_ref_lhs_classifier_segments(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum TopLevelFunctionConflictDeclaration {
-    Legacy(DeclId),
-    Stable(crate::fir::DeclarationId),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TopLevelFunctionConflictDecl {
     file: u32,
-    declaration: TopLevelFunctionConflictDeclaration,
+    declaration: crate::fir::DeclarationId,
     diagnostic_span: Span,
 }
 
 #[derive(Clone)]
 struct TopLevelFunctionConflictCandidate {
     file: u32,
-    declaration: TopLevelFunctionConflictDeclaration,
+    declaration: crate::fir::DeclarationId,
     display: String,
-}
-
-#[derive(Clone, Copy)]
-enum TopLevelFunctionConflictDisplaySource<'a> {
-    Legacy(&'a [File]),
-    Compact(&'a crate::fir::StreamedHeaderModule),
 }
 
 #[derive(Default)]
@@ -879,7 +769,6 @@ impl TopLevelFunctionConflictGroups {
 
 #[derive(Clone, Default)]
 struct TopLevelFunctionConflictCandidates {
-    public: Vec<TopLevelFunctionConflictCandidate>,
     by_file: HashMap<u32, Vec<TopLevelFunctionConflictCandidate>>,
 }
 
@@ -923,7 +812,7 @@ fn retain_conflict_diagnostic(
 }
 
 fn retain_conflict_candidate(
-    source: TopLevelFunctionConflictDisplaySource<'_>,
+    headers: &crate::fir::StreamedHeaderModule,
     candidates: &mut Vec<TopLevelFunctionConflictCandidate>,
     retained_display_bytes: &mut usize,
     declaration: TopLevelFunctionConflictDecl,
@@ -941,25 +830,7 @@ fn retain_conflict_candidate(
     let per_message_bytes =
         MAX_OVERLOAD_DIAGNOSTIC_BYTES.saturating_sub(INAPPLICABLE_OVERLOAD_PREFIX.len() + 2);
     let max_bytes = remaining_bytes.min(per_message_bytes);
-    let display =
-        match (source, declaration.declaration) {
-            (
-                TopLevelFunctionConflictDisplaySource::Legacy(files),
-                TopLevelFunctionConflictDeclaration::Legacy(declaration_id),
-            ) => files.get(declaration.file as usize).and_then(|file| {
-                match file.decl(declaration_id) {
-                    Decl::Fun(function) => {
-                        source_function_conflict_display(file, function, max_bytes)
-                    }
-                    Decl::Property(_) | Decl::Class(_) => None,
-                }
-            }),
-            (
-                TopLevelFunctionConflictDisplaySource::Compact(headers),
-                TopLevelFunctionConflictDeclaration::Stable(declaration_id),
-            ) => streamed_function_conflict_display(headers, declaration_id, max_bytes),
-            _ => None,
-        };
+    let display = streamed_function_conflict_display(headers, declaration.declaration, max_bytes);
     let Some(display) = display else {
         *retained_display_bytes = MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES;
         return;
@@ -970,17 +841,6 @@ fn retain_conflict_candidate(
         declaration: declaration.declaration,
         display,
     });
-}
-
-fn is_kotlin_main_entry_point(function: &FunDecl, params: &[Ty], ret: Ty) -> bool {
-    is_kotlin_main_entry_point_shape(
-        &function.name,
-        function.receiver.is_some(),
-        function.type_params.len(),
-        function.context_count,
-        params,
-        ret,
-    )
 }
 
 fn is_kotlin_main_entry_point_shape(
@@ -1004,7 +864,7 @@ fn is_kotlin_main_entry_point_shape(
 }
 
 fn register_top_level_function_conflict(
-    source: TopLevelFunctionConflictDisplaySource<'_>,
+    headers: &crate::fir::StreamedHeaderModule,
     groups: &mut TopLevelFunctionConflictGroups,
     registration: TopLevelFunctionConflictRegistration,
     pending: &mut HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
@@ -1053,7 +913,7 @@ fn register_top_level_function_conflict(
         );
         if let Some(first_public) = first_file_public {
             retain_conflict_candidate(
-                source,
+                headers,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 first_public,
@@ -1061,7 +921,7 @@ fn register_top_level_function_conflict(
         }
         if let Some(first_local) = first_file_local {
             retain_conflict_candidate(
-                source,
+                headers,
                 &mut group.files.entry(current.file).or_default().candidates,
                 retained_display_bytes,
                 first_local,
@@ -1069,14 +929,14 @@ fn register_top_level_function_conflict(
         }
         if local {
             retain_conflict_candidate(
-                source,
+                headers,
                 &mut group.files.entry(current.file).or_default().candidates,
                 retained_display_bytes,
                 current,
             );
         } else {
             retain_conflict_candidate(
-                source,
+                headers,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 current,
@@ -1099,14 +959,14 @@ fn register_top_level_function_conflict(
         );
         if let Some(first_public) = group.first_public {
             retain_conflict_candidate(
-                source,
+                headers,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 first_public,
             );
         }
         retain_conflict_candidate(
-            source,
+            headers,
             &mut group.files.entry(current.file).or_default().candidates,
             retained_display_bytes,
             current,
@@ -1125,7 +985,7 @@ fn register_top_level_function_conflict(
                     true,
                 );
                 retain_conflict_candidate(
-                    source,
+                    headers,
                     &mut group.public_candidates,
                     retained_display_bytes,
                     first_public,
@@ -1139,7 +999,7 @@ fn register_top_level_function_conflict(
                 true,
             );
             retain_conflict_candidate(
-                source,
+                headers,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 current,
@@ -1157,7 +1017,7 @@ fn register_top_level_function_conflict(
             if !prior_private.is_empty() {
                 group.conflicts = true;
                 retain_conflict_candidate(
-                    source,
+                    headers,
                     &mut group.public_candidates,
                     retained_display_bytes,
                     current,
@@ -1171,7 +1031,7 @@ fn register_top_level_function_conflict(
                         true,
                     );
                     retain_conflict_candidate(
-                        source,
+                        headers,
                         &mut group.files.entry(declaration.file).or_default().candidates,
                         retained_display_bytes,
                         declaration,
@@ -1200,8 +1060,6 @@ fn register_top_level_function_conflict(
     }
     retained
 }
-
-pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
 /// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`has_reified_type_params`/`is_abstract`/
@@ -1643,37 +1501,6 @@ pub use crate::libraries::DefaultValue as CtorDefaultValue;
 /// `None` for an unmodeled default (a non-literal/non-object — kept conservative so behavior matches the
 /// previous literal-only handling). Resolves an object-singleton `Name` (`= EmptyCoroutineContext`) to its
 /// internal via the type universe, so the default lowers cross-file as `getstatic …INSTANCE`.
-fn extract_ctor_default(
-    file: &File,
-    dx: ExprId,
-    class_names: &ClassNames,
-    libraries: &dyn SymbolSource,
-) -> Option<CtorDefaultValue> {
-    Some(match file.expr(dx) {
-        Expr::IntLit(v) => CtorDefaultValue::Int(*v),
-        Expr::LongLit(v) => CtorDefaultValue::Long(*v),
-        Expr::DoubleLit(v) => CtorDefaultValue::Double(*v),
-        Expr::FloatLit(v) => CtorDefaultValue::Float(*v),
-        Expr::BoolLit(v) => CtorDefaultValue::Bool(*v),
-        Expr::CharLit(v) => CtorDefaultValue::Char(*v),
-        Expr::StringLit(s) => CtorDefaultValue::Str(s.clone()),
-        Expr::NullLit => CtorDefaultValue::Null,
-        Expr::Name(n) => {
-            let internal = class_names.get(n)?;
-            if libraries
-                .classifier(internal)
-                .is_some_and(|t| t.is_object())
-            {
-                CtorDefaultValue::Object(internal.render())
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    })
-}
-
-/// A member extension property's declaration-time semantic shape.
 #[derive(Clone, Debug)]
 pub struct MemberExtPropSig {
     receiver: Ty,
@@ -1855,21 +1682,6 @@ struct SourceClassHeader {
 /// One source of truth for declaration-level classifier flags. The same packed value seeds the
 /// all-files header index and is later installed on the complete `ClassSig`, preventing early
 /// inference and final checking from classifying a declaration differently.
-fn source_class_flags(class: &ClassDecl) -> ClassFlags {
-    ClassFlags::default()
-        .with_interface(class.is_interface())
-        .with_object(class.is_singleton())
-        .with_abstract(class.is_abstract())
-        .with_fun_interface(class.is_fun_interface)
-        .with_sealed(class.is_sealed())
-        .with_final(class.is_final())
-        .with_has_abstract_members(
-            class.methods.iter().any(|method| method.is_abstract())
-                || class.body_props.iter().any(|property| property.is_abstract),
-        )
-        .with_annotation(class.is_annotation())
-}
-
 /// Classifier flags read from the compact Pass-1 declaration inventory.
 ///
 /// `HAS_ABSTRACT_MEMBERS` is a property of the classifier's direct declaration children, not of
@@ -1907,36 +1719,6 @@ fn streamed_source_class_flags(
 /// Capture the source-level callable inventory before functions and properties are normalized into
 /// separate name-indexed maps. Byte offsets are parser facts, so this preserves interleaving without
 /// deriving order later from arena indices or stable identities.
-fn source_declared_callable_order(class: &ClassDecl) -> Vec<String> {
-    let mut declarations = Vec::new();
-    declarations.extend(
-        class
-            .props
-            .iter()
-            .filter(|property| property.is_property)
-            .map(|property| (property.span.lo, property.name.clone())),
-    );
-    declarations.extend(
-        class
-            .methods
-            .iter()
-            .map(|method| (method.span.lo, method.name.clone())),
-    );
-    declarations.extend(
-        class
-            .body_props
-            .iter()
-            .map(|property| (property.span.lo, property.name.clone())),
-    );
-    declarations.sort_by_key(|(position, _)| *position);
-    let mut names = Vec::new();
-    for (_, name) in declarations {
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
-}
 
 /// Direct callable names of a compact classifier in lexical declaration order.
 ///
@@ -2202,7 +1984,7 @@ struct DeclaredCallableClassHeader {
     internal: TypeName,
     stable_declaration: Option<crate::fir::DeclarationId>,
     source_file: u32,
-    source_decl: DeclId,
+    source_decl: Option<DeclId>,
     visibility: Visibility,
     flags: ClassFlags,
     methods: MethodMap,
@@ -2244,7 +2026,7 @@ impl ClassSig {
             internal,
             stable_declaration,
             source_file,
-            source_decl: Some(source_decl),
+            source_decl,
             visibility,
             annotations: Vec::new(),
             props: Vec::new(),
@@ -2308,22 +2090,6 @@ impl ClassSig {
     pub fn type_param_variances(&self) -> &Vec<crate::types::TypeVariance> {
         &self.type_parameters.type_param_variances
     }
-}
-
-/// Backend-facing classifier metadata keyed by an already-resolved owner. This is deliberately not a
-/// resolver result: name/prefix/overload selection has finished before a consumer asks for this model.
-/// Source and dependency classifiers project into the same shape so emission never branches on origin.
-#[derive(Clone, Debug)]
-pub(crate) struct ClassModel {
-    pub value_underlying: Option<Ty>,
-    pub type_parameters: Vec<String>,
-    pub constructor_params: Vec<Ty>,
-    pub constructor_param_shapes: Vec<Ty>,
-    /// Annotation members in constructor order. `Some(empty)` denotes a marker annotation; `None`
-    /// denotes an ordinary classifier. Providers normalize every declaration origin into this shape.
-    pub annotation_members: Option<Vec<(String, Ty)>>,
-    /// File-independent constructor defaults parallel to [`Self::constructor_params`].
-    pub constructor_defaults: Vec<Option<CtorDefaultValue>>,
 }
 
 /// The symbolic declaration shape of a generic member method.
@@ -2485,56 +2251,6 @@ fn module_member_lambda_params(
 }
 
 impl ClassSig {
-    fn set_inferred_source_method_return(
-        &mut self,
-        source_member: crate::libraries::SourceMember,
-        ret: Ty,
-    ) -> bool {
-        self.source_methods
-            .iter_mut()
-            .find(|plan| plan.signature.source_member == Some(source_member))
-            .is_some_and(|plan| plan.signature.set_inferred_return(ret))
-    }
-
-    fn set_inferred_method_return(&mut self, name: &str, params: &[Ty], ret: Ty) -> bool {
-        let ret = inferred_declaration_ty(ret);
-        let mut changed = false;
-        if let Some(signature) = self.methods.get_mut(name).and_then(|overloads| {
-            overloads
-                .iter_mut()
-                .find(|signature| same_erased_params(&signature.params, params))
-        }) {
-            changed |= signature.set_inferred_return(ret);
-        }
-        if let Some(method) = self.generic_methods.get_mut(name).and_then(|overloads| {
-            overloads
-                .iter_mut()
-                .find(|method| same_erased_params(&method.params, params))
-        }) {
-            changed |= method.ret_shape != ret;
-            method.ret_shape = ret;
-        }
-        changed
-    }
-
-    fn set_inferred_member_extension_return(
-        &mut self,
-        name: &str,
-        receiver: Ty,
-        params: &[Ty],
-        ret: Ty,
-    ) -> bool {
-        self.member_ext_funs
-            .get_mut(name)
-            .and_then(|overloads| {
-                overloads.iter_mut().find(|function| {
-                    erased_type_key(function.receiver_ty) == erased_type_key(receiver)
-                        && same_erased_params(&function.signature.params, params)
-                })
-            })
-            .is_some_and(|function| function.signature.set_inferred_return(ret))
-    }
-
     /// True if this is an `interface` (calls dispatch via `invokeinterface`).
     #[inline]
     pub fn is_interface(&self) -> bool {
@@ -3532,24 +3248,6 @@ fn declared_supertype_name_from_source_name(
     class_names.get_qualified_supertype(name)
 }
 
-fn declared_supertype_name(
-    class: &ClassDecl,
-    name: &str,
-    class_names: &ClassNames,
-    lexical_classifiers: &[TypeName],
-) -> Option<TypeName> {
-    declared_supertype_name_from_source_name(&class.name, name, class_names, lexical_classifiers)
-}
-
-/// Supertypes implied by a Kotlin classifier kind rather than written in its source header.
-/// They are semantic Kotlin identities; a backend maps them to its physical platform types.
-fn implicit_source_supertypes(class: &ClassDecl) -> impl Iterator<Item = TypeName> {
-    class
-        .is_annotation()
-        .then(|| type_name("kotlin/Annotation"))
-        .into_iter()
-}
-
 fn default_classifier_internal(name: &str) -> Option<TypeName> {
     let name = name.strip_prefix("kotlin.").unwrap_or(name);
     if Ty::from_name(name).is_some()
@@ -3595,7 +3293,8 @@ pub struct ExtPropSig {
     pub setter_name: Option<String>,
     pub context_params: Vec<Ty>,
     pub accepts_nullable_receiver: bool,
-    pub source: (u32, u32),
+    pub source: Option<(u32, u32)>,
+    pub source_file: u32,
     pub package: String,
     pub visibility: Visibility,
     /// Resolved declaration annotation identities. These are semantic header metadata; Pass 2
@@ -3648,6 +3347,7 @@ fn extension_property_headers_alpha_equivalent(left: &ExtPropSig, right: &ExtPro
 
 pub struct SourcePropertySig {
     pub name: String,
+    pub source_file: u32,
     /// Semantic identities of the property's own type parameters. Context arguments and an
     /// extension receiver may both constrain these at a read/write site.
     pub formals: Vec<String>,
@@ -3868,13 +3568,6 @@ type ModuleSymbolCache = HashMap<
     HashMap<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>,
 >;
 
-#[derive(Clone)]
-enum PropertyInferenceFailure {
-    Recursive { span: Span },
-    UninitializedReads(Vec<(Span, String)>),
-    Untypeable,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct VisibilitySuppressions {
     invisible_reference: bool,
@@ -3969,9 +3662,6 @@ pub struct SymbolTable {
     /// the parameter positions of the expansion (`typealias Boxed<T> = PBox<T, T>` used as
     /// `Boxed<Cargo>` abbreviates both expanded arguments as `Cargo`).
     pub alias_expansion_spellings: HashMap<TypeName, (crate::spelling::Spelled, Vec<String>, Ty)>,
-    anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
-    anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
-    anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
     /// Top-level properties (name → type, is_var, is_const), backed by static fields on the file facade.
     /// `is_const` distinguishes a `const val` (public field, no accessor, cross-file `getstatic`) from a
     /// plain `val`/`var` (private field, read/written through `getX`/`setX`).
@@ -3979,11 +3669,14 @@ pub struct SymbolTable {
     /// Top-level properties keyed by source declaration. Context parameters are ordinary leading
     /// accessor parameters; an empty list is the regular property case.
     pub source_props: HashMap<(u32, u32), SourcePropertySig>,
+    /// Production top-level properties keyed by stable declaration identity. This is the same
+    /// normalized candidate shape as `source_props`; the separate key space prevents a streamed
+    /// declaration from fabricating a parser arena coordinate merely to enter semantic lookup.
+    pub(crate) stable_source_props: HashMap<crate::fir::DeclarationId, SourcePropertySig>,
     pub context_prop_names: std::collections::HashSet<String>,
     /// Why an implicitly typed property could not be resolved, keyed by its source declaration.
     /// The authoritative checker consumes this fact once; reads keep the ordinary error type and
     /// do not reconstruct the failure from a spelling or emit cascades.
-    property_inference_failures: HashMap<DeclKey, PropertyInferenceFailure>,
     /// `(source file, declaration)` → the `@JvmName` spelling of a top-level function whose emitted
     /// method name differs from its source name. A CROSS-FILE caller resolves the callee by source
     /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
@@ -4020,37 +3713,11 @@ pub struct SymbolTable {
     /// boundary as the retention. An identity absent from this map declares no `@Target` and is
     /// therefore applicable everywhere ([`crate::types::AnnotationTargets::DEFAULT`]).
     annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
-    /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
-    /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
-    /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
-    /// function defined in ANOTHER file as a cross-facade `invokestatic` (`Callee::CrossFile`) instead
-    /// of bailing. A function defined in the file being lowered is resolved locally first.
-    pub fn_facades: HashMap<String, TypeName>,
-    /// Top-level function source declaration → declaring facade. This is the declaration-keyed
-    /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
-    pub fn_facades_by_decl: HashMap<(u32, u32), TypeName>,
-    /// Source functions the JVM module-registration pass deliberately omitted from
-    /// [`Self::fn_facades_by_decl`]. An absent positive entry is otherwise ambiguous: it can mean
-    /// either "splice-only, never emitted" or simply "this checker-only pipeline did not run JVM
-    /// registration". Keeping the authoritative negative result beside the positive map lets the
-    /// checker diagnose only the former without reimplementing backend emission policy or accepting
-    /// a facade class name leaked through a generic symbol origin.
-    unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
     /// Bare generic value operands for source members.
     pub(crate) source_generic_member_value_operand_slots: GenericMemberValueOperandSlots,
     pub source_projected_return_hazards: std::collections::HashSet<(u32, u32)>,
-    pub ext_prop_facades_by_decl: HashMap<(u32, u32), TypeName>,
-    /// Physical facade selected for every top-level source property. Semantic property resolution is
-    /// declaration-keyed; the JVM backend fills this map so cross-file accessor emission never has to
-    /// derive an owner from a property name.
-    pub prop_facades_by_decl: HashMap<(u32, u32), TypeName>,
-    /// Top-level property name → `(facade_internal, type, is_var)` across the WHOLE multi-file
-    /// compilation. Populated only by the multi-file driver. A read of a property from ANOTHER file
-    /// lowers to `invokestatic <facade>.getX()` (the field is private), a write to `setX(v)`. Empty for
-    /// single-file callers; a property in the file being lowered is resolved locally (its static) first.
-    pub prop_facades: HashMap<String, (TypeName, Ty, bool, bool)>,
 }
 
 /// The complete semantic environment that is allowed to survive the Pass-1/Pass-2 boundary.
@@ -4104,13 +3771,10 @@ impl Default for SymbolTable {
             stable_declared_spellings: HashMap::new(),
             member_spellings: HashMap::new(),
             alias_expansion_spellings: HashMap::new(),
-            anonymous_object_types: HashMap::new(),
-            anonymous_object_captures: HashMap::new(),
-            anonymous_object_capture_discovered: std::collections::HashSet::new(),
             props: HashMap::new(),
             source_props: HashMap::new(),
+            stable_source_props: HashMap::new(),
             context_prop_names: std::collections::HashSet::new(),
-            property_inference_failures: HashMap::new(),
             toplevel_jvm_names: HashMap::new(),
             enums: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
@@ -4122,15 +3786,9 @@ impl Default for SymbolTable {
             declaration_visibility_suppressions: HashMap::new(),
             annotation_retentions: HashMap::new(),
             annotation_targets: HashMap::new(),
-            fn_facades: HashMap::new(),
-            fn_facades_by_decl: HashMap::new(),
-            unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
             source_generic_value_operand_slots: HashMap::new(),
             source_generic_member_value_operand_slots: HashMap::new(),
             source_projected_return_hazards: std::collections::HashSet::new(),
-            ext_prop_facades_by_decl: HashMap::new(),
-            prop_facades_by_decl: HashMap::new(),
-            prop_facades: HashMap::new(),
         }
     }
 }
@@ -4193,127 +3851,6 @@ impl SymbolTable {
             package = current.parent();
         }
     }
-    /// Record the JVM module registrar's complete answer for one source function. `Some` is the
-    /// concrete facade static the lowerer may reference; `None` is an explicit promise that no
-    /// callable is emitted. The two declaration-keyed collections are maintained as complements so
-    /// rerunning registration cannot leave a stale positive/negative answer behind.
-    pub(crate) fn record_fn_facade(
-        &mut self,
-        file: u32,
-        declaration: DeclId,
-        facade: Option<TypeName>,
-    ) {
-        let key = (file, declaration.0);
-        if let Some(facade) = facade {
-            self.register_source_package_for_owner(facade);
-            self.unemitted_fn_facades_by_decl.remove(&key);
-            self.fn_facades_by_decl.insert(key, facade);
-        } else {
-            self.fn_facades_by_decl.remove(&key);
-            self.unemitted_fn_facades_by_decl.insert(key);
-        }
-    }
-
-    /// Whether JVM registration explicitly decided that this declaration has no callable facade.
-    /// `false` does not imply emission: callers must check the positive map separately because an
-    /// analysis-only pipeline records neither outcome.
-    #[cfg(test)]
-    pub(crate) fn fn_facade_is_explicitly_unemitted(&self, file: u32, declaration: u32) -> bool {
-        self.unemitted_fn_facades_by_decl
-            .contains(&(file, declaration))
-    }
-
-    pub(crate) fn offset_source_files(&mut self, offset: u32) {
-        let offset_signature = |signature: &mut Signature| {
-            if let Some(file) = &mut signature.source_file {
-                *file += offset;
-            }
-        };
-        for signature in self.funs.values_mut().flatten() {
-            offset_signature(signature);
-        }
-        for class in self.classes.values_mut() {
-            class.source_file += offset;
-        }
-        self.source_class_aliases = std::mem::take(&mut self.source_class_aliases)
-            .into_iter()
-            .map(|((file, alias), internal)| ((file + offset, alias), internal))
-            .collect();
-        self.resolved_annotations = std::mem::take(&mut self.resolved_annotations)
-            .into_iter()
-            .map(|((file, lo, hi), internal)| ((file + offset, lo, hi), internal))
-            .collect();
-        self.conflicting_top_level_key_by_source =
-            std::mem::take(&mut self.conflicting_top_level_key_by_source)
-                .into_iter()
-                .map(|((file, declaration), key)| ((file + offset, declaration), key))
-                .collect();
-        for candidates in self.conflicting_top_level_candidates.values_mut() {
-            for candidate in &mut candidates.public {
-                candidate.file += offset;
-            }
-            candidates.by_file = std::mem::take(&mut candidates.by_file)
-                .into_iter()
-                .map(|(file, mut local)| {
-                    for candidate in &mut local {
-                        candidate.file += offset;
-                    }
-                    (file + offset, local)
-                })
-                .collect();
-        }
-        for signature in self
-            .ext_funs
-            .values_mut()
-            .flat_map(HashMap::values_mut)
-            .flatten()
-        {
-            offset_signature(signature);
-        }
-        for property in self.ext_props.values_mut().flatten() {
-            property.source.0 += offset;
-        }
-        self.source_props = std::mem::take(&mut self.source_props)
-            .into_iter()
-            .map(|((file, declaration), property)| ((file + offset, declaration), property))
-            .collect();
-        self.anonymous_object_types = std::mem::take(&mut self.anonymous_object_types)
-            .into_iter()
-            .map(|((file, declaration), internal)| ((file + offset, declaration), internal))
-            .collect();
-        self.anonymous_object_captures = std::mem::take(&mut self.anonymous_object_captures)
-            .into_iter()
-            .map(|((file, declaration), captures)| ((file + offset, declaration), captures))
-            .collect();
-        self.anonymous_object_capture_discovered =
-            std::mem::take(&mut self.anonymous_object_capture_discovered)
-                .into_iter()
-                .map(|(file, declaration)| (file + offset, declaration))
-                .collect();
-        self.source_generic_value_operand_slots =
-            std::mem::take(&mut self.source_generic_value_operand_slots)
-                .into_iter()
-                .map(|((file, declaration), slots)| ((file + offset, declaration), slots))
-                .collect();
-        self.source_projected_return_hazards =
-            std::mem::take(&mut self.source_projected_return_hazards)
-                .into_iter()
-                .map(|(file, declaration)| (file + offset, declaration))
-                .collect();
-        self.source_ext_funs = std::mem::take(&mut self.source_ext_funs)
-            .into_iter()
-            .map(|((file, declaration), target)| ((file + offset, declaration), target))
-            .collect();
-        for class in self.classes.values_mut() {
-            for signature in class.methods.values_mut().flatten() {
-                offset_signature(signature);
-            }
-            for signature in class.member_ext_funs.values_mut().flatten() {
-                offset_signature(&mut signature.signature);
-            }
-        }
-    }
-
     pub fn resolved_annotation(&self, file: u32, annotation: &AnnotationRef) -> Option<TypeName> {
         self.resolved_annotations
             .get(&(file, annotation.span.lo, annotation.span.hi))
@@ -4387,7 +3924,7 @@ impl SymbolTable {
         self.ext_props
             .values()
             .flatten()
-            .find(|signature| signature.source == source)
+            .find(|signature| signature.source == Some(source))
     }
 
     pub fn single_fun(&self, name: &str) -> Option<Signature> {
@@ -4414,14 +3951,6 @@ impl SymbolTable {
         })
     }
 
-    fn fun_ret_by_erased_params(&self, name: &str, params: &[ErasedTypeKey]) -> Option<Ty> {
-        let overloads = self.funs.get(name)?;
-        overloads
-            .iter()
-            .find(|sig| overloads.len() == 1 || erased_params_semantic_key(sig) == params)
-            .map(|sig| sig.ret)
-    }
-
     /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
     pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
         existing_type_name(internal).and_then(|internal| self.class_by_type_name(internal))
@@ -4429,64 +3958,6 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.get(&internal)
-    }
-
-    pub(crate) fn class_by_stable_declaration(
-        &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<&ClassSig> {
-        self.classes
-            .values()
-            .find(|class| class.stable_declaration == Some(declaration))
-    }
-
-    pub(crate) fn class_model(&self, owner: TypeName) -> Option<ClassModel> {
-        if let Some(class) = self.classes.get(&owner) {
-            return Some(ClassModel {
-                value_underlying: class.value_field.as_ref().map(|(_, ty)| *ty),
-                type_parameters: class.type_params.clone(),
-                constructor_params: class.ctor_params.clone(),
-                constructor_param_shapes: class
-                    .ctor_param_shapes
-                    .iter()
-                    .map(|(shape, _)| *shape)
-                    .collect(),
-                annotation_members: class.is_annotation().then(|| {
-                    class
-                        .ctor_param_names
-                        .iter()
-                        .map(|(name, _)| name.clone())
-                        .zip(class.ctor_params.iter().copied())
-                        .collect()
-                }),
-                constructor_defaults: class.ctor_defaults.clone(),
-            });
-        }
-        let class = self.libraries.classifier(owner)?;
-        let constructor_params = class
-            .constructors
-            .first()
-            .map(|constructor| constructor.params.clone())
-            .unwrap_or_default();
-        Some(ClassModel {
-            value_underlying: class.value_underlying,
-            type_parameters: class.type_params.clone(),
-            constructor_param_shapes: constructor_params.clone(),
-            constructor_params,
-            annotation_members: class.annotation_application().map(|application| {
-                application
-                    .parameters
-                    .names
-                    .into_iter()
-                    .zip(application.parameters.types)
-                    .collect()
-            }),
-            constructor_defaults: class
-                .constructors
-                .first()
-                .map(|constructor| constructor.default_values.clone())
-                .unwrap_or_default(),
-        })
     }
 
     /// Resolve one source file's alias spelling to its target module class. The returned class still
@@ -5173,28 +4644,6 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn is_source_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        crate::assignable::is_subtype(
-            &crate::assignable::TyCtx::new(),
-            &self.source_constructor_matcher(),
-            sub,
-            sup,
-        )
-    }
-
-    /// Answer a lowering-time compatibility question through the front-end handoff rather than
-    /// exposing the assignability engine to `ir_lower`. Despite the historical matcher name, its
-    /// constructor lookup federates current-module and library symbols, so this remains valid when
-    /// `sub` reaches `sup` across a source/classpath boundary.
-    pub(crate) fn is_assignable_across_sources(&self, sub: Ty, sup: Ty) -> bool {
-        crate::assignable::is_assignable(
-            &crate::assignable::TyCtx::new(),
-            &self.source_constructor_matcher(),
-            sub,
-            sup,
-        )
-    }
-
     /// The source enum entry names for this classifier identity.
     pub fn enum_entries_of(&self, internal: TypeName) -> Option<&Vec<String>> {
         self.enums.get(&internal)
@@ -5230,15 +4679,6 @@ impl SymbolTable {
         packages: &'scope [TypeName],
     ) -> ExtensionOverloads<'symbols, 'scope> {
         self.ext_fun_overloads_filtered(recv, name, None, Some(packages), None, None)
-    }
-
-    pub(crate) fn ext_fun_overloads_in_import_scope<'symbols, 'scope>(
-        &'symbols self,
-        recv: Ty,
-        name: &'scope str,
-        scope: &'scope crate::symbol_resolver::FunctionImportScope,
-    ) -> ExtensionOverloads<'symbols, 'scope> {
-        self.ext_fun_overloads_filtered(recv, name, None, None, Some(scope), Some(name))
     }
 
     fn ext_fun_overloads_filtered<'symbols, 'package>(
@@ -6019,18 +5459,6 @@ fn signed_unary_literal_ty(value: i64, operator: UnOp, expected: Option<Ty>) -> 
     fits.then_some(expected)
 }
 
-fn same_erased_params(left: &[Ty], right: &[Ty]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(&left, &right)| erased_type_key(left) == erased_type_key(right))
-}
-
-fn erased_params_semantic_key(sig: &Signature) -> Vec<ErasedTypeKey> {
-    sig.params.iter().copied().map(erased_type_key).collect()
-}
-
 /// A loose, `self`-free argument-fit test for overload disambiguation: is a value of type `a` plausibly
 /// passable where `p` is expected? Exact match, `Error`/`Nothing`/`null`→reference, numeric→numeric, and
 /// any value→reference (boxing/upcast) fit; a reference is NOT passable to a primitive. Intentionally
@@ -6140,285 +5568,6 @@ fn collect_typeref_names(r: &TypeRef, out: &mut std::collections::HashSet<String
     }
 }
 
-fn collect_declaration_type_parameter_annotation_names(
-    file: &File,
-    declaration_start: u32,
-    out: &mut std::collections::HashSet<String>,
-) {
-    if let Some(parameters) = file
-        .declaration_type_parameter_annotations
-        .get(&declaration_start)
-    {
-        out.extend(
-            parameters
-                .iter()
-                .flat_map(|parameter| &parameter.annotations)
-                .map(|annotation| annotation.name.clone()),
-        );
-    }
-}
-
-fn collect_fun_type_names(file: &File, f: &FunDecl, out: &mut std::collections::HashSet<String>) {
-    collect_declaration_type_parameter_annotation_names(file, f.signature_span.lo, out);
-    if let Some(receiver) = &f.receiver {
-        collect_typeref_names(receiver, out);
-    }
-    for parameter in &f.params {
-        collect_typeref_names(&parameter.ty, out);
-    }
-    if let Some(ret) = &f.ret {
-        collect_typeref_names(ret, out);
-    }
-    for (_, bound) in &f.type_param_bounds {
-        collect_typeref_names(bound, out);
-    }
-}
-
-fn collect_property_type_names(
-    file: &File,
-    p: &PropDecl,
-    out: &mut std::collections::HashSet<String>,
-) {
-    collect_declaration_type_parameter_annotation_names(file, p.span.lo, out);
-    for parameter in &p.context_params {
-        collect_typeref_names(&parameter.ty, out);
-    }
-    if let Some(receiver) = &p.receiver {
-        collect_typeref_names(receiver, out);
-    }
-    if let Some(ty) = &p.ty {
-        collect_typeref_names(ty, out);
-    }
-    if let Some(ty) = p
-        .explicit_backing_field
-        .as_ref()
-        .and_then(|field| field.ty.as_ref())
-    {
-        collect_typeref_names(ty, out);
-    }
-}
-
-fn collect_expression_type_names(
-    file: &File,
-    roots: impl IntoIterator<Item = ExprId>,
-    out: &mut std::collections::HashSet<String>,
-) {
-    let mut expressions = roots.into_iter().collect::<Vec<_>>();
-    let mut statements = Vec::new();
-    let mut seen_expressions = std::collections::HashSet::new();
-    let mut seen_statements = std::collections::HashSet::new();
-    while let Some(expression) = expressions.pop() {
-        if !seen_expressions.insert(expression) {
-            continue;
-        }
-        match file.expr(expression) {
-            Expr::Name(name) => {
-                out.insert(name.clone());
-            }
-            Expr::Is { ty, .. } | Expr::As { ty, .. } => collect_typeref_names(ty, out),
-            Expr::Try { catches, .. } => {
-                for catch in catches {
-                    collect_typeref_names(&catch.ty, out);
-                }
-            }
-            _ => {}
-        }
-        if let Some(arguments) = file.call_type_args.get(&expression.0) {
-            for argument in arguments {
-                collect_typeref_names(argument, out);
-            }
-        }
-        if let Some(parameters) = file.lambda_param_types.get(&expression.0) {
-            for parameter in parameters.iter().flatten() {
-                collect_typeref_names(parameter, out);
-            }
-        }
-        if let Some(ret) = file.anon_fun_ret.get(&expression.0) {
-            collect_typeref_names(ret, out);
-        }
-        if let Some(receiver) = file.anon_fun_receivers.get(&expression.0) {
-            collect_typeref_names(receiver, out);
-        }
-        file.any_child_expr(
-            expression,
-            &mut |child| {
-                expressions.push(child);
-                false
-            },
-            &mut |statement| {
-                statements.push(statement);
-                false
-            },
-        );
-        while let Some(statement) = statements.pop() {
-            if !seen_statements.insert(statement) {
-                continue;
-            }
-            match file.stmt(statement) {
-                Stmt::LocalLateinit { ty, .. }
-                | Stmt::Local { ty: Some(ty), .. }
-                | Stmt::LocalDelegate { ty: Some(ty), .. } => collect_typeref_names(ty, out),
-                Stmt::LocalFun(function) => collect_fun_type_names(file, function, out),
-                Stmt::LocalClass(class) => collect_class_type_names(file, class, out),
-                Stmt::LocalTypeAlias(alias) => collect_typeref_names(&alias.target, out),
-                _ => {}
-            }
-            file.any_child_stmt(statement, &mut |child| {
-                expressions.push(child);
-                false
-            });
-        }
-    }
-}
-
-fn fun_expression_roots(function: &FunDecl) -> impl Iterator<Item = ExprId> + '_ {
-    function
-        .params
-        .iter()
-        .filter_map(|parameter| parameter.default)
-        .chain(
-            function
-                .params
-                .iter()
-                .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
-        )
-        .chain(match function.body {
-            FunBody::Expr(body) | FunBody::Block(body) => Some(body),
-            FunBody::None => None,
-        })
-}
-
-fn property_expression_roots(property: &PropDecl) -> impl Iterator<Item = ExprId> + '_ {
-    property
-        .context_params
-        .iter()
-        .filter_map(|parameter| parameter.default)
-        .chain(
-            property
-                .context_params
-                .iter()
-                .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
-        )
-        .chain(property.init)
-        .chain(property.delegate)
-        .chain(property.getter.as_ref().and_then(|body| match body {
-            FunBody::Expr(body) | FunBody::Block(body) => Some(*body),
-            FunBody::None => None,
-        }))
-        .chain(
-            property
-                .setter
-                .as_ref()
-                .and_then(|setter| setter.body.as_ref())
-                .and_then(|body| match body {
-                    FunBody::Expr(body) | FunBody::Block(body) => Some(*body),
-                    FunBody::None => None,
-                }),
-        )
-}
-
-fn collect_class_type_names(
-    file: &File,
-    class: &ClassDecl,
-    out: &mut std::collections::HashSet<String>,
-) {
-    collect_declaration_type_parameter_annotation_names(file, class.span.lo, out);
-    for supertype in &class.supertypes {
-        collect_typeref_names(supertype, out);
-    }
-    out.extend(class.base_class.iter().cloned());
-    out.extend(
-        class
-            .interface_delegations
-            .iter()
-            .map(|delegation| delegation.interface.clone()),
-    );
-    for (_, bound) in &class.type_param_bounds {
-        collect_typeref_names(bound, out);
-    }
-    for parameter in &class.props {
-        collect_typeref_names(&parameter.ty, out);
-    }
-    for property in &class.body_props {
-        collect_property_type_names(file, property, out);
-    }
-    for method in &class.methods {
-        collect_fun_type_names(file, method, out);
-    }
-    for entry in &class.enum_entries {
-        for method in &entry.methods {
-            collect_fun_type_names(file, method, out);
-        }
-        for property in &entry.props {
-            collect_property_type_names(file, property, out);
-        }
-    }
-    for constructor in &class.secondary_ctors {
-        for parameter in &constructor.params {
-            collect_typeref_names(&parameter.ty, out);
-        }
-    }
-    let expression_roots = class
-        .annotation_args
-        .iter()
-        .flatten()
-        .copied()
-        .chain(class.props.iter().filter_map(|parameter| parameter.default))
-        .chain(
-            class
-                .props
-                .iter()
-                .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
-        )
-        .chain(class.base_args.iter().copied())
-        .chain(
-            class
-                .interface_delegations
-                .iter()
-                .map(|delegation| delegation.value),
-        )
-        .chain(class.body_props.iter().flat_map(property_expression_roots))
-        .chain(class.methods.iter().flat_map(fun_expression_roots))
-        .chain(class.init_order.iter().filter_map(|init| match init {
-            crate::ast::ClassInit::Block(body) => Some(*body),
-            crate::ast::ClassInit::PropInit(_) => None,
-        }))
-        .chain(class.secondary_ctors.iter().flat_map(|constructor| {
-            constructor
-                .params
-                .iter()
-                .filter_map(|parameter| parameter.default)
-                .chain(
-                    constructor
-                        .params
-                        .iter()
-                        .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
-                )
-                .chain(match &constructor.delegation {
-                    crate::ast::CtorDelegation::This(arguments)
-                    | crate::ast::CtorDelegation::Super(arguments) => arguments.args.clone(),
-                    crate::ast::CtorDelegation::None => Vec::new(),
-                })
-                .chain(constructor.body)
-        }))
-        .chain(class.enum_entries.iter().flat_map(|entry| {
-            entry
-                .annotation_args
-                .iter()
-                .flatten()
-                .copied()
-                .chain(entry.args.iter().copied())
-                .chain(entry.methods.iter().flat_map(fun_expression_roots))
-                .chain(entry.props.iter().flat_map(property_expression_roots))
-                .chain(entry.init_order.iter().filter_map(|step| match step {
-                    crate::ast::ClassInit::Block(body) => Some(*body),
-                    crate::ast::ClassInit::PropInit(_) => None,
-                }))
-        }));
-    collect_expression_type_names(file, expression_roots, out);
-}
-
-/// Collect names that signature inference may need to resolve through imports.
 fn collect_streamed_header_type_names(
     headers: &crate::fir::StreamedHeaderModule,
     source: crate::fir::SourceFileId,
@@ -6436,72 +5585,6 @@ fn collect_streamed_header_type_names(
             .transient_type_ref(root, &headers.lookup_names)
         {
             collect_typeref_names(&reference, out);
-        }
-    }
-}
-
-/// Collect names that signature inference may need to resolve through imports for the legacy
-/// inspection pipeline. Production uses [`collect_streamed_header_type_names`] and cannot observe
-/// ordinary expression or statement arenas here.
-fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<String>) {
-    for reference in &file.detached_type_refs {
-        collect_typeref_names(reference, out);
-    }
-    // Every bare VALUE reference (`val x = EmptyCoroutineContext` — an object singleton/top-level fun
-    // used as a value) is a candidate too: a wildcard/explicit import resolves it no differently from a
-    // type. Collecting all `Expr::Name`s over-approximates (locals, params), but a name that matches no
-    // import package simply isn't added — harmless. This is what lets a default-import-only seed (no
-    // whole-classpath blanket) still resolve imported values.
-    for e in &file.expr_arena {
-        match e {
-            Expr::Name(n) => {
-                out.insert(n.clone());
-            }
-            // Type names in EXPRESSION position — a cast (`x as T`), a type test (`x is T`), or a catch
-            // clause (`catch (e: T)`) — are just as much candidates as a declared parameter type, and are
-            // the only place some names (a caught `NotImplementedError`) appear. The signature phase's
-            // `ty_of_ref` / `catch_internal` resolve them through the same `class_names`, so they must be
-            // import-resolved here too.
-            Expr::Is { ty, .. } | Expr::As { ty, .. } => collect_typeref_names(ty, out),
-            Expr::Try { catches, .. } => {
-                for c in catches {
-                    collect_typeref_names(&c.ty, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    // A local declaration's type annotation (`val r: Reg`, `lateinit var x: T`) is a type-position name
-    // too, and may be the only place a name appears (a classpath alias used only for a local `val`).
-    for s in &file.stmt_arena {
-        match s {
-            Stmt::LocalLateinit { ty, .. } => collect_typeref_names(ty, out),
-            Stmt::Local { ty: Some(ty), .. } | Stmt::LocalDelegate { ty: Some(ty), .. } => {
-                collect_typeref_names(ty, out)
-            }
-            Stmt::LocalFun(f) => collect_fun_type_names(file, f, out),
-            Stmt::LocalClass(class) => collect_class_type_names(file, class, out),
-            Stmt::LocalTypeAlias(alias) => collect_typeref_names(&alias.target, out),
-            _ => {}
-        }
-    }
-    // Explicit call type arguments (`foo<Bar>()`, `arrayOf<Baz>()`) are type-position names too.
-    for targs in file.call_type_args.values() {
-        for t in targs {
-            collect_typeref_names(t, out);
-        }
-    }
-    // A `typealias A = Foo` TARGET is a candidate: alias expansion resolves `A` by looking up `Foo` in
-    // the resolved names, so `Foo` must itself be import-resolved (it may not appear in any other type
-    // position). Both simple (`Foo`) and dotted (`a.b.Foo`) targets go in; the resolver tries each.
-    for (_, target) in &file.type_aliases {
-        out.insert(target.clone());
-    }
-    for &declaration in &file.decls {
-        match file.decl(declaration) {
-            Decl::Fun(function) => collect_fun_type_names(file, function, out),
-            Decl::Property(property) => collect_property_type_names(file, property, out),
-            Decl::Class(class) => collect_class_type_names(file, class, out),
         }
     }
 }
@@ -6635,33 +5718,6 @@ fn expand_type_aliases(class_names: &mut ClassNames, aliases: &HashMap<String, S
     }
 }
 
-/// Stage C: collect top-level function + class signatures across all files. Two passes so that a
-/// class type can be referenced before its declaration (and across files).
-/// Convenience wrapper — uses an empty classpath (no stdlib type scanning).
-pub fn collect_signatures(files: &[File], diags: &mut DiagSink) -> SymbolTable {
-    collect_signatures_with_cp(files, Box::new(EmptySymbolSource), diags)
-}
-
-fn validate_context_property(property: &PropDecl, abstract_allowed: bool, diags: &mut DiagSink) {
-    validate_context_property_shape(
-        property.span,
-        !property.context_params.is_empty(),
-        property.is_var,
-        property.getter.is_some(),
-        property
-            .setter
-            .as_ref()
-            .is_some_and(|setter| setter.body.is_some()),
-        property.init.is_some(),
-        property.delegate.is_some(),
-        property.is_lateinit,
-        property.is_const,
-        property.getter_reads_field,
-        abstract_allowed,
-        diags,
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 fn validate_context_property_shape(
     span: Span,
@@ -6698,22 +5754,6 @@ fn validate_context_property_shape(
 /// Declaration-context validity for a syntactically complete property. These checks deliberately
 /// live after parsing: the same absent initializer is valid on abstract/expect/external/lateinit
 /// declarations and on members definitely assigned by a constructor.
-fn validate_top_level_property(property: &PropDecl, diags: &mut DiagSink) {
-    validate_top_level_property_shape(
-        property.span,
-        property.receiver.is_some(),
-        property.is_companion_extension,
-        property.init.is_some(),
-        property.delegate.is_some(),
-        property.getter.is_some(),
-        property.is_lateinit,
-        property.is_abstract,
-        property.is_external,
-        property.is_expect,
-        diags,
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 fn validate_top_level_property_shape(
     span: Span,
@@ -6746,22 +5786,6 @@ fn validate_top_level_property_shape(
     }
 }
 
-fn validate_member_property(property: &PropDecl, owner_is_interface: bool, diags: &mut DiagSink) {
-    validate_member_property_shape(
-        property.span,
-        owner_is_interface,
-        property.getter_declared,
-        property.getter.is_some(),
-        property.init.is_some(),
-        property.delegate.is_some(),
-        property.is_lateinit,
-        property.is_abstract,
-        property.is_external,
-        property.is_expect,
-        diags,
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 fn validate_member_property_shape(
     span: Span,
@@ -6779,9 +5803,6 @@ fn validate_member_property_shape(
     if owner_is_interface && has_initializer {
         diags.error(span, "property initializers are not allowed in interfaces");
     }
-    // A written default getter supplies no value of its own. Unlike an entirely accessor-less
-    // member, it cannot be a deferred constructor assignment. Keep this distinction in the AST and
-    // diagnose it here; general definite assignment remains the constructor-flow checker's job.
     if getter_declared
         && !getter_has_body
         && !has_initializer
@@ -6794,22 +5815,6 @@ fn validate_member_property_shape(
     {
         diags.error(span, "property must be initialized or be abstract");
     }
-}
-
-fn validate_explicit_backing_field(property: &PropDecl, diags: &mut DiagSink) {
-    validate_explicit_backing_field_shape(
-        property.span,
-        property.explicit_backing_field.is_some(),
-        property.is_var,
-        property.is_open,
-        property.getter.is_some(),
-        property.setter.is_some(),
-        property.delegate.is_some(),
-        property.is_const,
-        property.receiver.is_some(),
-        !property.context_params.is_empty(),
-        diags,
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6911,76 +5916,30 @@ fn has_projected_generic_return_hazard_for<'a>(
 /// Bind declaration type-parameter annotations in the exact classifier scope already built for
 /// their owning signature. Source spelling is lookup input once; Pass 1 temporarily associates the
 /// result with the occurrence, then projects declaration-owned facts to stable identities.
-struct DeclarationAnnotationResolution<'a> {
-    file_index: u32,
-    attempted: &'a mut std::collections::HashSet<(u32, u32, u32)>,
-}
-
-fn resolve_declaration_type_parameter_annotations(
-    file: &File,
-    declaration_start: u32,
-    class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
-    resolution: &mut DeclarationAnnotationResolution<'_>,
-    diags: &mut DiagSink,
-) {
-    let Some(parameters) = file
-        .declaration_type_parameter_annotations
-        .get(&declaration_start)
-    else {
-        return;
-    };
-    for annotation in parameters
-        .iter()
-        .flat_map(|parameter| &parameter.annotations)
-    {
-        let key = (
-            resolution.file_index,
-            annotation.span.lo,
-            annotation.span.hi,
-        );
-        if !resolution.attempted.insert(key) {
-            continue;
-        }
-        let Some(identity) = class_names.get_class(&annotation.name) else {
-            diags.error(
-                annotation.span,
-                format!("unresolved reference '{}'.", annotation.name),
-            );
-            continue;
-        };
-        let previous = resolved.insert(key, identity);
-        debug_assert!(
-            previous.is_none_or(|previous| previous == identity),
-            "annotation occurrence {key:?} was rebound from {previous:?} to {identity:?}"
-        );
-    }
-}
-
-/// Add direct nested classifiers from the supplied lexical owners. Owners carry lexical-precedence
-/// ranks (nearest is lowest); one arena scan therefore handles ordinary nested classes, inherited
-/// lexical owners, and enum-entry anonymous subclass scopes without origin-specific name probing.
-fn extend_lexical_nested_classifier_names(
-    file: &File,
+fn extend_streamed_lexical_nested_classifier_names(
+    headers: &crate::fir::StreamedHeaderModule,
     lexical_owner_ranks: &HashMap<TypeName, usize>,
     class_names: &mut ClassNames,
 ) {
     let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
-    for &declaration in &file.decls {
-        let Decl::Class(nested) = file.decl(declaration) else {
+    for stub in headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+    {
+        let Some((source_name, internal)) = compact_classifier_identity(headers, stub) else {
             continue;
         };
-        let Some((owner, simple)) = nested.name.rsplit_once('.') else {
+        let Some(owner) = internal.nested_owner() else {
             continue;
         };
-        let owner = type_name(&class_internal(file, owner));
         let Some(&rank) = lexical_owner_ranks.get(&owner) else {
             continue;
         };
-        let internal = class_names
-            .get(&nested.name)
-            .unwrap_or_else(|| type_name(&class_internal(file, &nested.name)));
-        match lexical_nested.entry(simple.to_string()) {
+        let Some(simple) = source_name.rsplit('.').next() else {
+            continue;
+        };
+        match lexical_nested.entry(simple.to_owned()) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert((rank, internal));
             }
@@ -6994,266 +5953,6 @@ fn extend_lexical_nested_classifier_names(
         class_names.insert_name(simple, internal);
     }
 }
-
-/// Bind annotation occurrences written in one class body's lexical classifier scope. Annotation
-/// references are also retained in `detached_type_refs`, but rebinding a member annotation later
-/// from file scope loses own/inherited nested classifiers. The smallest enclosing class owns the
-/// occurrence; nested declarations will bind their own bodies when their header is visited.
-fn resolve_class_body_annotation_references(
-    file: &File,
-    declaration: DeclId,
-    class: &ClassDecl,
-    class_names: &ClassNames,
-    file_index: u32,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
-) {
-    let declaration_type_parameter_annotations = file
-        .declaration_type_parameter_annotations
-        .values()
-        .flatten()
-        .flat_map(|parameter| {
-            parameter
-                .annotations
-                .iter()
-                .map(|annotation| annotation.span)
-        })
-        .collect::<std::collections::HashSet<_>>();
-    for reference in &file.detached_type_refs {
-        if reference.span.lo < class.span.lo || reference.span.hi > class.span.hi {
-            continue;
-        }
-        // These occurrences belong to the declaration inventory below, which has the exact
-        // function/local/enum-entry lexical scope. The broad class-body walk must never pre-bind
-        // them through an enclosing classifier rung.
-        if declaration_type_parameter_annotations.contains(&reference.span) {
-            continue;
-        }
-        let belongs_to_nested = file.decls.iter().copied().any(|candidate| {
-            if candidate == declaration {
-                return false;
-            }
-            let Decl::Class(candidate) = file.decl(candidate) else {
-                return false;
-            };
-            candidate.span.lo >= class.span.lo
-                && candidate.span.hi <= class.span.hi
-                && reference.span.lo >= candidate.span.lo
-                && reference.span.hi <= candidate.span.hi
-        });
-        if belongs_to_nested {
-            continue;
-        }
-        if let Some(identity) = class_names.get_class(&reference.name) {
-            resolved.insert((file_index, reference.span.lo, reference.span.hi), identity);
-        }
-    }
-}
-
-fn enum_entry_expression_roots(
-    entry: &crate::ast::AstEnumEntry,
-) -> impl Iterator<Item = ExprId> + '_ {
-    entry
-        .annotation_args
-        .iter()
-        .flatten()
-        .copied()
-        .chain(entry.args.iter().copied())
-        .chain(entry.methods.iter().flat_map(fun_expression_roots))
-        .chain(entry.props.iter().flat_map(property_expression_roots))
-        .chain(entry.init_order.iter().filter_map(|step| match step {
-            ClassInit::Block(body) => Some(*body),
-            ClassInit::PropInit(_) => None,
-        }))
-}
-
-/// Resolve every local function reachable below the supplied expression roots. Local classes are
-/// deliberately skipped here: parser normalization hoists them into `File::decls`, where the class
-/// inventory runs with that declaration's own lexical classifier scope. The iterative walk keeps this
-/// ownership pass bounded by arena size rather than expression nesting depth.
-fn resolve_local_type_parameter_annotation_inventory(
-    file: &File,
-    roots: impl IntoIterator<Item = ExprId>,
-    class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
-    resolution: &mut DeclarationAnnotationResolution<'_>,
-    diags: &mut DiagSink,
-) {
-    let mut expressions = roots.into_iter().collect::<Vec<_>>();
-    let mut seen_expressions = std::collections::HashSet::new();
-    let mut seen_statements = std::collections::HashSet::new();
-    while let Some(expression) = expressions.pop() {
-        if !seen_expressions.insert(expression) {
-            continue;
-        }
-        let mut children = Vec::new();
-        let mut statements = Vec::new();
-        file.any_child_expr(
-            expression,
-            &mut |child| {
-                children.push(child);
-                false
-            },
-            &mut |statement| {
-                statements.push(statement);
-                false
-            },
-        );
-        expressions.extend(children);
-        for statement in statements {
-            if !seen_statements.insert(statement) {
-                continue;
-            }
-            match file.stmt(statement) {
-                Stmt::LocalFun(function) => {
-                    resolve_declaration_type_parameter_annotations(
-                        file,
-                        function.signature_span.lo,
-                        class_names,
-                        resolved,
-                        resolution,
-                        diags,
-                    );
-                    file.any_fun_expr(function, &mut |root| {
-                        expressions.push(root);
-                        false
-                    });
-                }
-                // Hoisted declarations receive their own exact class inventory.
-                Stmt::LocalClass(_) => {}
-                _ => {
-                    file.any_child_stmt(statement, &mut |child| {
-                        expressions.push(child);
-                        false
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// One declaration-owned inventory for annotation-bearing type parameters. Direct members inherit
-/// their containing class's already-built classifier scope; local functions are discovered once from
-/// the AST's shared expression inventory instead of adding origin-specific resolver call sites.
-fn resolve_declaration_type_parameter_annotation_inventory(
-    file: &File,
-    declaration: DeclId,
-    class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
-    resolution: &mut DeclarationAnnotationResolution<'_>,
-    diags: &mut DiagSink,
-    include_local_bodies: bool,
-) {
-    let mut direct_owners = Vec::new();
-    match file.decl(declaration) {
-        Decl::Fun(function) => direct_owners.push(function.signature_span.lo),
-        Decl::Property(property) => direct_owners.push(property.span.lo),
-        Decl::Class(class) => {
-            direct_owners.push(class.span.lo);
-            direct_owners.extend(
-                class
-                    .methods
-                    .iter()
-                    .map(|function| function.signature_span.lo),
-            );
-            direct_owners.extend(class.body_props.iter().map(|property| property.span.lo));
-        }
-    }
-    for declaration_start in direct_owners {
-        resolve_declaration_type_parameter_annotations(
-            file,
-            declaration_start,
-            class_names,
-            resolved,
-            resolution,
-            diags,
-        );
-    }
-
-    if !include_local_bodies {
-        return;
-    }
-    let mut roots = Vec::new();
-    file.any_decl_expr(declaration, &mut |root| {
-        roots.push(root);
-        false
-    });
-    if let Decl::Class(class) = file.decl(declaration) {
-        let entry_roots = class
-            .enum_entries
-            .iter()
-            .flat_map(enum_entry_expression_roots)
-            .collect::<std::collections::HashSet<_>>();
-        roots.retain(|root| !entry_roots.contains(root));
-    }
-    resolve_local_type_parameter_annotation_inventory(
-        file,
-        roots,
-        class_names,
-        resolved,
-        resolution,
-        diags,
-    );
-}
-
-fn resolve_enum_entry_type_parameter_annotation_inventory(
-    file: &File,
-    class: &ClassDecl,
-    entry: &crate::ast::AstEnumEntry,
-    class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
-    resolution: &mut DeclarationAnnotationResolution<'_>,
-    diags: &mut DiagSink,
-    include_local_bodies: bool,
-) {
-    let mut entry_class_names = class_names.clone();
-    let entry_owner = type_name(&class_internal(
-        file,
-        &format!("{}.{}", class.name, entry.name),
-    ));
-    extend_lexical_nested_classifier_names(
-        file,
-        &HashMap::from([(entry_owner, 0)]),
-        &mut entry_class_names,
-    );
-    for declaration_start in entry
-        .methods
-        .iter()
-        .map(|function| function.signature_span.lo)
-        .chain(entry.props.iter().map(|property| property.span.lo))
-    {
-        resolve_declaration_type_parameter_annotations(
-            file,
-            declaration_start,
-            &entry_class_names,
-            resolved,
-            resolution,
-            diags,
-        );
-    }
-    if include_local_bodies {
-        resolve_local_type_parameter_annotation_inventory(
-            file,
-            enum_entry_expression_roots(entry),
-            &entry_class_names,
-            resolved,
-            resolution,
-            diags,
-        );
-    }
-}
-
-fn generic_value_operand_slots(function: &FunDecl, owner_type_params: &[String]) -> Vec<u32> {
-    generic_value_operand_slots_for(
-        function.receiver.as_ref(),
-        function
-            .params
-            .iter()
-            .map(|parameter| (&parameter.ty, parameter.is_vararg)),
-        &function.type_params,
-        owner_type_params,
-    )
-}
-
 fn generic_value_operand_slots_from_header(
     function: &StreamedCallableHeader,
     owner_type_params: &[String],
@@ -7296,83 +5995,6 @@ fn generic_value_operand_slots_for<'a>(
             .map(|(index, _)| index as u32 + 1),
     );
     slots
-}
-
-/// Like `collect_signatures` but also seeds class names and type aliases from the target's
-/// libraries (a JVM classpath, a klib), eliminating the need for any hardcoded type lists.
-pub fn collect_signatures_with_cp(
-    files: &[File],
-    libraries: Box<dyn SemanticPlatform>,
-    diags: &mut DiagSink,
-) -> SymbolTable {
-    // Signature collection structurally infers expression-body literal types (`infer_lit_ty_p`, a
-    // per-operand recursion over the body), so a deep expression recurses here BEFORE any wrapped
-    // check runs — it needs the same grown stack segment (see [`crate::wide_stack`]).
-    crate::wide_stack::on_wide_stack(move || {
-        collect_signatures_with_cp_impl(files, libraries, diags, None, None)
-    })
-}
-
-/// Production migration entry: explicit declaration lookup candidates come from compact stable
-/// headers, while body/local/annotation candidates remain on the legacy file scan until Pass 2 is
-/// streamed. Semantic classifier selection is still the ordinary resolver below.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn collect_signatures_with_cp_headers(
-    files: &[File],
-    headers: &crate::fir::StreamedHeaderModule,
-    libraries: Box<dyn SemanticPlatform>,
-    diags: &mut DiagSink,
-) -> SymbolTable {
-    crate::wide_stack::on_wide_stack(move || {
-        collect_signatures_with_cp_impl(files, libraries, diags, Some(headers), None)
-    })
-}
-
-/// Production compact-header entry with body-derived lexical classifier context extracted while
-/// each source was the active Pass-1 parse. The context owns no expression or statement identity.
-pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
-    files: &[File],
-    headers: &crate::fir::StreamedHeaderModule,
-    local_contexts: &[PassOneLocalClassContext],
-    libraries: Box<dyn SemanticPlatform>,
-    diags: &mut DiagSink,
-) -> SymbolTable {
-    crate::wide_stack::on_wide_stack(move || {
-        collect_signatures_with_cp_impl(
-            files,
-            libraries,
-            diags,
-            Some(headers),
-            Some(local_contexts),
-        )
-    })
-}
-
-fn resolve_source_alias_expansion(
-    target: &TypeRef,
-    formals: &[String],
-    visible_aliases: &[(String, Vec<String>, TypeRef)],
-    names: &ClassNames,
-    known_spellings: &HashMap<TypeName, (crate::spelling::Spelled, Vec<String>, Ty)>,
-    diags: &mut DiagSink,
-) -> Option<(Ty, crate::spelling::Spelled)> {
-    let symbolic =
-        TParams::symbolic_from_decl_with(formals, &[], &|candidate| names.get_class(candidate));
-    let mut target_spellings = HashMap::new();
-    let expanded_target =
-        crate::parser::expanded_type_alias_target(visible_aliases, target, &mut target_spellings);
-    let expansion = ty_of_ref(&expanded_target, names, &symbolic, diags);
-    if expansion == Ty::Error {
-        return None;
-    }
-    let spelling = spelling_of_ref(
-        &expanded_target,
-        names,
-        &symbolic,
-        known_spellings,
-        &target_spellings,
-    );
-    Some((expansion, spelling))
 }
 
 fn compact_classifier_identity(
@@ -7489,9 +6111,6 @@ fn compact_source_imports(
         .collect()
 }
 
-/// Publish an annotation classifier's source-declared retention/target policy from compact
-/// headers. The annotation argument arena stores only resolved-policy enum spellings and owns no
-/// ordinary expression or parser identity.
 fn collect_compact_annotation_policies(
     headers: &crate::fir::StreamedHeaderModule,
     table: &mut SymbolTable,
@@ -7594,180 +6213,153 @@ fn normalize_referenced_library_annotations(
     }
 }
 
-fn collect_signatures_with_cp_impl(
-    files: &[File],
+enum SignatureCollectionDeclaration<'a> {
+    Function(&'a crate::fir::DeclarationStub),
+    Classifier(&'a crate::fir::DeclarationStub),
+    Property(&'a crate::fir::DeclarationStub),
+}
+
+fn signature_collection_declarations(
+    source: crate::fir::SourceFileId,
+    headers: &crate::fir::StreamedHeaderModule,
+) -> Vec<SignatureCollectionDeclaration<'_>> {
+    headers
+        .source_declarations(source)
+        .iter()
+        .filter_map(|declaration| {
+            let compact = headers.stub(*declaration)?;
+            match compact.kind {
+                crate::fir::DeclarationKind::Function => {
+                    Some(SignatureCollectionDeclaration::Function(compact))
+                }
+                crate::fir::DeclarationKind::Classifier => {
+                    Some(SignatureCollectionDeclaration::Classifier(compact))
+                }
+                crate::fir::DeclarationKind::Property => {
+                    Some(SignatureCollectionDeclaration::Property(compact))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn collect_streamed_signatures_with_cp(
+    headers: &crate::fir::StreamedHeaderModule,
+    local_contexts: &[PassOneLocalClassContext],
     libraries: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
-    compact_headers: Option<&crate::fir::StreamedHeaderModule>,
-    compact_local_contexts: Option<&[PassOneLocalClassContext]>,
+) -> SymbolTable {
+    crate::wide_stack::on_wide_stack(move || {
+        collect_signatures_with_cp_impl(headers, local_contexts, libraries, diags)
+    })
+}
+
+fn resolve_source_alias_expansion(
+    target: &TypeRef,
+    formals: &[String],
+    visible_aliases: &[(String, Vec<String>, TypeRef)],
+    names: &ClassNames,
+    known_spellings: &HashMap<TypeName, (crate::spelling::Spelled, Vec<String>, Ty)>,
+    diags: &mut DiagSink,
+) -> Option<(Ty, crate::spelling::Spelled)> {
+    let symbolic =
+        TParams::symbolic_from_decl_with(formals, &[], &|candidate| names.get_class(candidate));
+    let mut target_spellings = HashMap::new();
+    let expanded_target =
+        crate::parser::expanded_type_alias_target(visible_aliases, target, &mut target_spellings);
+    let expansion = ty_of_ref(&expanded_target, names, &symbolic, diags);
+    if expansion == Ty::Error {
+        return None;
+    }
+    let spelling = spelling_of_ref(
+        &expanded_target,
+        names,
+        &symbolic,
+        known_spellings,
+        &target_spellings,
+    );
+    Some((expansion, spelling))
+}
+
+fn collect_signatures_with_cp_impl(
+    headers: &crate::fir::StreamedHeaderModule,
+    local_contexts: &[PassOneLocalClassContext],
+    libraries: Box<dyn SemanticPlatform>,
+    diags: &mut DiagSink,
 ) -> SymbolTable {
     let frontend_plugins = crate::plugins::enabled_plugins("main");
-    let file_type_aliases = compact_headers.map_or_else(
-        || {
-            files
-                .iter()
-                .map(|file| file.type_alias_fun.clone())
-                .collect::<Vec<_>>()
-        },
-        |headers| {
-            (0..headers.sources.len())
-                .map(|file_index| {
-                    let source = crate::fir::SourceFileId::from_raw(file_index as u32);
-                    if headers.has_headers(source) {
-                        streamed_pass_one_file_type_aliases(headers, source)
-                            .expect("production file type aliases must have compact headers")
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect()
-        },
-    );
-    let source_packages = compact_headers.map_or_else(
-        || {
-            files
-                .iter()
-                .map(|file| file.package.clone().unwrap_or_default())
-                .collect::<Vec<_>>()
-        },
-        |headers| {
-            (0..headers.sources.len())
-                .map(|source| {
-                    compact_source_package_spelling(
-                        headers,
-                        crate::fir::SourceFileId::from_raw(source as u32),
-                    )
-                    .unwrap_or_default()
-                })
-                .collect()
-        },
-    );
-    let source_imports = compact_headers.map_or_else(
-        || {
-            files
-                .iter()
-                .map(|file| {
-                    file.import_paths
-                        .iter()
-                        .map(|import| CompactSourceImport {
-                            visible_name: import.imported_name().unwrap_or_default().to_owned(),
-                            path: import.path(),
-                            wildcard: import.wildcard,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        },
-        |headers| {
-            (0..headers.sources.len())
-                .map(|source| {
-                    compact_source_imports(
-                        headers,
-                        crate::fir::SourceFileId::from_raw(source as u32),
-                    )
-                    .unwrap_or_default()
-                })
-                .collect()
-        },
-    );
+    let file_type_aliases = (0..headers.sources.len())
+        .map(|file_index| {
+            let source = crate::fir::SourceFileId::from_raw(file_index as u32);
+            if headers.has_headers(source) {
+                streamed_pass_one_file_type_aliases(headers, source)
+                    .expect("production file type aliases must have compact headers")
+            } else {
+                Vec::new()
+            }
+        })
+        .collect::<Vec<_>>();
+    let source_packages = (0..headers.sources.len())
+        .map(|source| {
+            compact_source_package_spelling(
+                headers,
+                crate::fir::SourceFileId::from_raw(source as u32),
+            )
+            .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let source_imports = (0..headers.sources.len())
+        .map(|source| {
+            compact_source_imports(headers, crate::fir::SourceFileId::from_raw(source as u32))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
     let platform_default_imports = libraries.platform_default_import_packages();
-    // Pass 1: every class simple-name -> internal name (no bodies, just the type universe). Nothing is
-    // pre-seeded: every referenced type resolves through the file's imports and default packages below
-    // (the import machinery), so a bare name binds ONLY to a default-import / imported / same-package class
-    // — kotlinc semantics — never to an arbitrary classpath class. A classpath `typealias`
-    // (`ArrayList` → `java/util/ArrayList`) resolves through the same probe: `resolve_type` returns the
-    // alias's target.
     let mut class_names = ClassNames::new(std::rc::Rc::new(HashMap::new()));
-    // A user-declared top-level class *shadows* any classpath/JDK type of the same simple name
-    // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
-    // user's own declarations is a conflict, so track which names the user has defined. The dedup
-    // key is the package-qualified *internal* name, not the simple name: two classes sharing a
-    // simple name in different packages (e.g. a test's root-package `EmptyContinuation` and the
-    // injected `helpers.EmptyContinuation`) are distinct declarations, not a conflict.
     let mut user_defined: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
-    // Bootstrap class/interface identity for the same all-files pass. `ModuleSymbols` cannot exist
-    // until this table is complete, but a parenless supertype still needs semantic classification:
-    // another-file source base and a classpath base must produce the same `super_internal` shape.
     let mut user_base_classes: std::collections::HashSet<TypeName> =
         std::collections::HashSet::new();
     let mut user_aliases: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
-    if let Some(headers) = compact_headers {
-        for stub in headers
-            .stubs
-            .iter()
-            .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+    for stub in headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+    {
+        diags.set_file(stub.source.raw());
+        let (source_name, internal) = compact_classifier_identity(headers, stub)
+            .expect("a compact classifier must retain its lookup name and source package");
+        if !user_defined.insert(internal) {
+            diags.error(
+                stub.range,
+                format!("conflicting declarations: {source_name}"),
+            );
+        }
+        if !stub.flags.has(crate::fir::DeclarationFlags::INTERFACE)
+            && !stub.flags.has(crate::fir::DeclarationFlags::SINGLETON)
         {
-            diags.set_file(stub.source.raw());
-            let (source_name, internal) = compact_classifier_identity(headers, stub)
-                .expect("a compact classifier must retain its lookup name and source package");
-            if !user_defined.insert(internal) {
-                diags.error(
-                    stub.range,
-                    format!("conflicting declarations: {source_name}"),
-                );
-            }
-            if !stub.flags.has(crate::fir::DeclarationFlags::INTERFACE)
-                && !stub.flags.has(crate::fir::DeclarationFlags::SINGLETON)
-            {
-                user_base_classes.insert(internal);
-            }
-            class_names.insert_name(source_name, internal);
+            user_base_classes.insert(internal);
         }
-        for (source, aliases) in file_type_aliases.iter().enumerate() {
-            let package = headers
-                .sources
-                .get(crate::fir::SourceFileId::from_raw(source as u32))
-                .map(|file| file.package)
-                .unwrap_or(TypeName::ROOT);
-            for (alias, _, target) in aliases {
-                if target.name != "<fun>" && !target.name.is_empty() {
-                    user_aliases.insert(crate::types::type_name_child(package, alias));
-                }
-            }
-        }
-    } else {
-        for (i, file) in files.iter().enumerate() {
-            diags.set_file(i as u32);
-            for &d in &file.decls {
-                if let Decl::Class(c) = file.decl(d) {
-                    let internal = class_internal(file, &c.name);
-                    if !user_defined.insert(type_name(&internal)) {
-                        diags.error(c.span, format!("conflicting declarations: {}", c.name));
-                    }
-                    if !c.is_interface() && !c.is_singleton() {
-                        user_base_classes.insert(type_name(&internal));
-                    }
-                    class_names.insert(c.name.clone(), internal.clone());
-                }
-            }
-            let package = file.package.as_deref().unwrap_or("").replace('.', "/");
-            for (alias, _) in &file.type_aliases {
-                let qualified = if package.is_empty() {
-                    alias.clone()
-                } else {
-                    format!("{package}/{alias}")
-                };
-                user_aliases.insert(type_name(&qualified));
+        class_names.insert_name(source_name, internal);
+    }
+    for (source, aliases) in file_type_aliases.iter().enumerate() {
+        let package = headers
+            .sources
+            .get(crate::fir::SourceFileId::from_raw(source as u32))
+            .map(|file| file.package)
+            .unwrap_or(TypeName::ROOT);
+        for (alias, _, target) in aliases {
+            if target.name != "<fun>" && !target.name.is_empty() {
+                user_aliases.insert(crate::types::type_name_child(package, alias));
             }
         }
     }
-    // (The library set's `seed` already merged the intrinsic Kotlin built-in → target class mapping,
-    // e.g. the ported `JavaToKotlinClassMap`, beneath any classpath/user declarations.)
 
-    // Resolve every referenced simple name through the file's imports — an explicit import, a
-    // wildcard/default-import package that actually provides the type, or a dotted FQ. This is Kotlin's
-    // import-driven name resolution (there is no global simple-name index): a bare name binds ONLY to a
-    // default-import / imported / same-package class, verified to exist via `resolve_type`. Runs BEFORE
-    // alias expansion so a user `typealias A = Foo` (Foo a classpath type) finds `Foo` already resolved.
     let imports_by_file = {
         let mut consensus: HashMap<String, Option<TypeName>> = HashMap::new();
-        // A classpath `typealias` resolves to its TARGET classifier above. When the target takes a
-        // different argument list than the alias declares (`Lens<S, A>` = `PLens<S, S, A, A>`), a use
-        // site must substitute into the alias's expansion instead of pasting its arguments onto the
-        // target — so record the template under the spelling that named the alias.
         let mut expansion_consensus: HashMap<String, Option<crate::libraries::AliasExpansion>> =
             HashMap::new();
-        let source_count = compact_headers.map_or(files.len(), |headers| headers.sources.len());
+        let source_count = headers.sources.len();
         let mut imports_by_file = Vec::with_capacity(source_count);
         for file_index in 0..source_count {
             let imap = source_imports[file_index]
@@ -7808,15 +6400,11 @@ fn collect_signatures_with_cp_impl(
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
             // it) plus the explicit-import names themselves.
             let mut names = std::collections::HashSet::new();
-            if let Some(headers) = compact_headers {
-                collect_streamed_header_type_names(
-                    headers,
-                    crate::fir::SourceFileId::from_raw(file_index as u32),
-                    &mut names,
-                );
-            } else {
-                collect_file_type_names(&files[file_index], &mut names);
-            }
+            collect_streamed_header_type_names(
+                headers,
+                crate::fir::SourceFileId::from_raw(file_index as u32),
+                &mut names,
+            );
             names.extend(imap.keys().cloned());
             for name in names {
                 // `collect_file_type_names` deliberately combines ordinary `TypeRef` spellings with
@@ -8034,59 +6622,18 @@ fn collect_signatures_with_cp_impl(
             names
         })
         .collect();
-    // Inspection-only lexical views remain parser-keyed. Production keeps the stable Pass-1
-    // context directly and never reconstructs a `DeclId` from a source range.
-    let legacy_anonymous_lexical_scopes = compact_headers.is_none().then(|| {
-        files
-            .iter()
-            .map(anonymous_lexical_class_scope)
-            .collect::<Vec<_>>()
-    });
-    let legacy_local_class_tparams = compact_headers.is_none().then(|| {
-        files
-            .iter()
-            .map(local_class_enclosing_tparams)
-            .collect::<Vec<_>>()
-    });
-    let legacy_local_class_siblings = compact_headers.is_none().then(|| {
-        files
-            .iter()
-            .map(local_class_sibling_names)
-            .collect::<Vec<_>>()
-    });
-    let source_classifier_visibility = compact_headers.map_or_else(
-        || {
-            files
-                .iter()
-                .flat_map(|file| {
-                    file.decls.iter().filter_map(|&declaration| {
-                        let Decl::Class(class) = file.decl(declaration) else {
-                            return None;
-                        };
-                        Some((
-                            type_name(&class_internal(file, &class.name)),
-                            class.visibility,
-                        ))
-                    })
-                })
-                .collect::<HashMap<_, _>>()
-        },
-        |headers| {
-            headers
-                .stubs
-                .iter()
-                .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
-                .map(|stub| {
-                    let (_, identity) = compact_classifier_identity(headers, stub).expect(
-                        "a compact classifier must retain its lookup name and source package",
-                    );
-                    (identity, stub.visibility)
-                })
-                .collect()
-        },
-    );
+    let source_classifier_visibility = headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+        .map(|stub| {
+            let (_, identity) = compact_classifier_identity(headers, stub)
+                .expect("a compact classifier must retain its lookup name and source package");
+            (identity, stub.visibility)
+        })
+        .collect::<HashMap<_, _>>();
     let mut source_direct_supertypes: HashMap<TypeName, Vec<TypeName>> = HashMap::new();
-    if let Some(headers) = compact_headers {
+    {
         let empty_context = PassOneLocalClassContext::default();
         for stub in headers
             .stubs
@@ -8094,9 +6641,7 @@ fn collect_signatures_with_cp_impl(
             .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
         {
             let source = stub.source.raw() as usize;
-            let context = compact_local_contexts
-                .and_then(|contexts| contexts.get(source))
-                .unwrap_or(&empty_context);
+            let context = local_contexts.get(source).unwrap_or(&empty_context);
             // Parser-hoisted local classifiers keep their source header, but their generated
             // module name is deliberately not entered under the source spelling in the file-wide
             // import table. Extend this compact header-only view with classifiers from the
@@ -8146,51 +6691,6 @@ fn collect_signatures_with_cp_impl(
             }
             source_direct_supertypes.insert(internal, supertypes);
         }
-    } else {
-        for (file_index, file) in files.iter().enumerate() {
-            for &declaration in &file.decls {
-                let Decl::Class(class) = file.decl(declaration) else {
-                    continue;
-                };
-                let mut names = file_class_names[file_index].clone();
-                for (simple, internal) in legacy_local_class_siblings
-                    .as_ref()
-                    .expect("legacy local classifier scopes")[file_index]
-                    .get(&declaration)
-                    .into_iter()
-                    .flatten()
-                {
-                    names.insert_name(simple.clone(), *internal);
-                }
-                let classifier_header = legacy_classifier_header(class);
-                let internal = type_name(&class_internal(file, &class.name));
-                let lexical_classifiers = declaration_lexical_class_names(
-                    file,
-                    declaration,
-                    &legacy_anonymous_lexical_scopes
-                        .as_ref()
-                        .expect("legacy anonymous classifier scopes")[file_index],
-                    |candidate| user_defined.contains(&candidate),
-                );
-                let mut supertypes = classifier_header
-                    .supertypes
-                    .iter()
-                    .filter_map(|supertype| {
-                        declared_supertype_name(
-                            class,
-                            &supertype.name,
-                            &names,
-                            &lexical_classifiers,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                supertypes.extend(classifier_header.base.as_ref().and_then(|base| {
-                    declared_supertype_name(class, &base.name, &names, &lexical_classifiers)
-                }));
-                supertypes.extend(implicit_source_supertypes(class));
-                source_direct_supertypes.insert(internal, supertypes);
-            }
-        }
     }
 
     let ty_of_ref = |r: &TypeRef, classes: &ClassNames, tparams: &TParams, diags: &mut DiagSink| {
@@ -8203,83 +6703,21 @@ fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
-    let mut declaration_annotation_resolution_attempts = std::collections::HashSet::new();
     for file_index in 0..source_packages.len() {
         diags.set_file(file_index as u32);
         let names = &file_class_names[file_index];
-        let mut annotation_resolution = DeclarationAnnotationResolution {
-            file_index: file_index as u32,
-            attempted: &mut declaration_annotation_resolution_attempts,
-        };
-        // A declaration type-parameter annotation must be bound in its declaration's lexical
-        // classifier scope below. `detached_type_refs` also carries the same occurrence so Pass 1
-        // can discover its spelling, but resolving that duplicate from file scope first gives a
-        // nested `Host.Marker` occurrence the unrelated top-level `Marker` identity.
-        let declaration_annotation_spans = files
-            .get(file_index)
-            .into_iter()
-            .flat_map(|file| file.declaration_type_parameter_annotations.values())
-            .flatten()
-            .flat_map(|parameter| {
-                parameter
-                    .annotations
-                    .iter()
-                    .map(|annotation| annotation.span)
-            })
-            .collect::<std::collections::HashSet<_>>();
-        if let Some(headers) = compact_headers {
-            let source = crate::fir::SourceFileId::from_raw(file_index as u32);
-            for root in headers.detached_type_roots(source) {
-                let Some(reference) = headers
-                    .syntax
-                    .transient_type_ref(root, &headers.lookup_names)
-                else {
-                    continue;
-                };
-                if declaration_annotation_spans.contains(&reference.span) {
-                    continue;
-                }
-                if let Some(internal) = names.get_class(&reference.name) {
-                    table.resolved_annotations.insert(
-                        (file_index as u32, reference.span.lo, reference.span.hi),
-                        internal,
-                    );
-                }
-            }
-        } else {
-            let file = &files[file_index];
-            for reference in &file.detached_type_refs {
-                if declaration_annotation_spans.contains(&reference.span) {
-                    continue;
-                }
-                if let Some(internal) = names.get_class(&reference.name) {
-                    table.resolved_annotations.insert(
-                        (file_index as u32, reference.span.lo, reference.span.hi),
-                        internal,
-                    );
-                }
-            }
-        }
-        if compact_headers.is_none() {
-            let file = &files[file_index];
-            for &declaration_start in &file.type_alias_declaration_starts {
-                resolve_declaration_type_parameter_annotations(
-                    file,
-                    declaration_start,
-                    names,
-                    &mut table.resolved_annotations,
-                    &mut annotation_resolution,
-                    diags,
-                );
-            }
-            if let Some(script_body) = file.script_body {
-                resolve_local_type_parameter_annotation_inventory(
-                    file,
-                    [script_body],
-                    names,
-                    &mut table.resolved_annotations,
-                    &mut annotation_resolution,
-                    diags,
+        let source = crate::fir::SourceFileId::from_raw(file_index as u32);
+        for root in headers.detached_type_roots(source) {
+            let Some(reference) = headers
+                .syntax
+                .transient_type_ref(root, &headers.lookup_names)
+            else {
+                continue;
+            };
+            if let Some(internal) = names.get_class(&reference.name) {
+                table.resolved_annotations.insert(
+                    (file_index as u32, reference.span.lo, reference.span.hi),
+                    internal,
                 );
             }
         }
@@ -8291,19 +6729,10 @@ fn collect_signatures_with_cp_impl(
     table
         .resolved_annotations
         .retain(|(file, _, _), annotation| {
-            let common = compact_headers.map_or_else(
-                || {
-                    files
-                        .get(*file as usize)
-                        .is_some_and(|source| source.is_common)
-                },
-                |headers| {
-                    headers
-                        .scopes
-                        .file(crate::fir::SourceFileId::from_raw(*file))
-                        .is_some_and(|source| source.is_common)
-                },
-            );
+            let common = headers
+                .scopes
+                .file(crate::fir::SourceFileId::from_raw(*file))
+                .is_some_and(|source| source.is_common);
             let optional = libraries.is_optional_expectation(*annotation);
             crate::trace_compiler!(
             "diagnostic",
@@ -8314,98 +6743,14 @@ fn collect_signatures_with_cp_impl(
     // Normalize source annotation retention once identities are bound. The explicit retention
     // argument is interpreted only under the resolved `kotlin.annotation.Retention` declaration;
     // later phases receive the enum fact and never inspect its source spelling.
-    if let Some(headers) = compact_headers {
-        collect_compact_annotation_policies(headers, &mut table);
-    } else {
-        for (file_index, file) in files.iter().enumerate() {
-            for &declaration in &file.decls {
-                let Decl::Class(class) = file.decl(declaration) else {
-                    continue;
-                };
-                if class.kind != crate::ast::ClassKind::Annotation {
-                    continue;
-                }
-                let retention = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Retention"))?;
-                        let &argument = arguments.first()?;
-                        let Expr::Member { name, .. } = file.expr(argument) else {
-                            return None;
-                        };
-                        match name.as_str() {
-                            "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
-                            "BINARY" => Some(crate::types::AnnotationRetention::Binary),
-                            "SOURCE" => Some(crate::types::AnnotationRetention::Source),
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or(crate::types::AnnotationRetention::Default);
-                let Some(annotation_identity) = file_class_names[file_index].get_class(&class.name)
-                else {
-                    continue;
-                };
-                table
-                    .annotation_retentions
-                    .insert(annotation_identity, retention);
-                // `@Target(AnnotationTarget.X, …)` decides where an application written with no use-site
-                // prefix lands. Only the three declaration sites a PROPERTY application can take are
-                // modeled; an annotation class that declares no `@Target` is applicable everywhere and is
-                // left out of the map entirely.
-                let declared_targets = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                        let mut targets = crate::types::AnnotationTargets {
-                            value_parameter: false,
-                            property: false,
-                            field: false,
-                        };
-                        for &argument in arguments {
-                            // `@Target` takes a `vararg` of enum entries. The NAMED form spells the
-                            // same list as an array literal or `arrayOf`, so both flatten here.
-                            let entries: Vec<ExprId> = match file.expr(argument) {
-                                Expr::AnnotationArrayLiteral(elements) => elements.clone(),
-                                Expr::Call { args, .. } => args.to_vec(),
-                                _ => vec![argument],
-                            };
-                            for entry in entries {
-                                let Expr::Member { name, .. } = file.expr(entry) else {
-                                    continue;
-                                };
-                                match name.as_str() {
-                                    "VALUE_PARAMETER" => targets.value_parameter = true,
-                                    "PROPERTY" => targets.property = true,
-                                    "FIELD" => targets.field = true,
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Some(targets)
-                    });
-                if let Some(targets) = declared_targets {
-                    table
-                        .annotation_targets
-                        .insert(annotation_identity, targets);
-                }
-            }
-        }
-    }
+    collect_compact_annotation_policies(headers, &mut table);
     // Providers normalize compiled declarations into `LibraryType`; retain only the semantic policy
     // for annotation identities actually referenced by this source set.
     normalize_referenced_library_annotations(&mut table, &*libraries);
     // Seed the complete source package namespace before declaration collection starts. Package
     // qualification is syntax-derived and does not change as provisional class/callable signatures
     // are installed below, so ModuleSymbols can query this set directly during mutation.
-    if let Some(headers) = compact_headers {
+    {
         for source in 0..headers.sources.len() {
             let Some(source) = headers
                 .sources
@@ -8421,25 +6766,11 @@ fn collect_signatures_with_cp_impl(
                 package = current.parent();
             }
         }
-    } else {
-        for file in files {
-            let Some(package) = file.package.as_deref() else {
-                continue;
-            };
-            let mut current = String::new();
-            for segment in package.split('.').filter(|segment| !segment.is_empty()) {
-                if !current.is_empty() {
-                    current.push('/');
-                }
-                current.push_str(segment);
-                table.source_packages.insert(type_name(&current));
-            }
-        }
     }
     // Pre-seed identity-keyed declaration headers from ALL files so lightweight initializer
     // inference is independent of declaration order. These are the exact flags later moved onto
     // each canonical `ClassSig`, not a parallel simple-name object index.
-    if let Some(headers) = compact_headers {
+    {
         for stub in headers
             .stubs
             .iter()
@@ -8459,136 +6790,37 @@ fn collect_signatures_with_cp_impl(
                 },
             );
         }
-    } else {
-        for file in files {
-            for &declaration in &file.decls {
-                if let Decl::Class(class) = file.decl(declaration) {
-                    let internal = type_name(&class_internal(file, &class.name));
-                    table.source_class_headers.insert(
-                        internal,
-                        SourceClassHeader {
-                            flags: source_class_flags(class),
-                            direct_supertypes: source_direct_supertypes
-                                .get(&internal)
-                                .cloned()
-                                .unwrap_or_default()
-                                .into(),
-                        },
-                    );
-                }
-            }
-        }
     }
-    // Same-name top-level functions are kept as overloads; a real "conflicting declarations" clash
-    // is a same-*package* same-erasure duplicate. Keyed by (package, name, erased params) so a
-    // cross-package homonym (a star-imported function shadowed by a local one) is not a conflict.
-    let mut top_level_fun_groups = TopLevelFunctionConflictGroups::default();
-    let mut pending_conflict_diagnostics = HashMap::new();
-    let mut reserved_conflict_diagnostic_bytes = 0usize;
-    let mut retained_conflict_display_bytes = 0usize;
-    // Unannotated MEMBER expression getters whose first-pass inference hit `Error` — a referenced
-    // class may simply be collected later (another file, or a later class in this one). Each entry
-    // keeps the exact scope of its first pass; retried to a fixpoint after the walk (see
-    // [`finish_member_computed_getter_inference`]).
-    // Properties — top-level and class members alike — whose type this walk could not determine,
-    // resolved afterwards by the engine (see [`resolve_deferred_properties`]). One queue, because
-    // a member may be waiting on a module property and a module property on a member.
-    let mut deferred_properties: Vec<DeferredProperty> = Vec::new();
     let empty_local_context = PassOneLocalClassContext::default();
-    for (i, file) in files.iter().enumerate() {
+    for i in 0..source_packages.len() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
-        let legacy_anonymous_lexical_scope = legacy_anonymous_lexical_scopes
-            .as_ref()
-            .and_then(|scopes| scopes.get(i));
-        let mut annotation_resolution = DeclarationAnnotationResolution {
-            file_index: i as u32,
-            attempted: &mut declaration_annotation_resolution_attempts,
-        };
-        for (declaration_sibling, &d) in file.decls.iter().enumerate() {
-            let compact_declaration = compact_headers.and_then(|headers| {
-                let declaration = *headers
-                    .source_declarations(crate::fir::SourceFileId::from_raw(i as u32))
-                    .get(declaration_sibling)?;
-                headers.stub(declaration)
-            });
-            if compact_headers.is_some() && compact_declaration.is_none() {
-                continue;
-            }
-            match file.decl(d) {
-                Decl::Fun(f) => {
-                    let compact_function = compact_declaration;
-                    let callable_header = match compact_headers.zip(compact_function) {
-                        Some((headers, stub)) => streamed_callable_header_by_declaration(
-                            headers, stub.id,
-                        )
-                        .expect("a production top-level function must have a compact header"),
-                        _ => legacy_callable_header(f),
-                    };
-                    let compact_flags = compact_function.map(|stub| stub.flags);
-                    let function_name = compact_function
-                        .and_then(|stub| stub.lookup_name)
-                        .and_then(|name| {
-                            compact_headers.and_then(|headers| headers.lookup_names.get(name))
-                        })
-                        .unwrap_or(&f.name)
-                        .to_string();
-                    let function_visibility =
-                        compact_function.map_or(f.visibility, |stub| stub.visibility);
-                    let companion_extension = compact_flags.map_or_else(
-                        || f.is_companion_extension(),
-                        |flags| flags.has(crate::fir::DeclarationFlags::COMPANION),
+        for declaration in
+            signature_collection_declarations(crate::fir::SourceFileId::from_raw(i as u32), headers)
+        {
+            match declaration {
+                SignatureCollectionDeclaration::Function(compact_function) => {
+                    let callable_header =
+                        streamed_callable_header_by_declaration(headers, compact_function.id)
+                            .expect("a production top-level function must have a compact header");
+                    let function_name = callable_header.name.clone();
+                    let function_visibility = callable_header.visibility;
+                    let companion_extension = callable_header
+                        .flags
+                        .has(crate::fir::DeclarationFlags::COMPANION);
+                    let reified = callable_header
+                        .type_parameter_flags
+                        .iter()
+                        .any(|flags| flags.is_reified());
+                    let flags = callable_header.flags;
+                    let (is_inline, is_operator, is_infix, is_override, is_final, is_suspend) = (
+                        flags.has(crate::fir::DeclarationFlags::INLINE),
+                        flags.has(crate::fir::DeclarationFlags::OPERATOR),
+                        flags.has(crate::fir::DeclarationFlags::INFIX),
+                        flags.has(crate::fir::DeclarationFlags::OVERRIDE),
+                        flags.has(crate::fir::DeclarationFlags::FINAL),
+                        flags.has(crate::fir::DeclarationFlags::SUSPEND),
                     );
-                    let reified = if compact_headers.is_some() {
-                        callable_header
-                            .type_parameter_flags
-                            .iter()
-                            .any(|flags| flags.is_reified())
-                    } else {
-                        !f.reified_type_params.is_empty()
-                    };
-                    let (is_inline, is_operator, is_infix, is_override, is_final, is_suspend) =
-                        if let Some(flags) = compact_flags {
-                            (
-                                flags.has(crate::fir::DeclarationFlags::INLINE),
-                                flags.has(crate::fir::DeclarationFlags::OPERATOR),
-                                flags.has(crate::fir::DeclarationFlags::INFIX),
-                                flags.has(crate::fir::DeclarationFlags::OVERRIDE),
-                                flags.has(crate::fir::DeclarationFlags::FINAL),
-                                flags.has(crate::fir::DeclarationFlags::SUSPEND),
-                            )
-                        } else {
-                            (
-                                f.is_inline(),
-                                f.is_operator(),
-                                f.is_infix(),
-                                f.is_override(),
-                                f.is_final(),
-                                f.is_suspend(),
-                            )
-                        };
-                    if compact_headers.is_none() {
-                        resolve_declaration_type_parameter_annotation_inventory(
-                            file,
-                            d,
-                            &class_names,
-                            &mut table.resolved_annotations,
-                            &mut annotation_resolution,
-                            diags,
-                            true,
-                        );
-                    }
-                    let source_key = (i as u32, d.0);
-                    let value_operand_slots = if compact_headers.is_some() {
-                        generic_value_operand_slots_from_header(&callable_header, &[])
-                    } else {
-                        generic_value_operand_slots(f, &[])
-                    };
-                    if !value_operand_slots.is_empty() {
-                        table
-                            .source_generic_value_operand_slots
-                            .insert(source_key, value_operand_slots);
-                    }
                     let tp = TParams::from_decl_with_primary_class(
                         &callable_header.type_parameters,
                         &callable_header.bounds,
@@ -8633,75 +6865,8 @@ fn collect_signatures_with_cp_impl(
                             &tp,
                             diags,
                         ),
-                        StreamedResultKind::Inferred => {
-                            if compact_headers.is_some() {
-                                // Production inferred declarations are owned exclusively by the
-                                // compact `SigExpr` graph. Running the legacy AST literal inferer in
-                                // parallel retains ordinary bodies and can publish a competing
-                                // approximation before graph finalization. `Pending` remains private
-                                // to this provisional symbol table and is replaced by stable-ID
-                                // projection before any FIR or backend boundary.
-                                Ty::Pending
-                            } else if let FunBody::Expr(e) = &f.body {
-                                // For expression-body functions, try to infer the return type from
-                                // the body literal (handles `fun f() = "literal"` etc.).  Falls back
-                                // to Unit; check_fun will do a deeper inference pass and patch the
-                                // canonical signature table before lowering.
-                                // For an extension function, bind `this` to the receiver type so a body
-                                // using it (`fun Int.double() = this * 2`) infers correctly.
-                                let this_scope: Vec<(String, Ty, bool)> = callable_header
-                                    .receiver
-                                    .as_ref()
-                                    .map(|r| {
-                                        vec![(
-                                            "this".to_string(),
-                                            if f.is_companion_extension() {
-                                                associated_companion_receiver_ty(
-                                                    file,
-                                                    r,
-                                                    &class_names,
-                                                    &tp,
-                                                    diags,
-                                                )
-                                            } else {
-                                                ty_of_ref(r, &class_names, &tp, diags)
-                                            },
-                                            false,
-                                        )]
-                                    })
-                                    .unwrap_or_default();
-                                let t = infer_lit_ty_scoped(
-                                    InferenceSource::file(file, i as u32),
-                                    *e,
-                                    &class_names,
-                                    &this_scope,
-                                    &*libraries,
-                                    &table,
-                                );
-                                if t != Ty::Error {
-                                    t
-                                } else if let Expr::Name(n) = file.expr(*e) {
-                                    // Body is a bare parameter name (`fun f(x: T) = x`): infer T.
-                                    callable_header
-                                        .parameters
-                                        .iter()
-                                        .position(|parameter| &parameter.name == n)
-                                        .map(|parameter| params[parameter])
-                                        .unwrap_or(Ty::Pending)
-                                } else {
-                                    // NOT determined. Publishing `Unit` here is a wrong type, not a
-                                    // missing one: every property initialized by a call to this
-                                    // function then takes `Unit` as the answer and reports an
-                                    // "initializer type mismatch: expected 'Unit'" that names the
-                                    // wrong declaration entirely.
-                                    Ty::Pending
-                                }
-                            } else {
-                                unreachable!(
-                                    "an inferred compact result requires an expression body"
-                                )
-                            }
-                        }
+                        // Expression-result inference belongs solely to the compact signature graph.
+                        StreamedResultKind::Inferred => Ty::Pending,
                         StreamedResultKind::ImplicitUnit => Ty::Unit,
                     };
                     let ret = if callable_header.result != StreamedResultKind::Explicit {
@@ -8780,19 +6945,7 @@ fn collect_signatures_with_cp_impl(
                                 &class_names,
                                 &semantic_tp,
                                 ret,
-                                if compact_headers.is_some() {
-                                    // The compact signature graph owns expression-result
-                                    // inference, including declaration type-parameter identity.
-                                    // Re-reading the parser body here both duplicates that semantic
-                                    // decision and prevents Pass 1 from releasing ordinary arenas.
-                                    None
-                                } else {
-                                    inferred_return_type_parameter_from_header(
-                                        file,
-                                        f,
-                                        &callable_header,
-                                    )
-                                },
+                                None,
                                 diags,
                             )
                         });
@@ -8804,15 +6957,9 @@ fn collect_signatures_with_cp_impl(
                             &*libraries,
                         );
                     }
-                    let projected_return_hazard = if compact_headers.is_some() {
-                        has_projected_generic_return_hazard_from_header(&callable_header)
-                    } else {
-                        has_projected_generic_return_hazard(file, f)
-                    };
-                    if projected_return_hazard {
-                        table.source_projected_return_hazards.insert(source_key);
-                    }
-                    let stable_declaration = compact_function.map(|stub| stub.id);
+                    let projected_return_hazard =
+                        has_projected_generic_return_hazard_from_header(&callable_header);
+                    let stable_declaration = Some(compact_function.id);
                     let sig = Signature {
                         params,
                         ret,
@@ -8835,14 +6982,10 @@ fn collect_signatures_with_cp_impl(
                             // declaration set or rediscovering `reified` in individual call paths.
                             .with_requires_splice(reified)
                             .with_has_reified_type_params(reified),
-                        annotations: if compact_headers.is_some() {
-                            resolved_header_annotation_identities(
-                                &callable_header.annotations,
-                                &class_names,
-                            )
-                        } else {
-                            resolved_annotation_identities(&f.annotations, &class_names)
-                        },
+                        annotations: resolved_header_annotation_identities(
+                            &callable_header.annotations,
+                            &class_names,
+                        ),
                         equality_bound: None,
                         vararg_index,
                         required,
@@ -8851,96 +6994,40 @@ fn collect_signatures_with_cp_impl(
                             .iter()
                             .map(|parameter| parameter.has_default)
                             .collect(),
-                        exact_params: if compact_headers.is_some() {
-                            callable_header
-                                .parameters
-                                .iter()
-                                .map(|parameter| {
-                                    header_type_has_annotation(
-                                        &parameter.type_annotations,
-                                        &class_names,
-                                        type_name("kotlin/internal/Exact"),
-                                    )
-                                })
-                                .collect()
-                        } else {
-                            f.params
-                                .iter()
-                                .map(|parameter| {
-                                    has_type_annotation(
-                                        file,
-                                        parameter.ty.span,
-                                        &class_names,
-                                        type_name("kotlin/internal/Exact"),
-                                    )
-                                })
-                                .collect()
-                        },
-                        no_infer_params: if compact_headers.is_some() {
-                            callable_header
-                                .parameters
-                                .iter()
-                                .map(|parameter| {
-                                    header_type_has_annotation(
-                                        &parameter.type_annotations,
-                                        &class_names,
-                                        type_name("kotlin/internal/NoInfer"),
-                                    )
-                                })
-                                .collect()
-                        } else {
-                            f.params
-                                .iter()
-                                .map(|parameter| {
-                                    has_type_annotation(
-                                        file,
-                                        parameter.ty.span,
-                                        &class_names,
-                                        type_name("kotlin/internal/NoInfer"),
-                                    )
-                                })
-                                .collect()
-                        },
-                        implicit_integer_coercion: if compact_headers.is_some() {
-                            callable_header
-                                .parameters
-                                .iter()
-                                .map(|parameter| {
-                                    header_type_has_annotation(
-                                        &parameter.annotations,
-                                        &class_names,
-                                        type_name("kotlin/internal/ImplicitIntegerCoercion"),
-                                    )
-                                })
-                                .collect()
-                        } else {
-                            f.params
-                                .iter()
-                                .map(|parameter| {
-                                    has_implicit_integer_coercion_annotation(
-                                        &parameter.annotations,
-                                        &class_names,
-                                    )
-                                })
-                                .collect()
-                        },
-                        // Checked default expressions are body units. The compact production path
-                        // retains only the declaration-level `has_default` fact above; calls carry
-                        // an omitted parameter ordinal into FIR and the declaration's checked
-                        // default body supplies its value. Literal payload folding remains only for
-                        // the legacy AST lowerer while that non-production entry point exists.
-                        param_default_values: if compact_headers.is_some() {
-                            vec![None; callable_header.parameters.len()]
-                        } else {
-                            f.params
-                                .iter()
-                                .map(|p| {
-                                    p.default.and_then(|dx| {
-                                        extract_ctor_default(file, dx, &class_names, &*libraries)
-                                    })
-                                })
-                                .collect()
-                        },
+                        exact_params: callable_header
+                            .parameters
+                            .iter()
+                            .map(|parameter| {
+                                header_type_has_annotation(
+                                    &parameter.type_annotations,
+                                    &class_names,
+                                    type_name("kotlin/internal/Exact"),
+                                )
+                            })
+                            .collect(),
+                        no_infer_params: callable_header
+                            .parameters
+                            .iter()
+                            .map(|parameter| {
+                                header_type_has_annotation(
+                                    &parameter.type_annotations,
+                                    &class_names,
+                                    type_name("kotlin/internal/NoInfer"),
+                                )
+                            })
+                            .collect(),
+                        implicit_integer_coercion: callable_header
+                            .parameters
+                            .iter()
+                            .map(|parameter| {
+                                header_type_has_annotation(
+                                    &parameter.annotations,
+                                    &class_names,
+                                    type_name("kotlin/internal/ImplicitIntegerCoercion"),
+                                )
+                            })
+                            .collect(),
+                        param_default_values: vec![None; callable_header.parameters.len()],
                         param_names: callable_header
                             .parameters
                             .iter()
@@ -8954,7 +7041,7 @@ fn collect_signatures_with_cp_impl(
                             .collect(),
                         visibility: function_visibility,
                         context_count: callable_header.context_count,
-                        source_decl: Some(d),
+                        source_decl: None,
                         stable_declaration,
                         source_file: Some(i as u32),
                         source_member: None,
@@ -8963,51 +7050,15 @@ fn collect_signatures_with_cp_impl(
                         contract: None,
                         plugin_expression: None,
                     };
-                    let jvm_name = match compact_headers.zip(stable_declaration) {
-                        Some((headers, declaration)) => resolved_compact_jvm_name(
-                            headers,
-                            declaration,
-                            &callable_header.annotations,
-                            &class_names,
-                            &function_name,
-                        ),
-                        None => resolved_jvm_name(file, f, &class_names),
-                    };
-                    if jvm_name != function_name {
-                        table
-                            .toplevel_jvm_names
-                            .insert((i as u32, d.0), jvm_name.clone());
-                    }
-                    let retained = if compact_headers.is_some() {
-                        // Production conflict classification needs finalized inferred returns.
-                        // The stable post-solver pass below owns that decision; provisional
-                        // `Pending` signatures must not decide whether `main` is an entry point.
-                        true
-                    } else {
-                        let current = TopLevelFunctionConflictDecl {
-                            file: i as u32,
-                            declaration: TopLevelFunctionConflictDeclaration::Legacy(d),
-                            diagnostic_span: f.signature_span,
-                        };
-                        let private = function_visibility.is_private();
-                        let entry_point = is_kotlin_main_entry_point(f, &sig.params, sig.ret);
-                        TopLevelFunctionConflictKey::from_signature(&sig, function_name.clone())
-                            .is_none_or(|key| {
-                                register_top_level_function_conflict(
-                                    TopLevelFunctionConflictDisplaySource::Legacy(files),
-                                    &mut top_level_fun_groups,
-                                    TopLevelFunctionConflictRegistration {
-                                        key,
-                                        declaration: current,
-                                        private,
-                                        entry_point,
-                                    },
-                                    &mut pending_conflict_diagnostics,
-                                    &mut reserved_conflict_diagnostic_bytes,
-                                    &mut retained_conflict_display_bytes,
-                                )
-                            })
-                    };
+                    let _jvm_name = resolved_compact_jvm_name(
+                        headers,
+                        stable_declaration.expect("streamed declaration identity"),
+                        &callable_header.annotations,
+                        &class_names,
+                        &function_name,
+                    );
+                    // Conflict classification waits for stable inferred results below.
+                    let retained = true;
                     if callable_header.receiver.is_some() {
                         let recv_ty = sig
                             .source_receiver
@@ -9022,10 +7073,7 @@ fn collect_signatures_with_cp_impl(
                                 .or_default();
                             let overload_index = overloads.len();
                             overloads.push(sig);
-                            table.source_ext_funs.insert(
-                                source_key,
-                                (function_name.clone(), source_receiver, overload_index),
-                            );
+                            let _ = overload_index;
                         }
                     } else {
                         // A platform declaration clash is decided on the emitted JVM NAME, not the
@@ -9038,91 +7086,40 @@ fn collect_signatures_with_cp_impl(
                         }
                     }
                 }
-                Decl::Class(c) => {
-                    let compact_classifier = compact_declaration;
-                    let classifier_header = match compact_headers {
-                        Some(headers) => streamed_classifier_header_by_declaration(
-                            headers,
-                            compact_classifier
-                                .expect("a production classifier must have a compact identity")
-                                .id,
-                        )
-                        .expect("a production classifier must have a compact header"),
-                        _ => legacy_classifier_header(c),
-                    };
-                    let classifier_flags = compact_headers.zip(compact_classifier).map_or_else(
-                        || source_class_flags(c),
-                        |(headers, stub)| streamed_source_class_flags(headers, stub),
-                    );
-                    let classifier_visibility = compact_classifier
-                        .map(|stub| stub.visibility)
-                        .unwrap_or(c.visibility);
+                SignatureCollectionDeclaration::Classifier(compact_classifier) => {
+                    let classifier_header =
+                        streamed_classifier_header_by_declaration(headers, compact_classifier.id)
+                            .expect("a production classifier must have a compact header");
+                    let classifier_flags = streamed_source_class_flags(headers, compact_classifier);
+                    let classifier_visibility = compact_classifier.visibility;
                     let classifier_callable_order =
-                        compact_headers.zip(compact_classifier).map_or_else(
-                            || source_declared_callable_order(c),
-                            |(headers, stub)| streamed_declared_callable_order(headers, stub.id),
-                        );
-                    let classifier_declaration_flags = compact_classifier.map(|stub| stub.flags);
-                    let classifier_is_data = classifier_declaration_flags
-                        .map_or(c.is_data, |flags| {
-                            flags.has(crate::fir::DeclarationFlags::DATA)
-                        });
-                    let classifier_is_enum = classifier_declaration_flags
-                        .map_or(c.is_enum(), |flags| {
-                            flags.has(crate::fir::DeclarationFlags::ENUM)
-                        });
-                    let classifier_is_value = classifier_declaration_flags
-                        .map_or(c.is_value, |flags| {
-                            flags.has(crate::fir::DeclarationFlags::VALUE)
-                        });
-                    if compact_headers.is_none() {
-                        assert_eq!(
-                            classifier_header.primary_parameters.len(),
-                            c.props.len(),
-                            "legacy classifier and constructor parameters must stay aligned",
-                        );
-                    }
-                    let anonymous_object = compact_classifier.map_or_else(
-                        || {
-                            legacy_anonymous_lexical_scope
-                                .is_some_and(|scope| scope.declarations.contains(&d))
-                        },
-                        |stub| {
-                            stub.flags
-                                .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
-                        },
-                    );
+                        streamed_declared_callable_order(headers, compact_classifier.id);
+                    let classifier_declaration_flags = compact_classifier.flags;
+                    let classifier_is_data =
+                        classifier_declaration_flags.has(crate::fir::DeclarationFlags::DATA);
+                    let classifier_is_enum =
+                        classifier_declaration_flags.has(crate::fir::DeclarationFlags::ENUM);
+                    let classifier_is_value =
+                        classifier_declaration_flags.has(crate::fir::DeclarationFlags::VALUE);
+                    let anonymous_object = classifier_declaration_flags
+                        .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT);
                     // The declaration's OWN internal name is definitional (`pkg/Name`); the
                     // simple-name `class_names` lookup can bind a SAME-NAMED class from another
                     // package (or an alias/import), which would register this class's signature
                     // under the wrong internal. Only fall back to it for shapes whose internal
                     // isn't the plain `class_internal` form (e.g. remapped lexical nestings).
-                    let own_internal = class_internal(file, &c.name);
-                    let internal = if user_defined.contains(&type_name(&own_internal)) {
-                        own_internal
-                    } else {
-                        class_names
-                            .get(&c.name)
-                            .map(TypeName::render)
-                            .unwrap_or_else(|| class_internal(file, &c.name))
-                    };
-                    if anonymous_object {
-                        table
-                            .anonymous_object_types
-                            .insert((i as u32, d), type_name(&internal));
-                    }
+                    let internal = compact_classifier_identity(headers, compact_classifier)
+                        .map(|(_, internal)| internal)
+                        .expect("a compact classifier must retain its stable identity");
                     // A parser-hoisted body-local classifier has its explicit header types
                     // captured on the compact signature graph while the exact lexical type-alias
                     // rung is live. The table built here is only the declaration-shape bootstrap
                     // needed to evaluate that graph; it must not diagnose its necessarily
                     // incomplete spelling view. Graph evaluation below resolves these types,
                     // rejects failures, and publishes the resulting semantic header before Pass 2.
-                    let compact_local_header = compact_classifier.is_some_and(|stub| {
-                        stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                            || stub
-                                .flags
-                                .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
-                    });
+                    let compact_local_header = classifier_declaration_flags
+                        .has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                        || anonymous_object;
                     // An `inner class` captures the enclosing instance, so the outer class's type
                     // parameters are in scope for its own member/ctor/field types (`inner class N :
                     // Iterator<T>` where `T` is the outer's parameter). Walk the `inner_of` chain and
@@ -9130,52 +7127,15 @@ fn collect_signatures_with_cp_impl(
                     // A LOCAL class is written inside another declaration's body, so that
                     // declaration's type parameters are in scope for its member types too — the
                     // hoisted `Decl::Class` collected here has lost that context.
-                    let mut enclosing_tparam_declarations = compact_classifier
-                        .and_then(|stub| {
-                            compact_local_contexts
-                                .and_then(|contexts| contexts.get(i))
-                                .and_then(|context| context.enclosing_type_parameters.get(&stub.id))
-                                .cloned()
+                    let enclosing_tparam_declarations = local_contexts
+                        .get(i)
+                        .and_then(|context| {
+                            context
+                                .enclosing_type_parameters
+                                .get(&compact_classifier.id)
                         })
-                        .or_else(|| {
-                            legacy_local_class_tparams
-                                .as_ref()
-                                .and_then(|contexts| contexts.get(i))
-                                .and_then(|context| context.get(&d))
-                                .cloned()
-                        })
+                        .cloned()
                         .unwrap_or_default();
-                    if compact_headers.is_none() {
-                        let mut outer = c.inner_of.clone();
-                        let mut guard = 0;
-                        let mut outer_declarations = Vec::new();
-                        while let Some(on) = outer {
-                            guard += 1;
-                            if guard > 32 {
-                                break;
-                            }
-                            if let Some(oc) = file
-                                .decls
-                                .iter()
-                                .filter_map(|&d| match file.decl(d) {
-                                    Decl::Class(x) => Some(x),
-                                    _ => None,
-                                })
-                                .find(|x| x.name == on)
-                            {
-                                outer_declarations.push(EnclosingTypeParameterDeclaration {
-                                    declaration_start: oc.span.lo,
-                                    names: oc.type_params.clone(),
-                                    bounds: oc.type_param_bounds.clone(),
-                                });
-                                outer = oc.inner_of.clone();
-                            } else {
-                                break;
-                            }
-                        }
-                        outer_declarations.reverse();
-                        enclosing_tparam_declarations.splice(0..0, outer_declarations);
-                    }
                     // A classifier header is resolved before declarations in that classifier's own
                     // body enter scope. Keep this declaration-owned header scope separate from the
                     // member scope built below: `class C : Base { interface Base }` must bind the
@@ -9189,60 +7149,25 @@ fn collect_signatures_with_cp_impl(
                     // simple spelling is otherwise absent here (`Container.SomeClass :
                     // SomeInterface<SomeClass>`). This adds only the declaration itself; own nested
                     // body declarations remain excluded as required by the header-scope rule above.
-                    if let Some(simple) = c.name.rsplit('.').next() {
-                        header_class_names.insert_name(simple.to_owned(), type_name(&internal));
+                    let classifier_source_name =
+                        compact_classifier_identity(headers, compact_classifier)
+                            .map(|(source_name, _)| source_name)
+                            .expect("a compact classifier must retain its source name");
+                    if let Some(simple) = classifier_source_name.rsplit('.').next() {
+                        header_class_names.insert_name(simple.to_owned(), internal);
                     }
-                    let stable_siblings = compact_classifier.and_then(|stub| {
-                        compact_local_contexts
-                            .and_then(|contexts| contexts.get(i))
-                            .and_then(|context| context.sibling_classifiers.get(&stub.id))
+                    let stable_siblings = local_contexts.get(i).and_then(|context| {
+                        context.sibling_classifiers.get(&compact_classifier.id)
                     });
-                    let legacy_siblings = legacy_local_class_siblings
-                        .as_ref()
-                        .and_then(|contexts| contexts.get(i))
-                        .and_then(|context| context.get(&d));
-                    for (simple, internal) in
-                        stable_siblings.or(legacy_siblings).into_iter().flatten()
-                    {
+                    for (simple, internal) in stable_siblings.into_iter().flatten() {
                         header_class_names.insert_name(simple.clone(), *internal);
                     }
-                    let mut lexical_inheritors = match (compact_headers, compact_classifier) {
-                        (Some(headers), Some(stub)) => compact_declaration_lexical_class_names(
-                            headers,
-                            compact_local_contexts
-                                .and_then(|contexts| contexts.get(i))
-                                .unwrap_or(&empty_local_context),
-                            stub.id,
-                            |candidate| source_direct_supertypes.contains_key(&candidate),
-                        ),
-                        _ => declaration_lexical_class_names(
-                            file,
-                            d,
-                            legacy_anonymous_lexical_scope
-                                .expect("legacy anonymous classifier scope"),
-                            |candidate| source_direct_supertypes.contains_key(&candidate),
-                        ),
-                    };
-                    if compact_headers.is_none() {
-                        if let Some(owner) = file.local_class_lexical_classifier_owners.get(&d) {
-                            let owner = type_name(&class_internal(file, owner));
-                            if !lexical_inheritors.contains(&owner) {
-                                // An enum entry has no `Decl`, so splice its parser-recorded scope
-                                // immediately before its real containing enum. Keeping all actual
-                                // local/nested owners nearer preserves ordinary lexical shadowing:
-                                // `[Nested, Local, E.A, E]`, never `[Nested, E.A, Local, E]`.
-                                let rank = owner
-                                    .nested_owner()
-                                    .and_then(|containing| {
-                                        lexical_inheritors
-                                            .iter()
-                                            .position(|&candidate| candidate == containing)
-                                    })
-                                    .unwrap_or(lexical_inheritors.len());
-                                lexical_inheritors.insert(rank, owner);
-                            }
-                        }
-                    }
+                    let lexical_inheritors = compact_declaration_lexical_class_names(
+                        headers,
+                        local_contexts.get(i).unwrap_or(&empty_local_context),
+                        compact_classifier.id,
+                        |candidate| source_direct_supertypes.contains_key(&candidate),
+                    );
                     // A classifier header cannot see declarations nested in the classifier being
                     // declared, but it does see nested classifiers of every enclosing lexical
                     // owner. Keep that distinction in the bootstrap view too: the compact graph
@@ -9253,23 +7178,25 @@ fn collect_signatures_with_cp_impl(
                     let header_lexical_owner_ranks = lexical_inheritors
                         .iter()
                         .copied()
-                        .filter(|owner| *owner != type_name(&internal))
+                        .filter(|owner| *owner != internal)
                         .enumerate()
                         .map(|(rank, owner)| (owner, rank))
                         .collect::<HashMap<_, _>>();
-                    extend_lexical_nested_classifier_names(
-                        file,
+                    extend_streamed_lexical_nested_classifier_names(
+                        headers,
                         &header_lexical_owner_ranks,
                         &mut header_class_names,
                     );
                     let mut referenced_types = std::collections::HashSet::new();
-                    if let Some(headers) = compact_headers {
+                    {
                         let source = crate::fir::SourceFileId::from_raw(i as u32);
                         for stub in headers.stubs.iter().filter(|stub| {
                             stub.source == source
-                                && compact_classifier.is_some_and(|classifier| {
-                                    streamed_declaration_is_within(headers, stub.id, classifier.id)
-                                })
+                                && streamed_declaration_is_within(
+                                    headers,
+                                    stub.id,
+                                    compact_classifier.id,
+                                )
                         }) {
                             for root in headers.syntax.declaration_type_roots(stub.id) {
                                 if let Some(reference) = headers
@@ -9280,8 +7207,6 @@ fn collect_signatures_with_cp_impl(
                                 }
                             }
                         }
-                    } else {
-                        collect_class_type_names(file, c, &mut referenced_types);
                     }
                     let extend_inherited_names =
                         |class_names: &mut ClassNames,
@@ -9357,7 +7282,7 @@ fn collect_signatures_with_cp_impl(
                     let header_inheritors = lexical_inheritors
                         .iter()
                         .copied()
-                        .filter(|owner| *owner != type_name(&internal))
+                        .filter(|owner| *owner != internal)
                         .collect::<Vec<_>>();
                     extend_inherited_names(&mut header_class_names, &header_inheritors, false);
                     // The classifier's own inherited nested classifiers form a later header rung:
@@ -9367,7 +7292,7 @@ fn collect_signatures_with_cp_impl(
                     // existing package classifier spuriously ambiguous.
                     extend_inherited_names(
                         &mut header_class_names,
-                        std::slice::from_ref(&type_name(&internal)),
+                        std::slice::from_ref(&internal),
                         true,
                     );
                     let lexical_owner_ranks = lexical_inheritors
@@ -9382,8 +7307,8 @@ fn collect_signatures_with_cp_impl(
                     // class N }`).
                     let primary_header_class_names = {
                         let mut ext = header_class_names.clone();
-                        extend_lexical_nested_classifier_names(
-                            file,
+                        extend_streamed_lexical_nested_classifier_names(
+                            headers,
                             &lexical_owner_ranks,
                             &mut ext,
                         );
@@ -9399,31 +7324,19 @@ fn collect_signatures_with_cp_impl(
                         // nested classifiers now precede those of enclosing receivers and the file
                         // scope, while declarations owned directly by the class are added below and
                         // retain the nearest lexical priority.
-                        extend_inherited_names(
-                            &mut ext,
-                            std::slice::from_ref(&type_name(&internal)),
-                            false,
-                        );
+                        extend_inherited_names(&mut ext, std::slice::from_ref(&internal), false);
                         // Own nested classifiers from every lexical owner are in scope inside a nested
                         // class. For `Outer { inner class First; inner class Second(val first: First) }`,
                         // `First` belongs to `Outer`, not `Outer.Second`, so probing only `c.name` loses
                         // the sibling during signature collection. Index direct children of all lexical
                         // owners in one declaration scan; a nearer owner wins when names shadow.
-                        extend_lexical_nested_classifier_names(
-                            file,
+                        extend_streamed_lexical_nested_classifier_names(
+                            headers,
                             &lexical_owner_ranks,
                             &mut ext,
                         );
                         ext
                     };
-                    resolve_class_body_annotation_references(
-                        file,
-                        d,
-                        c,
-                        &class_names,
-                        i as u32,
-                        &mut table.resolved_annotations,
-                    );
                     // JVM erasure of every type parameter in scope: the enclosing declarations'
                     // (outer/local) first, then this class's own. A declared reference bound erases to
                     // the bound (`<T : Cargo>` → `Lapp/Cargo;`) — the class counterpart of what the
@@ -9445,30 +7358,6 @@ fn collect_signatures_with_cp_impl(
                             &classifier_header.bounds,
                             &|name| class_names.get(name),
                         );
-                    // An enum entry contributes a nearer lexical classifier rung than its enum.
-                    // Bind entry-owned declarations first so the general class inventory cannot
-                    // claim the same source occurrence through the enclosing enum's view.
-                    for entry in &c.enum_entries {
-                        resolve_enum_entry_type_parameter_annotation_inventory(
-                            file,
-                            c,
-                            entry,
-                            &class_names,
-                            &mut table.resolved_annotations,
-                            &mut annotation_resolution,
-                            diags,
-                            compact_headers.is_none(),
-                        );
-                    }
-                    resolve_declaration_type_parameter_annotation_inventory(
-                        file,
-                        d,
-                        &class_names,
-                        &mut table.resolved_annotations,
-                        &mut annotation_resolution,
-                        diags,
-                        compact_headers.is_none(),
-                    );
                     let mut enclosing_semantic_parameters = Vec::new();
                     let symbolic_enclosing_tparams = enclosing_tparam_declarations.iter().fold(
                         TParams::default(),
@@ -9514,7 +7403,7 @@ fn collect_signatures_with_cp_impl(
                             &classifier_header.type_parameters,
                             table.compilation_id,
                             i as u32,
-                            c.span.lo,
+                            compact_classifier.range.lo,
                         );
                     // Capture only type parameters lexically visible at the local declaration. Keep
                     // every declaration in `symbolic_enclosing_tparams` above so an outer bound can
@@ -9530,7 +7419,10 @@ fn collect_signatures_with_cp_impl(
                         .iter()
                         .map(String::as_str)
                         .collect::<std::collections::HashSet<_>>();
-                    let parser_hoisted = anonymous_object || file.is_local_declaration(d);
+                    let parser_hoisted = anonymous_object
+                        || compact_classifier
+                            .flags
+                            .has(crate::fir::DeclarationFlags::LOCAL_CLASS);
                     let mut visible_source_names = std::collections::HashSet::new();
                     let mut visible_enclosing_parameters = enclosing_semantic_parameters;
                     for declaration in visible_enclosing_parameters.iter_mut().rev() {
@@ -9558,33 +7450,6 @@ fn collect_signatures_with_cp_impl(
                         .iter()
                         .map(|(name, _)| name.clone())
                         .collect::<Vec<_>>();
-                    if compact_headers.is_none() {
-                        // Legacy AST lowering cannot preserve this initialization-order edge. The
-                        // production path streams init blocks and property initializers as ordered
-                        // checked body units, so signature collection must neither inspect the
-                        // blocks nor reject otherwise-valid Kotlin merely because a member call
-                        // precedes a later initializer.
-                        let own_methods: std::collections::HashSet<&str> =
-                            c.methods.iter().map(|m| m.name.as_str()).collect();
-                        let is_own_call = |ce: ExprId| matches!(file.expr(ce), Expr::Call { callee, .. } if matches!(file.expr(*callee), Expr::Name(n) if own_methods.contains(n.as_str())));
-                        if let Some(last_prop) = c
-                            .init_order
-                            .iter()
-                            .rposition(|i| matches!(i, ClassInit::PropInit(_)))
-                        {
-                            for (pos, init) in c.init_order.iter().enumerate() {
-                                if let (true, ClassInit::Block(b)) = (pos < last_prop, init) {
-                                    if let Expr::Block { stmts, trailing } = file.expr(*b) {
-                                        let calls_own = trailing.map_or(false, |t| is_own_call(t))
-                                            || stmts.iter().any(|&st| matches!(file.stmt(st), Stmt::Expr(ce) if is_own_call(*ce)));
-                                        if calls_own {
-                                            diags.error(c.span, "krusty: an init block that calls a member method before a later property initializer is not supported (init order)".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                     // All primary-ctor params (in order) define the constructor signature.
                     let ctor_params: Vec<Ty> = classifier_header
                         .primary_parameters
@@ -9633,19 +7498,8 @@ fn collect_signatures_with_cp_impl(
                     // Primary-constructor defaults are executable checked body units. Compact
                     // signatures retain their presence in `ctor_param_names`; they must not retain
                     // or inspect initializer syntax merely to support legacy literal substitution.
-                    let ctor_defaults: Vec<Option<CtorDefaultValue>> = if compact_headers.is_some()
-                    {
-                        vec![None; classifier_header.primary_parameters.len()]
-                    } else {
-                        c.props
-                            .iter()
-                            .map(|p| {
-                                p.default.and_then(|dx| {
-                                    extract_ctor_default(file, dx, &class_names, &*libraries)
-                                })
-                            })
-                            .collect()
-                    };
+                    let ctor_defaults: Vec<Option<CtorDefaultValue>> =
+                        vec![None; classifier_header.primary_parameters.len()];
                     // Only `val`/`var` params (+ body props) are backing-field properties.
                     let mut props: Vec<(String, Ty, bool)> = classifier_header
                         .primary_parameters
@@ -9658,9 +7512,8 @@ fn collect_signatures_with_cp_impl(
                         .primary_parameters
                         .iter()
                         .zip(&ctor_params)
-                        .enumerate()
-                        .filter(|(_, (header, _))| header.is_property)
-                        .map(|(property_index, (header, &ty))| {
+                        .filter(|(header, _)| header.is_property)
+                        .map(|(header, &ty)| {
                             (
                                 header.name.clone(),
                                 DeclaredPropertySig {
@@ -9688,13 +7541,7 @@ fn collect_signatures_with_cp_impl(
                                     is_abstract: classifier_flags.has(ClassFlags::ANNOTATION),
                                     is_open: header.is_open,
                                     context_params: Vec::new(),
-                                    source_member: compact_headers.is_none().then_some(
-                                        crate::libraries::SourceMember::ClassProperty {
-                                            file: i as u32,
-                                            owner: d.0,
-                                            property: property_index as u32,
-                                        },
-                                    ),
+                                    source_member: None,
                                     stable_declaration: header.stable_declaration,
                                 },
                             )
@@ -9713,93 +7560,16 @@ fn collect_signatures_with_cp_impl(
                     // receiver. For an enum-entry inner class the lexical name includes the entry
                     // (`E.ENTRY.Inner`) while `inner_of` correctly names the semantic receiver (`E`),
                     // so include that entry body's properties after the enum's ordinary properties.
-                    if let Some(outer_name) = c.inner_of.as_deref() {
-                        if let Some(outer) = file.decls.iter().find_map(|&declaration| {
-                            matches!(file.decl(declaration), Decl::Class(owner) if owner.name == outer_name)
-                                .then(|| match file.decl(declaration) {
-                                    Decl::Class(owner) => owner,
-                                    _ => unreachable!(),
-                                })
-                        }) {
-                            let outer_tparams = TParams::from_decl_with(
-                                &outer.type_params,
-                                &outer.type_param_bounds,
-                                &|name| class_names.get(name),
-                            );
-                            init_scope.extend(outer.props.iter().filter(|p| p.is_property).map(|p| {
-                                let ty = ty_of_ref_silent(&p.ty, &class_names, &outer_tparams);
-                                (
-                                    p.name.clone(),
-                                    semantic_value_parameter_ty(ty, p.is_vararg),
-                                    p.is_var,
-                                )
-                            }));
-                            for property in &outer.body_props {
-                                let ty = property
-                                    .ty
-                                    .as_ref()
-                                    .map(|ty| {
-                                        ty_of_ref_silent(ty, &class_names, &outer_tparams)
-                                    })
-                                    .or_else(|| {
-                                        property.init.map(|expression| {
-                                            if compact_headers.is_some() {
-                                                return Ty::Pending;
-                                            }
-                                            infer_lit_ty_scoped(
-                                                InferenceSource::file(file, i as u32),
-                                                expression,
-                                                &class_names,
-                                                &init_scope,
-                                                &*libraries,
-                                                &table,
-                                            )
-                                        })
-                                    })
-                                    .unwrap_or(Ty::Error);
-                                init_scope.push((property.name.clone(), ty, property.is_var));
-                            }
-                            let entry_name = c
-                                .name
-                                .strip_prefix(&format!("{}.", outer.name))
-                                .and_then(|tail| tail.split('.').next());
-                            if let Some(entry) = entry_name.and_then(|entry_name| {
-                                outer
-                                    .enum_entries
-                                    .iter()
-                                    .find(|entry| entry.name == entry_name)
-                            }) {
-                                for property in entry
-                                    .props
-                                    .iter()
-                                    .filter(|property| property.span.lo < c.span.lo)
-                                {
-                                    let ty = property
-                                        .ty
-                                        .as_ref()
-                                        .map(|ty| {
-                                            ty_of_ref_silent(ty, &class_names, &outer_tparams)
-                                        })
-                                        .or_else(|| {
-                                            property.init.map(|expression| {
-                                                if compact_headers.is_some() {
-                                                    return Ty::Pending;
-                                                }
-                                                infer_lit_ty_scoped(
-                                                    InferenceSource::file(file, i as u32),
-                                                    expression,
-                                                    &class_names,
-                                                    &init_scope,
-                                                    &*libraries,
-                                                    &table,
-                                                )
-                                            })
-                                        })
-                                        .unwrap_or(Ty::Error);
-                                    init_scope.push((property.name.clone(), ty, property.is_var));
-                                }
-                            }
-                        }
+                    if let Some(outer) = internal
+                        .nested_owner()
+                        .and_then(|outer| table.class_by_type_name(outer))
+                    {
+                        init_scope.extend(
+                            outer
+                                .props
+                                .iter()
+                                .map(|(name, ty, mutable)| (name.clone(), *ty, *mutable)),
+                        );
                     }
                     init_scope.extend(
                         classifier_header
@@ -9808,12 +7578,13 @@ fn collect_signatures_with_cp_impl(
                             .zip(&ctor_params)
                             .map(|(p, &ty)| (p.name.clone(), ty, p.is_mutable_property)),
                     );
-                    let direct_companion = c.companion.and_then(|companion| {
-                        let Decl::Class(companion) = file.decl(companion) else {
-                            return None;
-                        };
-                        Some(type_name(&class_internal(file, &companion.name)))
-                    });
+                    let direct_companion =
+                        headers.owned_stubs(compact_classifier.id).find_map(|stub| {
+                            (stub.kind == crate::fir::DeclarationKind::Classifier
+                                && stub.flags.has(crate::fir::DeclarationFlags::COMPANION))
+                            .then(|| compact_classifier_identity(headers, stub).map(|(_, id)| id))
+                            .flatten()
+                        });
                     // Publish explicitly typed members before any property/getter initializer asks
                     // for them. This is not a spelling-to-return shortcut: the temporary class
                     // header is consumed through ModuleSymbols, so overload selection, generic
@@ -9855,29 +7626,24 @@ fn collect_signatures_with_cp_impl(
                     let (declared_methods, declared_member_extensions) =
                         declared_member_callable_headers(
                             &DeclaredMemberHeaderContext {
-                                file,
                                 classes: &class_names,
                                 class_tparams: &ctp,
                                 symbolic_class_tparams: &symbolic_ctp,
                                 class_type_parameters: &classifier_header.type_parameters,
-                                compact_headers,
+                                headers,
                                 compilation_id: table.compilation_id,
                                 source_file: i as u32,
-                                libraries: &*libraries,
-                                owner_is_interface: classifier_flags.has(ClassFlags::INTERFACE),
                             },
-                            c,
-                            compact_classifier.map(|stub| stub.id),
-                            d,
+                            compact_classifier.id,
                             diags,
                         );
                     table.insert_class_sig(
-                        type_name(&internal),
+                        internal,
                         ClassSig::with_declared_callable_headers(DeclaredCallableClassHeader {
-                            internal: type_name(&internal),
-                            stable_declaration: compact_classifier.map(|stub| stub.id),
+                            internal,
+                            stable_declaration: Some(compact_classifier.id),
                             source_file: i as u32,
-                            source_decl: d,
+                            source_decl: None,
                             visibility: classifier_visibility,
                             flags: classifier_flags,
                             methods: declared_methods,
@@ -9885,7 +7651,7 @@ fn collect_signatures_with_cp_impl(
                             member_ext_funs: declared_member_extensions,
                             companion_internal: direct_companion,
                             direct_supertypes: source_direct_supertypes
-                                .get(&type_name(&internal))
+                                .get(&internal)
                                 .cloned()
                                 .unwrap_or_default()
                                 .into(),
@@ -9932,139 +7698,6 @@ fn collect_signatures_with_cp_impl(
                             captured_type_parameters: header_captured_type_parameters,
                         }),
                     );
-                    if let Some(companion_decl) = c.companion {
-                        if let (Some(companion_internal), Decl::Class(companion)) =
-                            (direct_companion, file.decl(companion_decl))
-                        {
-                            if !table.classes.contains_key(&companion_internal) {
-                                let compact_companion = compact_headers.and_then(|headers| {
-                                    headers.stubs.iter().find(|stub| {
-                                        stub.source.raw() == i as u32
-                                            && stub.range == companion.span
-                                            && stub.kind == crate::fir::DeclarationKind::Classifier
-                                    })
-                                });
-                                let companion_header = match compact_headers {
-                                    Some(headers) => {
-                                        streamed_classifier_header_by_declaration(
-                                            headers,
-                                            compact_companion
-                                                .expect("a production companion must have a compact identity")
-                                                .id,
-                                        )
-                                        .expect("a production companion must have a compact header")
-                                    }
-                                    _ => legacy_classifier_header(companion),
-                                };
-                                let companion_tparams = TParams::from_decl_with(
-                                    &companion_header.type_parameters,
-                                    &companion_header.bounds,
-                                    &|name| class_names.get(name),
-                                );
-                                let symbolic_companion_tparams = TParams::symbolic_from_decl_with(
-                                    &companion_header.type_parameters,
-                                    &companion_header.bounds,
-                                    &|name| class_names.get(name),
-                                )
-                                .alpha_renamed_declaration(
-                                    &companion_header.type_parameters,
-                                    table.compilation_id,
-                                    i as u32,
-                                    companion.span.lo,
-                                );
-                                let (methods, extensions) = declared_member_callable_headers(
-                                    &DeclaredMemberHeaderContext {
-                                        file,
-                                        classes: &class_names,
-                                        class_tparams: &companion_tparams,
-                                        symbolic_class_tparams: &symbolic_companion_tparams,
-                                        class_type_parameters: &companion_header.type_parameters,
-                                        compact_headers,
-                                        compilation_id: table.compilation_id,
-                                        source_file: i as u32,
-                                        libraries: &*libraries,
-                                        owner_is_interface: compact_companion.map_or_else(
-                                            || companion.is_interface(),
-                                            |stub| {
-                                                stub.flags
-                                                    .has(crate::fir::DeclarationFlags::INTERFACE)
-                                            },
-                                        ),
-                                    },
-                                    companion,
-                                    compact_companion.map(|stub| stub.id),
-                                    companion_decl,
-                                    diags,
-                                );
-                                let type_parameters = crate::types::TypeParameters::new(
-                                    companion_header.type_parameters.clone(),
-                                    companion_header
-                                        .type_parameters
-                                        .iter()
-                                        .map(|parameter| {
-                                            symbolic_companion_tparams
-                                                .bound(parameter)
-                                                .ty_param_bound()
-                                                .unwrap_or_else(|| {
-                                                    Ty::nullable(Ty::obj("kotlin/Any"))
-                                                })
-                                        })
-                                        .collect(),
-                                    companion_header.type_parameter_variances.clone(),
-                                );
-                                table.insert_class_sig(
-                                    companion_internal,
-                                    ClassSig::with_declared_callable_headers(
-                                        DeclaredCallableClassHeader {
-                                            internal: companion_internal,
-                                            stable_declaration: compact_companion
-                                                .map(|stub| stub.id),
-                                            source_file: i as u32,
-                                            source_decl: companion_decl,
-                                            visibility: compact_companion
-                                                .map(|stub| stub.visibility)
-                                                .unwrap_or(companion.visibility),
-                                            flags: compact_headers
-                                                .zip(compact_companion)
-                                                .map_or_else(
-                                                    || source_class_flags(companion),
-                                                    |(headers, stub)| {
-                                                        streamed_source_class_flags(headers, stub)
-                                                    },
-                                                ),
-                                            methods,
-                                            declared_callable_order: compact_headers
-                                                .zip(compact_companion)
-                                                .map_or_else(
-                                                    || source_declared_callable_order(companion),
-                                                    |(headers, stub)| {
-                                                        streamed_declared_callable_order(
-                                                            headers, stub.id,
-                                                        )
-                                                    },
-                                                ),
-                                            member_ext_funs: extensions,
-                                            companion_internal: None,
-                                            direct_supertypes: Default::default(),
-                                            direct_supertype_arguments: Vec::new(),
-                                            type_parameters,
-                                            type_parameter_extra_bounds: companion_header
-                                                .type_parameters
-                                                .iter()
-                                                .map(|parameter| {
-                                                    symbolic_companion_tparams
-                                                        .extra_bounds_of(parameter)
-                                                })
-                                                .collect(),
-                                            captured_type_parameters:
-                                                crate::types::TypeParameters::default(),
-                                        },
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    let member_this = Ty::obj_name(type_name(&internal));
                     // Parser-hoisted local/anonymous classifiers are still body-local semantic
                     // units. Their inferred properties depend on lexical values and receiver rungs
                     // that exist only when Pass 2 reparses/checks the enclosing body, so they must
@@ -10072,23 +7705,14 @@ fn collect_signatures_with_cp_impl(
                     // classifier marker consumed by `check_class`, which replaces it with the exact
                     // checked result before publishing local FIR; it is not inserted into the
                     // pending-free module index.
-                    let body_local_classifier = compact_classifier.map_or_else(
-                        || {
-                            file.is_local_declaration(d)
-                                || legacy_anonymous_lexical_scope
-                                    .is_some_and(|scope| scope.belongs_to_anonymous_subtree(d))
-                        },
-                        |stub| {
-                            stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                                || stub
-                                    .flags
-                                    .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
-                        },
-                    );
-                    let compact_body_properties = compact_headers.map(|headers| {
-                        let owner = compact_classifier
-                            .expect("a production class must have a stable identity")
-                            .id;
+                    let body_local_classifier = compact_classifier
+                        .flags
+                        .has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                        || compact_classifier
+                            .flags
+                            .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT);
+                    let compact_body_properties = {
+                        let owner = compact_classifier.id;
                         let mut declarations = headers
                             .stubs
                             .iter()
@@ -10114,39 +7738,15 @@ fn collect_signatures_with_cp_impl(
                             .into_iter()
                             .map(|(_, declaration)| declaration)
                             .collect::<Vec<_>>()
-                    });
-                    let body_property_count = compact_body_properties
-                        .as_ref()
-                        .map_or(c.body_props.len(), Vec::len);
+                    };
+                    let body_property_count = compact_body_properties.len();
                     for body_property_index in 0..body_property_count {
-                        let bp = compact_headers
-                            .is_none()
-                            .then(|| &c.body_props[body_property_index]);
-                        let source_property_index =
-                            u32::try_from(classifier_header.primary_parameters.len())
-                                .expect("too many constructor properties")
-                                .checked_add(
-                                    u32::try_from(body_property_index)
-                                        .expect("too many body properties"),
-                                )
-                                .expect("too many class properties");
-                        let property_header = match compact_headers {
-                            Some(headers) => streamed_property_header_by_declaration(
-                                headers,
-                                compact_body_properties
-                                    .as_ref()
-                                    .and_then(|declarations| declarations.get(body_property_index))
-                                    .copied()
-                                    .expect(
-                                        "a production member property must have a stable identity",
-                                    ),
-                            )
-                            .expect("a production member property must have a compact header"),
-                            None => legacy_property_header(
-                                bp.expect("a legacy member property must have parser syntax"),
-                            ),
-                        };
-                        if compact_headers.is_some() {
+                        let property_header = streamed_property_header_by_declaration(
+                            headers,
+                            compact_body_properties[body_property_index],
+                        )
+                        .expect("a production member property must have a compact header");
+                        {
                             let flags = property_header.flags;
                             let owner_is_interface = classifier_flags.has(ClassFlags::INTERFACE);
                             validate_member_property_shape(
@@ -10190,19 +7790,6 @@ fn collect_signatures_with_cp_impl(
                                 !property_header.context_parameters.is_empty(),
                                 diags,
                             );
-                        } else {
-                            let bp = bp.expect("legacy property validation requires parser syntax");
-                            validate_member_property(
-                                bp,
-                                classifier_flags.has(ClassFlags::INTERFACE),
-                                diags,
-                            );
-                            validate_context_property(
-                                bp,
-                                classifier_flags.has(ClassFlags::INTERFACE) || bp.is_abstract,
-                                diags,
-                            );
-                            validate_explicit_backing_field(bp, diags);
                         }
                         let resolve = |name: &str| class_names.get(name);
                         let btp = ctp.extended_with(
@@ -10238,175 +7825,41 @@ fn collect_signatures_with_cp_impl(
                             .receiver
                             .as_ref()
                             .map(|receiver| ty_of_ref(receiver, &class_names, &btp, diags));
-                        let mut property_scope = Vec::new();
-                        property_scope.extend(
-                            property_header
-                                .context_parameters
-                                .iter()
-                                .zip(&context_params)
-                                .filter(|((name, _), _)| name != "_")
-                                .map(|((name, _), ty)| (name.clone(), *ty, false)),
-                        );
-                        if let Some(receiver) = extension_receiver {
-                            property_scope.push(("this".to_string(), receiver, false));
-                        }
-                        property_scope.extend(init_scope.iter().cloned());
-                        let property_ty = if compact_headers.is_some() {
-                            property_header
-                                .declared_type
-                                .as_ref()
-                                .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
-                                .unwrap_or_else(|| {
-                                    if body_local_classifier {
-                                        Ty::Error
-                                    } else if property_header.signature_inference.is_some() {
-                                        // This is a temporary demandable candidate only. The compact
-                                        // signature graph owns the expression and replaces this value
-                                        // with a resolved type before the module index is published.
-                                        Ty::Pending
-                                    } else {
-                                        Ty::Error
-                                    }
-                                })
-                        } else if let Some(de) = bp
-                            .expect("legacy property inference requires parser syntax")
-                            .delegate
-                        {
-                            // A delegated member property: type = annotation, else the delegate's
-                            // `getValue` return type.
-                            match property_header.declared_type.as_ref() {
-                                Some(r) => ty_of_ref(r, &class_names, &btp, diags),
-                                None => {
-                                    deferred_properties.push(DeferredProperty {
-                                        key: DeclKey::member(i as u32, d.0, source_property_index),
-                                        file_index: i as u32,
-                                        name: property_header.name.clone(),
-                                        span: property_header.span,
-                                        delegate_of: Some(member_this),
-                                        backing_field: false,
-                                        expression: Some(de),
-                                        scope: property_scope.clone(),
-                                        kind: DeferredKind::Member(type_name(&internal)),
-                                    });
+                        let property_ty = property_header
+                            .declared_type
+                            .as_ref()
+                            .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
+                            .unwrap_or_else(|| {
+                                if body_local_classifier {
+                                    Ty::Error
+                                } else if property_header.signature_inference.is_some() {
                                     Ty::Pending
+                                } else {
+                                    Ty::Error
                                 }
-                            }
-                        } else {
-                            let bp = bp.expect("legacy property inference requires parser syntax");
-                            match (property_header.declared_type.as_ref(), &bp.getter) {
-                                (Some(r), _) => ty_of_ref(r, &class_names, &btp, diags),
-                                (None, Some(FunBody::Expr(g))) => {
-                                    let inferred = if body_local_classifier {
-                                        Ty::Error
-                                    } else {
-                                        Ty::Pending
-                                    };
-                                    if inferred == Ty::Pending && bp.receiver.is_none() {
-                                        deferred_properties.push(DeferredProperty {
-                                            key: DeclKey::member(
-                                                i as u32,
-                                                d.0,
-                                                source_property_index,
-                                            ),
-                                            file_index: i as u32,
-                                            name: bp.name.clone(),
-                                            span: bp.span,
-                                            delegate_of: None,
-                                            backing_field: false,
-                                            expression: Some(*g),
-                                            scope: property_scope.clone(),
-                                            kind: DeferredKind::Member(type_name(&internal)),
-                                        });
-                                    }
-                                    inferred
-                                }
-                                (None, _) => match bp.init {
-                                    Some(expression) => {
-                                        let inferred = if body_local_classifier {
-                                            Ty::Error
-                                        } else {
-                                            Ty::Pending
-                                        };
-                                        if inferred == Ty::Pending && bp.receiver.is_none() {
-                                            deferred_properties.push(DeferredProperty {
-                                                key: DeclKey::member(
-                                                    i as u32,
-                                                    d.0,
-                                                    source_property_index,
-                                                ),
-                                                file_index: i as u32,
-                                                name: bp.name.clone(),
-                                                span: bp.span,
-                                                delegate_of: None,
-                                                backing_field: false,
-                                                expression: Some(expression),
-                                                scope: property_scope.clone(),
-                                                kind: DeferredKind::Member(type_name(&internal)),
-                                            });
-                                        }
-                                        inferred
-                                    }
-                                    None => Ty::Error,
-                                },
-                            }
-                        };
+                            });
                         let property_ty = if property_header.declared_type.is_none() {
                             inferred_declaration_ty(property_ty)
                         } else {
                             property_ty
                         };
-                        let storage_ty = if compact_headers.is_some() {
-                            property_header
-                                .flags
-                                .has(crate::fir::DeclarationFlags::EXPLICIT_BACKING_FIELD)
-                                .then(|| {
-                                    property_header
-                                        .backing_field_type
-                                        .as_ref()
-                                        .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
-                                        .or_else(|| {
-                                            (property_header.signature_inference
-                                                == Some(
-                                                    crate::fir::InferredSignatureKind::BackingFieldInitializer,
-                                                ))
-                                            .then_some(Ty::Pending)
-                                        })
-                                        .unwrap_or(Ty::Error)
-                                })
-                        } else {
-                            let bp =
-                                bp.expect("legacy backing-field inference requires parser syntax");
-                            bp.explicit_backing_field.as_ref().map(|_| {
+                        let storage_ty = property_header
+                            .flags
+                            .has(crate::fir::DeclarationFlags::EXPLICIT_BACKING_FIELD)
+                            .then(|| {
                                 property_header
                                     .backing_field_type
                                     .as_ref()
                                     .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
                                     .or_else(|| {
-                                        // Inferred from the field's own initializer, which needs the
-                                        // class's context; resolved after the walk like every other
-                                        // implicitly-typed body.
-                                        bp.init.map(|init| {
-                                            deferred_properties.push(DeferredProperty {
-                                                key: DeclKey::member(
-                                                    i as u32,
-                                                    d.0,
-                                                    source_property_index,
-                                                ),
-                                                file_index: i as u32,
-                                                name: bp.name.clone(),
-                                                span: bp.span,
-                                                delegate_of: None,
-                                                backing_field: true,
-                                                expression: Some(init),
-                                                scope: property_scope.clone(),
-                                                kind: DeferredKind::Member(type_name(&internal)),
-                                            });
-                                            Ty::Pending
-                                        })
+                                        (property_header.signature_inference
+                                            == Some(
+                                                crate::fir::InferredSignatureKind::BackingFieldInitializer,
+                                            ))
+                                        .then_some(Ty::Pending)
                                     })
                                     .unwrap_or(Ty::Error)
-                            })
-                        };
+                            });
                         if storage_ty == Some(Ty::Error) {
                             diags.error(
                                 property_header.span,
@@ -10496,13 +7949,7 @@ fn collect_signatures_with_cp_impl(
                                         .mutable
                                         .then_some(property_header.setter_visibility),
                                     stable_declaration: property_header.declaration,
-                                    source_member: compact_headers.is_none().then_some(
-                                        crate::libraries::SourceMember::ClassProperty {
-                                            file: i as u32,
-                                            owner: d.0,
-                                            property: source_property_index,
-                                        },
-                                    ),
+                                    source_member: None,
                                     getter: None,
                                     setter: None,
                                 });
@@ -10553,13 +8000,7 @@ fn collect_signatures_with_cp_impl(
                                     .flags
                                     .has(crate::fir::DeclarationFlags::ABSTRACT),
                             context_params,
-                            source_member: compact_headers.is_none().then_some(
-                                crate::libraries::SourceMember::ClassProperty {
-                                    file: i as u32,
-                                    owner: d.0,
-                                    property: source_property_index,
-                                },
-                            ),
+                            source_member: None,
                             stable_declaration: property_header.declaration,
                         };
                         if declared_property.context_params.is_empty() {
@@ -10583,35 +8024,15 @@ fn collect_signatures_with_cp_impl(
                     let mut member_ext_funs: HashMap<String, Vec<MemberExtFunSig>> = HashMap::new();
                     let mut source_methods = Vec::new();
                     let mut generic_methods: HashMap<String, Vec<GenericMethod>> = HashMap::new();
-                    let compact_member_callables = compact_headers.map(|headers| {
-                        streamed_owned_callable_declarations(
-                            headers,
-                            compact_classifier
-                                .expect("a production classifier must have a stable identity")
-                                .id,
-                        )
-                    });
-                    let member_callable_count = compact_member_callables
-                        .as_ref()
-                        .map_or_else(|| c.methods.len(), Vec::len);
+                    let compact_member_callables =
+                        { streamed_owned_callable_declarations(headers, compact_classifier.id) };
+                    let member_callable_count = compact_member_callables.len();
                     for method_index in 0..member_callable_count {
-                        let method = compact_headers.is_none().then(|| &c.methods[method_index]);
-                        let method_header = match compact_headers {
-                            Some(headers) => streamed_callable_header_by_declaration(
-                                headers,
-                                compact_member_callables
-                                    .as_ref()
-                                    .and_then(|declarations| declarations.get(method_index))
-                                    .copied()
-                                    .expect(
-                                        "a production member function must have a stable identity",
-                                    ),
-                            )
-                            .expect("a production member function must have a compact header"),
-                            None => legacy_callable_header(
-                                method.expect("a legacy member function must have parser syntax"),
-                            ),
-                        };
+                        let method_header = streamed_callable_header_by_declaration(
+                            headers,
+                            compact_member_callables[method_index],
+                        )
+                        .expect("a production member function must have a compact header");
                         let mtp = ctp.extended_with(
                             &method_header.type_parameters,
                             &method_header.bounds,
@@ -10637,42 +8058,16 @@ fn collect_signatures_with_cp_impl(
                                 }
                                 Ty::Unit
                             });
-                        let mut signature = if compact_headers.is_some() {
-                            member_signature_from_header(
-                                &method_header,
-                                ret,
-                                &class_names,
-                                &mtp,
-                                i as u32,
-                                None,
-                                vec![None; method_header.parameters.len()],
-                                diags,
-                            )
-                        } else {
-                            let source_member = crate::libraries::SourceMember::Class {
-                                file: i as u32,
-                                owner: d.0,
-                                method: method_index as u32,
-                            };
-                            legacy_member_signature_from_header(
-                                file,
-                                method.expect("a legacy member function must have parser syntax"),
-                                &method_header,
-                                ret,
-                                &class_names,
-                                &mtp,
-                                i as u32,
-                                source_member,
-                                &*libraries,
-                                true,
-                                diags,
-                            )
-                        };
-                        if classifier_flags.has(ClassFlags::INTERFACE)
-                            && method.is_some_and(|method| matches!(method.body, FunBody::None))
-                        {
-                            signature.flags = signature.flags.with_is_abstract(true);
-                        }
+                        let mut signature = member_signature_from_header(
+                            &method_header,
+                            ret,
+                            &class_names,
+                            &mtp,
+                            i as u32,
+                            None,
+                            vec![None; method_header.parameters.len()],
+                            diags,
+                        );
                         let has_generic_shape = !method_header.type_parameters.is_empty()
                             || !captured_semantic_tparam_names.is_empty()
                             || !classifier_header.type_parameters.is_empty();
@@ -10699,19 +8094,7 @@ fn collect_signatures_with_cp_impl(
                                 &class_names,
                                 &symbolic_mtp,
                                 ret_shape,
-                                if compact_headers.is_some() {
-                                    // The compact signature graph owns inferred member results too.
-                                    // This provisional legacy symbol view must not reopen a body
-                                    // whose arena was released before signature collection.
-                                    None
-                                } else {
-                                    inferred_return_type_parameter(
-                                        file,
-                                        method.expect(
-                                            "a legacy member function must have parser syntax",
-                                        ),
-                                    )
-                                },
+                                None,
                                 diags,
                             ));
                             if method_header.receiver.is_none() {
@@ -10762,17 +8145,10 @@ fn collect_signatures_with_cp_impl(
                                     });
                             }
                         }
-                        let value_operand_slots = if compact_headers.is_some() {
-                            generic_value_operand_slots_from_header(
-                                &method_header,
-                                &classifier_header.type_parameters,
-                            )
-                        } else {
-                            generic_value_operand_slots(
-                                method.expect("a legacy member function must have parser syntax"),
-                                &classifier_header.type_parameters,
-                            )
-                        };
+                        let value_operand_slots = generic_value_operand_slots_from_header(
+                            &method_header,
+                            &classifier_header.type_parameters,
+                        );
                         if !value_operand_slots.is_empty() {
                             let physical_receiver = method_header
                                 .receiver
@@ -10780,7 +8156,7 @@ fn collect_signatures_with_cp_impl(
                                 .map(|receiver| ty_of_ref(receiver, &class_names, &mtp, diags));
                             table
                                 .source_generic_member_value_operand_slots
-                                .entry(type_name(&internal))
+                                .entry(internal)
                                 .or_default()
                                 .entry(method_header.name.clone())
                                 .or_default()
@@ -10859,7 +8235,7 @@ fn collect_signatures_with_cp_impl(
                                     .with_is_override(true)
                                     .with_is_final(true),
                                 annotations: Vec::new(),
-                                equality_bound: (name == "equals").then(|| Ty::obj(&internal)),
+                                equality_bound: (name == "equals").then(|| Ty::obj_name(internal)),
                                 vararg_index: None,
                                 required: parameter_count,
                                 param_defaults: vec![false; parameter_count],
@@ -10876,8 +8252,8 @@ fn collect_signatures_with_cp_impl(
                                 context_count: 0,
                                 source_decl: None,
                                 stable_declaration: compact_generated_member_declaration(
-                                    compact_headers,
-                                    compact_classifier.map(|stub| stub.id),
+                                    Some(headers),
+                                    Some(compact_classifier.id),
                                     name,
                                 ),
                                 source_file: None,
@@ -10893,9 +8269,9 @@ fn collect_signatures_with_cp_impl(
                     // destructurable constructor state and Kotlin deliberately declares neither;
                     // a user-written `copy` on one must remain the sole overload.
                     if classifier_is_data && !classifier_flags.has(ClassFlags::OBJECT) {
-                        let self_ty = Ty::obj(&internal);
+                        let self_ty = Ty::obj_name(internal);
                         let self_shape = Ty::obj_args_name(
-                            type_name(&internal),
+                            internal,
                             &classifier_header
                                 .type_parameters
                                 .iter()
@@ -10949,8 +8325,8 @@ fn collect_signatures_with_cp_impl(
                                     context_count: 0,
                                     source_decl: None,
                                     stable_declaration: compact_generated_member_declaration(
-                                        compact_headers,
-                                        compact_classifier.map(|stub| stub.id),
+                                        Some(headers),
+                                        Some(compact_classifier.id),
                                         &generated_name,
                                     ),
                                     source_file: None,
@@ -11002,8 +8378,8 @@ fn collect_signatures_with_cp_impl(
                                 context_count: 0,
                                 source_decl: None,
                                 stable_declaration: compact_generated_member_declaration(
-                                    compact_headers,
-                                    compact_classifier.map(|stub| stub.id),
+                                    Some(headers),
+                                    Some(compact_classifier.id),
                                     "copy",
                                 ),
                                 source_file: None,
@@ -11016,10 +8392,16 @@ fn collect_signatures_with_cp_impl(
                         );
                     }
                     if classifier_is_enum {
-                        table.enums.insert(
-                            type_name(&internal),
-                            c.enum_entries.iter().map(|e| e.name.clone()).collect(),
-                        );
+                        let entries = headers
+                            .owned_stubs(compact_classifier.id)
+                            .filter(|stub| stub.kind == crate::fir::DeclarationKind::EnumEntry)
+                            .filter_map(|stub| {
+                                stub.lookup_name
+                                    .and_then(|name| headers.lookup_names.get(name))
+                                    .map(str::to_owned)
+                            })
+                            .collect();
+                        table.enums.insert(internal, entries);
                     }
                     // An unresolved supertype is diagnosed at its own source span and is never emitted.
                     let super_span = |name: &str| {
@@ -11035,14 +8417,17 @@ fn collect_signatures_with_cp_impl(
                             .iter()
                             .find(|t| t.name == name)
                             .map(|t| t.span)
-                            .unwrap_or(c.span)
+                            .unwrap_or(compact_classifier.range)
                     };
-                    let mut resolve_super = |s: &str| -> String {
-                        let resolved =
-                            declared_supertype_name(c, s, &header_class_names, &lexical_inheritors)
-                                .map(TypeName::render)
-                                // An erased type parameter used as a supertype (degenerate) stays as-is.
-                                .or_else(|| ctp.contains(s).then(|| s.to_string()));
+                    let mut resolve_super = |s: &str| -> TypeName {
+                        let resolved = declared_supertype_name_from_source_name(
+                            &classifier_source_name,
+                            s,
+                            &header_class_names,
+                            &lexical_inheritors,
+                        )
+                        // An erased type parameter used as a supertype (degenerate) stays as-is.
+                        .or_else(|| ctp.contains(s).then(|| type_name(s)));
                         match resolved {
                             Some(internal) => internal,
                             None => {
@@ -11053,7 +8438,7 @@ fn collect_signatures_with_cp_impl(
                                         format!("unresolved reference '{segment}'."),
                                     );
                                 }
-                                s.to_string()
+                                type_name(s)
                             }
                         }
                     };
@@ -11061,23 +8446,29 @@ fn collect_signatures_with_cp_impl(
                     // classify an other-file module declaration from the bootstrap index and otherwise
                     // ask the library source. Both origins feed the same `super_internal` field, so later
                     // checking/lowering never needs separate file/module/classpath branches.
-                    let parenless_base = if c.primary_ctor_annotations.is_some()
+                    let primary_constructor_declaration =
+                        streamed_constructor_declaration(headers, compact_classifier.id, 0);
+                    let has_primary_ctor = primary_constructor_declaration.is_some();
+                    let has_secondary_constructor =
+                        headers.owned_stubs(compact_classifier.id).any(|stub| {
+                            stub.kind == crate::fir::DeclarationKind::Constructor
+                                && headers
+                                    .declarations
+                                    .anchor(stub.id)
+                                    .is_some_and(|anchor| anchor.sibling > 0)
+                        });
+                    let parenless_base = if has_primary_ctor
                         || classifier_header.base.is_some()
-                        || !c.secondary_ctors.iter().any(|constructor| {
-                            matches!(
-                                constructor.delegation,
-                                crate::ast::CtorDelegation::Super(_)
-                                    | crate::ast::CtorDelegation::None
-                            )
-                        }) {
+                        || !has_secondary_constructor
+                    {
                         None
                     } else {
                         classifier_header
                             .supertypes
                             .iter()
                             .find(|supertype| {
-                                declared_supertype_name(
-                                    c,
+                                declared_supertype_name_from_source_name(
+                                    &classifier_source_name,
                                     &supertype.name,
                                     &header_class_names,
                                     &lexical_inheritors,
@@ -11091,7 +8482,7 @@ fn collect_signatures_with_cp_impl(
                             })
                             .map(|supertype| supertype.name.clone())
                     };
-                    let mut interfaces: Vec<String> = classifier_header
+                    let mut interfaces: Vec<TypeName> = classifier_header
                         .supertypes
                         .iter()
                         // Arrow syntax contributes a callable shape, not a nominal classifier
@@ -11101,19 +8492,21 @@ fn collect_signatures_with_cp_impl(
                         .filter(|t| parenless_base.as_deref() != Some(t.name.as_str()))
                         .map(|t| resolve_super(&t.name))
                         .collect();
-                    interfaces.extend(implicit_source_supertypes(c).map(TypeName::render));
+                    if classifier_flags.has(ClassFlags::ANNOTATION) {
+                        interfaces.push(type_name("kotlin/Annotation"));
+                    }
                     let super_internal = classifier_header
                         .base
                         .as_ref()
                         .map(|base| base.name.as_str())
                         .or(parenless_base.as_deref())
                         .map(&mut resolve_super)
-                        .or_else(|| classifier_is_enum.then(|| "kotlin/Enum".to_string()));
-                    let resolved_annotations: Vec<_> = c
-                        .annotations
-                        .iter()
-                        .filter_map(|annotation| table.resolved_annotation(i as u32, annotation))
-                        .collect();
+                        .or_else(|| classifier_is_enum.then(|| type_name("kotlin/Enum")));
+                    let resolved_annotations = resolved_header_annotation_identities(
+                        &streamed_declaration_annotations(headers, compact_classifier.id)
+                            .expect("a production classifier has compact annotations"),
+                        &class_names,
+                    );
                     let semantic_tparam_names = classifier_header
                         .type_parameters
                         .iter()
@@ -11156,7 +8549,7 @@ fn collect_signatures_with_cp_impl(
                     let mut contributed_members = Vec::new();
                     frontend_plugins.generate_frontend_declarations(
                         &crate::plugins::FrontendClassContext {
-                            classifier: type_name(&internal),
+                            classifier: internal,
                             kind: if classifier_flags.has(ClassFlags::ANNOTATION) {
                                 crate::libraries::TypeKind::Annotation
                             } else if classifier_flags.has(ClassFlags::OBJECT) {
@@ -11225,23 +8618,18 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                     }
-                    let constants = c
-                        .body_props
-                        .iter()
-                        .filter(|property| {
-                            classifier_flags.has(ClassFlags::OBJECT) && property.is_const
+                    let constants = HashMap::new();
+                    let lateinit_props: std::collections::HashSet<String> = headers
+                        .owned_stubs(compact_classifier.id)
+                        .filter(|stub| {
+                            stub.kind == crate::fir::DeclarationKind::Property
+                                && stub.flags.has(crate::fir::DeclarationFlags::LATEINIT)
                         })
-                        .filter_map(|property| {
-                            let ty = declared_props.get(&property.name)?.ty;
-                            let value = source_literal_constant(file, property.init?, ty)?;
-                            Some((property.name.clone(), value))
+                        .filter_map(|stub| {
+                            stub.lookup_name
+                                .and_then(|name| headers.lookup_names.get(name))
+                                .map(str::to_owned)
                         })
-                        .collect::<HashMap<_, _>>();
-                    let lateinit_props: std::collections::HashSet<String> = c
-                        .body_props
-                        .iter()
-                        .filter(|p| p.is_lateinit)
-                        .map(|p| p.name.clone())
                         .collect();
                     // Record which properties are declared as a bare type parameter, so a read on a
                     // generic instantiation can substitute the corresponding type argument. A nullable
@@ -11290,22 +8678,6 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                     }
-                    for bp in &c.body_props {
-                        if let Some(r) = &bp.ty {
-                            if let Some(i) = tparam_index(r) {
-                                generic_props.insert(bp.name.clone(), i);
-                            }
-                            if is_direct_nullable_tparam(r) {
-                                if let Some(i) = classifier_header
-                                    .type_parameters
-                                    .iter()
-                                    .position(|t| *t == r.name)
-                                {
-                                    nullable_tparam_props.insert(bp.name.clone(), i);
-                                }
-                            }
-                        }
-                    }
                     let mut generic_property_shapes = HashMap::new();
                     for (property, &(shape, _)) in classifier_header
                         .primary_parameters
@@ -11317,59 +8689,32 @@ fn collect_signatures_with_cp_impl(
                             generic_property_shapes.insert(property.name.clone(), shape);
                         }
                     }
-                    for property in c
-                        .body_props
-                        .iter()
-                        .filter(|property| property.receiver.is_none())
-                    {
-                        if let Some(type_ref) = &property.ty {
-                            let shape = ty_of_ref_silent(type_ref, &class_names, &symbolic_ctp);
-                            if ty_mentions_param(shape, &classifier_semantic_tparam_names) {
-                                generic_property_shapes.insert(property.name.clone(), shape);
-                            }
-                        }
-                    }
-                    let secondary_constructors = c
-                        .secondary_ctors
-                        .iter()
-                        .enumerate()
-                        .map(|(index, constructor)| {
-                            let parameters = match compact_headers {
-                                Some(headers)
-                                    if headers.has_headers(crate::fir::SourceFileId::from_raw(
-                                        i as u32,
-                                    )) =>
-                                {
-                                    streamed_secondary_constructor_parameters(
-                                        headers,
-                                        compact_classifier
-                                            .expect("a production classifier has a stable identity")
-                                            .id,
-                                        u32::try_from(index + 1)
-                                            .expect("too many secondary constructors"),
-                                    )
-                                    .expect(
-                                        "a production secondary constructor must have a compact header",
-                                    )
-                                }
-                                _ => constructor
-                                    .params
-                                    .iter()
-                                    .map(|parameter| StreamedCallableParameter {
-                                        name: parameter.name.clone(),
-                                        ty: parameter.ty.clone(),
-                                        is_vararg: parameter.is_vararg,
-                                        has_default: parameter.default.is_some(),
-                                        annotations: parameter
-                                            .annotations
-                                            .iter()
-                                            .map(TypeRef::from_annotation)
-                                            .collect(),
-                                        type_annotations: Vec::new(),
-                                        annotation_class_literals: Vec::new(),
-                                    })
-                                    .collect(),
-                            };
+                    let compact_secondary_constructors = {
+                        let mut declarations = headers
+                            .owned_stubs(compact_classifier.id)
+                            .filter_map(|stub| {
+                                let anchor = headers.declarations.anchor(stub.id)?;
+                                (stub.kind == crate::fir::DeclarationKind::Constructor
+                                    && anchor.sibling > 0)
+                                    .then_some((anchor.sibling, stub.id))
+                            })
+                            .collect::<Vec<_>>();
+                        declarations.sort_by_key(|(sibling, _)| *sibling);
+                        declarations
+                            .into_iter()
+                            .map(|(_, declaration)| declaration)
+                            .collect::<Vec<_>>()
+                    };
+                    let secondary_constructor_count = compact_secondary_constructors.len();
+                    let secondary_constructors = (0..secondary_constructor_count)
+                        .map(|index| {
+                            let parameters = streamed_constructor_parameters_by_declaration(
+                                headers,
+                                compact_secondary_constructors[index],
+                            )
+                                .expect(
+                                    "a production secondary constructor must have a compact header",
+                                );
                             let erased = parameters
                                 .iter()
                                 .map(|parameter| {
@@ -11425,13 +8770,13 @@ fn collect_signatures_with_cp_impl(
                                 required,
                                 vararg,
                             );
-                            call_sig.implicit_integer_coercion = constructor
-                                .params
+                            call_sig.implicit_integer_coercion = parameters
                                 .iter()
                                 .map(|parameter| {
-                                    has_implicit_integer_coercion_annotation(
+                                    header_type_has_annotation(
                                         &parameter.annotations,
                                         &class_names,
+                                        type_name("kotlin/internal/ImplicitIntegerCoercion"),
                                     )
                                 })
                                 .collect();
@@ -11450,99 +8795,69 @@ fn collect_signatures_with_cp_impl(
                         .into_iter()
                         .map(|(_, _, call_sig)| call_sig)
                         .collect();
-                    let primary_constructor_declaration = compact_headers.and_then(|headers| {
-                        streamed_constructor_declaration(headers, compact_classifier?.id, 0)
-                    });
                     let secondary_constructor_declarations: Vec<Option<crate::fir::DeclarationId>> =
-                        c.secondary_ctors
-                            .iter()
-                            .enumerate()
-                            .map(|(index, _)| {
-                                compact_headers.and_then(|headers| {
-                                    streamed_constructor_declaration(
-                                        headers,
-                                        compact_classifier?.id,
-                                        u32::try_from(index + 1)
-                                            .expect("too many secondary constructors"),
-                                    )
-                                })
-                            })
+                        (0..secondary_constructor_count)
+                            .map(|index| compact_secondary_constructors.get(index).copied())
                             .collect();
-                    let primary_constructor_annotations = match (
-                        compact_headers,
-                        primary_constructor_declaration,
-                    ) {
-                        (Some(headers), Some(declaration)) => resolved_header_annotation_identities(
+                    let primary_constructor_annotations = match primary_constructor_declaration {
+                        Some(declaration) => resolved_header_annotation_identities(
                             &streamed_declaration_annotations(headers, declaration).expect(
                                 "a production primary constructor must have compact annotations",
                             ),
                             &class_names,
                         ),
-                        _ => c
-                            .primary_ctor_annotations
-                            .iter()
-                            .flatten()
-                            .filter_map(|annotation| {
-                                table.resolved_annotation(i as u32, annotation)
-                            })
-                            .collect(),
+                        None => Vec::new(),
                     };
-                    let secondary_constructor_annotations = match compact_headers {
-                        Some(headers) => secondary_constructor_declarations
-                            .iter()
-                            .map(|declaration| {
-                                let declaration = declaration.expect(
-                                    "a production secondary constructor has a stable identity",
-                                );
-                                let annotations = streamed_declaration_annotations(
-                                    headers,
-                                    declaration,
-                                )
-                                .expect(
+                    let secondary_constructor_annotations = secondary_constructor_declarations
+                        .iter()
+                        .map(|declaration| {
+                            let declaration = declaration
+                                .expect("a production secondary constructor has a stable identity");
+                            let annotations =
+                                streamed_declaration_annotations(headers, declaration).expect(
                                     "a production secondary constructor has compact annotations",
                                 );
-                                resolved_header_annotation_identities(&annotations, &class_names)
-                            })
-                            .collect(),
-                        None => c
-                            .secondary_ctors
-                            .iter()
-                            .map(|constructor| {
-                                constructor
-                                    .annotations
-                                    .iter()
-                                    .filter_map(|annotation| {
-                                        table.resolved_annotation(i as u32, annotation)
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect(),
-                    };
+                            resolved_header_annotation_identities(&annotations, &class_names)
+                        })
+                        .collect();
                     // `inner_of` is the semantic enclosing receiver, not necessarily the lexical name
                     // prefix. They differ for an inner class declared in an enum-entry body:
                     // `E.ENTRY.Inner` is named `E$ENTRY$Inner` but captures an `E` value.
-                    let inner_of = c
-                        .inner_of
-                        .as_deref()
-                        .map(|outer| class_internal(file, outer));
+                    let inner_of_ref = if compact_classifier
+                        .flags
+                        .has(crate::fir::DeclarationFlags::INNER)
+                    {
+                        let mut owner = headers
+                            .declarations
+                            .anchor(compact_classifier.id)
+                            .and_then(|anchor| anchor.owner);
+                        loop {
+                            let Some(candidate) = owner else { break None };
+                            let Some(anchor) = headers.declarations.anchor(candidate) else {
+                                break None;
+                            };
+                            if anchor.kind == crate::fir::DeclarationKind::Classifier {
+                                break headers
+                                    .stub(candidate)
+                                    .and_then(|stub| compact_classifier_identity(headers, stub))
+                                    .map(|(_, internal)| internal);
+                            }
+                            owner = anchor.owner;
+                        }
+                    } else {
+                        None
+                    };
                     // A `value class` is represented unboxed as its sole property's type.
                     let value_field = if classifier_is_value {
                         props.first().map(|(n, t, _)| (n.clone(), *t))
                     } else {
                         None
                     };
-                    let internal_ref = type_name(&internal);
-                    let explicit_companion = c.companion.and_then(|companion| {
-                        let Decl::Class(companion) = file.decl(companion) else {
-                            return None;
-                        };
-                        Some(type_name(&class_internal(file, &companion.name)))
-                    });
-                    let companion_internal_ref = explicit_companion.or_else(|| {
+                    let internal_ref = internal;
+                    let companion_internal_ref = direct_companion.or_else(|| {
                         (!contributed_companion_methods.is_empty())
                             .then(|| type_name_nested_child(internal_ref, "Companion"))
                     });
-                    let inner_of_ref = inner_of.as_ref().map(|inner| type_name(inner));
                     let interfaces_ref: crate::types::TypeNameList = interfaces.into();
                     let callable_signatures = classifier_header
                         .supertypes
@@ -11551,16 +8866,14 @@ fn collect_signatures_with_cp_impl(
                         .filter(|supertype| matches!(supertype, Ty::Fun(_)))
                         .collect::<Vec<_>>();
                     let callable_signature = callable_signatures.first().copied();
-                    let super_internal_ref = super_internal
-                        .as_ref()
-                        .map(|super_internal| type_name(super_internal));
+                    let super_internal_ref = super_internal;
                     table.insert_class_sig(
                         internal_ref,
                         ClassSig {
                             internal: internal_ref,
-                            stable_declaration: compact_classifier.map(|stub| stub.id),
+                            stable_declaration: Some(compact_classifier.id),
                             source_file: i as u32,
-                            source_decl: Some(d),
+                            source_decl: None,
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,
                             props,
@@ -11573,7 +8886,7 @@ fn collect_signatures_with_cp_impl(
                             // when the class declares no secondary constructors. An enum with
                             // explicit secondary constructors has no additional source-level
                             // primary candidate for its entries to select.
-                            has_primary_ctor: c.primary_ctor_annotations.is_some(),
+                            has_primary_ctor,
                             primary_constructor_declaration,
                             primary_constructor_annotations,
                             ctor_params,
@@ -11754,123 +9067,60 @@ fn collect_signatures_with_cp_impl(
                         }
                     }
                 }
-                Decl::Property(p) => {
-                    let compact_property = compact_declaration;
-                    let property_header = match compact_headers.zip(compact_property) {
-                        Some((headers, stub)) => streamed_property_header_by_declaration(
-                            headers, stub.id,
-                        )
-                        .expect("a production top-level property must have a compact header"),
-                        _ => legacy_property_header(p),
-                    };
-                    let property_flags = compact_property.map(|stub| stub.flags);
-                    let property_name = compact_property
-                        .and_then(|stub| stub.lookup_name)
-                        .and_then(|name| {
-                            compact_headers.and_then(|headers| headers.lookup_names.get(name))
-                        })
-                        .unwrap_or(&p.name)
-                        .to_string();
-                    let property_visibility =
-                        compact_property.map_or(p.visibility, |stub| stub.visibility);
-                    let property_span = compact_property.map_or(p.span, |stub| stub.range);
-                    let compact_inference =
-                        compact_property.and_then(|stub| stub.signature_inference);
-                    let companion_extension = property_flags.map_or_else(
-                        || p.is_companion_extension,
-                        |flags| flags.has(crate::fir::DeclarationFlags::COMPANION),
+                SignatureCollectionDeclaration::Property(compact_property) => {
+                    let property_header =
+                        streamed_property_header_by_declaration(headers, compact_property.id)
+                            .expect("a production top-level property must have a compact header");
+                    let property_flags = property_header.flags;
+                    let property_name = property_header.name.clone();
+                    let property_visibility = property_header.visibility;
+                    let property_span = property_header.span;
+                    let compact_inference = property_header.signature_inference;
+                    let companion_extension =
+                        property_flags.has(crate::fir::DeclarationFlags::COMPANION);
+                    let is_const = property_flags.has(crate::fir::DeclarationFlags::CONST);
+                    let is_lateinit = property_flags.has(crate::fir::DeclarationFlags::LATEINIT);
+                    let is_delegated = property_flags.has(crate::fir::DeclarationFlags::DELEGATED);
+                    let has_initializer =
+                        property_flags.has(crate::fir::DeclarationFlags::HAS_INITIALIZER);
+                    let has_custom_getter =
+                        property_flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER);
+                    let has_custom_setter =
+                        property_flags.has(crate::fir::DeclarationFlags::CUSTOM_SETTER);
+                    let setter_has_body =
+                        property_flags.has(crate::fir::DeclarationFlags::SETTER_HAS_BODY);
+                    let getter_reads_field = property_flags
+                        .has(crate::fir::DeclarationFlags::GETTER_READS_BACKING_FIELD);
+                    let is_abstract = property_flags.has(crate::fir::DeclarationFlags::ABSTRACT);
+                    let is_external = property_flags.has(crate::fir::DeclarationFlags::EXTERNAL);
+                    let is_expect = property_flags.has(crate::fir::DeclarationFlags::EXPECT);
+                    validate_top_level_property_shape(
+                        property_span,
+                        property_header.receiver.is_some(),
+                        companion_extension,
+                        has_initializer,
+                        is_delegated,
+                        has_custom_getter,
+                        is_lateinit,
+                        is_abstract,
+                        is_external,
+                        is_expect,
+                        diags,
                     );
-                    let is_const = property_flags.map_or_else(
-                        || p.is_const,
-                        |flags| flags.has(crate::fir::DeclarationFlags::CONST),
+                    validate_context_property_shape(
+                        property_span,
+                        !property_header.context_parameters.is_empty(),
+                        property_header.mutable,
+                        has_custom_getter,
+                        setter_has_body,
+                        has_initializer,
+                        is_delegated,
+                        is_lateinit,
+                        is_const,
+                        getter_reads_field,
+                        false,
+                        diags,
                     );
-                    let is_lateinit = property_flags.map_or_else(
-                        || p.is_lateinit,
-                        |flags| flags.has(crate::fir::DeclarationFlags::LATEINIT),
-                    );
-                    let is_delegated = property_flags.map_or_else(
-                        || p.delegate.is_some(),
-                        |flags| flags.has(crate::fir::DeclarationFlags::DELEGATED),
-                    );
-                    let has_initializer = property_flags.map_or_else(
-                        || p.init.is_some(),
-                        |flags| flags.has(crate::fir::DeclarationFlags::HAS_INITIALIZER),
-                    );
-                    let has_custom_getter = property_flags.map_or_else(
-                        || p.getter.is_some(),
-                        |flags| flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER),
-                    );
-                    let has_custom_setter = property_flags.map_or_else(
-                        || p.setter.is_some(),
-                        |flags| flags.has(crate::fir::DeclarationFlags::CUSTOM_SETTER),
-                    );
-                    let setter_has_body = property_flags.map_or_else(
-                        || {
-                            p.setter
-                                .as_ref()
-                                .is_some_and(|setter| setter.body.is_some())
-                        },
-                        |flags| flags.has(crate::fir::DeclarationFlags::SETTER_HAS_BODY),
-                    );
-                    let getter_reads_field = property_flags.map_or_else(
-                        || p.getter_reads_field,
-                        |flags| flags.has(crate::fir::DeclarationFlags::GETTER_READS_BACKING_FIELD),
-                    );
-                    let is_abstract = property_flags.map_or_else(
-                        || p.is_abstract,
-                        |flags| flags.has(crate::fir::DeclarationFlags::ABSTRACT),
-                    );
-                    let is_external = property_flags.map_or_else(
-                        || p.is_external,
-                        |flags| flags.has(crate::fir::DeclarationFlags::EXTERNAL),
-                    );
-                    let is_expect = property_flags.map_or_else(
-                        || p.is_expect,
-                        |flags| flags.has(crate::fir::DeclarationFlags::EXPECT),
-                    );
-                    if compact_headers.is_none() {
-                        resolve_declaration_type_parameter_annotation_inventory(
-                            file,
-                            d,
-                            &class_names,
-                            &mut table.resolved_annotations,
-                            &mut annotation_resolution,
-                            diags,
-                            true,
-                        );
-                    }
-                    if compact_headers.is_some() {
-                        validate_top_level_property_shape(
-                            property_span,
-                            property_header.receiver.is_some(),
-                            companion_extension,
-                            has_initializer,
-                            is_delegated,
-                            has_custom_getter,
-                            is_lateinit,
-                            is_abstract,
-                            is_external,
-                            is_expect,
-                            diags,
-                        );
-                        validate_context_property_shape(
-                            property_span,
-                            !property_header.context_parameters.is_empty(),
-                            property_header.mutable,
-                            has_custom_getter,
-                            setter_has_body,
-                            has_initializer,
-                            is_delegated,
-                            is_lateinit,
-                            is_const,
-                            getter_reads_field,
-                            false,
-                            diags,
-                        );
-                    } else {
-                        validate_top_level_property(p, diags);
-                        validate_context_property(p, false, diags);
-                    }
                     // Extension property `val Recv.name: T get() = …`: register by (erased receiver,
                     // name); emitted as a static `getName(Recv)`/`setName(Recv, T)`.
                     if let Some(recv_ref) = &property_header.receiver {
@@ -11959,80 +9209,12 @@ fn collect_signatures_with_cp_impl(
                                 )
                                 .is_none_or(Ty::is_nullable)
                             });
-                        let inference_body = if compact_headers.is_some() {
-                            None
-                        } else if companion_extension {
-                            p.init.map(|initializer| (initializer, true)).or_else(|| {
-                                match &p.getter {
-                                    Some(FunBody::Expr(getter)) => Some((*getter, false)),
-                                    Some(FunBody::Block(_) | FunBody::None) | None => None,
-                                }
-                            })
-                        } else {
-                            match &p.getter {
-                                Some(FunBody::Expr(getter)) => Some((*getter, false)),
-                                Some(FunBody::Block(_) | FunBody::None) | None => None,
-                            }
-                        };
                         let ty = property_header
                             .declared_type
                             .as_ref()
                             .map(|r| ty_of_ref(r, &class_names, &semantic_tparams, diags))
-                            .or_else(|| {
-                                if compact_inference.is_some() {
-                                    return Some(Ty::Pending);
-                                }
-                                inference_body.map(|(body, _)| {
-                                    let source = InferenceSource::file(file, i as u32);
-                                    let source = if companion_extension {
-                                        source.with_implicit_classifier(recv_ty.obj_internal())
-                                    } else {
-                                        source.with_implicit_value(Some(recv_ty))
-                                    };
-                                    infer_lit_ty_scoped(
-                                        source,
-                                        body,
-                                        &class_names,
-                                        &context_scope,
-                                        &*libraries,
-                                        &table,
-                                    )
-                                })
-                            })
+                            .or_else(|| compact_inference.is_some().then_some(Ty::Pending))
                             .unwrap_or(Ty::Error);
-                        // An EXTENSION property the walk could not type is not an error yet, exactly
-                        // as a plain one is not: its getter may read a declaration in a file the walk
-                        // has not reached, and it is typed in a receiver scope the walk cannot build
-                        // (`val <T : CharSequence> T.z get() = { x: T -> this }`). Record the marker
-                        // and queue the declaration; the engine runs the real checker over it, and
-                        // `settle` turns a decline back into the error placeholder this used to
-                        // publish immediately.
-                        let ty = match (
-                            ty.mentions_error(),
-                            property_header.declared_type.as_ref(),
-                            inference_body,
-                        ) {
-                            (true, None, Some((expression, is_eager))) => {
-                                deferred_properties.push(DeferredProperty {
-                                    key: DeclKey::declaration(i as u32, d.0),
-                                    file_index: i as u32,
-                                    name: property_name.clone(),
-                                    span: p.span,
-                                    delegate_of: None,
-                                    backing_field: false,
-                                    expression: Some(expression),
-                                    scope: context_scope.clone(),
-                                    kind: DeferredKind::TopLevel {
-                                        position: p.span.lo,
-                                        is_eager,
-                                        has_context_params: !context_params.is_empty(),
-                                        has_receiver: true,
-                                    },
-                                });
-                                Ty::Pending
-                            }
-                            _ => ty,
-                        };
                         crate::trace_compiler!(
                             "signature_inference",
                             "extension property name={} receiver={recv_ty:?} getter={:?} inferred={ty:?}",
@@ -12093,18 +9275,15 @@ fn collect_signatures_with_cp_impl(
                                     .then(|| property_setter_name(&property_name)),
                                 context_params,
                                 accepts_nullable_receiver,
-                                source: (i as u32, d.0),
+                                source: None,
+                                source_file: i as u32,
                                 package,
                                 visibility: property_visibility,
-                                annotations: if compact_headers.is_some() {
-                                    resolved_header_annotation_identities(
-                                        &property_header.annotations,
-                                        &class_names,
-                                    )
-                                } else {
-                                    resolved_annotation_identities(&p.annotations, &class_names)
-                                },
-                                stable_declaration: compact_property.map(|stub| stub.id),
+                                annotations: resolved_header_annotation_identities(
+                                    &property_header.annotations,
+                                    &class_names,
+                                ),
+                                stable_declaration: Some(compact_property.id),
                             };
                             let overloads = table.ext_props.entry(key).or_default();
                             if overloads.iter().any(|existing| {
@@ -12114,7 +9293,7 @@ fn collect_signatures_with_cp_impl(
                                     )
                                     && !(existing.visibility.is_private()
                                         && signature.visibility.is_private()
-                                        && existing.source.0 != i as u32)
+                                        && existing.source_file != i as u32)
                             }) {
                                 diags.error(property_span, format!("krusty: conflicting extension property '{}' (same erased receiver)", property_name));
                             } else {
@@ -12146,13 +9325,6 @@ fn collect_signatures_with_cp_impl(
                             ty_of_ref(parameter, &class_names, &property_tparams, diags)
                         })
                         .collect::<Vec<_>>();
-                    let context_scope = property_header
-                        .context_parameters
-                        .iter()
-                        .zip(&context_params)
-                        .filter(|((name, _), _)| name != "_")
-                        .map(|((name, _), ty)| (name.clone(), *ty, false))
-                        .collect::<Vec<_>>();
                     // A top-level backing-field property with a CUSTOM accessor (`val x = init get() =
                     // field`, `var y = init set(v){…}`) is lowered as a facade static + custom
                     // `getX`/`setX` (with `field` bound to the static). Reject only a custom accessor with
@@ -12167,54 +9339,14 @@ fn collect_signatures_with_cp_impl(
                     }
                     // A delegated property `val x: T by Del()`: type is the annotation if present, else the
                     // delegate's `getValue` return type. Resolving the read-type here lets `val a = x`
-                    // infer. (The lowering — `x$delegate`/`x$kprop` + `getX()` — is in ir_lower; an
+                    // infer. (The lowering — `x$delegate`/`x$kprop` + `getX()` — is in fir_lower; an
                     // unresolvable delegate type yields `Error` and the file skips.)
-                    let inferred_ty = if compact_headers.is_some() {
-                        match property_header.declared_type.as_ref() {
-                            Some(declared) => {
-                                ty_of_ref(declared, &class_names, &property_tparams, diags)
-                            }
-                            None if compact_inference.is_some() => Ty::Pending,
-                            None => Ty::Error,
+                    let inferred_ty = match property_header.declared_type.as_ref() {
+                        Some(declared) => {
+                            ty_of_ref(declared, &class_names, &property_tparams, diags)
                         }
-                    } else if let Some(delegate) = p.delegate {
-                        match property_header.declared_type.as_ref() {
-                            Some(declared) => {
-                                ty_of_ref(declared, &class_names, &property_tparams, diags)
-                            }
-                            None => {
-                                // The legacy publisher cannot type a delegate in its declaration
-                                // scope. Production never enters this queue: the compact signature
-                                // graph owns the delegate expression and publishes its final type.
-                                deferred_properties.push(DeferredProperty {
-                                    key: DeclKey::declaration(i as u32, d.0),
-                                    file_index: i as u32,
-                                    name: property_name.clone(),
-                                    span: property_span,
-                                    delegate_of: Some(Ty::Null),
-                                    backing_field: false,
-                                    expression: Some(delegate),
-                                    scope: Vec::new(),
-                                    kind: DeferredKind::TopLevel {
-                                        position: property_span.lo,
-                                        is_eager: true,
-                                        has_context_params: false,
-                                        has_receiver: false,
-                                    },
-                                });
-                                Ty::Pending
-                            }
-                        }
-                    } else {
-                        // The legacy path defers every implicit property result. Production uses
-                        // `compact_inference` above and never inspects getter/initializer syntax.
-                        match (property_header.declared_type.as_ref(), &p.getter) {
-                            (Some(declared), _) => {
-                                ty_of_ref(declared, &class_names, &property_tparams, diags)
-                            }
-                            (None, Some(FunBody::Expr(_))) if is_computed => Ty::Pending,
-                            (None, _) => Ty::Pending,
-                        }
+                        None if compact_inference.is_some() => Ty::Pending,
+                        None => Ty::Error,
                     };
                     // `null` is the expression type used by applicability, while an inferred
                     // declaration `val x = null` has Kotlin type `Nothing?`. Declaration symbols
@@ -12225,150 +9357,70 @@ fn collect_signatures_with_cp_impl(
                     // visits files in ARGUMENT order — so record it and let the engine resolve it on
                     // demand once the walk is over. Diagnosing here is what made the answer depend
                     // on the order the compiler was asked in.
-                    if compact_headers.is_none()
-                        && ty == Ty::Pending
-                        && property_header.declared_type.is_none()
-                        && p.delegate.is_none()
-                        && (p.init.is_some() || p.getter.is_some())
-                    {
-                        deferred_properties.push(DeferredProperty {
-                            key: DeclKey::declaration(i as u32, d.0),
-                            file_index: i as u32,
-                            name: property_name.clone(),
-                            span: property_span,
-                            delegate_of: None,
-                            backing_field: false,
-                            expression: p.init.or(match &p.getter {
-                                Some(FunBody::Expr(getter)) if is_computed => Some(*getter),
-                                // A block getter has no expression the signature pass can read; it
-                                // declines, which is the diagnostic asking for an annotation.
-                                _ => None,
-                            }),
-                            scope: context_scope.clone(),
-                            kind: DeferredKind::TopLevel {
-                                position: property_span.lo,
-                                is_eager: p.init.is_some(),
-                                has_context_params: !context_params.is_empty(),
-                                has_receiver: false,
-                            },
+                    let storage_ty = property_header
+                        .backing_field_type
+                        .as_ref()
+                        .map(|field| ty_of_ref(field, &class_names, &property_tparams, diags))
+                        .or_else(|| {
+                            (compact_inference
+                                == Some(crate::fir::InferredSignatureKind::BackingFieldInitializer))
+                            .then_some(Ty::Pending)
                         });
-                    }
-                    let storage_ty = if compact_headers.is_some() {
-                        property_header
-                            .backing_field_type
-                            .as_ref()
-                            .map(|field| ty_of_ref(field, &class_names, &property_tparams, diags))
-                            .or_else(|| {
-                                (compact_inference
-                                    == Some(
-                                        crate::fir::InferredSignatureKind::BackingFieldInitializer,
-                                    ))
-                                .then_some(Ty::Pending)
+                    let property_signature = SourcePropertySig {
+                        name: property_name.clone(),
+                        source_file: i as u32,
+                        formals: property_header
+                            .type_parameters
+                            .iter()
+                            .filter_map(|source| property_tparams.bound(source).ty_param_name())
+                            .map(str::to_string)
+                            .collect(),
+                        formal_bounds: property_header
+                            .type_parameters
+                            .iter()
+                            .map(|source| {
+                                property_tparams
+                                    .bound(source)
+                                    .ty_param_bound()
+                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
                             })
-                    } else {
-                        p.explicit_backing_field.as_ref().map(|field| {
-                            field
-                                .ty
-                                .as_ref()
-                                .map(|field_ty| {
-                                    ty_of_ref(field_ty, &class_names, &property_tparams, diags)
-                                })
-                                .or_else(|| {
-                                    p.init.map(|initializer| {
-                                        deferred_properties.push(DeferredProperty {
-                                            key: DeclKey::declaration(i as u32, d.0),
-                                            file_index: i as u32,
-                                            name: property_name.clone(),
-                                            span: property_span,
-                                            delegate_of: None,
-                                            backing_field: true,
-                                            expression: Some(initializer),
-                                            scope: context_scope.clone(),
-                                            kind: DeferredKind::TopLevel {
-                                                position: property_span.lo,
-                                                is_eager: true,
-                                                has_context_params: false,
-                                                has_receiver: false,
-                                            },
-                                        });
-                                        Ty::Pending
-                                    })
-                                })
-                                .unwrap_or(Ty::Error)
-                        })
+                            .collect(),
+                        ty,
+                        storage_ty,
+                        is_var: property_header.mutable,
+                        is_const,
+                        is_lateinit,
+                        compile_time_constant: None,
+                        implicit_integer_coercion: header_type_has_annotation(
+                            &property_header.annotations,
+                            &class_names,
+                            type_name("kotlin/internal/ImplicitIntegerCoercion"),
+                        ),
+                        context_params: context_params.clone(),
+                        context_param_names: property_header
+                            .context_parameters
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect(),
+                        package: source_packages[i].replace('.', "/"),
+                        visibility: property_visibility,
+                        setter_visibility: property_header.setter_visibility,
+                        annotations: resolved_header_annotation_identities(
+                            &property_header.annotations,
+                            &class_names,
+                        ),
+                        stable_declaration: Some(compact_property.id),
                     };
-                    table.source_props.insert(
-                        (i as u32, d.0),
-                        SourcePropertySig {
-                            name: property_name.clone(),
-                            formals: property_header
-                                .type_parameters
-                                .iter()
-                                .filter_map(|source| property_tparams.bound(source).ty_param_name())
-                                .map(str::to_string)
-                                .collect(),
-                            formal_bounds: property_header
-                                .type_parameters
-                                .iter()
-                                .map(|source| {
-                                    property_tparams
-                                        .bound(source)
-                                        .ty_param_bound()
-                                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                                })
-                                .collect(),
-                            ty,
-                            storage_ty,
-                            is_var: property_header.mutable,
-                            is_const,
-                            is_lateinit,
-                            compile_time_constant: if compact_headers.is_some()
-                                || property_header.mutable
-                            {
-                                None
-                            } else {
-                                p.init
-                                    .and_then(|init| source_literal_constant(file, init, ty))
-                            },
-                            implicit_integer_coercion: if compact_headers.is_some() {
-                                header_type_has_annotation(
-                                    &property_header.annotations,
-                                    &class_names,
-                                    type_name("kotlin/internal/ImplicitIntegerCoercion"),
-                                )
-                            } else {
-                                has_implicit_integer_coercion_annotation(
-                                    &p.annotations,
-                                    &class_names,
-                                )
-                            },
-                            context_params: context_params.clone(),
-                            context_param_names: property_header
-                                .context_parameters
-                                .iter()
-                                .map(|(name, _)| name.clone())
-                                .collect(),
-                            package: source_packages[i].replace('.', "/"),
-                            visibility: property_visibility,
-                            setter_visibility: property_header.setter_visibility,
-                            annotations: if compact_headers.is_some() {
-                                resolved_header_annotation_identities(
-                                    &property_header.annotations,
-                                    &class_names,
-                                )
-                            } else {
-                                resolved_annotation_identities(&p.annotations, &class_names)
-                            },
-                            stable_declaration: compact_property.map(|stub| stub.id),
-                        },
-                    );
+                    table
+                        .stable_source_props
+                        .insert(compact_property.id, property_signature);
                     if context_params.is_empty() {
                         crate::trace_compiler!(
                             "signature_inference",
                             "publish top-level property name={} type={ty:?} source=({}, {})",
                             property_name,
                             i,
-                            d.0,
+                            compact_property.id.raw(),
                         );
                         table.props.insert(
                             property_name.clone(),
@@ -12502,102 +9554,15 @@ fn collect_signatures_with_cp_impl(
         // Nested aliases inhabit their declaring classifier's lexical namespace. Their semantic
         // identity follows the slash-separated path recorded by an explicit import; the expansion,
         // not that namespace coordinate, supplies the classifier used by construction and type use.
-        if let Some(headers) = compact_headers {
-            publish_compact_nested_aliases(
-                &mut table,
-                headers,
-                compact_local_contexts,
-                &file_class_names,
-                crate::fir::SourceFileId::from_raw(file_index as u32),
-                &visible_aliases,
-                diags,
-            );
-            continue;
-        }
-        let file = &files[file_index];
-        for (class_declaration, class) in file
-            .decls
-            .iter()
-            .filter_map(|&declaration| match file.decl(declaration) {
-                Decl::Class(class) => Some((declaration, class)),
-                Decl::Fun(_) | Decl::Property(_) => None,
-            })
-            .filter(|(_, class)| !class.type_aliases.is_empty())
-        {
-            let mut nested_visible = visible_aliases.clone();
-            nested_visible.extend(class.type_aliases.iter().map(|alias| {
-                (
-                    alias.name.clone(),
-                    alias.type_params.clone(),
-                    alias.target.clone(),
-                )
-            }));
-            let mut nested_names = file_class_names[file_index].clone();
-            let alias_owner = type_name(&class_internal(file, &class.name));
-            extend_lexical_nested_classifier_names(
-                file,
-                &HashMap::from([(alias_owner, 0)]),
-                &mut nested_names,
-            );
-            if file.is_local_declaration(class_declaration) {
-                // Hoisting gives a local classifier a unique runtime name (`fun.Local`) but must
-                // not erase the source binding (`Local`) used by a nested alias target. Only sibling
-                // local classifiers owned by the same bounded declaration participate here; a
-                // same-spelled class in another function is not a competing lexical candidate.
-                let lexical_owner = class.name.rsplit_once('.').map(|(owner, _)| owner);
-                for &declaration in file.local_class_decls.values() {
-                    let Decl::Class(candidate) = file.decl(declaration) else {
-                        continue;
-                    };
-                    if candidate.name.rsplit_once('.').map(|(owner, _)| owner) != lexical_owner {
-                        continue;
-                    }
-                    let source_name = candidate
-                        .name
-                        .rsplit('.')
-                        .next()
-                        .expect("a local classifier has a source-name segment");
-                    let internal = type_name(&class_internal(file, &candidate.name));
-                    match nested_names.get_class(source_name) {
-                        Some(previous) if previous != internal => {
-                            nested_names.mark_ambiguous(source_name.to_owned());
-                        }
-                        Some(_) => {}
-                        None => {
-                            nested_names.insert_name(source_name.to_owned(), internal);
-                        }
-                    }
-                }
-            }
-            for alias in &class.type_aliases {
-                let Some((expansion, expansion_spelling)) = resolve_source_alias_expansion(
-                    &alias.target,
-                    &alias.type_params,
-                    &nested_visible,
-                    &nested_names,
-                    &table.alias_expansion_spellings,
-                    diags,
-                ) else {
-                    continue;
-                };
-                let owner = class.name.replace('.', "/");
-                let identity = type_name(&if package.is_empty() {
-                    format!("{owner}/{}", alias.name)
-                } else {
-                    format!("{package}/{owner}/{}", alias.name)
-                });
-                if let Some(target) = expansion.kotlin_class_internal() {
-                    table.source_alias_fqns.insert(identity, target);
-                }
-                table
-                    .source_alias_expansions
-                    .insert(identity, (alias.type_params.clone(), expansion));
-                table.alias_expansion_spellings.insert(
-                    identity,
-                    (expansion_spelling, alias.type_params.clone(), expansion),
-                );
-            }
-        }
+        publish_compact_nested_aliases(
+            &mut table,
+            headers,
+            Some(local_contexts),
+            &file_class_names,
+            crate::fir::SourceFileId::from_raw(file_index as u32),
+            &visible_aliases,
+            diags,
+        );
     }
 
     // Class/body inventories bind additional annotation occurrences after the initial detached-ref
@@ -12606,19 +9571,11 @@ fn collect_signatures_with_cp_impl(
     table
         .resolved_annotations
         .retain(|(file, _, _), annotation| {
-            compact_headers.map_or_else(
-                || {
-                    files
-                        .get(*file as usize)
-                        .is_some_and(|source| source.is_common)
-                },
-                |headers| {
-                    headers
-                        .scopes
-                        .file(crate::fir::SourceFileId::from_raw(*file))
-                        .is_some_and(|source| source.is_common)
-                },
-            ) || !libraries.is_optional_expectation(*annotation)
+            headers
+                .scopes
+                .file(crate::fir::SourceFileId::from_raw(*file))
+                .is_some_and(|source| source.is_common)
+                || !libraries.is_optional_expectation(*annotation)
         });
     normalize_referenced_library_annotations(&mut table, &*libraries);
     table.libraries = libraries;
@@ -12628,121 +9585,13 @@ fn collect_signatures_with_cp_impl(
     // the read erased to the parameter's bound — `x` published `Any`. Pre-inferring first gives the
     // run something to read; the pass after collection still runs and still refines, because this is
     // a fixpoint rather than a single sweep.
-    if compact_headers.is_none() {
-        resolve_deferred_properties(files, &mut table, &deferred_properties, true, diags);
-    } else {
-        // Every non-local inferred property in production has a compact graph node. The legacy
-        // deferred fixpoint reads initializer/getter AST and therefore both duplicates semantics
-        // and prevents bounded-unit release. Keep only the provisional declaration shapes here;
-        // stable graph projection replaces them before Pass 2.
-        drop(deferred_properties);
-    }
-    // The streamed path still needs provisional `Pending` declarations as demandable candidates
-    // while the compact graph is solving. Graph finalization consumes those states and stable-ID
-    // projection replaces them before Pass 2. The non-streamed API has no later solver, so it must
-    // retire every undetermined state here.
-    if compact_headers.is_none() {
-        fail_undetermined_returns(&mut table);
-        assert!(
-            !module_signatures_mention_pending(&table),
-            "signature finalization must retire every pending semantic type before body checking",
-        );
-    }
-
-    if compact_headers.is_none() {
-        commit_top_level_conflict_groups(
-            &mut table,
-            &top_level_fun_groups,
-            &pending_conflict_diagnostics,
-            reserved_conflict_diagnostic_bytes,
-            diags,
-        );
-        for (name, signatures) in &table.funs {
-            for signature in signatures {
-                let Some((file, declaration)) = signature.source_file.zip(signature.source_decl)
-                else {
-                    continue;
-                };
-                let Some(key) =
-                    TopLevelFunctionConflictKey::from_signature(signature, name.clone())
-                else {
-                    continue;
-                };
-                let source_is_local = signature.visibility.is_private()
-                    || files
-                        .get(file as usize)
-                        .and_then(|source| match source.decl(declaration) {
-                            Decl::Fun(function) => Some(is_kotlin_main_entry_point(
-                                function,
-                                &signature.params,
-                                signature.ret,
-                            )),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-                let retained_for_recovery = table
-                    .conflicting_top_level_candidates
-                    .get(&key)
-                    .is_some_and(|candidates| {
-                        !source_is_local || candidates.by_file.contains_key(&file)
-                    });
-                if retained_for_recovery {
-                    table
-                        .conflicting_top_level_key_by_source
-                        .insert((file, declaration.0), key);
-                }
-            }
-        }
-        for (name, receivers) in &table.ext_funs {
-            for signatures in receivers.values() {
-                for signature in signatures {
-                    let Some((file, declaration, _receiver)) = signature
-                        .source_file
-                        .zip(signature.source_decl)
-                        .zip(signature.source_receiver)
-                        .map(|((file, declaration), receiver)| (file, declaration, receiver))
-                    else {
-                        continue;
-                    };
-                    let Some(key) =
-                        TopLevelFunctionConflictKey::from_signature(signature, name.clone())
-                    else {
-                        continue;
-                    };
-                    let retained_for_recovery = table
-                        .conflicting_top_level_candidates
-                        .get(&key)
-                        .is_some_and(|candidates| {
-                            !signature.visibility.is_private()
-                                || candidates.by_file.contains_key(&file)
-                        });
-                    if retained_for_recovery {
-                        table
-                            .conflicting_top_level_key_by_source
-                            .insert((file, declaration.0), key);
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(headers) = compact_headers {
-        collect_compact_declared_spellings(&mut table, headers, &file_class_names);
-    } else {
-        collect_declared_spellings(&mut table, files, &file_class_names);
-    }
-    collect_stable_visibility_suppressions(&mut table, compact_headers);
+    collect_compact_declared_spellings(&mut table, headers, &file_class_names);
+    collect_stable_visibility_suppressions(&mut table, headers);
 
     table.class_names = class_names;
-    if let Some(headers) = compact_headers {
-        break_supertype_cycles(&mut table, diags, |internal, signature, components| {
-            compact_cycle_span(internal, signature, headers, components)
-        });
-    } else {
-        break_supertype_cycles(&mut table, diags, |internal, signature, components| {
-            legacy_cycle_span(internal, signature, files, components)
-        });
-    }
+    break_supertype_cycles(&mut table, diags, |internal, signature, components| {
+        compact_cycle_span(internal, signature, headers, components)
+    });
     table.finish_module_mutation();
     table
 }
@@ -12752,11 +9601,8 @@ fn collect_signatures_with_cp_impl(
 /// source spellings and annotation expression ids do not cross the boundary.
 fn collect_stable_visibility_suppressions(
     table: &mut SymbolTable,
-    headers: Option<&crate::fir::StreamedHeaderModule>,
+    headers: &crate::fir::StreamedHeaderModule,
 ) {
-    let Some(headers) = headers else {
-        return;
-    };
     for stub in &headers.stubs {
         let mut suppressions = VisibilitySuppressions::default();
         for application in headers
@@ -12794,266 +9640,6 @@ fn collect_stable_visibility_suppressions(
 /// checker — none of which may see a spelling. Emission is the only consumer, it addresses
 /// declarations by the same AST coordinates used here, and a whole module that names no `typealias`
 /// leaves both tables empty.
-fn collect_declared_spellings(
-    table: &mut SymbolTable,
-    files: &[File],
-    file_class_names: &[ClassNames],
-) {
-    // Cloned once: the pass reads these while inserting into `table`, and a declaration's spelling
-    // never depends on another declaration's.
-    let expansions = &table.alias_expansion_spellings.clone();
-    for (file_index, file) in files.iter().enumerate() {
-        let file_index = file_index as u32;
-        let names = &file_class_names[file_index as usize];
-        // Spellings the parse seam parked when it expanded this file's own aliases away.
-        let spellings = &file.alias_spellings;
-        for &d in &file.decls {
-            match file.decl(d) {
-                Decl::Fun(f) => {
-                    let scope = spelling_scope(&f.type_params);
-                    let spellings = crate::spelling::DeclaredSpellings {
-                        superclass: crate::spelling::Spelled::default(),
-                        ret: f
-                            .ret
-                            .as_ref()
-                            .map(|r| spelling_of_ref(r, names, &scope, expansions, spellings))
-                            .unwrap_or_default(),
-                        params: f
-                            .params
-                            .iter()
-                            .map(|p| spelling_of_ref(&p.ty, names, &scope, expansions, spellings))
-                            .collect(),
-                        receiver: f
-                            .receiver
-                            .as_ref()
-                            .map(|r| spelling_of_ref(r, names, &scope, expansions, spellings))
-                            .unwrap_or_default(),
-                        type_param_bounds: type_param_bound_spellings(
-                            &f.type_params,
-                            &f.type_param_bounds,
-                            names,
-                            &scope,
-                            expansions,
-                            spellings,
-                        ),
-                        supertypes: Vec::new(),
-                    };
-                    if !spellings.is_none() {
-                        table.declared_spellings.insert((file_index, d), spellings);
-                    }
-                }
-                Decl::Property(p) => {
-                    let scope = spelling_scope(&p.type_params);
-                    let spellings = crate::spelling::DeclaredSpellings {
-                        ret: p
-                            .ty
-                            .as_ref()
-                            .map(|r| spelling_of_ref(r, names, &scope, expansions, spellings))
-                            .unwrap_or_default(),
-                        receiver: p
-                            .receiver
-                            .as_ref()
-                            .map(|r| spelling_of_ref(r, names, &scope, expansions, spellings))
-                            .unwrap_or_default(),
-                        type_param_bounds: type_param_bound_spellings(
-                            &p.type_params,
-                            &p.type_param_bounds,
-                            names,
-                            &scope,
-                            expansions,
-                            spellings,
-                        ),
-                        ..Default::default()
-                    };
-                    if !spellings.is_none() {
-                        table.declared_spellings.insert((file_index, d), spellings);
-                    }
-                }
-                Decl::Class(c) => {
-                    let scope = spelling_scope(&c.type_params);
-                    // The class HEADER: supertypes, primary-constructor parameters, and the class's
-                    // own type-parameter bounds.
-                    let header = crate::spelling::DeclaredSpellings {
-                        params: c
-                            .props
-                            .iter()
-                            .map(|p| spelling_of_ref(&p.ty, names, &scope, expansions, spellings))
-                            .collect(),
-                        // The declared SUPERCLASS is parked as a bare name rather than a `TypeRef`
-                        // (`ClassDecl::base_class`), which also means the parse seam never rewrote
-                        // it — the alias spelling is still there. It is recorded APART from the
-                        // interfaces because the emitted supertype list reserves a leading slot for
-                        // it only for a generic class; `DeclaredSpellings::supertype_spellings`
-                        // does that alignment where both lists are in hand.
-                        superclass: c
-                            .base_class
-                            .as_deref()
-                            .filter(|base| *base != "Any")
-                            .map(|base| {
-                                spelling_of_ref(
-                                    &base_class_type_ref(
-                                        base,
-                                        &c.base_type_args,
-                                        c.base_class_span.unwrap_or(c.span),
-                                    ),
-                                    names,
-                                    &scope,
-                                    expansions,
-                                    spellings,
-                                )
-                            })
-                            .unwrap_or_default(),
-                        supertypes: c
-                            .supertypes
-                            .iter()
-                            .map(|t| spelling_of_ref(t, names, &scope, expansions, spellings))
-                            .collect(),
-                        type_param_bounds: type_param_bound_spellings(
-                            &c.type_params,
-                            &c.type_param_bounds,
-                            names,
-                            &scope,
-                            expansions,
-                            spellings,
-                        ),
-                        ..Default::default()
-                    };
-                    if !header.is_none() {
-                        table.declared_spellings.insert((file_index, d), header);
-                    }
-                    // Members are keyed by the exact AST coordinate selection already hands to
-                    // lowering, so the two sides cannot drift on overloads.
-                    for (method, m) in c.methods.iter().enumerate() {
-                        // A member's own type parameters shadow the class's.
-                        let mut member_scope = spelling_scope(&c.type_params);
-                        for name in &m.type_params {
-                            member_scope.insert_binding(
-                                name,
-                                Ty::nullable(Ty::obj("kotlin/Any")),
-                                Vec::new(),
-                            );
-                        }
-                        let spellings = crate::spelling::DeclaredSpellings {
-                            superclass: crate::spelling::Spelled::default(),
-                            ret: m
-                                .ret
-                                .as_ref()
-                                .map(|r| {
-                                    spelling_of_ref(r, names, &member_scope, expansions, spellings)
-                                })
-                                .unwrap_or_default(),
-                            params: m
-                                .params
-                                .iter()
-                                .map(|p| {
-                                    spelling_of_ref(
-                                        &p.ty,
-                                        names,
-                                        &member_scope,
-                                        expansions,
-                                        spellings,
-                                    )
-                                })
-                                .collect(),
-                            receiver: m
-                                .receiver
-                                .as_ref()
-                                .map(|r| {
-                                    spelling_of_ref(r, names, &member_scope, expansions, spellings)
-                                })
-                                .unwrap_or_default(),
-                            type_param_bounds: type_param_bound_spellings(
-                                &m.type_params,
-                                &m.type_param_bounds,
-                                names,
-                                &member_scope,
-                                expansions,
-                                spellings,
-                            ),
-                            supertypes: Vec::new(),
-                        };
-                        if !spellings.is_none() {
-                            table.member_spellings.insert(
-                                crate::libraries::SourceMember::Class {
-                                    file: file_index,
-                                    owner: d.0,
-                                    method: method as u32,
-                                },
-                                spellings,
-                            );
-                        }
-                    }
-                    // `SourceMember::ClassProperty` numbers the primary-constructor properties
-                    // first and the body properties after them, so both share one index space.
-                    for (property, p) in c.props.iter().enumerate() {
-                        let spelling = spelling_of_ref(&p.ty, names, &scope, expansions, spellings);
-                        if !spelling.is_none() {
-                            table.member_spellings.insert(
-                                crate::libraries::SourceMember::ClassProperty {
-                                    file: file_index,
-                                    owner: d.0,
-                                    property: property as u32,
-                                },
-                                crate::spelling::DeclaredSpellings {
-                                    ret: spelling,
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                    }
-                    for (body_property, p) in c.body_props.iter().enumerate() {
-                        let property = c.props.len() + body_property;
-                        // A body property is declared inside the class's type-parameter scope. Its
-                        // own parameters (possible on an extension property) are the inner rung and
-                        // therefore shadow class parameters with the same source spelling. Alias
-                        // abbreviations need this complete scope too: in
-                        // `class C<T> { val value: Alias<T> }`, the as-written alias argument must
-                        // encode `T`, even when the alias expansion does not use that parameter.
-                        let mut member_scope = spelling_scope(&c.type_params);
-                        for name in &p.type_params {
-                            member_scope.insert_binding(
-                                name,
-                                Ty::nullable(Ty::obj("kotlin/Any")),
-                                Vec::new(),
-                            );
-                        }
-                        let spellings = crate::spelling::DeclaredSpellings {
-                            ret: p
-                                .ty
-                                .as_ref()
-                                .map(|r| {
-                                    spelling_of_ref(r, names, &member_scope, expansions, spellings)
-                                })
-                                .unwrap_or_default(),
-                            receiver: p
-                                .receiver
-                                .as_ref()
-                                .map(|r| {
-                                    spelling_of_ref(r, names, &member_scope, expansions, spellings)
-                                })
-                                .unwrap_or_default(),
-                            ..Default::default()
-                        };
-                        if !spellings.is_none() {
-                            table.member_spellings.insert(
-                                crate::libraries::SourceMember::ClassProperty {
-                                    file: file_index,
-                                    owner: d.0,
-                                    property: property as u32,
-                                },
-                                spellings,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Rebuild the declared base class as a [`TypeRef`] so it can be spelled like any other declared
-/// type. `ClassDecl` stores it split into a bare name plus its type arguments, and only a whole
-/// reference can carry an alias with its as-written arguments.
 fn base_class_type_ref(base: &str, type_args: &[TypeRef], span: Span) -> TypeRef {
     TypeRef {
         name: base.to_string(),
@@ -13079,39 +9665,6 @@ fn spelling_scope(type_params: &[String]) -> TParams {
 
 /// Spellings of each declared type parameter's upper bounds, in declaration order, so
 /// `<T : Cargo>` records `Cargo` on the bound `Type` the way kotlinc does.
-fn type_param_bound_spellings(
-    type_params: &[String],
-    bounds: &[(String, TypeRef)],
-    names: &ClassNames,
-    scope: &TParams,
-    expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
-) -> Vec<Vec<Spelled>> {
-    type_params
-        .iter()
-        .map(|parameter| {
-            bounds
-                .iter()
-                .filter(|(name, _)| name == parameter)
-                .map(|(_, bound)| spelling_of_ref(bound, names, scope, expansions, spellings))
-                .collect()
-        })
-        .collect()
-}
-
-/// Report a class whose supertype chain reaches itself, and CUT the chain.
-///
-/// A cyclic hierarchy is ill-formed source — kotlinc answers `object Foo : Foo()` with "cycle in
-/// supertypes and/or containing declarations detected" — but krusty's walkers are recursive, and a
-/// cycle sent one of them into unbounded recursion until the stack was exhausted. The process died
-/// on a SIGBUS with no diagnostic at all, which is how it presented on 13 modules of
-/// intellij-community: a same-named import that does not resolve leaves the supertype bound to the
-/// declaration itself.
-///
-/// Individual walkers carry their own `seen` sets where they were known to need them; cutting the
-/// link here means the walkers that never grew a guard cannot meet the cycle. Traversal uses the
-/// same normalized direct-supertype model as ordinary inheritance: source declarations come from
-/// the module table and dependency declarations come from the semantic platform boundary.
 fn break_supertype_cycles(
     table: &mut SymbolTable,
     diags: &mut DiagSink,
@@ -13123,7 +9676,7 @@ fn break_supertype_cycles(
         .classes
         .iter()
         .filter(|(internal, sig)| {
-            sig.source_decl.is_some()
+            (sig.stable_declaration.is_some() || sig.source_decl.is_some())
                 && component_of
                     .get(internal)
                     .is_some_and(|component| cyclic_components.contains(component))
@@ -13335,35 +9888,6 @@ fn compact_cycle_span(
         .unwrap_or_else(|| Span::new(0, 0))
 }
 
-fn legacy_cycle_span(
-    internal: TypeName,
-    sig: &ClassSig,
-    files: &[File],
-    component_of: &HashMap<TypeName, usize>,
-) -> Span {
-    let component = component_of.get(&internal).copied();
-    let same_component =
-        |parent: TypeName| component.is_some() && component_of.get(&parent).copied() == component;
-    sig.source_decl
-        .and_then(|declaration| {
-            let file = files.get(sig.source_file as usize)?;
-            match file.decl(declaration) {
-                Decl::Class(class) => {
-                    if sig.super_internal.is_some_and(same_component) {
-                        return class.base_class_span;
-                    }
-                    sig.interfaces
-                        .iter_ids()
-                        .position(same_component)
-                        .and_then(|index| class.supertypes.get(index))
-                        .map(|supertype| supertype.span)
-                }
-                _ => None,
-            }
-        })
-        .unwrap_or_else(|| Span::new(0, 0))
-}
-
 fn direct_supertypes(table: &SymbolTable, current: TypeName) -> Vec<TypeName> {
     if let Some(signature) = table.classes.get(&current) {
         return signature
@@ -13496,7 +10020,6 @@ fn commit_top_level_conflict_groups(
             (
                 key.clone(),
                 TopLevelFunctionConflictCandidates {
-                    public: group.public_candidates.clone(),
                     by_file: group
                         .files
                         .iter()
@@ -13736,26 +10259,6 @@ fn call_sig_for_parameters(sig: &CallSig, parameters: &[usize]) -> CallSig {
     }
 }
 
-fn map_param_list_args(
-    args: &[ExprId],
-    names: Option<&[Option<String>]>,
-    params: &ParamList,
-    trailing_lambda: bool,
-) -> Result<Vec<Option<ExprId>>, CallArgMappingFailure> {
-    map_call_args(
-        args,
-        names,
-        &params.names,
-        params.names.len(),
-        required_arity(params.names.len(), &params.defaults),
-        &params.defaults,
-        params.vararg,
-        trailing_lambda,
-    )
-}
-
-/// Collect the outer-variable names a lambda body writes (assigns / `++`/`--`), so the lowerer can box
-/// them. Does not descend into nested lambdas; their writes are recorded when those lambdas are checked.
 fn collect_lambda_outer_writes(
     file: &File,
     e: ExprId,
@@ -14041,7 +10544,6 @@ fn fun_body_expr(body: &FunBody) -> Option<ExprId> {
     }
 }
 
-/// Best-effort type of a simple literal initializer (for an unannotated top-level property).
 /// Names of Kotlin's primitive operator/bitwise/conversion-overloadable methods. An explicit call
 /// of one of these on a primitive receiver binds to the builtin operator, not a user extension.
 fn is_builtin_operator_method(name: &str) -> bool {
@@ -14113,46 +10615,6 @@ fn assign_op_name(op: BinOp) -> Option<&'static str> {
     })
 }
 
-fn delegated_getvalue_ret_for_signature(
-    file: &File,
-    table: &SymbolTable,
-    libraries: &dyn SemanticPlatform,
-    delegate_ty: Ty,
-    this_ref: Ty,
-) -> Option<Ty> {
-    let internal = delegate_ty.obj_internal()?;
-    if internal.starts_with("kotlin/reflect/") {
-        return None;
-    }
-    let module = crate::module_symbols::ModuleSymbols::new(table);
-    let scope = function_import_scope_with(
-        file,
-        libraries.platform_default_import_packages(),
-        libraries,
-    );
-    let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
-        libraries, &module, &scope,
-    );
-    let kproperty = Ty::obj("kotlin/reflect/KProperty");
-    let convention_args = [this_ref, kproperty];
-    // `provideDelegate` read from the TABLE, whose return may still be the marker — its body is an
-    // expression nothing has typed yet. The caller has already resolved that step and passes the
-    // stored type in, so an undetermined answer here is not an answer: it would make the delegate
-    // `<not determined>` and lose `getValue` entirely.
-    let stored_ty = select_delegate_operator_return(
-        &resolver,
-        delegate_ty,
-        "provideDelegate",
-        &convention_args,
-    )
-    .filter(|stored| !stored.mentions_pending())
-    .unwrap_or(delegate_ty);
-    select_delegate_operator_return(&resolver, stored_ty, "getValue", &convention_args)
-}
-
-/// Select one delegated-property convention from the normalized member/extension family. Operator
-/// filtering happens before applicability and overload selection, so a same-named ordinary method
-/// can neither satisfy the convention nor displace a valid operator declaration.
 pub(crate) fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
     match base {
         Ty::Obj(internal, []) => Ty::obj_args_name(internal, &[represented]),
@@ -14160,113 +10622,6 @@ pub(crate) fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty 
     }
 }
 
-/// Source identity for lightweight signature inference. The AST and its module file index are one
-/// semantic context: alias/import edges are file-scoped, so passing either independently invites a
-/// mismatched lookup and needlessly widens every inference helper's argument list.
-#[derive(Clone, Copy)]
-struct InferenceSource<'a>(&'a File, u32, Option<TypeName>, Option<Ty>);
-
-impl<'a> InferenceSource<'a> {
-    fn file(file: &'a File, file_index: u32) -> Self {
-        Self(file, file_index, None, None)
-    }
-
-    fn with_implicit_classifier(self, classifier: Option<TypeName>) -> Self {
-        Self(self.0, self.1, classifier, self.3)
-    }
-
-    fn with_implicit_value(self, value: Option<Ty>) -> Self {
-        Self(self.0, self.1, self.2, value)
-    }
-}
-
-/// A property whose type comes from its initializer or expression getter and which the signature
-/// walk could not determine, kept with the context that walk gave it.
-///
-/// Top-level and class-body properties share one queue and one engine on purpose. They ask the same
-/// question, and keeping them in separate passes reintroduces exactly the fault being removed: one
-/// pass has to run before the other, so a member reading a module property and a module property
-/// reading a member cannot both be answered.
-struct DeferredProperty {
-    key: DeclKey,
-    file_index: u32,
-    name: String,
-    span: Span,
-    /// The initializer, or the expression getter body for a computed property. `None` for a
-    /// declaration with nothing typeable to read — a BLOCK getter, which needs an annotation — so
-    /// that it declines through the one decline point and is diagnosed with the rest.
-    expression: Option<ExprId>,
-    /// Set when `expression` is a DELEGATE (`val x by option(...)`). Its type is not the
-    /// declaration's: the declaration's is what the delegate's `getValue` returns, resolved once
-    /// the delegate itself is typed.
-    delegate_of: Option<Ty>,
-    /// Set when `expression` types the property's explicit BACKING FIELD rather than the property
-    /// itself (`val items: List<String> field = mutableListOf()`). The property's own type is
-    /// declared; only the field's is inferred, and it is published into the storage slot.
-    backing_field: bool,
-    /// The value scope the walk resolved this declaration in: context parameters for a top-level
-    /// property, the enclosing class's members and lexical values for a member. Entries still
-    /// `Ty::Error` are declarations that have not been typed YET and are re-asked through the
-    /// engine, which is what the old passes approximated by refreshing the scope between rounds.
-    scope: Vec<(String, Ty, bool)>,
-    kind: DeferredKind,
-}
-
-/// What a deferred property is, in the two respects that change how it resolves and where its
-/// answer is published.
-enum DeferredKind {
-    TopLevel {
-        /// Source position within its file, for the initialization-order rule.
-        position: u32,
-        /// Whether the type comes from an EAGER initializer rather than an expression getter. The
-        /// two differ in what they may read: a getter is an executable body and may name a
-        /// declaration written later, while an initializer runs in declaration order and may not —
-        /// kotlinc rejects `val eager = later; val later = 1` with "variable 'later' must be
-        /// initialized" while accepting the same pair split across two files.
-        is_eager: bool,
-        /// A context property is not reachable by its bare name — signature collection files it
-        /// under `context_prop_names` rather than `props` — so it must not answer a demand for that
-        /// spelling either.
-        has_context_params: bool,
-        /// An EXTENSION property. It is top-level in the sense that no class owns it, but it is
-        /// never reachable by its bare name and it lives in `ext_props` rather than in `props` —
-        /// so it neither answers a bare-name demand nor is published (or declined) through the
-        /// module property tables, which belong to a plain property of the same spelling.
-        has_receiver: bool,
-    },
-    /// The exact semantic owner, rather than the source/display name used as one symbol-table
-    /// index: two files may legally declare the same simple class name in different packages, and
-    /// an answer must never be published onto the other one.
-    Member(TypeName),
-}
-
-impl DeferredProperty {
-    fn owner(&self) -> Option<TypeName> {
-        match &self.kind {
-            DeferredKind::TopLevel { .. } => None,
-            DeferredKind::Member(owner) => Some(*owner),
-        }
-    }
-
-    /// Whether the declaration's own lexical scope binds `name`. A bound name is a class member or a
-    /// context parameter, which SHADOWS any module property of the same spelling; the walk already
-    /// recorded that, and the entry being a placeholder does not undo it.
-    fn scope_binds(&self, name: &str) -> bool {
-        self.scope.iter().any(|(bound, _, _)| bound == name)
-    }
-}
-
-/// Which top-level property spellings a declaration at a given position may NOT read, because they
-/// are declared later in its own file.
-///
-/// Only same-FILE order is a restriction: kotlinc accepts the identical forward reference when the
-/// two declarations live in different files (measured on 2.4.10), so this cannot be a module-wide
-/// position comparison.
-#[derive(Default)]
-struct SourceOrderIndex(HashMap<(u32, String), u32>);
-/// The one wording for an unannotated property whose type could not be inferred. Emitted by the
-/// checker (not the signature passes) so an initializer or getter that diagnoses itself
-/// (`val LOG = logger<Foo>()`) does not also draw this error on top of the unresolved reference.
 fn cannot_infer_property_message(name: &str) -> String {
     format!("krusty: cannot infer the type of property '{name}'; add an explicit type")
 }
@@ -14275,1392 +10630,12 @@ const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursiv
 const EXPLICIT_PROPERTY_TYPE_MESSAGE: &str =
     "this property must have an explicit type, be initialized, or be delegated.";
 
-impl SourceOrderIndex {
-    fn of(files: &[File]) -> Self {
-        let mut positions = HashMap::new();
-        for (file_index, file) in files.iter().enumerate() {
-            for &declaration in &file.decls {
-                let Decl::Property(property) = file.decl(declaration) else {
-                    continue;
-                };
-                if property.receiver.is_some() {
-                    continue;
-                }
-                positions
-                    .entry((file_index as u32, property.name.clone()))
-                    .or_insert(property.span.lo);
-            }
-        }
-        Self(positions)
-    }
-
-    fn declared_later(&self, file: u32, position: u32, name: &str) -> bool {
-        self.0
-            .get(&(file, name.to_string()))
-            .is_some_and(|declared| *declared > position)
-    }
-}
-
-/// Resolves deferred property types on demand, memoised, with cycles declining.
-///
-/// Borrows the symbol table, so it is built where it is used rather than kept alive across the
-/// walk; the memo it consults ([`TypeEngine`]) borrows nothing and therefore does outlive it.
-struct DeferredInferenceDriver<'a> {
-    files: &'a [File],
-    table: &'a SymbolTable,
-    engine: &'a TypeEngine,
-    deferred: &'a HashMap<DeclKey, &'a DeferredProperty>,
-    /// Module-wide index from a top-level property's source spelling to its declaration. A name
-    /// declared by more than one deferred property is absent: two declarations of one name are
-    /// already a conflict diagnostic, and guessing between them would type a reference from
-    /// whichever happened to be indexed last.
-    ///
-    /// The index is by SIMPLE NAME across the module, matching `SymbolTable::props`, which is what
-    /// this hook stands in for while a declaration's own type is still being determined. Import
-    /// scoping for module properties is a property of that table, not of this index.
-    by_name: &'a HashMap<String, DeclKey>,
-    /// The same index for class members, keyed by the owner's semantic identity so that two classes
-    /// sharing a simple name in different packages cannot answer for each other.
-    by_member: &'a HashMap<(TypeName, String), DeclKey>,
-    /// Top-level functions whose return is not determined, by source spelling. A call to one of
-    /// them cannot be answered from the table, so the function is resolved on demand. An OVERLOADED
-    /// spelling is absent — a name alone cannot choose between overloads.
-    functions: &'a HashMap<String, (u32, DeclId)>,
-    /// Every one of them, overloads included, by spelling. A call site knows its argument types and
-    /// can choose; this is the index it chooses from.
-    functions_by_name: &'a HashMap<String, Vec<(u32, DeclId)>>,
-    /// The same for class members: every undetermined method by declaring class and spelling,
-    /// overloads included.
-    methods_by_name: &'a HashMap<(TypeName, String), Vec<UndeterminedMethod>>,
-    /// Member FUNCTIONS whose expression body the walk could not type, keyed by the class that
-    /// declares them. A declaration reading `C().gen()` needs the return resolved the same way a
-    /// property read does.
-    methods: &'a HashMap<(TypeName, String), (u32, DeclId, u32)>,
-    source_order: &'a SourceOrderIndex,
-    rejected_reads: &'a std::cell::RefCell<HashMap<DeclKey, Vec<(Span, String)>>>,
-    recursive_dependents: &'a std::cell::RefCell<std::collections::HashSet<DeclKey>>,
-}
-
-impl DeferredInferenceDriver<'_> {
-    fn resolve(&self, key: DeclKey) -> Resolution {
-        let Some(entry) = self.deferred.get(&key).copied() else {
-            return Resolution::Declined(DeclineReason::Untypeable);
-        };
-        self.engine.resolve(key, || {
-            let expression = entry.expression?;
-            let file_index = entry.file_index as usize;
-            let file = &self.files[file_index];
-            let demand = |name: &str| self.demand(entry, name);
-            let demand_call = |name: &str, arg_tys: &[Ty]| self.demand_call_overload(name, arg_tys);
-            let demand_member = |receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                self.demand_on_receiver(Some(entry), receiver, name, arg_tys)
-            };
-            let rejects = |name: &str, span: Span| {
-                let rejected = !self.readable_from(entry, name);
-                if rejected {
-                    let read = (span, name.to_string());
-                    let mut rejected_reads = self.rejected_reads.borrow_mut();
-                    let reads = rejected_reads.entry(entry.key).or_default();
-                    if !reads.contains(&read) {
-                        reads.push(read);
-                    }
-                }
-                rejected
-            };
-            let inferred = match entry.kind {
-                DeferredKind::TopLevel { .. } => infer_declaration_ty(
-                    file,
-                    entry.file_index,
-                    DeclId(entry.key.decl),
-                    expression,
-                    self.table,
-                    EngineSeams {
-                        demand: &demand,
-                        demand_call: &demand_call,
-                        demand_member: &demand_member,
-                        rejects: &rejects,
-                    },
-                ),
-                DeferredKind::Member(_) if file.is_local_declaration(DeclId(entry.key.decl)) => {
-                    infer_local_class_member_ty(
-                        file,
-                        entry.file_index,
-                        entry.span,
-                        expression,
-                        self.table,
-                    )
-                }
-                DeferredKind::Member(_) => infer_class_member_ty(
-                    file,
-                    entry.file_index,
-                    DeclId(entry.key.decl),
-                    expression,
-                    &entry.scope,
-                    self.table,
-                    EngineSeams {
-                        demand: &demand,
-                        demand_call: &demand_call,
-                        demand_member: &demand_member,
-                        rejects: &rejects,
-                    },
-                ),
-            };
-            // A delegate's own type is not the declaration's: the declaration reads through
-            // `getValue`, so resolve that once the delegate itself is typed.
-            let inferred = match entry.delegate_of {
-                Some(this_ref) if inferred != Ty::Error => {
-                    // `provideDelegate` may itself have an inferred return, and its result is the
-                    // type `getValue` is then looked up on — so it has to be resolved BEFORE the
-                    // chain is followed, not patched afterwards.
-                    let delegate = self
-                        .demand_on_receiver(None, inferred, "provideDelegate", &[])
-                        .filter(|provided| !provided.mentions_pending())
-                        .map(|provided| {
-                            let bindings = inferred
-                                .kotlin_class_internal()
-                                .and_then(|owner| self.table.class_by_type_name(owner))
-                                .map(|class| class.type_parameter_bindings(inferred))
-                                .unwrap_or_default()
-                                .into_iter()
-                                .collect();
-                            crate::symbol_resolver::ty_subst_keep_unbound(provided, &bindings)
-                        })
-                        .unwrap_or(inferred);
-                    delegated_getvalue_ret_for_signature(
-                        file,
-                        self.table,
-                        self.table.libraries.as_ref(),
-                        delegate,
-                        this_ref,
-                    )
-                    // `getValue`'s own return may still be being determined — `val O by W("OK")` on
-                    // `class W<T>(val value: T) { operator fun getValue(…) = value }`. Ask the engine for
-                    // that declaration and substitute it in, the same way a call or a reference does;
-                    // publishing the marker would make "not resolved" the property's type.
-                    .map(|ret| match ret.mentions_pending() {
-                        true => self
-                            .demand_on_receiver(None, delegate, "getValue", &[])
-                            .filter(|answered| !answered.mentions_pending())
-                            // The answer is `getValue`'s DECLARED return — `T` for
-                            // `class W<T> { operator fun getValue(…) = value }` — so the delegate's own
-                            // type arguments are what make it this property's type.
-                            .map(|answered| {
-                                let bindings = delegate
-                                    .kotlin_class_internal()
-                                    .and_then(|owner| self.table.class_by_type_name(owner))
-                                    .map(|class| class.type_parameter_bindings(delegate))
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .collect();
-                                crate::symbol_resolver::ty_subst_keep_unbound(answered, &bindings)
-                            })
-                            .map_or(ret, |answered| {
-                                crate::types::ty_replace_pending(ret, answered)
-                            }),
-                        false => ret,
-                    })
-                    .unwrap_or(Ty::Error)
-                }
-                Some(_) => Ty::Error,
-                None => inferred,
-            };
-            let inferred = inferred_declaration_ty(inferred);
-            (inferred != Ty::Error).then_some(inferred)
-        })
-    }
-
-    /// The type of another declaration this one names, resolving it first if needed.
-    ///
-    /// A name the declaration's own scope BINDS is answered only from that scope's declarations. It
-    /// shadows any module property of the same spelling, and falling through to the module when the
-    /// owner cannot answer would type the reference from an unrelated declaration — for
-    /// `open class Base { val a = … }` / `class Derived : Base() { val b = a }` alongside a
-    /// top-level `val a`, that types `Derived.b` from the top-level one, which is a wrong field
-    /// descriptor rather than a diagnostic. An inherited member is not in `by_member`, which is
-    /// keyed by the DECLARING owner, so this declines exactly where the source needs the supertype
-    /// walk that signature collection has not done yet.
-    fn demand(&self, from: &DeferredProperty, name: &str) -> Option<Ty> {
-        self.demand_declared(from, name)
-            .or_else(|| self.module_property(from, name))
-    }
-
-    /// A module property that already HAS a type. Answered through this hook rather than by copying
-    /// the module's property table into every declaration's value scope: that copy is per
-    /// declaration and the table grows with the module, so it is quadratic in the number of
-    /// declarations being resolved — 2400 forward-referencing properties spent 25s almost entirely
-    /// cloning scope entries. Name resolution here is first-match over the declaration's OWN scope
-    /// and then this, which is the order the copy produced.
-    fn module_property(&self, from: &DeferredProperty, name: &str) -> Option<Ty> {
-        if !self.readable_from(from, name) {
-            return None;
-        }
-        self.table
-            .props
-            .get(name)
-            .map(|(ty, _, _)| *ty)
-            .filter(|ty| *ty != Ty::Pending && *ty != Ty::Error)
-    }
-
-    /// The declaration `name` refers to, resolved now if it has not been typed yet.
-    fn demand_declared(&self, from: &DeferredProperty, name: &str) -> Option<Ty> {
-        if let Some(owner) = from.owner() {
-            if let Some(ty) = self.demand_member(Some(from), owner, name) {
-                return Some(ty);
-            }
-            // The class — or something it inherits from — declares this spelling, so it SHADOWS any
-            // module property of the same name. Falling through would type the reference from an
-            // unrelated declaration: for `open class Base { val a = … }` and
-            // `class Derived : Base() { val b = a }` alongside a top-level `val a`, that types
-            // `Derived.b` from the top-level one, which is a wrong field descriptor rather than a
-            // diagnostic. Declining is the recoverable answer.
-            if self.class_declares(owner, name) {
-                return None;
-            }
-        }
-        if from.scope_binds(name) {
-            return None;
-        }
-        self.by_name
-            .get(name)
-            .and_then(|key| self.resolution_ty_for(Some(from), self.resolve(*key)))
-            .or_else(|| self.demand_function(name))
-    }
-
-    fn resolution_ty_for(
-        &self,
-        from: Option<&DeferredProperty>,
-        resolution: Resolution,
-    ) -> Option<Ty> {
-        if resolution.declined() == Some(DeclineReason::Recursive) {
-            if let Some(from) = from {
-                self.recursive_dependents.borrow_mut().insert(from.key);
-            }
-        }
-        resolution.ty()
-    }
-
-    /// The return of a top-level function whose own body has not been typed yet.
-    ///
-    /// A property initialized by a call to such a function cannot be answered from the table: the
-    /// walk records the return as undetermined, so the function is resolved on demand exactly as a
-    /// property is, and memoised the same way.
-    fn demand_function(&self, name: &str) -> Option<Ty> {
-        let (file_index, declaration) = *self.functions.get(name)?;
-        self.engine
-            .resolve(DeclKey::declaration(file_index, declaration.0), || {
-                infer_function_return_ty(
-                    &self.files[file_index as usize],
-                    file_index,
-                    declaration,
-                    self.table,
-                    EngineSeams {
-                        demand: &|name: &str| self.demand_name_only(name),
-                        demand_call: &|name: &str, arg_tys: &[Ty]| {
-                            self.demand_call_overload(name, arg_tys)
-                        },
-                        demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                            self.demand_on_receiver(None, receiver, name, arg_tys)
-                        },
-                        rejects: &|_, _| false,
-                    },
-                )
-            })
-            .ty()
-    }
-
-    /// A module function by spelling AND the call's argument types.
-    ///
-    /// The by-spelling index drops an overloaded name because a name alone cannot choose between
-    /// overloads. A CALL can: its arguments are already typed. Applicability is decided the way the
-    /// table decides it — parameter count, then each argument against the declared parameter — and
-    /// an answer is given only when exactly one candidate survives, so a genuinely ambiguous call
-    /// still declines rather than picking one.
-    fn demand_call_overload(&self, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
-        if let Some(ty) = self.demand_name_only(name) {
-            return Some(ty);
-        }
-        let candidates = self.functions_by_name.get(name)?;
-        if candidates.len() < 2 {
-            return None;
-        }
-        let applicable = candidates
-            .iter()
-            .filter(|(file_index, declaration)| {
-                !self
-                    .engine
-                    .is_computing(DeclKey::declaration(*file_index, declaration.0))
-            })
-            .filter(|(file_index, declaration)| {
-                let Some(Decl::Fun(function)) = self
-                    .files
-                    .get(*file_index as usize)
-                    .map(|file| file.decl(*declaration))
-                else {
-                    return false;
-                };
-                function.receiver.is_none()
-                    && function.params.len() == arg_tys.len()
-                    && self
-                        .signature_of(*file_index, *declaration)
-                        .is_some_and(|params| {
-                            params.iter().zip(arg_tys).all(|(parameter, argument)| {
-                                *argument == Ty::Error
-                                    || erased_type_key(*parameter) == erased_type_key(*argument)
-                            })
-                        })
-            })
-            .collect::<Vec<_>>();
-        let [(file_index, declaration)] = applicable.as_slice() else {
-            return None;
-        };
-        self.engine
-            .resolve(DeclKey::declaration(*file_index, declaration.0), || {
-                infer_function_return_ty(
-                    &self.files[*file_index as usize],
-                    *file_index,
-                    *declaration,
-                    self.table,
-                    EngineSeams {
-                        demand: &|name: &str| self.demand_name_only(name),
-                        demand_call: &|name: &str, arg_tys: &[Ty]| {
-                            self.demand_call_overload(name, arg_tys)
-                        },
-                        demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                            self.demand_on_receiver(None, receiver, name, arg_tys)
-                        },
-                        rejects: &|_, _| false,
-                    },
-                )
-            })
-            .ty()
-    }
-
-    /// The collected parameter types of the function declared at `(file, declaration)`.
-    fn signature_of(&self, file_index: u32, declaration: DeclId) -> Option<Vec<Ty>> {
-        self.table
-            .funs
-            .values()
-            .flatten()
-            .find(|signature| {
-                signature.source_file == Some(file_index)
-                    && signature.source_decl == Some(declaration)
-            })
-            .map(|signature| signature.params.clone())
-    }
-
-    /// A module declaration by spelling, without a requesting declaration's ordering rules.
-    fn demand_name_only(&self, name: &str) -> Option<Ty> {
-        self.by_name
-            .get(name)
-            .and_then(|key| self.resolve(*key).ty())
-            .or_else(|| self.demand_function(name))
-    }
-
-    /// The type of the member `owner` sees under `name`, resolving that declaration first if needed.
-    ///
-    /// This is the seam for every read that goes THROUGH a receiver — `other.a`, `this.a`, an
-    /// implicit companion receiver. Those do not reach the bare-name hook: they resolve against the
-    /// symbol table's member records, which still hold the placeholder while the member's own type
-    /// is being determined, and a placeholder read as an answer declines a program kotlinc accepts.
-    ///
-    /// The index is keyed by the DECLARING owner, so an inherited member is found by walking the
-    /// supertypes rather than by a second index that could disagree with the class graph.
-    fn demand_member(
-        &self,
-        from: Option<&DeferredProperty>,
-        owner: TypeName,
-        name: &str,
-    ) -> Option<Ty> {
-        let key = *self
-            .owner_chain(owner)
-            .into_iter()
-            .find_map(|declaring| self.by_member.get(&(declaring, name.to_string())))?;
-        self.resolution_ty_for(from, self.resolve(key))
-    }
-
-    /// Whether `owner` or any of its supertypes declares a property spelled `name`, whatever its
-    /// type is so far.
-    fn class_declares(&self, owner: TypeName, name: &str) -> bool {
-        self.owner_chain(owner).into_iter().any(|declaring| {
-            self.table
-                .class_by_type_name(declaring)
-                .is_some_and(|signature| signature.declared_props.contains_key(name))
-        })
-    }
-
-    /// Every classifier whose members `owner`'s body can read by bare name, nearest first: itself,
-    /// its source superclasses, the COMPANION of each, and the same again for each lexically
-    /// enclosing class.
-    ///
-    /// A companion's members are readable unqualified from the class body and from a nested class
-    /// (`companion object { val token = … }` read as `token`), so a chain of superclasses alone
-    /// misses them. Interfaces are not walked: a property they declare is abstract and has no
-    /// initializer to resolve. Bounded by the number of classes so a malformed cyclic hierarchy
-    /// cannot spin here.
-    fn owner_chain(&self, owner: TypeName) -> Vec<TypeName> {
-        let mut chain: Vec<TypeName> = Vec::new();
-        let mut lexical = Some(owner);
-        let bound = self.table.classes.len() + 1;
-        for _ in 0..bound {
-            let Some(start) = lexical else { break };
-            let mut current = Some(start);
-            for _ in 0..bound {
-                let Some(class) = current else { break };
-                if chain.contains(&class) {
-                    break;
-                }
-                chain.push(class);
-                let signature = self.table.class_by_type_name(class);
-                if let Some(companion) =
-                    signature.and_then(|signature| signature.companion_internal)
-                {
-                    if !chain.contains(&companion) {
-                        chain.push(companion);
-                    }
-                }
-                current = signature.and_then(|signature| signature.super_internal);
-            }
-            lexical = self
-                .table
-                .class_by_type_name(start)
-                .and_then(|signature| signature.inner_of);
-        }
-        chain
-    }
-
-    /// [`Self::demand_member`] addressed by the receiver's semantic type rather than its identity,
-    /// which is the form an expression read has to hand.
-    fn demand_on_receiver(
-        &self,
-        from: Option<&DeferredProperty>,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Ty],
-    ) -> Option<Ty> {
-        let owner = receiver.kotlin_class_internal()?;
-        self.demand_member(from, owner, name)
-            .or_else(|| self.demand_method(owner, name))
-            .or_else(|| self.demand_method_overload(owner, name, arg_tys))
-            .or_else(|| self.demand_module_extension(receiver, name))
-    }
-
-    /// A member FUNCTION by spelling AND the call's argument types.
-    ///
-    /// [`Self::demand_method`] is keyed by spelling, which cannot name one of several overloads, so
-    /// an overloaded member is absent from that index — `private fun foo() = foo(1)` beside
-    /// `private fun foo(i: Int) = "O"` left BOTH undetermined and settling to `Unit`. A call knows
-    /// its argument types; applicability is decided on them, and an answer is given only when
-    /// exactly one candidate survives.
-    fn demand_method_overload(&self, owner: TypeName, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
-        let applicable = self
-            .owner_chain(owner)
-            .into_iter()
-            .flat_map(|declaring| {
-                self.methods_by_name
-                    .get(&(declaring, name.to_string()))
-                    .map(Vec::as_slice)
-                    .unwrap_or_default()
-            })
-            .filter(|method| {
-                !self.engine.is_computing(DeclKey::method(
-                    method.file_index,
-                    method.declaration.0,
-                    method.method_index,
-                ))
-            })
-            .filter(|method| {
-                self.table
-                    .class_by_type_name(method.owner)
-                    .and_then(|class| class.methods.get(&method.name))
-                    .and_then(|overloads| overloads.get(method.overload_index))
-                    .is_some_and(|signature| {
-                        signature.params.len() == arg_tys.len()
-                            && signature.params.iter().zip(arg_tys).all(|(p, a)| {
-                                *a == Ty::Error || erased_type_key(*p) == erased_type_key(*a)
-                            })
-                    })
-            })
-            .collect::<Vec<_>>();
-        let [method] = applicable.as_slice() else {
-            return None;
-        };
-        self.engine
-            .resolve(
-                DeclKey::method(method.file_index, method.declaration.0, method.method_index),
-                || {
-                    Some(infer_method_return_ty(
-                        &self.files[method.file_index as usize],
-                        method.file_index,
-                        method.declaration,
-                        method.method_index,
-                        self.table,
-                        EngineSeams {
-                            demand: &|name: &str| self.demand_name_only(name),
-                            demand_call: &|name: &str, arg_tys: &[Ty]| {
-                                self.demand_call_overload(name, arg_tys)
-                            },
-                            demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                self.demand_on_receiver(None, receiver, name, arg_tys)
-                            },
-                            rejects: &|_, _| false,
-                        },
-                    ))
-                },
-            )
-            .ty()
-    }
-
-    /// A module-level EXTENSION reached through a receiver — `operator fun Int.getValue(…) = …`
-    /// answering `val x by …`.
-    ///
-    /// The read goes through a receiver, so it arrives here, but the declaration is top-level: no
-    /// owner chain contains it. The RECEIVER still has to match: answering on spelling alone would
-    /// let `fun String.tag() = 1.5` type a `tag()` call on an `Int` — a wrong type published with
-    /// no diagnostic anywhere. The extension table is keyed by erased receiver exactly as ordinary
-    /// extension lookup keys it, so the same key decides this.
-    fn demand_module_extension(&self, receiver: Ty, name: &str) -> Option<Ty> {
-        let (file_index, declaration) = *self.functions.get(name)?;
-        let declared_here = |signature: &&Signature| {
-            signature.source_file == Some(file_index) && signature.source_decl == Some(declaration)
-        };
-        let families = self.table.ext_funs.get(name)?;
-        receiver
-            .erased_recv_candidates()
-            .into_iter()
-            .filter_map(|key| families.get(&key))
-            .flatten()
-            .find(declared_here)?;
-        self.demand_function(name)
-    }
-
-    /// A member FUNCTION's inferred return, resolved on demand and memoised like every other
-    /// declaration. This is what the return pre-inference passes did by sweeping the module to a
-    /// fixpoint; asking for the one declaration that is needed replaces the sweep.
-    fn demand_method(&self, owner: TypeName, name: &str) -> Option<Ty> {
-        // A Java getter read as a Kotlin SYNTHETIC PROPERTY asks for `entries` while the declaration
-        // is spelled `getEntries` — the same mapping every other reader of these members applies. A
-        // demand that only tried the written spelling left the read undetermined, and the function
-        // that owned it settled to `Unit`.
-        let accessor = {
-            let mut characters = name.chars();
-            characters
-                .next()
-                .map(|first| format!("get{}{}", first.to_uppercase(), characters.as_str()))
-        };
-        let spellings = [Some(name.to_string()), accessor].into_iter().flatten();
-        let (file_index, declaration, method_index) = spellings
-            .flat_map(|spelling| {
-                self.owner_chain(owner)
-                    .into_iter()
-                    .filter_map(move |declaring| self.methods.get(&(declaring, spelling.clone())))
-                    .collect::<Vec<_>>()
-            })
-            .next()
-            .copied()?;
-        self.engine
-            .resolve(
-                DeclKey::method(file_index, declaration.0, method_index),
-                || {
-                    Some(infer_method_return_ty(
-                        &self.files[file_index as usize],
-                        file_index,
-                        declaration,
-                        method_index,
-                        self.table,
-                        EngineSeams {
-                            demand: &|name: &str| self.demand_name_only(name),
-                            demand_call: &|name: &str, arg_tys: &[Ty]| {
-                                self.demand_call_overload(name, arg_tys)
-                            },
-                            demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                self.demand_on_receiver(None, receiver, name, arg_tys)
-                            },
-                            rejects: &|_, _| false,
-                        },
-                    ))
-                },
-            )
-            .ty()
-    }
-
-    /// Whether `from`'s body may read the module property spelled `name` at all. An eager
-    /// initializer runs in declaration order, so a declaration written LATER IN ITS OWN FILE has no
-    /// value yet and must not type it; an expression getter is executable and may.
-    fn readable_from(&self, from: &DeferredProperty, name: &str) -> bool {
-        match from.kind {
-            DeferredKind::TopLevel {
-                position,
-                is_eager: true,
-                ..
-            } => !self
-                .source_order
-                .declared_later(from.file_index, position, name),
-            _ => true,
-        }
-    }
-}
-
-/// Type the properties the signature walk left undetermined, then publish and diagnose.
-///
-/// The walk visits files in ARGUMENT order, so a property initialized from a declaration in a later
-/// file could not be typed while the walk ran; a getter, being an executable body, may legally read
-/// a later declaration even within one file; and a class member may be waiting on either. All of
-/// these are the same question — what is this declaration's type — and all are answered here by the
-/// engine, which resolves each declaration when it is first asked for and remembers the answer.
-/// That is what makes `krusty A.kt B.kt` and `krusty B.kt A.kt` agree, and what makes a dependency
-/// loop decline rather than recurse.
-fn declaration_is_body_local(file: &File, declaration: DeclId) -> bool {
-    file.is_local_declaration(declaration)
-        || file
-            .anonymous_object_classes
-            .values()
-            .any(|candidate| *candidate == declaration)
-}
-
-fn resolve_deferred_properties(
+pub(crate) fn publish_checked_compile_time_constants(
     files: &[File],
+    headers: &crate::fir::StreamedHeaderModule,
+    index: &mut crate::fir::ResolvedModuleIndex,
     table: &mut SymbolTable,
-    deferred: &[DeferredProperty],
-    resolve_local_declarations: bool,
-    diags: &mut DiagSink,
 ) {
-    // No early return on an empty deferred queue: this is also where every undetermined RETURN and
-    // member-extension getter is resolved, and a module can have those with no deferred property at
-    // all.
-    let by_key = deferred
-        .iter()
-        .filter(|entry| {
-            resolve_local_declarations
-                || !declaration_is_body_local(
-                    &files[entry.file_index as usize],
-                    DeclId(entry.key.decl),
-                )
-        })
-        .map(|entry| (entry.key, entry))
-        .collect::<HashMap<_, _>>();
-    let mut by_name: HashMap<String, DeclKey> = HashMap::new();
-    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut by_member: HashMap<(TypeName, String), DeclKey> = HashMap::new();
-    let mut ambiguous_members: std::collections::HashSet<(TypeName, String)> =
-        std::collections::HashSet::new();
-    for entry in deferred {
-        if !resolve_local_declarations
-            && declaration_is_body_local(&files[entry.file_index as usize], DeclId(entry.key.decl))
-        {
-            continue;
-        }
-        match &entry.kind {
-            DeferredKind::TopLevel {
-                has_context_params: true,
-                ..
-            }
-            | DeferredKind::TopLevel {
-                has_receiver: true, ..
-            } => {}
-            DeferredKind::TopLevel { .. } => {
-                if by_name
-                    .insert(entry.name.clone(), entry.key)
-                    .is_some_and(|previous| previous != entry.key)
-                {
-                    ambiguous.insert(entry.name.clone());
-                }
-            }
-            DeferredKind::Member(owner) => {
-                // Two entries for the SAME declaration are not two declarations: a `var` with an
-                // inferred type queues its property and its backing field under one key. Only a
-                // genuine second declaration of the spelling makes the name unanswerable.
-                if by_member
-                    .insert((*owner, entry.name.clone()), entry.key)
-                    .is_some_and(|previous| previous != entry.key)
-                {
-                    ambiguous_members.insert((*owner, entry.name.clone()));
-                }
-            }
-        }
-    }
-    // A spelling declared twice is already a conflict diagnostic; answering a demand for it from
-    // whichever declaration was indexed last would type the reference from an arbitrary one.
-    for name in &ambiguous {
-        by_name.remove(name);
-    }
-    for key in &ambiguous_members {
-        by_member.remove(key);
-    }
-    // Functions whose expression body the walk could not type. Their return reads as undetermined,
-    // and a property initialized by a call to one needs it resolved first.
-    let mut undetermined_functions: HashMap<String, (u32, DeclId)> = HashMap::new();
-    let mut undetermined_function_decls: Vec<(u32, DeclId)> = Vec::new();
-    let mut undetermined_functions_by_name: HashMap<String, Vec<(u32, DeclId)>> = HashMap::new();
-    let mut ambiguous_functions: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    for (file_index, file) in files.iter().enumerate() {
-        for &declaration in &file.decls {
-            let Decl::Fun(function) = file.decl(declaration) else {
-                continue;
-            };
-            // Extensions are indexed too: their spelling is the key, and a spelling declared more
-            // than once is dropped below exactly as a plain function's is.
-            if !function_needs_return_preinfer(function) {
-                continue;
-            }
-            // As for members: the DECLARATION list carries every one, overloads included, because
-            // publishing an answer never has to choose between them.
-            undetermined_function_decls.push((file_index as u32, declaration));
-            undetermined_functions_by_name
-                .entry(function.name.clone())
-                .or_default()
-                .push((file_index as u32, declaration));
-            if undetermined_functions
-                .insert(function.name.clone(), (file_index as u32, declaration))
-                .is_some()
-            {
-                ambiguous_functions.insert(function.name.clone());
-            }
-        }
-    }
-    // An overloaded spelling cannot be answered by name alone.
-    for name in &ambiguous_functions {
-        undetermined_functions.remove(name);
-    }
-    // The same for MEMBER functions, keyed by the declaring class. The key comes from the table's
-    // own record of which declaration produced each classifier, so a nested or same-named class
-    // cannot be confused with another file's.
-    let mut undetermined_methods: HashMap<(TypeName, String), (u32, DeclId, u32)> = HashMap::new();
-    let mut undetermined_method_decls: Vec<UndeterminedMethod> = Vec::new();
-    let mut undetermined_methods_by_name: HashMap<(TypeName, String), Vec<UndeterminedMethod>> =
-        HashMap::new();
-    let mut ambiguous_methods: std::collections::HashSet<(TypeName, String)> =
-        std::collections::HashSet::new();
-    for (internal, signature) in &table.classes {
-        let Some(declaration) = signature.source_decl else {
-            continue;
-        };
-        let file_index = signature.source_file;
-        let Some(file) = files.get(file_index as usize) else {
-            continue;
-        };
-        let Decl::Class(class) = file.decl(declaration) else {
-            continue;
-        };
-        if !resolve_local_declarations && declaration_is_body_local(file, declaration) {
-            continue;
-        }
-        for (method_index, method) in class.methods.iter().enumerate() {
-            if !function_needs_return_preinfer(method) {
-                continue;
-            }
-            // The DECLARATION list carries every one, overloads included: publishing does not go
-            // through a spelling, it knows which declaration it asked about. Its position among the
-            // same-spelled overloads of the same kind is what selects the signature to write, the
-            // way the lowerer selects one.
-            let overload_index = class.methods[..method_index]
-                .iter()
-                .filter(|previous| {
-                    previous.name == method.name
-                        && previous.receiver.is_some() == method.receiver.is_some()
-                })
-                .count();
-            undetermined_methods_by_name
-                .entry((*internal, method.name.clone()))
-                .or_default()
-                .push(UndeterminedMethod {
-                    owner: *internal,
-                    name: method.name.clone(),
-                    is_extension: method.receiver.is_some(),
-                    overload_index,
-                    file_index,
-                    declaration,
-                    method_index: method_index as u32,
-                });
-            undetermined_method_decls.push(UndeterminedMethod {
-                owner: *internal,
-                name: method.name.clone(),
-                is_extension: method.receiver.is_some(),
-                overload_index,
-                file_index,
-                declaration,
-                method_index: method_index as u32,
-            });
-            let key = (*internal, method.name.clone());
-            if undetermined_methods
-                .insert(key.clone(), (file_index, declaration, method_index as u32))
-                .is_some()
-            {
-                ambiguous_methods.insert(key);
-            }
-        }
-    }
-    // The by-SPELLING index drops an overloaded name: a demand that arrives with a name alone
-    // cannot choose between them. The declaration list above keeps them.
-    for key in &ambiguous_methods {
-        undetermined_methods.remove(key);
-    }
-    // Member-extension PROPERTIES, keyed by the declaring class and the property's position among
-    // the extensions of that spelling — the same index the publish target uses.
-    let mut undetermined_member_ext_props: Vec<(TypeName, String, usize, u32, DeclId, u32)> =
-        Vec::new();
-    for (internal, signature) in &table.classes {
-        let Some(declaration) = signature.source_decl else {
-            continue;
-        };
-        let file_index = signature.source_file;
-        let Some(file) = files.get(file_index as usize) else {
-            continue;
-        };
-        let Decl::Class(class) = file.decl(declaration) else {
-            continue;
-        };
-        if !resolve_local_declarations && declaration_is_body_local(file, declaration) {
-            continue;
-        }
-        for (property_index, property) in class.body_props.iter().enumerate() {
-            if member_extension_property_preinfer_body(property).is_none() {
-                continue;
-            }
-            let extension_index = class.body_props[..property_index]
-                .iter()
-                .filter(|previous| previous.receiver.is_some() && previous.name == property.name)
-                .count();
-            undetermined_member_ext_props.push((
-                *internal,
-                property.name.clone(),
-                extension_index,
-                file_index,
-                declaration,
-                property_index as u32,
-            ));
-        }
-    }
-    let engine = TypeEngine::new();
-    let source_order = SourceOrderIndex::of(files);
-    let rejected_reads = std::cell::RefCell::new(HashMap::new());
-    let recursive_dependents = std::cell::RefCell::new(std::collections::HashSet::new());
-    let resolutions = {
-        let driver = DeferredInferenceDriver {
-            files,
-            table,
-            engine: &engine,
-            deferred: &by_key,
-            by_name: &by_name,
-            by_member: &by_member,
-            functions: &undetermined_functions,
-            functions_by_name: &undetermined_functions_by_name,
-            methods_by_name: &undetermined_methods_by_name,
-            methods: &undetermined_methods,
-            source_order: &source_order,
-            rejected_reads: &rejected_reads,
-            recursive_dependents: &recursive_dependents,
-        };
-        deferred
-            .iter()
-            .filter(|entry| {
-                resolve_local_declarations
-                    || !declaration_is_body_local(
-                        &files[entry.file_index as usize],
-                        DeclId(entry.key.decl),
-                    )
-            })
-            .map(|entry| (entry, driver.resolve(entry.key)))
-            .collect::<Vec<_>>()
-    };
-    let (engine_function_returns, engine_returns, engine_member_ext_props) = {
-        let driver = DeferredInferenceDriver {
-            files,
-            table,
-            engine: &engine,
-            deferred: &by_key,
-            by_name: &by_name,
-            by_member: &by_member,
-            functions: &undetermined_functions,
-            functions_by_name: &undetermined_functions_by_name,
-            methods_by_name: &undetermined_methods_by_name,
-            methods: &undetermined_methods,
-            source_order: &source_order,
-            rejected_reads: &rejected_reads,
-            recursive_dependents: &recursive_dependents,
-        };
-        // Asked per DECLARATION, so an overloaded spelling is answered too. Asking by name drops
-        // both overloads — a name alone cannot choose between them — and they then settled to
-        // `Unit`, which is how `fun f(n: Int) = n` and `fun f(s: String) = s` ended up sharing one
-        // return.
-        let function_returns = undetermined_function_decls
-            .iter()
-            .filter_map(|&(file_index, declaration)| {
-                let ty = engine
-                    .resolve(DeclKey::declaration(file_index, declaration.0), || {
-                        infer_function_return_ty(
-                            &files[file_index as usize],
-                            file_index,
-                            declaration,
-                            table,
-                            EngineSeams {
-                                demand: &|name: &str| driver.demand_name_only(name),
-                                demand_call: &|name: &str, arg_tys: &[Ty]| {
-                                    driver.demand_call_overload(name, arg_tys)
-                                },
-                                demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                    driver.demand_on_receiver(None, receiver, name, arg_tys)
-                                },
-                                rejects: &|_, _| false,
-                            },
-                        )
-                    })
-                    .ty()?;
-                Some((file_index, declaration, ty))
-            })
-            .collect::<Vec<_>>();
-        // Every inferred-return member, not only the ones still marked pending: the sweep can
-        // publish a WRONG answer rather than no answer — `Unit`, computed from a call it could not
-        // yet resolve — and a wrong answer is exactly what the engine exists to replace. Asked per
-        // DECLARATION, so an overloaded spelling is answered too; asking by name would drop both
-        // overloads and settle them to `Unit`, which made the answer depend on the order the files
-        // were passed in.
-        let method_returns = undetermined_method_decls
-            .iter()
-            .filter_map(|method| {
-                let ty = engine
-                    .resolve(
-                        DeclKey::method(
-                            method.file_index,
-                            method.declaration.0,
-                            method.method_index,
-                        ),
-                        || {
-                            Some(infer_method_return_ty(
-                                &files[method.file_index as usize],
-                                method.file_index,
-                                method.declaration,
-                                method.method_index,
-                                table,
-                                EngineSeams {
-                                    demand: &|name: &str| driver.demand_name_only(name),
-                                    demand_call: &|name: &str, arg_tys: &[Ty]| {
-                                        driver.demand_call_overload(name, arg_tys)
-                                    },
-                                    demand_member: &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                        driver.demand_on_receiver(None, receiver, name, arg_tys)
-                                    },
-                                    rejects: &|_, _| false,
-                                },
-                            ))
-                        },
-                    )
-                    .ty()?;
-                Some((method, ty))
-            })
-            .collect::<Vec<_>>();
-        let member_ext_property_types = undetermined_member_ext_props
-            .iter()
-            .filter_map(
-                |(owner, name, extension_index, file_index, declaration, property_index)| {
-                    let ty = engine
-                        .resolve(
-                            DeclKey::member(*file_index, declaration.0, *property_index),
-                            || {
-                                Some(infer_member_ext_property_ty(
-                                    &files[*file_index as usize],
-                                    *file_index,
-                                    *declaration,
-                                    *property_index,
-                                    table,
-                                    EngineSeams {
-                                        demand: &|name: &str| driver.demand_name_only(name),
-                                        demand_call: &|name: &str, arg_tys: &[Ty]| {
-                                            driver.demand_call_overload(name, arg_tys)
-                                        },
-                                        demand_member:
-                                            &|receiver: Ty, name: &str, arg_tys: &[Ty]| {
-                                                driver.demand_on_receiver(
-                                                    None, receiver, name, arg_tys,
-                                                )
-                                            },
-                                        rejects: &|_, _| false,
-                                    },
-                                ))
-                            },
-                        )
-                        .ty()?;
-                    Some((*owner, name.clone(), *extension_index, ty))
-                },
-            )
-            .collect::<Vec<_>>();
-        (function_returns, method_returns, member_ext_property_types)
-    };
-    for (owner, name, extension_index, ret) in engine_member_ext_props {
-        if ret == Ty::Error {
-            continue;
-        }
-        if let Some(signature) = table
-            .class_by_type_name_mut(owner)
-            .and_then(|class| class.member_ext_props.get_mut(&name))
-            .and_then(|properties| properties.get_mut(extension_index))
-        {
-            signature.ret = inferred_declaration_ty(ret);
-        }
-    }
-    for (file_index, declaration, ret) in engine_function_returns {
-        if ret == Ty::Error {
-            continue;
-        }
-        let declared_here = |signature: &&mut Signature| {
-            signature.source_file == Some(file_index) && signature.source_decl == Some(declaration)
-        };
-        if let Some(signature) = table
-            .funs
-            .values_mut()
-            .find_map(|signatures| signatures.iter_mut().find(declared_here))
-        {
-            signature.set_inferred_return(ret);
-            continue;
-        }
-        // An EXTENSION lives in its own table, keyed by spelling and then by receiver.
-        if let Some(signature) = table.ext_funs.values_mut().find_map(|receivers| {
-            receivers
-                .values_mut()
-                .find_map(|signatures| signatures.iter_mut().find(declared_here))
-        }) {
-            signature.set_inferred_return(ret);
-        }
-    }
-    for (method, ret) in engine_returns {
-        // `Error` is the engine saying "I could not determine this", not a type. Publishing it
-        // would overwrite whatever collection did determine (an anonymous object's member keeps
-        // the walk's answer, for one) with a placeholder that reads downstream as a real shape —
-        // an `Object` descriptor where the override needs `void`. Leave the existing answer alone;
-        // an undetermined member still carries the marker and settles with the rest.
-        if ret == Ty::Error {
-            continue;
-        }
-        let Some(class) = table.class_by_type_name_mut(method.owner) else {
-            continue;
-        };
-        class.set_inferred_source_method_return(
-            crate::libraries::SourceMember::Class {
-                file: method.file_index,
-                owner: method.declaration.0,
-                method: method.method_index,
-            },
-            ret,
-        );
-        // The signature written is the one this DECLARATION produced — its position among the
-        // same-spelled overloads of the same kind. Choosing by spelling alone wrote an inferred
-        // return onto an unrelated overload, including one with a DECLARED return.
-        if method.is_extension {
-            let Some((receiver, params)) = class
-                .member_ext_funs
-                .get(&method.name)
-                .and_then(|overloads| overloads.get(method.overload_index))
-                .map(|function| (function.receiver_ty, function.signature.params.clone()))
-            else {
-                continue;
-            };
-            class.set_inferred_member_extension_return(&method.name, receiver, &params, ret);
-            continue;
-        }
-        let Some(params) = class
-            .methods
-            .get(&method.name)
-            .and_then(|overloads| overloads.get(method.overload_index))
-            .map(|signature| signature.params.clone())
-        else {
-            continue;
-        };
-        class.set_inferred_method_return(&method.name, &params, ret);
-    }
-    for (entry, resolution) in resolutions {
-        // An answer that carries the error placeholder is a resolution FAILURE wearing a type's
-        // clothes: publishing it puts `<error>` into `@Metadata` and `java/lang/Object` into every
-        // descriptor derived from it, with no diagnostic anywhere. It takes the decline path with
-        // the undetermined ones, which reports it.
-        let Some(ty) = resolution.ty().filter(|ty| !ty.mentions_error()) else {
-            // Undetermined is not a type. Replace the marker with the ordinary error placeholder so
-            // nothing downstream — emission, `@Metadata`, a later read — can mistake "not resolved"
-            // for a shape. The decline is DIAGNOSED by the authoritative check of the declaration,
-            // not here: only that run knows whether the body already reported its own error (an
-            // unresolved reference inside the initializer), in which case kotlinc shows no second
-            // inference error.
-            let failure = if resolution.declined() == Some(DeclineReason::Recursive)
-                || recursive_dependents.borrow().contains(&entry.key)
-            {
-                let span = entry
-                    .expression
-                    .and_then(|expression| files[entry.file_index as usize].expr_span(expression))
-                    .unwrap_or(entry.span);
-                PropertyInferenceFailure::Recursive { span }
-            } else if let Some(reads) = rejected_reads.borrow().get(&entry.key).cloned() {
-                PropertyInferenceFailure::UninitializedReads(reads)
-            } else {
-                PropertyInferenceFailure::Untypeable
-            };
-            table.property_inference_failures.insert(entry.key, failure);
-            decline_pending_property(table, entry);
-            continue;
-        };
-        match &entry.kind {
-            DeferredKind::TopLevel { .. } if entry.backing_field => {
-                publish_top_level_backing_field_type(table, entry, ty)
-            }
-            DeferredKind::TopLevel { .. } => {
-                publish_top_level_property_type(files, table, entry, ty)
-            }
-            DeferredKind::Member(owner) if entry.backing_field => {
-                publish_member_backing_field_type(table, *owner, &entry.name, ty);
-            }
-            DeferredKind::Member(owner) => {
-                publish_member_property_type(table, *owner, entry, ty);
-                if let Decl::Class(class) =
-                    files[entry.file_index as usize].decl(DeclId(entry.key.decl))
-                {
-                    let body_property_index = entry
-                        .key
-                        .member
-                        .checked_sub(
-                            u32::try_from(class.props.len())
-                                .expect("too many constructor properties"),
-                        )
-                        .and_then(|index| usize::try_from(index).ok());
-                    if let Some(property) = class
-                        .body_props
-                        .get(body_property_index.unwrap_or(usize::MAX))
-                        .filter(|property| property.name == entry.name)
-                    {
-                        publish_member_constant(
-                            &files[entry.file_index as usize],
-                            table,
-                            *owner,
-                            property,
-                            ty,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Property cycles are carried to the property checker because it owns suppression of cascaded
-    // body diagnostics. Function cycles have no analogous declaration-failure record, so report
-    // every stable declaration on the engine's cycle stack here, before Pass 2 begins.
-    for key in engine.cycle_members() {
-        let Some(file) = files.get(key.file as usize) else {
-            continue;
-        };
-        let declaration = DeclId(key.decl);
-        let function = match key.list {
-            crate::type_engine::MemberList::Own => match file.decl(declaration) {
-                Decl::Fun(function) => Some(function),
-                Decl::Class(_) | Decl::Property(_) => None,
-            },
-            crate::type_engine::MemberList::Method => match file.decl(declaration) {
-                Decl::Class(class) => class.methods.get(key.member as usize),
-                Decl::Fun(_) | Decl::Property(_) => None,
-            },
-            crate::type_engine::MemberList::Property => None,
-        };
-        let Some(function) = function else {
-            continue;
-        };
-        let span = match &function.body {
-            FunBody::Expr(expression) => file.expr_span(*expression).unwrap_or(function.span),
-            FunBody::Block(_) | FunBody::None => function.span,
-        };
-        diags.set_file(key.file);
-        diags.error(span, RECURSIVE_INFERENCE_MESSAGE);
-    }
-}
-
-/// The engine's member-demand hook: what `owner`'s `name` denotes, refined by a CALL's argument
-/// types (empty for a plain read, where there is nothing to choose between overloads with).
-type DemandMember<'a> = &'a dyn Fn(Ty, &str, &[Ty]) -> Option<Ty>;
-
-/// The engine's bare-name demand: what a module declaration spelled `name` denotes.
-type DemandName<'a> = &'a dyn Fn(&str) -> Option<Ty>;
-
-/// The same for a spelling that may be OVERLOADED, chosen by a call's argument types.
-type DemandCall<'a> = &'a dyn Fn(&str, &[Ty]) -> Option<Ty>;
-
-/// `KFunctionN<A, …, R>` as the function type `(A, …) -> R`.
-///
-/// A function reference types as the function type once its target's return is known; only while
-/// that return is undetermined does it stay a reflective `KFunctionN`. Property references
-/// (`KProperty1`) are untouched: they are not function types.
-fn natural_function_reference_ty(ty: Ty) -> Ty {
-    let Ty::Obj(name, args) = ty else {
-        return ty;
-    };
-    let rendered = name.render();
-    if !rendered.starts_with("kotlin/reflect/KFunction") || args.is_empty() {
-        return ty;
-    }
-    let Some((ret, params)) = args.split_last() else {
-        return ty;
-    };
-    Ty::fun(params.to_vec(), *ret)
-}
-
-/// One class member whose return the walk could not determine, addressed by DECLARATION.
-///
-/// The by-spelling index cannot carry an overloaded name; this can, because publishing an answer
-/// never has to choose — it already knows which declaration was asked about.
-struct UndeterminedMethod {
-    owner: TypeName,
-    name: String,
-    /// A member EXTENSION keeps its own signature table, so which one to write is decided here.
-    is_extension: bool,
-    /// Position among the same-spelled overloads of the same kind, as the lowerer counts them.
-    overload_index: usize,
-    file_index: u32,
-    declaration: DeclId,
-    method_index: u32,
-}
-
-/// Turn a declaration the engine could not determine into the ordinary error placeholder.
-fn decline_pending_property(table: &mut SymbolTable, entry: &DeferredProperty) {
-    // An extension property the engine could not determine is REMOVED from the extension table
-    // rather than left carrying a placeholder: an entry whose type is `Error` is registered — it
-    // resolves at every use site and reaches emission and `@Metadata` with `<error>` in its
-    // descriptor. Not registering it is what collection did with the same answer, and the use site
-    // reports the ordinary unresolved-reference diagnostic.
-    //
-    // The module property tables below are NOT touched for one: they are keyed by bare spelling,
-    // which an extension property does not own — writing there would place the placeholder on an
-    // unrelated `val` of the same name. `publish_top_level_property_type` returns early for the
-    // same reason.
-    if matches!(
-        entry.kind,
-        DeferredKind::TopLevel {
-            has_receiver: true,
-            ..
-        }
-    ) {
-        // In the streamed path this record is also the stable receiver/parameter header for the
-        // compact signature graph. The legacy engine declining its result approximation must not
-        // erase that header before the authoritative solver runs. `fail_undetermined_returns`
-        // still retires the private `Pending` marker, and finalization projects the graph result
-        // back into this exact stable declaration before Pass 2.
-        let retained_for_signature_graph = table.ext_props.values().flatten().any(|signature| {
-            signature.source == (entry.file_index, entry.key.decl)
-                && signature.ty == Ty::Pending
-                && signature.stable_declaration.is_some()
-        });
-        if retained_for_signature_graph {
-            return;
-        }
-        for overloads in table.ext_props.values_mut() {
-            overloads.retain(|signature| {
-                signature.source != (entry.file_index, entry.key.decl)
-                    || signature.ty != Ty::Pending
-            });
-        }
-        return;
-    }
-    if entry.backing_field && entry.owner().is_none() {
-        if let Some(signature) = table
-            .source_props
-            .get_mut(&(entry.file_index, entry.key.decl))
-            .filter(|signature| signature.storage_ty == Some(Ty::Pending))
-        {
-            signature.storage_ty = Some(Ty::Error);
-        }
-        return;
-    }
-    if let Some(signature) = table
-        .source_props
-        .get_mut(&(entry.file_index, entry.key.decl))
-        .filter(|signature| signature.ty == Ty::Pending)
-    {
-        signature.ty = Ty::Error;
-    }
-    if let Some(module_property) = table
-        .props
-        .get_mut(&entry.name)
-        .filter(|property| property.0 == Ty::Pending)
-    {
-        module_property.0 = Ty::Error;
-    }
-    if let Some(owner) = entry.owner() {
-        if let Some(signature) = table.class_by_type_name_mut(owner) {
-            if let Some(property) = signature
-                .declared_props
-                .get_mut(&entry.name)
-                .filter(|property| property.ty == Ty::Pending)
-            {
-                property.ty = Ty::Error;
-            }
-            for backing in signature.props.iter_mut() {
-                if backing.0 == entry.name && backing.1 == Ty::Pending {
-                    backing.1 = Ty::Error;
-                }
-            }
-        }
-    }
-}
-
-/// Write a resolved top-level property type into the module signature.
-fn publish_top_level_property_type(
-    files: &[File],
-    table: &mut SymbolTable,
-    entry: &DeferredProperty,
-    ty: Ty,
-) {
-    let Decl::Property(property) = files[entry.file_index as usize].decl(DeclId(entry.key.decl))
-    else {
-        return;
-    };
-    // The compile-time value depends on the type the engine settled on: `source_literal_constant`
-    // reads the literal THROUGH it (a `UIntLit` is a long constant under `ULong` and an int
-    // constant otherwise), so it cannot have been computed while the type was still a placeholder.
-    let compile_time_constant = (!property.is_var)
-        .then(|| {
-            property.init.and_then(|init| {
-                source_literal_constant(&files[entry.file_index as usize], init, ty)
-            })
-        })
-        .flatten();
-    // An EXTENSION property lives in its own table, keyed by erased receiver and spelling; it has
-    // no `source_props` entry to update.
-    if property.receiver.is_some() {
-        if let Some(signature) = table
-            .ext_props
-            .values_mut()
-            .flatten()
-            .find(|signature| signature.source == (entry.file_index, entry.key.decl))
-            .filter(|signature| signature.ty == Ty::Pending)
-        {
-            signature.ty = ty;
-        }
-        return;
-    }
-    crate::trace_compiler!(
-        "signature_inference",
-        "finalize top-level property name={} source=({}, {}) type={ty:?}",
-        property.name,
-        entry.file_index,
-        entry.key.decl,
-    );
-    let published = table
-        .source_props
-        .get_mut(&(entry.file_index, entry.key.decl))
-        .filter(|signature| signature.ty == Ty::Pending)
-        .map(|signature| {
-            signature.ty = ty;
-            signature.compile_time_constant = compile_time_constant.clone();
-            signature.context_params.is_empty()
-        });
-    if published == Some(true) {
-        if let Some(module_property) = table.props.get_mut(&property.name) {
-            module_property.0 = ty;
-        }
-    }
-}
-
-/// Check and publish the compile-time payloads of top-level `const val` declarations after stable
-/// signature finalization.
-///
-/// This is Pass-1 dependency work, not an ordinary-body retention path: each initializer is checked
-/// as one bounded declaration fragment, its AST-local decisions are immediately discarded, and only
-/// the compact [`LibraryConst`](crate::libraries::LibraryConst) survives. Repeating to a fixpoint lets
-/// a forward constant read consume the declaration-owned payload published by a later source file.
-pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut SymbolTable) {
     // Explicitly typed and already-inferred singleton constants do not necessarily pass through
     // the deferred-property publication loop. Publish their literal payloads unconditionally from
     // the bounded declaration fragment before stable metadata is projected. This stores only the
@@ -15669,19 +10644,24 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
         .iter()
         .enumerate()
         .flat_map(|(file_index, file)| {
-            file.decls.iter().copied().filter_map(move |declaration| {
-                let Decl::Class(class) = file.decl(declaration) else {
-                    return None;
-                };
-                Some((file_index as u32, declaration, class))
-            })
+            file.decls
+                .iter()
+                .copied()
+                .zip(
+                    headers
+                        .source_declarations(crate::fir::SourceFileId::from_raw(file_index as u32)),
+                )
+                .filter_map(move |(declaration, stable)| {
+                    let Decl::Class(class) = file.decl(declaration) else {
+                        return None;
+                    };
+                    Some((file_index as u32, *stable, class))
+                })
         })
         .flat_map(|(file_index, declaration, class)| {
             let owner = table.classes.values().find_map(|signature| {
-                (signature.source_file == file_index
-                    && signature.source_decl == Some(declaration)
-                    && signature.is_object())
-                .then_some(signature.internal)
+                (signature.stable_declaration == Some(declaration) && signature.is_object())
+                    .then_some(signature.internal)
             });
             class
                 .body_props
@@ -15705,16 +10685,24 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
         .iter()
         .enumerate()
         .flat_map(|(file_index, file)| {
-            file.decls.iter().copied().filter_map(move |declaration| {
-                let Decl::Property(property) = file.decl(declaration) else {
-                    return None;
-                };
-                (property.is_const && property.receiver.is_none()).then_some((
-                    file_index as u32,
-                    declaration,
-                    property.init?,
-                ))
-            })
+            file.decls
+                .iter()
+                .copied()
+                .zip(
+                    headers
+                        .source_declarations(crate::fir::SourceFileId::from_raw(file_index as u32)),
+                )
+                .filter_map(move |(declaration, stable)| {
+                    let Decl::Property(property) = file.decl(declaration) else {
+                        return None;
+                    };
+                    (property.is_const && property.receiver.is_none()).then_some((
+                        file_index as u32,
+                        declaration,
+                        *stable,
+                        property.init?,
+                    ))
+                })
         })
         .collect::<Vec<_>>();
     // A later constant may depend on a payload published earlier in this fixpoint. Disable the
@@ -15722,11 +10710,10 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
     // declaration payload instead of a snapshot from before the preceding publication.
     for _ in 0..declarations.len() {
         let mut changed = false;
-        for &(file_index, declaration, initializer) in &declarations {
-            let source = (file_index, declaration.0);
+        for &(file_index, declaration, stable, initializer) in &declarations {
             let already_published = table
-                .source_props
-                .get(&source)
+                .stable_source_props
+                .get(&stable)
                 .is_none_or(|property| property.compile_time_constant.is_some());
             if already_published {
                 continue;
@@ -15737,8 +10724,22 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
                     continue;
                 };
                 let mut diagnostics = DiagSink::new();
-                let mut checker =
-                    make_checker(file, file_index, Some(files), table, &mut diagnostics);
+                let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
+                    file,
+                    crate::fir::SourceFileId::from_raw(file_index),
+                    index,
+                )
+                .expect("constant syntax must bind to the stable declaration inventory");
+                let environment = CheckerExternalEnvironment::from(&*table);
+                let mut checker = make_checker_with_index(
+                    file,
+                    file_index,
+                    &environment,
+                    index,
+                    &active,
+                    None,
+                    &mut diagnostics,
+                );
                 let root = CheckerScope::root();
                 checker.check_property(&root, property, declaration);
                 checker.resolved_constants.get(&initializer).cloned()
@@ -15746,8 +10747,9 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
             let Some(folded) = folded else {
                 continue;
             };
-            if let Some(property) = table.source_props.get_mut(&source) {
-                property.compile_time_constant = Some(folded);
+            if let Some(property) = table.stable_source_props.get_mut(&stable) {
+                property.compile_time_constant = Some(folded.clone());
+                index.publish_compile_time_constant(stable, folded);
                 changed = true;
             }
         }
@@ -15759,80 +10761,6 @@ pub(crate) fn publish_checked_compile_time_constants(files: &[File], table: &mut
 }
 
 /// Publish a top-level explicit backing field without changing the property's declared signature.
-fn publish_top_level_backing_field_type(table: &mut SymbolTable, entry: &DeferredProperty, ty: Ty) {
-    if let Some(signature) = table
-        .source_props
-        .get_mut(&(entry.file_index, entry.key.decl))
-        .filter(|signature| signature.storage_ty == Some(Ty::Pending))
-    {
-        signature.storage_ty = Some(ty);
-    }
-}
-
-fn member_property_by_source_mut(
-    class: &mut ClassSig,
-    source: crate::libraries::SourceMember,
-) -> Option<&mut DeclaredPropertySig> {
-    class
-        .declared_props
-        .values_mut()
-        .chain(class.contextual_props.values_mut().flatten())
-        .find(|property| property.source_member == Some(source))
-}
-
-/// Write a resolved member property type into its exact declaration signature and, for an ordinary
-/// stored property, its backing-field entry. A contextual property has no field and may share its
-/// spelling with other overloads, so it is selected by source identity rather than by name.
-fn publish_member_property_type(
-    table: &mut SymbolTable,
-    owner: TypeName,
-    entry: &DeferredProperty,
-    ty: Ty,
-) {
-    let Some(signature) = table.class_by_type_name_mut(owner) else {
-        return;
-    };
-    let source = crate::libraries::SourceMember::ClassProperty {
-        file: entry.file_index,
-        owner: entry.key.decl,
-        property: entry.key.member,
-    };
-    if let Some(property) = member_property_by_source_mut(signature, source) {
-        property.ty = ty;
-    }
-    if let Some(backing) = signature
-        .props
-        .iter_mut()
-        .find(|(property_name, _, _)| property_name == &entry.name)
-    {
-        backing.1 = ty;
-    }
-}
-
-/// Write a resolved explicit backing-field type into its owner's signature.
-///
-/// The PROPERTY's type is declared here; only the field's is inferred, so this touches the storage
-/// slot and the backing entry, never `declared_props`.
-fn publish_member_backing_field_type(table: &mut SymbolTable, owner: TypeName, name: &str, ty: Ty) {
-    let Some(signature) = table.class_by_type_name_mut(owner) else {
-        return;
-    };
-    if let Some(property) = signature.declared_props.get_mut(name) {
-        property.storage_ty = Some(ty);
-    }
-    if let Some(backing) = signature
-        .props
-        .iter_mut()
-        .find(|(property_name, _, _)| property_name == name)
-    {
-        backing.1 = ty;
-    }
-}
-
-/// Record a `const val` member's compile-time value once its type is known.
-///
-/// The value is read THROUGH the type — a `UIntLit` is a long constant under `ULong` and an int
-/// constant otherwise — so collection, which saw only the placeholder, could not compute it.
 fn publish_member_constant(
     file: &File,
     table: &mut SymbolTable,
@@ -15865,1148 +10793,6 @@ fn publish_member_constant(
 ///
 /// Reads only what the table already holds. A reference to a module declaration whose own type is
 /// still being determined resolves through [`infer_lit_ty_scoped_on_demand`] instead.
-fn infer_lit_ty_scoped(
-    source: InferenceSource<'_>,
-    e: ExprId,
-    class_names: &ClassNames,
-    props: &[(String, Ty, bool)],
-    src: &dyn SemanticPlatform,
-    table: &SymbolTable,
-) -> Ty {
-    let _ = (class_names, src);
-    infer_lit_ty_scoped_on_demand(source, e, props, table, &|_| None, &|_, _, _| None)
-}
-
-/// Whether an argument of type `actual` could be passed for a parameter declared `parameter`.
-///
-/// Answers YES wherever it cannot tell — a type variable, an erased top, an unresolved type, or a
-/// function type (whose shape this does not compare) all fit — and otherwise asks the ordinary
-/// subtyping relation, so a `Number` parameter accepts an `Int` argument and a `CharSequence` one a
-/// `String`. Comparing classifier IDENTITY instead reads every supertype parameter as a non-fit,
-/// which is exactly the case where the call belongs to the other constructor.
-fn constructor_param_may_take(
-    oracle: &dyn crate::assignable::TypeOracle,
-    actual: Ty,
-    parameter: Ty,
-) -> bool {
-    if parameter == Ty::Error || actual == Ty::Error {
-        return true;
-    }
-    if matches!(parameter, Ty::TyParam(..)) || matches!(actual, Ty::TyParam(..)) {
-        return true;
-    }
-    if matches!(parameter, Ty::Fun(_)) || matches!(actual, Ty::Fun(_)) {
-        return true;
-    }
-    if parameter.non_null() == Ty::obj("kotlin/Any") {
-        return true;
-    }
-    crate::assignable::is_subtype(&crate::assignable::TyCtx::new(), oracle, actual, parameter)
-}
-
-/// Whether a declaration with these parameters could be CALLED with `arity` arguments.
-///
-/// A declared parameter count is not an arity: every default makes a shorter call reachable and a
-/// vararg makes longer ones reachable.
-fn constructor_at_arity(declared: usize, optional: usize, vararg: bool, arity: usize) -> bool {
-    let least = declared.saturating_sub(optional);
-    if vararg {
-        arity + 1 >= least
-    } else {
-        arity >= least && arity <= declared
-    }
-}
-
-fn constructor_params_may_take(
-    oracle: &dyn crate::assignable::TypeOracle,
-    parameters: &[Ty],
-    actuals: &[Option<Ty>],
-) -> bool {
-    parameters
-        .iter()
-        .zip(actuals)
-        .all(|(parameter, actual)| match actual {
-            Some(actual) => constructor_param_may_take(oracle, *actual, *parameter),
-            None => true,
-        })
-}
-
-/// A construction whose call a SECONDARY constructor could own must be published unapplied.
-///
-/// The applied type comes from binding the class's parameters against the PRIMARY constructor.
-/// `class Cell<T>(val value: T, val flag: Boolean) { constructor(n: Int, v: T) }` written
-/// `Cell(5, "tag")` resolves to the secondary one, so binding `T` from the primary's `(T, Boolean)`
-/// gives `Cell<Int>` — a `checkcast` to `Integer` on a `String`, emitted with no diagnostic and
-/// throwing on first read where kotlinc runs. Keeping the classifier raw rejects the program
-/// instead of miscompiling it.
-fn withheld_construction_ty(
-    file: &File,
-    expression: ExprId,
-    expr_types: &[Ty],
-    table: &SymbolTable,
-    ty: Ty,
-) -> Ty {
-    let Ty::Obj(internal, args) = ty else {
-        return ty;
-    };
-    if args.is_empty() {
-        return ty;
-    }
-    let Expr::Call {
-        args: call_args, ..
-    } = file.expr(expression)
-    else {
-        return ty;
-    };
-    let Some(class) = table.class_by_type_name(internal) else {
-        return ty;
-    };
-    if class.secondary_ctors.is_empty() {
-        return ty;
-    }
-    let actuals = call_args
-        .iter()
-        .map(|argument| {
-            expr_types
-                .get(argument.0 as usize)
-                .copied()
-                .filter(|ty| *ty != Ty::Error)
-        })
-        .collect::<Vec<_>>();
-    let arity = call_args.len();
-    let oracle = table.source_constructor_matcher_with(table.libraries.as_ref());
-    let primary = &class.ctor_params;
-    // Every default makes a SHORTER call reach the primary, so a declared parameter count is not an
-    // arity. Ignoring defaults reads an ordinary `C(x)` on `class C<T>(x: T, y: Int = 0)` as a call
-    // the primary cannot take, and withholds a type argument the construction genuinely fixed.
-    let primary_optional = class
-        .ctor_param_names
-        .iter()
-        .filter(|(_, has_default)| *has_default)
-        .count();
-    let primary_fits = constructor_at_arity(
-        primary.len(),
-        primary_optional,
-        class.ctor_vararg.is_some(),
-        arity,
-    ) && constructor_params_may_take(&oracle, primary, &actuals);
-    // A secondary owns the call only where it takes the arity AND its parameters accept the
-    // arguments. Where the primary also fits, the call is the primary's: an applicable primary is
-    // what the applied type was bound from.
-    let secondary_owns = !primary_fits
-        && class.secondary_ctors.iter().any(|parameters| {
-            parameters.len() == arity && constructor_params_may_take(&oracle, parameters, &actuals)
-        });
-    let primary_owns_it = primary_fits
-        || !class
-            .secondary_ctors
-            .iter()
-            .any(|parameters| parameters.len() == arity);
-    if primary_owns_it && !secondary_owns {
-        return ty;
-    }
-    Ty::obj_name(internal)
-}
-
-/// Whether this expression has no publishable declaration type because every value-producing path
-/// diverges. Ordinary least-upper-bound computation is semantic and therefore needs no separate
-/// declaration-only correction here.
-fn declaration_body_is_unpublishable(file: &File, expression: ExprId, expr_types: &[Ty]) -> bool {
-    // A body that never yields a value gives the declaration no type. `val a = throw E()` and
-    // `val a = return` would otherwise infer `Nothing` and emit a `Ljava/lang/Void;` field, where
-    // kotlinc rejects the property outright ("property type 'Nothing' needs to be specified
-    // explicitly"). An elvis whose RIGHT side throws is unaffected: its type is the left side's.
-    if expr_types
-        .get(expression.0 as usize)
-        .is_some_and(|ty| *ty == Ty::Nothing)
-    {
-        return true;
-    }
-    let Expr::Elvis { lhs, rhs } = file.expr(expression) else {
-        return false;
-    };
-    let side = |e: &ExprId| {
-        expr_types
-            .get(e.0 as usize)
-            .copied()
-            .unwrap_or(Ty::Error)
-            .non_null()
-    };
-    let (left, right) = (side(lhs), side(rhs));
-    // `null ?: throw …` yields the LEFT side, and a bare `null` left becomes `Nothing?` — a
-    // publishable type — so the rule above never sees it. Neither side ever produces a value, so
-    // the declaration has no type; kotlinc rejects it.
-    if right == Ty::Nothing && matches!(left, Ty::Null | Ty::Nothing) {
-        return true;
-    }
-    false
-}
-
-/// The engine's seams into one checker run.
-///
-/// Grouped rather than passed one by one: they are three views of a single question — what does the
-/// engine say about a name this declaration reads — and a run either has all three or, for the
-/// authoritative check, none.
-#[derive(Clone, Copy)]
-struct EngineSeams<'a> {
-    /// A name whose declaration has not been typed yet.
-    demand: DemandName<'a>,
-    /// A spelling that may be OVERLOADED, chosen by the call's argument types.
-    demand_call: DemandCall<'a>,
-    /// The same, for a read through a receiver. The argument types are the CALL's, empty for a
-    /// plain read: a name alone cannot choose between overloads, and they can.
-    demand_member: DemandMember<'a>,
-    /// A name this declaration may not read at all, by initialization order.
-    rejects: &'a dyn Fn(&str, Span) -> bool,
-}
-
-/// Retire the collection-only pending marker after demand-driven inference. A failed declaration
-/// carries `Error` only on the diagnostic path; inventing `Unit` here would publish a false ABI.
-fn fail_undetermined_returns(table: &mut SymbolTable) {
-    for signatures in table.funs.values_mut() {
-        for signature in signatures.iter_mut() {
-            if signature.ret == Ty::Pending {
-                signature.set_inferred_return(Ty::Error);
-            }
-        }
-    }
-    for overloads in table.ext_funs.values_mut() {
-        for receivers in overloads.values_mut() {
-            for signature in receivers.iter_mut() {
-                if signature.ret == Ty::Pending {
-                    signature.set_inferred_return(Ty::Error);
-                }
-            }
-        }
-    }
-    // Top-level PROPERTIES and top-level EXTENSION properties keep their own tables. An extension
-    // property with an inferred type (`val A.z get() = this.x`) settles here; leaving the marker in
-    // place trips the finalization assertion and aborts the compiler.
-    for (ty, _, _) in table.props.values_mut() {
-        if *ty == Ty::Pending {
-            *ty = Ty::Error;
-        }
-    }
-    for property in table.source_props.values_mut() {
-        if property.ty == Ty::Pending {
-            property.ty = Ty::Error;
-        }
-    }
-    for properties in table.ext_props.values_mut() {
-        for property in properties.iter_mut() {
-            if property.receiver == Ty::Pending {
-                property.receiver = Ty::Error;
-            }
-            if property.ty == Ty::Pending {
-                property.ty = Ty::Error;
-            }
-            for context in property.context_params.iter_mut() {
-                if *context == Ty::Pending {
-                    *context = Ty::Error;
-                }
-            }
-        }
-    }
-    // Class members too. The marker means "ask the engine for this declaration"; where nothing
-    // answered — an overloaded spelling the index cannot key, a member of a classifier with no
-    // source declaration — it must not survive into checking or emission, so it settles to the same
-    // `Unit` the walk used to guess. The difference is that the guess is now the LAST resort rather
-    // than the first answer.
-    for class in table.classes.values_mut() {
-        for (_, ty, _) in &mut class.props {
-            if *ty == Ty::Pending {
-                *ty = Ty::Error;
-            }
-        }
-        for property in class.declared_props.values_mut() {
-            if property.ty == Ty::Pending {
-                property.ty = Ty::Error;
-            }
-            if property.storage_ty == Some(Ty::Pending) {
-                property.storage_ty = Some(Ty::Error);
-            }
-        }
-        for property in class.contextual_props.values_mut().flatten() {
-            if property.ty == Ty::Pending {
-                property.ty = Ty::Error;
-            }
-            debug_assert!(
-                property.storage_ty.is_none(),
-                "a context property cannot own backing storage"
-            );
-        }
-        for overloads in class.methods.values_mut() {
-            for signature in overloads.iter_mut() {
-                if signature.ret == Ty::Pending {
-                    signature.set_inferred_return(Ty::Error);
-                }
-            }
-        }
-        for plan in &mut class.source_methods {
-            if plan.signature.ret == Ty::Pending {
-                plan.signature.set_inferred_return(Ty::Error);
-            }
-        }
-        for overloads in class.generic_methods.values_mut() {
-            for method in overloads.iter_mut() {
-                if method.ret_shape == Ty::Pending {
-                    method.ret_shape = Ty::Error;
-                }
-            }
-        }
-        // A member EXTENSION keeps its own table, and a marker left there reaches emission exactly
-        // as an ordinary member's would: `operator fun String.invoke() = Unit` is a real method with
-        // a real descriptor.
-        for overloads in class.member_ext_funs.values_mut() {
-            for function in overloads.iter_mut() {
-                if function.signature.ret == Ty::Pending {
-                    function.signature.set_inferred_return(Ty::Error);
-                }
-            }
-        }
-        // Member-extension PROPERTIES keep a third table, and their getter descriptor is emitted
-        // from it. A marker left here reaches `type_encoder`, which rejects it.
-        for properties in class.member_ext_props.values_mut() {
-            for property in properties.iter_mut() {
-                if property.ret == Ty::Pending {
-                    property.ret = Ty::Error;
-                }
-            }
-        }
-    }
-}
-
-fn module_signatures_mention_pending(table: &SymbolTable) -> bool {
-    let generic_mentions_pending = |generic: &GenericSig| {
-        generic.receiver.is_some_and(Ty::mentions_pending)
-            || generic.params.iter().copied().any(Ty::mentions_pending)
-            || generic.ret.mentions_pending()
-            || generic
-                .formal_bounds
-                .iter()
-                .flatten()
-                .copied()
-                .any(Ty::mentions_pending)
-    };
-    let signature_mentions_pending = |signature: &Signature| {
-        signature.params.iter().copied().any(Ty::mentions_pending)
-            || signature.ret.mentions_pending()
-            || signature.source_receiver.is_some_and(Ty::mentions_pending)
-            || signature
-                .generic_sig
-                .as_ref()
-                .is_some_and(&generic_mentions_pending)
-    };
-    if table
-        .funs
-        .values()
-        .flatten()
-        .any(&signature_mentions_pending)
-        || table
-            .ext_funs
-            .values()
-            .flat_map(HashMap::values)
-            .flatten()
-            .any(&signature_mentions_pending)
-        || table
-            .source_props
-            .values()
-            .any(|property| property.ty.mentions_pending())
-        || table.props.values().any(|(ty, _, _)| ty.mentions_pending())
-        || table.ext_props.values().flatten().any(|property| {
-            property.receiver.mentions_pending()
-                || property.ty.mentions_pending()
-                || property
-                    .context_params
-                    .iter()
-                    .copied()
-                    .any(Ty::mentions_pending)
-        })
-    {
-        return true;
-    }
-    table.classes.values().any(|class| {
-        class.ctor_params.iter().copied().any(Ty::mentions_pending)
-            || class
-                .ctor_param_shapes
-                .iter()
-                .any(|(ty, _)| ty.mentions_pending())
-            || class
-                .secondary_ctors
-                .iter()
-                .flatten()
-                .copied()
-                .any(Ty::mentions_pending)
-            || class.props.iter().any(|(_, ty, _)| ty.mentions_pending())
-            || class.declared_props.values().any(|property| {
-                property.ty.mentions_pending()
-                    || property.storage_ty.is_some_and(Ty::mentions_pending)
-                    || property
-                        .context_params
-                        .iter()
-                        .copied()
-                        .any(Ty::mentions_pending)
-            })
-            || class
-                .methods
-                .values()
-                .flatten()
-                .any(&signature_mentions_pending)
-            || class
-                .source_methods
-                .iter()
-                .any(|plan| signature_mentions_pending(&plan.signature))
-            || class.member_ext_funs.values().flatten().any(|function| {
-                function.receiver_ty.mentions_pending()
-                    || signature_mentions_pending(&function.signature)
-            })
-            || class.member_ext_props.values().flatten().any(|property| {
-                property.receiver.mentions_pending()
-                    || property.ret.mentions_pending()
-                    || property
-                        .context_params
-                        .iter()
-                        .copied()
-                        .any(Ty::mentions_pending)
-                    || property
-                        .type_param_bounds
-                        .iter()
-                        .copied()
-                        .any(Ty::mentions_pending)
-            })
-            || class.generic_methods.values().flatten().any(|method| {
-                method.ret_shape.mentions_pending()
-                    || method.params.iter().copied().any(Ty::mentions_pending)
-                    || method
-                        .param_shapes
-                        .iter()
-                        .copied()
-                        .any(Ty::mentions_pending)
-                    || method
-                        .method_tparam_bounds
-                        .iter()
-                        .copied()
-                        .any(Ty::mentions_pending)
-            })
-            || class
-                .type_parameters
-                .type_param_bounds
-                .iter()
-                .copied()
-                .any(Ty::mentions_pending)
-            || class
-                .type_parameter_extra_bounds
-                .iter()
-                .flatten()
-                .copied()
-                .any(Ty::mentions_pending)
-            || class
-                .captured_type_parameters
-                .type_param_bounds
-                .iter()
-                .copied()
-                .any(Ty::mentions_pending)
-    })
-}
-
-/// Type ONE top-level function's expression body, to answer a call whose return is not determined.
-///
-/// The declaration is run the same way its own inference would run it, so the answer is the one the
-/// function itself yields rather than a guess made at the call site.
-fn infer_function_return_ty(
-    file: &File,
-    file_index: u32,
-    declaration: DeclId,
-    table: &SymbolTable,
-    engine: EngineSeams<'_>,
-) -> Option<Ty> {
-    let Decl::Fun(function) = file.decl(declaration) else {
-        return None;
-    };
-    if !function_needs_return_preinfer(function) {
-        return None;
-    }
-    let mut scratch = DiagSink::new();
-    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    checker.demand_name = Some(engine.demand);
-    checker.demand_call = Some(engine.demand_call);
-    checker.demand_member = Some(engine.demand_member);
-    checker.inference_only = true;
-    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-    checker.set_anonymous_lexical_class_context(declaration);
-    let root = CheckerScope::root();
-    let resolve = class_internal_resolver(table);
-    let declaration_scope = root.child(ScopeKind::Function { receiver: None });
-    let scope = &declaration_scope;
-    scope.declare_tparams(
-        &function.type_params,
-        &TParams::symbolic_from_decl_with(
-            &function.type_params,
-            &function.type_param_bounds,
-            &resolve,
-        ),
-        |name| function.reified_type_params.contains(name),
-    );
-    let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
-    checker.check_fun(scope, function, Some(declaration));
-    checker.symbolic_signature_inference = outer;
-    let incomplete = checker.inference_incomplete;
-    // An EXTENSION records its return in its own table, keyed by spelling as well — the module's
-    // extensions live in a table keyed by receiver, so the walk cannot key them the way it keys a
-    // plain function. Which table the answer landed in is a property of the declaration, not of the
-    // question, so both are read.
-    let rets = std::mem::take(&mut checker.inferred_fun_rets);
-    let ext_rets = std::mem::take(&mut checker.inferred_ext_fun_rets);
-    drop(checker);
-    if incomplete {
-        return None;
-    }
-    rets.get(&(file_index, declaration.0))
-        .copied()
-        .or_else(|| {
-            ext_rets
-                .iter()
-                .find(|((file, decl, _), _)| *file == file_index && *decl == declaration.0)
-                .map(|(_, ret)| *ret)
-        })
-        .filter(|ty| *ty != Ty::Error && *ty != Ty::Pending)
-}
-
-/// Type a LOCAL class's member by checking the function that declares the class.
-///
-/// A local class's member initializer may read the enclosing function's locals — `fun f() { val s =
-/// "x"; class A(val p: String) { val s2 = s + p } }` — and no signature-level scope can hold them:
-/// the signature walk never enters function bodies, so typing the member in its own class declines.
-///
-/// The checker answers this when it walks the function: it types `s + p` with `s` in scope. The
-/// declaration's type is READ from that run rather than recomputed — the same jump-and-resolve the
-/// engine does everywhere else, with the enclosing function as the unit resolved. That function is
-/// the innermost one whose span contains the member. The run is a full check, not an inference-only
-/// one, because inference mode does not descend into a local class body; its diagnostics go to a
-/// scratch sink and are discarded, since this run exists only to read one type.
-fn infer_local_class_member_ty(
-    file: &File,
-    file_index: u32,
-    member_span: Span,
-    expression: ExprId,
-    table: &SymbolTable,
-) -> Ty {
-    let Some(declaration) = file
-        .decls
-        .iter()
-        .copied()
-        .filter(|&declaration| {
-            matches!(file.decl(declaration), Decl::Fun(function)
-                if function.span.lo <= member_span.lo && member_span.lo <= function.span.hi)
-        })
-        .min_by_key(|&declaration| match file.decl(declaration) {
-            Decl::Fun(function) => function.span.hi.saturating_sub(function.span.lo),
-            _ => u32::MAX,
-        })
-    else {
-        return Ty::Error;
-    };
-    let Decl::Fun(function) = file.decl(declaration) else {
-        return Ty::Error;
-    };
-    let mut scratch = DiagSink::new();
-    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    // No demand hooks: the enclosing function's OWN body typically reads the member being computed
-    // (`return A().s2`), and answering that read through the engine re-enters the declaration that
-    // is already being computed — a cycle, which declines the very resolution this run exists to
-    // produce. The initializer needs the function's locals, which this run has, and nothing else.
-    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-    checker.set_anonymous_lexical_class_context(declaration);
-    let root = CheckerScope::root();
-    let resolve = class_internal_resolver(table);
-    let declaration_scope = root.child(ScopeKind::Function { receiver: None });
-    let scope = &declaration_scope;
-    scope.declare_tparams(
-        &function.type_params,
-        &TParams::symbolic_from_decl_with(
-            &function.type_params,
-            &function.type_param_bounds,
-            &resolve,
-        ),
-        |name| function.reified_type_params.contains(name),
-    );
-    checker.check_fun(scope, function, Some(declaration));
-    let types = std::mem::take(&mut checker.expr_types);
-    drop(checker);
-    types
-        .get(expression.0 as usize)
-        .copied()
-        .unwrap_or(Ty::Error)
-}
-
-/// Type ONE class-body declaration in its class's checking context.
-///
-/// `check_class` validates members against the types the symbol table already holds; it does not
-/// recompute them, so running it while those types are placeholders leaves every initializer
-/// `Ty::Error` with no diagnostic to show for it. What a member's body actually needs is the
-/// context its class establishes — the class's type parameters, the dispatch receiver and `this`
-/// labels, and its sibling members as scoped properties — and then ordinary expression resolution,
-/// which is what the enclosing declaration would give it.
-fn infer_class_member_ty(
-    file: &File,
-    file_index: u32,
-    owner: DeclId,
-    expression: ExprId,
-    scope_values: &[(String, Ty, bool)],
-    table: &SymbolTable,
-    engine: EngineSeams<'_>,
-) -> Ty {
-    let EngineSeams {
-        demand,
-        demand_call,
-        demand_member,
-        rejects,
-    } = engine;
-    let Decl::Class(class) = file.decl(owner) else {
-        return Ty::Error;
-    };
-    let mut scratch = DiagSink::new();
-    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    checker.demand_name = Some(demand);
-    checker.demand_call = Some(demand_call);
-    checker.demand_member = Some(demand_member);
-    checker.demand_rejects = Some(rejects);
-    checker.inference_only = true;
-    checker.symbolic_signature_inference = true;
-    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-    checker.set_anonymous_lexical_class_context(owner);
-    let Some(internal) = checker
-        .same_package_class(&class.name)
-        .map(ClassSig::internal_name)
-    else {
-        return Ty::Error;
-    };
-    // The dispatch rung carries the APPLIED type (`C<T>`, not the raw `C`), which is what member
-    // bodies resolve against.
-    let class_tparams = TParams::symbolic_from_decl_with(
-        &class.type_params,
-        &class.type_param_bounds,
-        &class_internal_resolver(table),
-    )
-    .alpha_renamed_declaration(
-        &class.type_params,
-        checker.compilation_id,
-        file_index,
-        class.span.lo,
-    );
-    let dispatch = Ty::obj_args_name(
-        internal,
-        &class
-            .type_params
-            .iter()
-            .map(|name| class_tparams.bound(name))
-            .collect::<Vec<_>>(),
-    );
-    let root = CheckerScope::root();
-    let dispatch_scope = root.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
-    let scope = &dispatch_scope;
-    scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
-    checker
-        .this_labels
-        .extend(class_receiver_labels(class, file, table, Some(dispatch)));
-    let mut properties = checker.scoped_properties(scope, internal);
-    let entry_properties = checker.enclosing_enum_entry_properties(scope, class, &properties);
-    properties.extend(entry_properties);
-    checker.declare_enclosing_enum_entry_methods(scope, class);
-    for property in &properties {
-        checker.declare_scoped_property(scope, property, true);
-    }
-    // The declaration's OWN value bindings — its context parameters, and the receiver an extension
-    // property binds — are part of its body's scope and are not members of the class, so
-    // `scoped_properties` does not carry them. `context(s: String) val v get() = s` reads `s` from
-    // here or not at all.
-    for (name, ty, is_var) in scope_values {
-        checker.declare(scope, name, *ty, *is_var);
-    }
-    let inferred =
-        checker.with_ret_allowed(Ty::Unit, false, |checker| checker.expr(scope, expression));
-    let declines = checker.inference_incomplete
-        || declaration_body_is_unpublishable(file, expression, &checker.expr_types);
-    let types = std::mem::take(&mut checker.expr_types);
-    drop(checker);
-    // Diagnostics are NOT the signal here. Resolving one member reaches siblings whose own types
-    // are still placeholders, so this run reports errors the authoritative check will not; the type
-    // the expression itself got is what decides.
-    if declines {
-        return Ty::Error;
-    }
-    if inferred == Ty::Pending {
-        // The body's own type is still the marker: something it read was undetermined and stayed
-        // that way. Publishing it would make "not resolved" look like a type — and, for a cycle
-        // between two members, would report nothing at all.
-        return Ty::Error;
-    }
-    withheld_construction_ty(file, expression, &types, table, inferred)
-}
-
-/// Type ONE member-extension property's getter, in its class's context.
-///
-/// `class C { val Foo.name get() = this.length }` needs four things bound before the getter means
-/// anything: the class's dispatch receiver and type parameters, the property's OWN type parameters
-/// on their own rung so they retire with it, the extension receiver as `this`, and the property's
-/// context parameters. The sweep built exactly this; the engine builds it for one declaration, when
-/// that declaration is asked for.
-fn infer_member_ext_property_ty(
-    file: &File,
-    file_index: u32,
-    owner: DeclId,
-    property_index: u32,
-    table: &SymbolTable,
-    engine: EngineSeams<'_>,
-) -> Ty {
-    let Decl::Class(class) = file.decl(owner) else {
-        return Ty::Error;
-    };
-    let Some(property) = class.body_props.get(property_index as usize) else {
-        return Ty::Error;
-    };
-    let Some((receiver, getter)) = member_extension_property_preinfer_body(property) else {
-        return Ty::Error;
-    };
-    let mut scratch = DiagSink::new();
-    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    checker.demand_name = Some(engine.demand);
-    checker.demand_call = Some(engine.demand_call);
-    checker.demand_member = Some(engine.demand_member);
-    checker.demand_rejects = Some(engine.rejects);
-    checker.inference_only = true;
-    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-    checker.set_anonymous_lexical_class_context(owner);
-    let Some(internal) = checker
-        .same_package_class(&class.name)
-        .map(ClassSig::internal_name)
-    else {
-        return Ty::Error;
-    };
-    let resolve = class_internal_resolver(table);
-    // The class's formals carry the declaration-owned identity here too: without it the getter's
-    // `T` is a different variable from the class's own and `Wrapper<T>` comes back `Wrapper<Any>`.
-    let class_tparams =
-        TParams::symbolic_from_decl_with(&class.type_params, &class.type_param_bounds, &resolve)
-            .alpha_renamed_declaration(
-                &class.type_params,
-                checker.compilation_id,
-                file_index,
-                class.span.lo,
-            );
-    let dispatch = Ty::obj_args_name(
-        internal,
-        &class
-            .type_params
-            .iter()
-            .map(|name| class_tparams.bound(name))
-            .collect::<Vec<_>>(),
-    );
-    let root = CheckerScope::root();
-    let dispatch_scope = root.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
-    let scope = &dispatch_scope;
-    scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
-    checker
-        .this_labels
-        .extend(class_receiver_labels(class, file, table, Some(dispatch)));
-    for declared in &checker.scoped_properties(scope, internal) {
-        checker.declare_scoped_property(scope, declared, true);
-    }
-    let property_scope = scope.child(ScopeKind::Function { receiver: None });
-    let scope = &property_scope;
-    scope.declare_tparams(
-        &property.type_params,
-        &class_tparams
-            .symbolic_extended_with(&property.type_params, &property.type_param_bounds, &resolve)
-            .alpha_renamed_declaration(
-                &property.type_params,
-                checker.compilation_id,
-                file_index,
-                property.span.lo,
-            ),
-        |_| false,
-    );
-    let receiver_ty = checker.type_ref_ty(scope, receiver);
-    checker
-        .this_labels
-        .push((property.name.clone(), receiver_ty, false));
-    let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
-    let inferred = {
-        let getter_scope = scope.child(ScopeKind::Function {
-            receiver: Some(receiver_ty),
-        });
-        let scope = &getter_scope;
-        for parameter in &property.context_params {
-            if parameter.name == "_" {
-                continue;
-            }
-            let parameter_type = checker.type_ref_ty(scope, &parameter.ty);
-            checker.declare_context_parameter(scope, &parameter.name, parameter_type);
-        }
-        checker.expr(scope, getter)
-    };
-    checker.symbolic_signature_inference = outer;
-    let incomplete = checker.inference_incomplete;
-    drop(checker);
-    match incomplete || inferred == Ty::Error || inferred.mentions_pending() {
-        true => Ty::Error,
-        false => inferred,
-    }
-}
-
-/// Type a member FUNCTION's inferred return, in its class's checking context.
-///
-/// The same jump the engine makes for a member property: the class's formals are symbolic, `this`
-/// is bound to the applied dispatch type, and the class's own properties are in scope, so a body
-/// reading `value` or a companion constant answers from the declaration rather than from whatever
-/// the walk had recorded when it passed by.
-fn infer_method_return_ty(
-    file: &File,
-    file_index: u32,
-    owner: DeclId,
-    method_index: u32,
-    table: &SymbolTable,
-    engine: EngineSeams<'_>,
-) -> Ty {
-    let Decl::Class(class) = file.decl(owner) else {
-        return Ty::Error;
-    };
-    let Some(method) = class.methods.get(method_index as usize) else {
-        return Ty::Error;
-    };
-    let mut scratch = DiagSink::new();
-    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    checker.demand_name = Some(engine.demand);
-    checker.demand_call = Some(engine.demand_call);
-    checker.demand_member = Some(engine.demand_member);
-    checker.demand_rejects = Some(engine.rejects);
-    checker.inference_only = true;
-    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-    checker.set_anonymous_lexical_class_context(owner);
-    let Some(internal) = checker
-        .same_package_class(&class.name)
-        .map(ClassSig::internal_name)
-    else {
-        return Ty::Error;
-    };
-    let resolve = class_internal_resolver(table);
-    // The class's formals carry the DECLARATION-owned identity, as they do when a member property is
-    // typed. Without it the body's `T` is a different variable from the class's own, and every read
-    // through it erases to the bound.
-    // Symbolic formals, minted with the DECLARATION-owned identity. A plain formal erases to its
-    // bound (`fun get() = value` comes back `Any`), and a symbolic one under its source name is not
-    // what the call substitutes against: the receiver's bindings are keyed by that same declaration
-    // identity, so `T` under any other key passes through unsubstituted.
-    let class_tparams =
-        TParams::symbolic_from_decl_with(&class.type_params, &class.type_param_bounds, &resolve)
-            .alpha_renamed_declaration(
-                &class.type_params,
-                checker.compilation_id,
-                file_index,
-                class.span.lo,
-            );
-    let dispatch = Ty::obj_args_name(
-        internal,
-        &class
-            .type_params
-            .iter()
-            .map(|name| class_tparams.bound(name))
-            .collect::<Vec<_>>(),
-    );
-    let root = CheckerScope::root();
-    let dispatch_scope = root.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
-    let scope = &dispatch_scope;
-    scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
-    checker
-        .this_labels
-        .extend(class_receiver_labels(class, file, table, Some(dispatch)));
-    let mut properties = checker.scoped_properties(scope, internal);
-    let entry_properties = checker.enclosing_enum_entry_properties(scope, class, &properties);
-    properties.extend(entry_properties);
-    checker.declare_enclosing_enum_entry_methods(scope, class);
-    for property in &properties {
-        checker.declare_scoped_property(scope, property, true);
-    }
-    // The method's OWN type parameters go on their own rung first: an extension receiver may mention
-    // them (`fun <T> T.first()`), and resolving the receiver before they are declared erases it to
-    // its bound. Only then is the receiver typed and bound as `this`, with the class's dispatch
-    // receiver behind it — which is what lets `fun Foo.name() = this.length` inside a class answer
-    // from the declaration instead of declining.
-    let rung = scope.child(ScopeKind::Function { receiver: None });
-    let rung = &rung;
-    rung.declare_tparams(
-        &method.type_params,
-        &class_tparams
-            .symbolic_extended_with(&method.type_params, &method.type_param_bounds, &resolve)
-            .alpha_renamed_declaration(
-                &method.type_params,
-                checker.compilation_id,
-                file_index,
-                method.signature_span.lo,
-            ),
-        |name| method.reified_type_params.contains(name),
-    );
-    let extension_receiver = method
-        .receiver
-        .as_ref()
-        .map(|receiver| checker.type_ref_ty(rung, receiver));
-    if let Some(receiver) = extension_receiver {
-        checker
-            .this_labels
-            .push((method.name.clone(), receiver, false));
-    }
-    // The scope `check_method` is handed carries the DISPATCH receiver, not the extension one: it
-    // pushes the extension receiver itself, and it reads `scope.this_ty()` BEFORE doing so to decide
-    // which table the inferred return belongs in. Handing it a scope whose `this` is already the
-    // extension receiver made that read the receiver — a type PARAMETER for
-    // `fun <T : Any> T.self()` — so the return was recorded in neither table and the declaration
-    // settled to `Unit`.
-    let method_scope = rung.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
-    let method_scope = &method_scope;
-    let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
-    checker.check_method(method_scope, method, &properties, None, None);
-    checker.symbolic_signature_inference = outer;
-    let incomplete = checker.inference_incomplete;
-    // Keyed by the method that was ASKED for. `check_method` records every return it computed while
-    // walking, so taking whichever entry happened to be first answered a different declaration.
-    //
-    // A member EXTENSION records into its own table — the ordinary methods are keyed by name and
-    // parameters, an extension by its receiver as well — so both are read here. `class.methods`
-    // holds either kind, and which table the answer landed in is a property of the declaration,
-    // not of the question being asked.
-    let inferred = checker
-        .inferred_method_rets
-        .iter()
-        .find(|((declaring, name, _), _)| *declaring == internal && *name == method.name)
-        .map(|(_, ret)| *ret)
-        .or_else(|| {
-            // A member EXTENSION records into its own table, keyed by its RECEIVER rather than by
-            // the class that declares it, so the owner is not the discriminator here — the receiver
-            // is, and it is what tells two same-spelled extensions apart.
-            //
-            // The recorded receiver is the one `check_method` resolved in its own scope, which for
-            // a GENERIC receiver (`fun <T : Any> T.self()`) is a type parameter under a different
-            // identity than the one minted here. Exact identity is preferred; failing that, the
-            // ERASURE decides, which is what the extension tables themselves are keyed by.
-            let receiver = extension_receiver?;
-            let recorded_for = |matches: &dyn Fn(Ty) -> bool| {
-                checker
-                    .inferred_member_ext_fun_rets
-                    .iter()
-                    .find(|((_, name, recorded, _), _)| *name == method.name && matches(*recorded))
-                    .map(|(_, ret)| *ret)
-            };
-            recorded_for(&|recorded| recorded == receiver).or_else(|| {
-                recorded_for(&|recorded| erased_type_key(recorded) == erased_type_key(receiver))
-            })
-        })
-        .unwrap_or(Ty::Error);
-    drop(checker);
-    match incomplete || inferred == Ty::Error || inferred.mentions_pending() {
-        true => Ty::Error,
-        false => inferred,
-    }
-}
-
-/// Type a top-level declaration by running the checker over the DECLARATION, not over a scope
-/// rebuilt by hand.
-///
-/// `check_property` is what establishes a property's checking context — its type parameters, its
-/// context parameters, the backing-field binding, and the postponed-inference frame a lambda
-/// argument resolves against. A scope assembled from a list of `(name, type)` bindings has none of
-/// that, which is why `val derived = base.map { it + 1 }` could not be typed that way: the lambda
-/// had no frame to be postponed into. Running the declaration and then reading the type the checker
-/// recorded for its body is the same thing the reference compiler does when it jumps to an
-/// implicitly-typed declaration.
-fn infer_declaration_ty(
-    file: &File,
-    file_index: u32,
-    declaration: DeclId,
-    expression: ExprId,
-    table: &SymbolTable,
-    engine: EngineSeams<'_>,
-) -> Ty {
-    let EngineSeams {
-        demand,
-        demand_call,
-        demand_member,
-        rejects,
-    } = engine;
-    let Decl::Property(property) = file.decl(declaration) else {
-        return Ty::Error;
-    };
-    let mut scratch = DiagSink::new();
-    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    checker.demand_name = Some(&demand);
-    checker.demand_call = Some(&demand_call);
-    checker.demand_member = Some(&demand_member);
-    checker.demand_rejects = Some(&rejects);
-    checker.inference_only = true;
-    checker.symbolic_signature_inference = true;
-    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-    checker.set_anonymous_lexical_class_context(declaration);
-    let root = CheckerScope::root();
-    checker.check_property(&root, property, declaration);
-    let inferred = checker
-        .expr_types
-        .get(expression.0 as usize)
-        .copied()
-        .unwrap_or(Ty::Error);
-    // A CALLABLE REFERENCE records its type beside the expression table rather than in it, so the
-    // expression itself is still the marker here. Reading only `expr_types` published that marker as
-    // the declaration's type, and a marker must never reach `@Metadata` — `val f = C::foo` aborted
-    // emission outright. The reference's own recorded type is the answer, and it is the same one the
-    // walk publishes for this shape anywhere else.
-    let inferred = match inferred == Ty::Pending {
-        true => checker
-            .callable_reference_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(inferred),
-        false => inferred,
-    };
-    // A CALL of a member function whose own return is still being determined types as the marker:
-    // the call read the member's recorded return rather than asking for it. The member READ path
-    // asks the engine in exactly this situation; a call has to ask too. The receiver's type is what
-    // names the owner, and the callee spells the member.
-    let inferred = match (inferred == Ty::Pending, file.expr(expression)) {
-        (true, Expr::Call { callee, .. }) => match file.expr(*callee) {
-            Expr::Member { receiver, name } => checker
-                .expr_types
-                .get(receiver.0 as usize)
-                .copied()
-                .filter(|receiver| *receiver != Ty::Error && !receiver.mentions_pending())
-                .and_then(|owner| (engine.demand_member)(owner, name, &[]))
-                .filter(|answered| !answered.mentions_pending())
-                .unwrap_or(inferred),
-            _ => inferred,
-        },
-        _ => inferred,
-    };
-    // The reference's recorded type can itself still carry the marker: `C::bar` is
-    // `KProperty1<C, <not determined>>` while `bar` is being determined, because the reference read
-    // the member's record rather than asking for it. The member READ path asks the engine in exactly
-    // this situation; asking here covers the reference without teaching every reference site to. The
-    // reference's own classifier names the owner, and the expression names the member.
-    let inferred = match (inferred.mentions_pending(), file.expr(expression)) {
-        (true, Expr::CallableRef { receiver, name }) => receiver
-            // A BOUND reference (`C()::bar`) names its owner with the receiver EXPRESSION, and its
-            // classifier carries only the member's own type — `KProperty0<T>` — so the type
-            // arguments cannot supply the owner the way an unbound `C::bar` does.
-            .and_then(|receiver| checker.expr_types.get(receiver.0 as usize).copied())
-            .filter(|receiver| *receiver != Ty::Error && !receiver.mentions_pending())
-            // An UNBOUND reference spells a classifier, which is not a value: its receiver
-            // expression has no type, and the owner comes from the classifier instead.
-            .or_else(|| inferred.type_args().first().copied())
-            // A FUNCTION reference is a `Ty::Fun`, which carries no type arguments at all, so
-            // neither route above names an owner. The receiver still SPELLS the classifier —
-            // `C::foo` — and that spelling is the owner.
-            .or_else(|| {
-                let Some(Expr::Name(spelling)) = receiver.map(|receiver| file.expr(receiver))
-                else {
-                    return None;
-                };
-                checker
-                    .same_package_class(spelling)
-                    .map(ClassSig::internal_name)
-                    .map(Ty::obj_name)
-            })
-            .and_then(|owner| (engine.demand_member)(owner, name, &[]))
-            .filter(|answered| !answered.mentions_pending())
-            .map_or(inferred, |answered| {
-                crate::types::ty_replace_pending(inferred, answered)
-            }),
-        _ => inferred,
-    };
-    // A declaration whose body has no value-producing path still cannot publish a type. Ordinary
-    // expression joins already compute their semantic least upper bound and need no second policy.
-    if declaration_body_is_unpublishable(file, expression, &checker.expr_types) {
-        return Ty::Error;
-    }
-    // `checker.inference_incomplete` is deliberately NOT a decline on its own. It is FILE-global —
-    // it records that this run met a classifier collection had not reached yet — while the question
-    // here is about ONE declaration, which need not mention that classifier at all. The evidence
-    // that this declaration was answered is its own type: a complete one was determined, and one
-    // still carrying the marker was not.
-    if inferred.mentions_pending() {
-        return Ty::Error;
-    }
-    let inferred = withheld_construction_ty(file, expression, &checker.expr_types, table, inferred);
-    // The declaration's own body is what decides. Diagnostics from this run are discarded: the
-    // authoritative check reports on the declaration later, and reporting here would duplicate
-    // every message or, worse, report one the demand hook was about to make moot.
-    inferred
-}
-
-/// Type one declaration's body with the REAL checker.
-///
-/// This is the "jump" the resolution engine performs: an implicitly-typed declaration gets its type
-/// by running ordinary body resolution for it, exactly as the reference compiler does
-/// (`ReturnTypeCalculatorWithJump`). There is no second, reduced expression grammar — that is what
-/// made the signature pass and the checker disagree, an elvis or a lambda's result type being typed
-/// by one and not the other.
-///
-/// `demand` and `demand_member` are the engine's seams: a name, or a member read, whose declaration
-/// has not been typed yet resolves through them instead of reading the placeholder the symbol table
-/// still holds. Diagnostics go to a scratch sink — this run exists to produce a type, and the
-/// authoritative check reports on the declaration later.
-#[allow(clippy::too_many_arguments)]
-fn infer_lit_ty_scoped_on_demand(
-    source: InferenceSource<'_>,
-    e: ExprId,
-    props: &[(String, Ty, bool)],
-    table: &SymbolTable,
-    demand: &dyn Fn(&str) -> Option<Ty>,
-    demand_member: DemandMember<'_>,
-) -> Ty {
-    let InferenceSource(file, file_index, implicit_classifier, implicit_value) = source;
-    let mut scratch = DiagSink::new();
-    let mut checker = make_checker(file, file_index, None, table, &mut scratch);
-    checker.demand_name = Some(&demand);
-    checker.demand_member = Some(&demand_member);
-    checker.inference_only = true;
-    checker.anonymous_lexical_scope = anonymous_lexical_class_scope(file);
-    // Signature inference wants a declaration's type in terms of its own type parameters, not their
-    // erasures: a member of `Holder<T>` initialized from `T` is `T`, and erasing it here would write
-    // the bound into the field descriptor.
-    checker.symbolic_signature_inference = false;
-
-    // A lexical singleton or classifier whose members are visible is an implicit receiver, which
-    // the checker models as a `this` rung rather than as a separate lookup channel.
-    let receiver = implicit_value.or_else(|| implicit_classifier.map(Ty::obj_name));
-    let root = CheckerScope::root();
-    let declaration = root.child(ScopeKind::Function { receiver });
-    let scope = if receiver.is_some() {
-        &declaration
-    } else {
-        &root
-    };
-    if let Some(receiver) = receiver {
-        checker.this_labels.push((String::new(), receiver, false));
-    }
-    for (name, ty, is_var) in props {
-        checker.declare(scope, name, *ty, *is_var);
-    }
-    // An initializer is not a function body: a `return` in it does not belong to any function, and
-    // giving it one would type `val a = return` instead of rejecting it.
-    let inferred = checker.with_ret_allowed(Ty::Unit, false, |checker| checker.expr(scope, e));
-    let declines = checker.inference_incomplete
-        || declaration_body_is_unpublishable(file, e, &checker.expr_types);
-    drop(checker);
-    if scratch.has_errors() || declines {
-        return Ty::Error;
-    }
-    inferred
-}
-
 fn unify_ty_common(
     shape: Ty,
     actual: Ty,
@@ -17045,22 +10831,6 @@ fn unify_ty_common(
 
 fn is_function_property_shape(ty: Ty) -> bool {
     matches!(ty, Ty::Fun(_)) || matches!(ty, Ty::Nullable(inner) if matches!(*inner, Ty::Fun(_)))
-}
-
-/// A bound-name → JVM-internal resolver over a `SymbolTable`: the merged class-name map, which binds
-/// a bare contract/tparam-bound name to its internal for both module and classpath classes (and
-/// already carries the Kotlin built-in → JVM mapping, `CharSequence` → `java/lang/CharSequence`).
-/// Borrows only the (copied) `&SymbolTable`, so a caller can hold it while mutating its own state.
-/// Shared with the jvm backend (via `frontend`) so the checker and the `@Metadata` emitter resolve
-/// contract type references through ONE lookup and cannot drift.
-pub(crate) fn class_internal_resolver(
-    syms: &SymbolTable,
-) -> impl Fn(&str) -> Option<TypeName> + '_ {
-    move |n: &str| {
-        // The class map keys on internal names; `class_names` covers both module and classpath
-        // bindings for a bare contract/tparam-bound name, so consult it directly.
-        syms.class_names.get(n)
-    }
 }
 
 fn definitely_non_null_binding(binding: Ty) -> Ty {
@@ -17228,14 +10998,6 @@ fn write_source_type_list_with(
 fn source_function_display(file: &File, function: &FunDecl, resolved_ret: Ty) -> String {
     render_source_function_display(file, function, Some(resolved_ret), usize::MAX)
         .expect("unbounded source display")
-}
-
-fn source_function_conflict_display(
-    file: &File,
-    function: &FunDecl,
-    max_bytes: usize,
-) -> Option<String> {
-    render_source_function_display(file, function, None, max_bytes)
 }
 
 fn streamed_function_conflict_display(
@@ -17455,55 +11217,6 @@ fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
 /// class-member collection. They nevertheless own the same generic callable shape and stable type-
 /// parameter identities as every other source method.
 #[allow(clippy::too_many_arguments)]
-fn enum_entry_member_signature(
-    file: &File,
-    method: &FunDecl,
-    ret: Ty,
-    classes: &ClassNames,
-    enclosing_tparams: &TParams,
-    compilation_id: u64,
-    source_file: u32,
-    source_member: crate::libraries::SourceMember,
-    libraries: &dyn SymbolSource,
-    diags: &mut DiagSink,
-) -> Signature {
-    let header = legacy_callable_header(method);
-    let method_tparams = enclosing_tparams
-        .symbolic_extended_with(&header.type_parameters, &header.bounds, &|name| {
-            classes.get(name)
-        })
-        .alpha_renamed_declaration(
-            &header.type_parameters,
-            compilation_id,
-            source_file,
-            method.signature_span.lo,
-        );
-    let mut signature = legacy_member_signature_from_header(
-        file,
-        method,
-        &header,
-        ret,
-        classes,
-        &method_tparams,
-        source_file,
-        source_member,
-        libraries,
-        true,
-        diags,
-    );
-    if !header.type_parameters.is_empty() {
-        signature.generic_sig = Some(source_generic_signature_from_header(
-            &header,
-            classes,
-            &method_tparams,
-            ret,
-            None,
-            diags,
-        ));
-    }
-    signature
-}
-
 fn member_signature_from_header(
     header: &StreamedCallableHeader,
     ret: Ty,
@@ -17644,144 +11357,36 @@ fn member_signature_from_header(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn legacy_member_signature_from_header(
-    file: &File,
-    method: &FunDecl,
-    header: &StreamedCallableHeader,
-    ret: Ty,
-    classes: &ClassNames,
-    method_tparams: &TParams,
-    source_file: u32,
-    source_member: crate::libraries::SourceMember,
-    libraries: &dyn SymbolSource,
-    capture_default_values: bool,
-    diags: &mut DiagSink,
-) -> Signature {
-    assert_eq!(
-        header.parameters.len(),
-        method.params.len(),
-        "legacy materialized header and member parameters must stay aligned",
-    );
-    let defaults = if capture_default_values {
-        method
-            .params
-            .iter()
-            .map(|parameter| {
-                parameter
-                    .default
-                    .and_then(|expr| extract_ctor_default(file, expr, classes, libraries))
-            })
-            .collect()
-    } else {
-        vec![None; header.parameters.len()]
-    };
-    let mut signature = member_signature_from_header(
-        header,
-        ret,
-        classes,
-        method_tparams,
-        source_file,
-        Some(source_member),
-        defaults,
-        diags,
-    );
-    signature.equality_bound = method
-        .params
-        .iter()
-        .find_map(|parameter| declared_equality_bound(file, parameter, classes));
-    signature.exact_params = method
-        .params
-        .iter()
-        .map(|parameter| {
-            has_type_annotation(
-                file,
-                parameter.ty.span,
-                classes,
-                type_name("kotlin/internal/Exact"),
-            )
-        })
-        .collect();
-    signature.no_infer_params = method
-        .params
-        .iter()
-        .map(|parameter| {
-            has_type_annotation(
-                file,
-                parameter.ty.span,
-                classes,
-                type_name("kotlin/internal/NoInfer"),
-            )
-        })
-        .collect();
-    signature
-}
-
-/// Normalize the explicitly typed callable headers of one source classifier into the same
-/// [`Signature`] families consumed by [`ModuleSymbols`](crate::module_symbols::ModuleSymbols).
-/// This is the declaration-header half of class signature collection: bodies and inferred returns
-/// stay deferred, while overloads, generic shapes, defaults, visibility, and source identities are
-/// already authoritative enough for another declaration's initializer to select a call.
 struct DeclaredMemberHeaderContext<'a> {
-    file: &'a File,
     classes: &'a ClassNames,
     class_tparams: &'a TParams,
     symbolic_class_tparams: &'a TParams,
     class_type_parameters: &'a [String],
-    compact_headers: Option<&'a crate::fir::StreamedHeaderModule>,
+    headers: &'a crate::fir::StreamedHeaderModule,
     compilation_id: u64,
     source_file: u32,
-    libraries: &'a dyn SymbolSource,
-    owner_is_interface: bool,
 }
 
 fn declared_member_callable_headers(
     context: &DeclaredMemberHeaderContext<'_>,
-    class: &ClassDecl,
-    stable_class: Option<crate::fir::DeclarationId>,
-    declaration: DeclId,
+    stable_class: crate::fir::DeclarationId,
     diags: &mut DiagSink,
 ) -> (MethodMap, HashMap<String, Vec<MemberExtFunSig>>) {
     let DeclaredMemberHeaderContext {
-        file,
         classes,
         class_tparams,
         symbolic_class_tparams,
         class_type_parameters,
-        compact_headers,
+        headers,
         compilation_id,
         source_file,
-        libraries,
-        owner_is_interface,
     } = context;
     let mut methods = MethodMap::new();
     let mut extensions: HashMap<String, Vec<MemberExtFunSig>> = HashMap::new();
-    let compact_members = compact_headers.map(|headers| {
-        streamed_owned_callable_declarations(
-            headers,
-            stable_class.expect("a production classifier must have a stable identity"),
-        )
-    });
-    let method_count = compact_members
-        .as_ref()
-        .map_or_else(|| class.methods.len(), Vec::len);
-    for method_index in 0..method_count {
-        let method = compact_headers
-            .is_none()
-            .then(|| &class.methods[method_index]);
-        let header = match compact_headers {
-            Some(headers) => streamed_callable_header_by_declaration(
-                headers,
-                compact_members
-                    .as_ref()
-                    .and_then(|declarations| declarations.get(method_index))
-                    .copied()
-                    .expect("a production member function must have a stable identity"),
-            )
-            .expect("a production member function must have a compact header"),
-            None => legacy_callable_header(
-                method.expect("a legacy member function must have parser syntax"),
-            ),
-        };
+    let members = streamed_owned_callable_declarations(headers, stable_class);
+    for declaration in members {
+        let header = streamed_callable_header_by_declaration(headers, declaration)
+            .expect("a production member function must have a compact header");
         let Some(return_ref) = header.explicit_result.as_ref() else {
             continue;
         };
@@ -17790,41 +11395,16 @@ fn declared_member_callable_headers(
                 classes.get(name)
             });
         let ret = ty_of_ref(return_ref, classes, &method_tparams, diags);
-        let mut signature = if compact_headers.is_some() {
-            member_signature_from_header(
-                &header,
-                ret,
-                classes,
-                &method_tparams,
-                *source_file,
-                None,
-                vec![None; header.parameters.len()],
-                diags,
-            )
-        } else {
-            let source_member = crate::libraries::SourceMember::Class {
-                file: *source_file,
-                owner: declaration.0,
-                method: method_index as u32,
-            };
-            legacy_member_signature_from_header(
-                file,
-                method.expect("a legacy member function must have parser syntax"),
-                &header,
-                ret,
-                classes,
-                &method_tparams,
-                *source_file,
-                source_member,
-                *libraries,
-                true,
-                diags,
-            )
-        };
-        if *owner_is_interface && method.is_some_and(|method| matches!(method.body, FunBody::None))
-        {
-            signature.flags = signature.flags.with_is_abstract(true);
-        }
+        let mut signature = member_signature_from_header(
+            &header,
+            ret,
+            classes,
+            &method_tparams,
+            *source_file,
+            None,
+            vec![None; header.parameters.len()],
+            diags,
+        );
         if !header.type_parameters.is_empty() || !class_type_parameters.is_empty() {
             let symbolic_method_tparams = symbolic_class_tparams
                 .symbolic_extended_with(&header.type_parameters, &header.bounds, &|name| {
@@ -17880,7 +11460,7 @@ fn declared_member_callable_headers(
 /// parameter (`fun <T> use(f: () -> T) = f()`). In both cases the declaration says `T`; publishing
 /// the body's erased `Any?` would discard the constraint needed by callers.
 fn inferred_return_type_parameter(file: &File, function: &FunDecl) -> Option<String> {
-    let header = legacy_callable_header(function);
+    let header = active_callable_header(function);
     inferred_return_type_parameter_from_header(file, function, &header)
 }
 
@@ -17942,7 +11522,7 @@ fn source_generic_signature_from_tparams(
     inferred_ret_tparam: Option<String>,
     formal_bounds: Vec<Vec<Ty>>,
 ) -> GenericSig {
-    let header = legacy_callable_header(function);
+    let header = active_callable_header(function);
     let bindings = header
         .type_parameters
         .iter()
@@ -18180,22 +11760,6 @@ fn apply_alias_expansion(
 /// a generic alias without use-site arguments (`typealias A<T> = List<T>; companion fun A.f()`), and
 /// aliases with different fixed arguments associate with the same expanded classifier. Ordinary
 /// extension receivers still go through full alias application and arity checking.
-fn associated_companion_receiver_ty(
-    file: &File,
-    receiver: &TypeRef,
-    classes: &ClassNames,
-    tparams: &TParams,
-    diags: &mut DiagSink,
-) -> Ty {
-    associated_companion_receiver_ty_from_spelling(
-        receiver,
-        file.alias_spellings.get(&receiver.span),
-        classes,
-        tparams,
-        diags,
-    )
-}
-
 fn associated_companion_receiver_ty_from_spelling(
     receiver: &TypeRef,
     source_spelling: Option<&TypeRef>,
@@ -18614,11 +12178,6 @@ fn ty_of_ref_with(
     base
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct InheritedMethodConstraint {
-    pub(crate) is_final: bool,
-}
-
 /// Result of typechecking a file: the type assigned to every expression node.
 /// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
 /// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
@@ -18674,17 +12233,6 @@ pub struct TypeInfo {
     /// layout used for the class dispatch receiver, not retained syntax or a lowering-time lookup.
     pub(crate) checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
     pub anonymous_object_types: HashMap<DeclId, TypeName>,
-    /// Base-class methods visible to compiler-generated members. The checker owns the hierarchy walk;
-    /// lowering consumes this closed fact and never asks a symbol provider to select a method.
-    inherited_method_constraints: HashMap<(TypeName, String), InheritedMethodConstraint>,
-    /// Declared dispatch owner for each generated data-class reference hash. Interface values use
-    /// `Any`; concrete classifier values use their own classifier. This is classifier metadata, not a
-    /// backend lookup, and is fixed before lowering builds the synthesized body.
-    data_class_hash_owners: HashMap<(TypeName, String), TypeName>,
-    /// Class declarations whose semantic superclass is valid Kotlin but cannot be emitted safely by
-    /// this backend. The checker records the exact capability failure; lowering only fails that class
-    /// and never queries classifier providers again.
-    pub(crate) unsupported_class_emission: HashMap<DeclId, &'static str>,
     /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Exact functional-interface conversion selected for an argument. Lowering consumes this
@@ -19009,20 +12557,15 @@ pub enum ResolvedCall {
 #[derive(Clone, Copy, Debug)]
 pub struct SelectedCallCapabilities {
     suspend: bool,
-    inline: InlineKind,
 }
 
 impl SelectedCallCapabilities {
-    fn new(suspend: bool, inline: InlineKind) -> Self {
-        Self { suspend, inline }
+    fn new(suspend: bool) -> Self {
+        Self { suspend }
     }
 
     pub(crate) fn suspends(self) -> bool {
         self.suspend
-    }
-
-    fn requires_suspend_inline_splice(self) -> bool {
-        self.suspend && self.inline.must_inline()
     }
 }
 
@@ -19092,17 +12635,6 @@ impl ResolvedCall {
         }
     }
 
-    /// Provider-owned spelling of this already-selected receiver call. Synthetic convention lowering
-    /// uses it only as an emit handle; semantic lookup and overload selection are complete.
-    pub(crate) fn emit_name(&self) -> Option<&str> {
-        match self {
-            Self::Member(resolved) => Some(&resolved.member.name),
-            Self::Extension(extension) => Some(&extension.callable.name),
-            Self::MemberExtension { name, .. } => Some(name),
-            Self::TopLevel(_) | Self::Companion(_) | Self::LocalFunction(_) => None,
-        }
-    }
-
     /// Whether the selected callee is `suspend`, for every target kind that records the flag. The
     /// Local functions derive the same fact from their retained signature. Every selected target that
     /// can carry `suspend` must report it here: this query decides whether the enclosing lambda receives
@@ -19134,36 +12666,17 @@ impl ResolvedCall {
         }
     }
 
-    /// Complete callable capabilities for this exact checker-selected target. Computing both facts in
-    /// one origin switch prevents the suspend classifier and suspend-inline safety gate from drifting
-    /// when a new target provider or syntax path is added.
+    /// Suspension capability of this exact checker-selected target.
     fn capabilities(&self) -> SelectedCallCapabilities {
         match self {
-            Self::Member(resolved) => {
-                SelectedCallCapabilities::new(resolved.suspend, resolved.member.inline)
+            Self::Member(resolved) => SelectedCallCapabilities::new(resolved.suspend),
+            Self::TopLevel(call) => SelectedCallCapabilities::new(call.callable.suspend),
+            Self::Extension(extension) => SelectedCallCapabilities::new(extension.callable.suspend),
+            Self::Companion(member) => SelectedCallCapabilities::new(member.suspend()),
+            Self::MemberExtension { suspend, .. } => SelectedCallCapabilities::new(*suspend),
+            Self::LocalFunction(callable) => {
+                SelectedCallCapabilities::new(callable.sig.is_suspend())
             }
-            Self::TopLevel(call) => {
-                SelectedCallCapabilities::new(call.callable.suspend, call.callable.inline)
-            }
-            Self::Extension(extension) => {
-                SelectedCallCapabilities::new(extension.callable.suspend, extension.callable.inline)
-            }
-            Self::Companion(member) => {
-                SelectedCallCapabilities::new(member.suspend(), member.inline)
-            }
-            // A SIBLING-FILE callee is never spliced when it is `suspend`: `inline` on the
-            // declaration does not change the cross-file ABI — kotlinc emits the same
-            // `plusOne(int, Continuation)` method for an `inline suspend fun` as for a plain one, plus
-            // a private `$$forInline` copy it splices only inside the declaring compilation. Reporting
-            // `can_inline` here made the suspend-lambda gate refuse a call that is in fact reached
-            // through its real CPS entry point (see `docs/SPEC.md`).
-            Self::MemberExtension {
-                suspend, inline, ..
-            } => SelectedCallCapabilities::new(*suspend, *inline),
-            Self::LocalFunction(callable) => SelectedCallCapabilities::new(
-                callable.sig.is_suspend(),
-                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice()),
-            ),
         }
     }
 }
@@ -19305,9 +12818,6 @@ pub struct ResolvedCtorDelegation {
     /// Source-level constraint retained for every target parameter. This is used only while checking
     /// the selected constructor; lowering consumes the already validated argument types and slots.
     parameter_constraints: Vec<ConstructorParameterConstraint>,
-    /// Semantic overload priority of the selected declaration. The lowerer ignores it; the checker
-    /// uses it only while the same-named callable tower is still competing with a constructor.
-    low_priority: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -19601,29 +13111,6 @@ pub(crate) struct ResolvedIncDec {
 }
 
 impl SyntheticOperatorCall {
-    /// Every convention key, so a scan can ask "was ANY operator selected here?" without knowing
-    /// which spelling the source used. Keep in sync with the variants above.
-    pub(crate) const ALL: [Self; 18] = [
-        Self::RangeTo,
-        Self::RangeUntil,
-        Self::Until,
-        Self::DownTo,
-        Self::Contains,
-        Self::Set,
-        Self::Put,
-        Self::Plus,
-        Self::Minus,
-        Self::Times,
-        Self::Div,
-        Self::Rem,
-        Self::UnaryMinus,
-        Self::UnaryPlus,
-        Self::Not,
-        Self::Inc,
-        Self::Dec,
-        Self::CompareTo,
-    ];
-
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "rangeTo" => Self::RangeTo,
@@ -19778,26 +13265,6 @@ impl DelegateGetValueTarget {
 }
 
 impl TypeInfo {
-    pub(crate) fn inherited_method_constraint(
-        &self,
-        owner: TypeName,
-        name: &str,
-    ) -> Option<InheritedMethodConstraint> {
-        self.inherited_method_constraints
-            .get(&(owner, name.to_string()))
-            .copied()
-    }
-
-    pub(crate) fn data_class_hash_owner(
-        &self,
-        owner: TypeName,
-        property: &str,
-    ) -> Option<TypeName> {
-        self.data_class_hash_owners
-            .get(&(owner, property.to_string()))
-            .copied()
-    }
-
     pub fn resolved_type_ref(&self, reference: &TypeRef) -> Option<TypeName> {
         self.resolved_type(reference)?
             .non_null()
@@ -20328,8 +13795,8 @@ pub enum ExprLowering {
     /// increment reached FIR with no write target and failed as an unknown local.
     TopLevelPropertyIncDec(Box<ResolvedPropertyAccess>),
     /// `::prop.isInitialized` after the property reference has selected a `lateinit` declaration.
-    /// Checked FIR consumes `declaration`; the legacy lowerer temporarily consumes the parallel
-    /// storage coordinates. No phase is allowed to reinterpret the callable-reference spelling.
+    /// Checked FIR consumes `declaration`; the parallel storage coordinates remain a bounded
+    /// representation handoff. No phase is allowed to reinterpret the callable-reference spelling.
     LateinitInitialized {
         declaration: Option<crate::fir::DeclarationId>,
         owner: TypeName,
@@ -20800,13 +14267,6 @@ impl CompoundAssignmentTarget {
     pub(crate) fn suspends(&self) -> bool {
         self.capabilities.suspends()
     }
-
-    /// The stronger capability pair used by the suspend-lambda inline safety gate. Keeping it on the
-    /// selected target makes statement-form `plusAssign` agree with expression-form operators and
-    /// ordinary calls instead of growing another name/origin-specific lookup.
-    pub(crate) fn requires_suspend_inline_splice(&self) -> bool {
-        self.capabilities.requires_suspend_inline_splice()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -20904,79 +14364,6 @@ impl TypeInfo {
             StmtLowering::PlusAssign(target) => Some(target),
             _ => None,
         }
-    }
-
-    /// Apply one capability predicate to every exact target a convention-shaped EXPRESSION can select.
-    /// The checker keys indexed/safe/plain calls and synthetic operators separately; centralizing that
-    /// storage detail here keeps every later safety classifier syntax-independent.
-    fn convention_call_has(
-        &self,
-        expr_id: ExprId,
-        predicate: impl Fn(SelectedCallCapabilities) -> bool,
-    ) -> bool {
-        self.resolved_calls
-            .get(&expr_id)
-            .is_some_and(|call| predicate(call.capabilities()))
-            || SyntheticOperatorCall::ALL.iter().any(|&key| {
-                self.resolved_operator_calls
-                    .get(&(expr_id, key))
-                    .is_some_and(|call| predicate(call.capabilities()))
-            })
-    }
-
-    /// Statement counterpart of [`Self::convention_call_has`]. Statement-position operators use a
-    /// resolved-call table; an in-place compound assignment has a specialized emission target that
-    /// retains the same selected capabilities.
-    fn convention_stmt_has(
-        &self,
-        stmt_id: StmtId,
-        predicate: impl Fn(SelectedCallCapabilities) -> bool,
-        compound_predicate: impl Fn(&CompoundAssignmentTarget) -> bool,
-    ) -> bool {
-        SyntheticOperatorCall::ALL.iter().any(|&key| {
-            self.resolved_stmt_operator_calls
-                .get(&(stmt_id, key))
-                .is_some_and(|call| predicate(call.capabilities()))
-        }) || self
-            .compound_assignment_target(stmt_id)
-            .is_some_and(compound_predicate)
-    }
-
-    /// Whether a CONVENTION call selected at expression `expr_id` targets a `suspend` function —
-    /// indexed access (`b[i]`), an arithmetic/comparison operator (`a + b`, `a < b`), or a unary
-    /// operator. None of these is necessarily an `Expr::Call`, so coroutine classification asks the
-    /// exact selected capabilities instead of matching syntax.
-    pub(crate) fn convention_call_suspends(&self, expr_id: ExprId) -> bool {
-        self.convention_call_has(expr_id, SelectedCallCapabilities::suspends)
-    }
-
-    /// Statement form of [`Self::convention_call_suspends`].
-    pub(crate) fn convention_stmt_suspends(&self, stmt_id: StmtId) -> bool {
-        self.convention_stmt_has(
-            stmt_id,
-            SelectedCallCapabilities::suspends,
-            CompoundAssignmentTarget::suspends,
-        )
-    }
-
-    /// Whether an expression-form convention selected a suspend target whose call site must be
-    /// spliced. A suspend-lambda state machine cannot satisfy that obligation.
-    pub(crate) fn convention_call_requires_suspend_inline_splice(&self, expr_id: ExprId) -> bool {
-        self.convention_call_has(
-            expr_id,
-            SelectedCallCapabilities::requires_suspend_inline_splice,
-        )
-    }
-
-    /// Statement-form counterpart of
-    /// [`Self::convention_call_requires_suspend_inline_splice`], including the specialized in-place
-    /// compound-assignment target.
-    pub(crate) fn convention_stmt_requires_suspend_inline_splice(&self, stmt_id: StmtId) -> bool {
-        self.convention_stmt_has(
-            stmt_id,
-            SelectedCallCapabilities::requires_suspend_inline_splice,
-            CompoundAssignmentTarget::requires_suspend_inline_splice,
-        )
     }
 
     /// Whether a lambda has an implicit receiver.
@@ -22949,19 +16336,14 @@ impl<'a> Checker<'a> {
         &self,
         source: crate::libraries::SourceMember,
     ) -> Option<crate::fir::DeclarationId> {
-        let (active, index) = self.active_declarations.zip(self.resolved_index)?;
-        active.source_member_declaration(self.file, index, source)
+        self.active_declarations
+            .source_member_declaration(self.file, self.resolved_index, source)
     }
 
-    fn active_classifier_internal(&self, parser: DeclId, class: &ClassDecl) -> Option<TypeName> {
+    fn active_classifier_internal(&self, parser: DeclId) -> Option<TypeName> {
         self.active_declarations
-            .zip(self.resolved_index)
-            .and_then(|(active, index)| {
-                active
-                    .canonical_classifier_declaration(parser, index)
-                    .and_then(|declaration| index.classifier_identity(declaration))
-            })
-            .or_else(|| self.same_package_classifier_name(&class.name))
+            .canonical_classifier_declaration(parser, self.resolved_index)
+            .and_then(|declaration| self.resolved_index.classifier_identity(declaration))
     }
 
     fn direct_superclass_name(&self, owner: TypeName) -> Option<TypeName> {
@@ -23076,8 +16458,10 @@ impl<'a> Checker<'a> {
         &self,
         parser: DeclId,
     ) -> Option<Vec<(String, String, Ty)>> {
-        let (active, index) = self.active_declarations.zip(self.resolved_index)?;
-        let classifier = active.canonical_classifier_declaration(parser, index)?;
+        let index = self.resolved_index;
+        let classifier = self
+            .active_declarations
+            .canonical_classifier_declaration(parser, index)?;
         let own = usize::try_from(index.classifier_own_type_parameter_count(classifier)?).ok()?;
         let parameters = index.classifier_type_arguments(classifier)?;
         parameters
@@ -23107,8 +16491,10 @@ impl<'a> Checker<'a> {
         &self,
         parser: DeclId,
     ) -> Option<Vec<(String, String, Ty, Vec<Ty>)>> {
-        let (active, index) = self.active_declarations.zip(self.resolved_index)?;
-        let mut current = active.canonical_classifier_declaration(parser, index)?;
+        let index = self.resolved_index;
+        let mut current = self
+            .active_declarations
+            .canonical_classifier_declaration(parser, index)?;
         let mut levels = Vec::new();
         loop {
             let header = index.declaration_header(current)?;
@@ -23149,25 +16535,10 @@ impl<'a> Checker<'a> {
         Some(levels.into_iter().flatten().collect())
     }
 
-    fn record_checked_function_result(
-        &mut self,
-        source: DeclId,
-        name: &str,
-        extension: bool,
-        ty: Ty,
-    ) {
-        if let Some(declaration) = self
-            .active_declarations
-            .and_then(|active| active.file_declaration(self.file, source))
-        {
+    fn record_checked_function_result(&mut self, source: DeclId, ty: Ty) {
+        if let Some(declaration) = self.active_declarations.file_declaration(self.file, source) {
             self.inferred_stable_declaration_rets
                 .insert(declaration, ty);
-        } else if extension {
-            self.inferred_ext_fun_rets
-                .insert((self.file_index, source.0, name.to_string()), ty);
-        } else {
-            self.inferred_fun_rets
-                .insert((self.file_index, source.0), ty);
         }
     }
 
@@ -23181,9 +16552,6 @@ impl<'a> Checker<'a> {
         {
             self.inferred_stable_declaration_rets
                 .insert(declaration, ty);
-        } else {
-            // Legacy whole-file checker callers have no stable active declaration inventory.
-            self.inferred_source_member_rets.insert(source, ty);
         }
     }
 
@@ -23244,10 +16612,7 @@ impl<'a> Checker<'a> {
     }
 
     fn has_finalized_signature(&self, declaration: Option<crate::fir::DeclarationId>) -> bool {
-        declaration.is_some_and(|declaration| {
-            self.resolved_index
-                .is_some_and(|index| index.signature(declaration).is_some())
-        })
+        declaration.is_some_and(|declaration| self.resolved_index.signature(declaration).is_some())
     }
 
     fn checked_source_member_result(
@@ -23274,19 +16639,10 @@ impl<'a> Checker<'a> {
             // interpreting them through the active unit can alias an unrelated member at the same
             // class/method indices (`I.call` and a later unit's `A.foo` both appear as owner 0,
             // method 0 after reparsing). Stable identity is authoritative once present.
-            let stable_result = self
+            return self
                 .inferred_stable_declaration_rets
                 .get(&declaration)
                 .copied();
-            if stable_result.is_some() || self.active_declarations.is_some() {
-                return stable_result;
-            }
-            // Same-parse compatibility checkers have no active stable binding table, but their
-            // retained AST and `SourceMember` coordinates still belong to this exact file arena.
-            // Consume the checked overlay there; production Pass 2 always has
-            // `active_declarations` and therefore never takes this transient-coordinate path.
-            return source
-                .and_then(|source| self.inferred_source_member_rets.get(&source).copied());
         }
         source
             .and_then(|source| self.active_source_member_declaration(source))
@@ -23536,7 +16892,8 @@ impl<'a> Checker<'a> {
         let Some(identity) = ty.non_null().ty_param_name() else {
             return Vec::new();
         };
-        if let Some(bounds) = self.resolved_index.and_then(|index| {
+        if let Some(bounds) = (|| {
+            let index = self.resolved_index;
             let parameter = index.type_parameter_by_semantic_name(identity)?;
             let header = index.type_parameter_header(parameter)?;
             Some(
@@ -23547,7 +16904,7 @@ impl<'a> Checker<'a> {
                     .map(|bound| bound.ty.get())
                     .collect::<Vec<_>>(),
             )
-        }) {
+        })() {
             return bounds;
         }
         self.module.type_parameter_extra_bounds(identity)
@@ -23818,11 +17175,7 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        // Every read through a receiver funnels here, and the member's record still holds the
-        // marker while its own type is being determined. The receiver names the owner, which is all
-        // the demand needs — asking once here answers the bare-name, implicit-receiver and
-        // narrowed-`this` spellings alike, instead of teaching each of them separately.
-        Some(self.demanded_member_read(t, rt, name))
+        Some(t)
     }
 
     /// Probe one already-ordered implicit receiver for a bare property name. Scope-tower ordering
@@ -23835,20 +17188,6 @@ impl<'a> Checker<'a> {
         name: &str,
         receiver: ImplicitReceiver,
     ) -> Option<Ty> {
-        // A member read through an IMPLICIT receiver — a companion's property named unqualified
-        // from the class body or a nested class — resolves straight out of the member records, so
-        // it reaches neither the bare-name nor the explicit-receiver seam. An undetermined member
-        // read here would otherwise be taken as the answer.
-        if let Some(resolved) = self
-            .demand_member
-            .filter(|_| {
-                self.lookup_prop_name(receiver.ty, name)
-                    .is_some_and(|property| property.0 == Ty::Pending)
-            })
-            .and_then(|demand| demand(receiver.ty, name, &[]))
-        {
-            return Some(self.set(expression, resolved));
-        }
         if let Ty::Obj(_, _) = receiver.ty {
             if self.lookup_prop_name(receiver.ty, name).is_some() {
                 match self.select_property_read(scope, receiver.ty, name) {
@@ -26928,40 +20267,6 @@ impl<'a> Checker<'a> {
         // member READ path does. This sits on the one selection funnel rather than at each syntactic
         // position, so a qualified call, an unqualified call through the implicit receiver, and a
         // call inside another member's body all get the same answer.
-        let ret = match ret.mentions_pending() {
-            true => self
-                .demand_member
-                .and_then(|demand| demand(rt, name, &[]))
-                .filter(|answered| !answered.mentions_pending())
-                // The engine answers with the DECLARED return, which for a generic member is the
-                // class's own formal — `fun get() = value` is `T`, not `String`. The receiver's type
-                // arguments are what turn it into this call's type, and they are the same bindings
-                // the ordinary path substitutes with; without them `T` reads as its bound.
-                .map(|answered| {
-                    // Substituted with the RECEIVER's own arguments. `member_receiver_type_bindings`
-                    // answers nothing when the selected member carries no owner — exactly the
-                    // source-member case this seam serves — so the bindings come from the receiver's
-                    // classifier directly: `W<String>` binds `T` to `String`, and without that the
-                    // declared `T` leaks out as this call's type.
-                    let own = rt
-                        .kotlin_class_internal()
-                        .and_then(|owner| self.resolver().classifier(owner))
-                        .map(|class| crate::symbol_resolver::classifier_bindings(&class, rt))
-                        .unwrap_or_default();
-                    let bindings = match own.is_empty() {
-                        true => receiver_bindings.clone(),
-                        false => own.into_iter().collect(),
-                    };
-                    let out = crate::types::ty_subst_keep_unbound(answered, &bindings);
-                    crate::trace_compiler!(
-                        "resolve",
-                        "SEAM {name} rt={rt:?} answered={answered:?} binds={bindings:?} -> {out:?}"
-                    );
-                    out
-                })
-                .unwrap_or(ret),
-            false => ret,
-        };
         let owner = fi.owner.unwrap_or(internal_name);
         let projected_return_hazard = fi.projected_return_hazard
             && ret.is_erased_top()
@@ -27014,265 +20319,11 @@ impl<'a> Checker<'a> {
     /// decision instead of duplicating (or deeply nesting) argument validation, generic inference,
     /// default masks, and lowering metadata. The selected delegation is already provider-neutral
     /// semantic data; this function only records that data for the checker and lowerer.
-    fn finish_source_constructor_call(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        class: &ClassSig,
-        selected: ResolvedCtorDelegation,
-        bound_outer: Option<Ty>,
-        expected: Option<Ty>,
-        applied_classifier: Option<Ty>,
-    ) -> Ty {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let primary = matches!(
-            &selected.target,
-            ResolvedCtorDelegationTarget::ThisPrimary { .. }
-        );
-        let stable_declaration = match &selected.target {
-            ResolvedCtorDelegationTarget::ThisPrimary { .. } => {
-                class.primary_constructor_declaration
-            }
-            ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => class
-                .secondary_constructor_declarations
-                .get(*index)
-                .copied()
-                .flatten(),
-            ResolvedCtorDelegationTarget::Super { .. } => None,
-        };
-        let declared_params = selected.target.params().to_vec();
-        let checked_primary_shapes = primary
-            .then(|| {
-                let declaration = self.source_class_decl_by_internal(class.internal_name());
-                self.checked_primary_constructor_shapes(declaration.as_ref())
-            })
-            .flatten();
-        let parameter_shapes = match &selected.target {
-            ResolvedCtorDelegationTarget::ThisPrimary { .. } => {
-                checked_primary_shapes.or_else(|| Some(class.ctor_param_shapes.clone()))
-            }
-            ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => class
-                .secondary_ctor_shapes
-                .get(*index)
-                .map(|shapes| shapes.iter().copied().map(|shape| (shape, false)).collect()),
-            ResolvedCtorDelegationTarget::Super { .. } => None,
-        };
-        let inferred = if parameter_shapes
-            .as_ref()
-            .is_some_and(|shapes| shapes.len() == declared_params.len())
-        {
-            if let Some(vararg) = selected.vararg {
-                // Expanded vararg operands are independent constraints on the declaration's
-                // element shape. A spread or named vararg operand instead constrains the complete
-                // array shape. Present that source-order semantic view to the same classifier
-                // inference engine used by ordinary constructor parameters; the declaration and
-                // provider origin do not otherwise affect inference.
-                let argument_names = self.file.call_arg_names.get(&call.0);
-                let mut source_shapes = Vec::with_capacity(args.len());
-                let mut source_actuals = arg_tys.to_vec();
-                let mut whole_array_varargs = Vec::with_capacity(args.len());
-                for (source, (&argument, &slot)) in
-                    args.iter().zip(&selected.argument_slots).enumerate()
-                {
-                    let (mut shape, definitely_non_null) = parameter_shapes
-                        .as_deref()
-                        .and_then(|shapes| shapes.get(slot))
-                        .copied()
-                        .unwrap_or((selected.argument_types[source], false));
-                    let whole_array = slot == vararg
-                        && (self.file.is_spread_arg(argument)
-                            || argument_names
-                                .and_then(|names| names.get(source))
-                                .is_some_and(Option::is_some));
-                    if slot == vararg && !whole_array {
-                        shape = shape.array_read_elem().unwrap_or(shape);
-                    } else if whole_array
-                        && self.file.is_spread_arg(argument)
-                        && !source_actuals[source].is_array()
-                    {
-                        // Some call probes expose a spread as the element read from its array.
-                        // Reconstruct the source array only for constraint collection; checked FIR
-                        // still records the spread bit from syntax and never materializes this type.
-                        source_actuals[source] = Ty::array(source_actuals[source]);
-                    }
-                    source_shapes.push((shape, definitely_non_null));
-                    whole_array_varargs.push(whole_array);
-                }
-                self.expect_source_constructor_args(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &source_actuals,
-                    },
-                    class,
-                    &selected.argument_types,
-                    &source_shapes,
-                    None,
-                    &selected.argument_implicit_integer_coercion,
-                    Some(&whole_array_varargs),
-                    applied_classifier.or(expected),
-                    bound_outer,
-                    applied_classifier.is_some(),
-                )
-            } else {
-                let mut slots = vec![None; declared_params.len()];
-                let mut implicit_integer_coercion = vec![false; declared_params.len()];
-                for (source, (&argument, &slot)) in
-                    args.iter().zip(&selected.argument_slots).enumerate()
-                {
-                    slots[slot] = Some(argument);
-                    implicit_integer_coercion[slot] = selected
-                        .argument_implicit_integer_coercion
-                        .get(source)
-                        .copied()
-                        .unwrap_or(false);
-                }
-                self.expect_source_constructor_args(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys,
-                    },
-                    class,
-                    &declared_params,
-                    parameter_shapes.as_deref().expect("checked above"),
-                    Some(&slots),
-                    &implicit_integer_coercion,
-                    None,
-                    applied_classifier.or(expected),
-                    bound_outer,
-                    applied_classifier.is_some(),
-                )
-            }
-        } else {
-            // Selection has fixed the parameter for every source argument. Contextualize each
-            // concrete argument once against that selected parameter; in particular, a generic call
-            // nested in a constructor argument may bind its result from this expectation. Generic
-            // class-parameter slots are handled by the primary-constructor inference path above.
-            for (index, (&argument, &expected)) in
-                args.iter().zip(&selected.argument_types).enumerate()
-            {
-                let constraint = selected
-                    .argument_slots
-                    .get(index)
-                    .and_then(|&slot| selected.parameter_constraints.get(slot))
-                    .copied()
-                    .unwrap_or_default();
-                if constraint != ConstructorParameterConstraint::Concrete {
-                    continue;
-                }
-                if self.implicit_integer_coercion_applies(
-                    argument,
-                    expected,
-                    selected
-                        .argument_implicit_integer_coercion
-                        .get(index)
-                        .copied()
-                        .unwrap_or(false),
-                ) {
-                    continue;
-                }
-                let has_receiver = selected
-                    .argument_lambda_receivers
-                    .get(index)
-                    .copied()
-                    .unwrap_or(false);
-                self.check_argument_expected(scope, argument, expected, has_receiver, None);
-            }
-            Vec::new()
-        };
-        let params = if inferred.len() == class.type_params.len() {
-            let bindings = class
-                .type_params
-                .iter()
-                .cloned()
-                .zip(inferred.iter().copied())
-                .collect::<HashMap<_, _>>();
-            parameter_shapes
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|(shape, definitely_non_null)| {
-                    let parameter = crate::symbol_resolver::ty_subst(*shape, &bindings);
-                    if *definitely_non_null {
-                        definitely_non_null_binding(parameter)
-                    } else {
-                        parameter
-                    }
-                })
-                .collect()
-        } else {
-            declared_params
-        };
-        self.commit_constructor(
-            call,
-            ResolvedConstructor::Source {
-                owner: class.internal_name(),
-                stable_declaration,
-                outer: None,
-                primary,
-                context_args: selected.context_args,
-                params,
-                argument_slots: selected.argument_slots,
-                argument_types: selected.argument_types,
-                omitted: selected.omitted,
-                vararg: selected.vararg,
-                default_masks: selected.default_masks,
-            },
-        );
-        // Written type arguments on a typealias have already been substituted into the alias's
-        // complete target application (`StringPair<Int>` -> `Pair<String, Int>`). They are not the
-        // target classifier's positional arguments: applying the one written alias argument to
-        // `Pair` again would publish the malformed `Pair<Int>` and leave checked FIR without a
-        // substitution for `Pair`'s first parameter. Preserve the expanded semantic application;
-        // omitted alias arguments still take the ordinary constructor-inference path below.
-        let written_alias_application = applied_classifier.filter(|applied| {
-            self.file
-                .call_type_args
-                .get(&call.0)
-                .is_some_and(|arguments| !arguments.is_empty())
-                && applied.kotlin_class_internal() == Some(class.internal_name())
-                && applied.type_args().len() == class.type_params.len()
-        });
-        if let Some(applied) = written_alias_application {
-            return self.attach_captured_classifier_arguments(
-                scope,
-                call,
-                class.internal_name(),
-                applied,
-                bound_outer,
-            );
-        }
-        self.ctor_result_name_with_inferred(
-            scope,
-            call,
-            class.internal_name(),
-            inferred,
-            bound_outer,
-            applied_classifier.or(expected),
-        )
-    }
-
     fn anonymous_object_type(&mut self, scope: &CheckerScope<'_>, declaration: DeclId) -> Ty {
         let Decl::Class(class) = self.file.decl(declaration).clone() else {
             return Ty::Error;
         };
-        let owner = self
-            .active_classifier_internal(declaration, &class)
-            .or_else(|| match &self.module {
-                CheckerModuleSymbols::Legacy(source) => source
-                    .pass_one_symbols()
-                    .anonymous_object_types
-                    .get(&(self.file_index, declaration))
-                    .copied(),
-                CheckerModuleSymbols::Streamed(_) => None,
-            });
+        let owner = self.active_classifier_internal(declaration);
         let Some(owner) = owner else {
             return Ty::Error;
         };
@@ -27845,14 +20896,6 @@ impl<'a> Checker<'a> {
                 .discovered_anonymous_captures
                 .get(&declaration)
                 .cloned()
-                .or_else(|| match &self.module {
-                    CheckerModuleSymbols::Legacy(source) => source
-                        .pass_one_symbols()
-                        .anonymous_object_captures
-                        .get(&(self.file_index, declaration))
-                        .cloned(),
-                    CheckerModuleSymbols::Streamed(_) => None,
-                })
                 .unwrap_or_default();
             {
                 for capture in captures {
@@ -28282,99 +21325,6 @@ impl<'a> Checker<'a> {
                     ) {
                         return result;
                     }
-                }
-                // Nested-class construction `Outer.Inner(args)`.
-                let source_constructor = match (&self.module, &member_qualifier) {
-                    (
-                        CheckerModuleSymbols::Legacy(source),
-                        Ok(ResolvedQualifier::Classifier(internal)),
-                    ) => source
-                        .pass_one_symbols()
-                        .classes
-                        .get(internal)
-                        .cloned()
-                        .map(|class| {
-                            let qname = source
-                                .pass_one_symbols()
-                                .class_simple_name(*internal)
-                                .unwrap_or_else(|| name.clone());
-                            (class, qname)
-                        }),
-                    _ => None,
-                };
-                if let Some((cls, qname)) = source_constructor {
-                    // Route through the general source-constructor selection (defaults,
-                    // varargs, secondaries, generic inference) so an omitted default records
-                    // the same `ResolvedConstructor::Source` the lowerer's default-filling
-                    // consumes — exactly like an unqualified `Inner(args)` construction.
-                    let declaration = self.source_class_decl_by_internal(cls.internal_name());
-                    let arg_tys = self.arg_tys(scope, args);
-                    let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
-                    let arguments = CtorDelegationCall {
-                        args: args.to_vec(),
-                        names,
-                        trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                    };
-                    let candidates =
-                        self.source_constructor_candidates(scope, declaration.as_ref(), &cls);
-                    if let SourceConstructorSelection::Selected {
-                        resolved: selected, ..
-                    } = self.select_source_constructor(scope, &arguments, &candidates)
-                    {
-                        let selected = *selected;
-                        return self.finish_source_constructor_call(
-                            scope,
-                            CallArgs {
-                                call,
-                                args,
-                                arg_tys: &arg_tys,
-                            },
-                            &cls,
-                            selected,
-                            None,
-                            expected,
-                            qualified_alias_target,
-                        );
-                    }
-                    // A class name with a companion also denotes that companion in value
-                    // position. Constructor applicability is the nearer arbitration step, but
-                    // an inapplicable constructor must not prevent the companion's ordinary
-                    // `operator invoke` family from participating (`Outer.Nested(arg)`).
-                    if let Some(resolution) = self.classifier_value_invoke(
-                        scope,
-                        call,
-                        callee,
-                        cls.internal_name(),
-                        args,
-                        span,
-                    ) {
-                        match resolution {
-                            InvokeResolution::Selected(result) => return result,
-                            InvokeResolution::Ambiguous(overloads) => {
-                                self.diags.error(
-                                    span,
-                                    self.ambiguous_member_candidates_message(
-                                        CALLABLE_INVOKE_OPERATOR,
-                                        &overloads,
-                                    ),
-                                );
-                                return Ty::Error;
-                            }
-                            InvokeResolution::Inapplicable(_) | InvokeResolution::Absent => {}
-                        }
-                    }
-                    if !self.report_source_constructor_mapping_error(
-                        call,
-                        args,
-                        &arguments,
-                        &candidates,
-                        &qname,
-                    ) && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags
-                            .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
-                    }
-                    return Ty::Error;
                 }
                 // CLASSPATH nested-class constructor `Outer.Nested(args)` (a sealed subclass
                 // `Subject.User("x")`, or any nested class), OR a FULLY-QUALIFIED constructor via a package
@@ -32138,8 +25088,6 @@ impl<'a> Checker<'a> {
                 // Keep its diagnostic pending while the remaining callable-tower levels participate;
                 // report it only if no constructor, same-named function, or companion `invoke` wins.
                 let mut constructor_mapping_failure = None;
-                let mut source_constructor_failure = None;
-                let mut low_priority_source_constructor = None;
                 let mut low_priority_provider_constructor = None;
                 let mut had_inapplicable_constructor = false;
                 if let Some(scoped_internal) = bare_classifier {
@@ -32160,9 +25108,11 @@ impl<'a> Checker<'a> {
                     // Pass 2. Select their constructor family directly from that provider shape;
                     // retaining a separate `ClassSig` route here would reopen the graph that was
                     // deliberately destroyed before body checking.
-                    if self.resolved_index.is_some_and(|index| {
-                        index.classifier_declaration(scoped_internal).is_some()
-                    }) {
+                    if self
+                        .resolved_index
+                        .classifier_declaration(scoped_internal)
+                        .is_some()
+                    {
                         has_source_constructor_declaration = true;
                         let argument_classifier = inherited_shape
                             .clone()
@@ -32212,93 +25162,6 @@ impl<'a> Checker<'a> {
                                         !classifier.constructors.is_empty();
                                 }
                                 Err(error) => constructor_mapping_failure = Some(error),
-                            }
-                        }
-                    }
-                    let ctor_cls = match &self.module {
-                        CheckerModuleSymbols::Legacy(source) => source
-                            .pass_one_symbols()
-                            .class_by_type_name(scoped_internal)
-                            .cloned(),
-                        CheckerModuleSymbols::Streamed(_) => None,
-                    };
-                    if let Some(cls) = ctor_cls {
-                        if cls.source_decl.is_some() {
-                            has_source_constructor_declaration = true;
-                            // Pass 2 retains the stable semantic class header, not another file's
-                            // syntax. Same-file syntax contributes annotation details when present;
-                            // ordinary constructor selection and inference consume the header-only
-                            // candidate shape once that syntax has been dropped.
-                            let declaration =
-                                self.source_class_decl_by_internal(cls.internal_name());
-                            let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
-                            let arguments = CtorDelegationCall {
-                                args: args.to_vec(),
-                                names,
-                                trailing_lambda: self
-                                    .file
-                                    .call_has_trailing_lambda
-                                    .contains(&call.0),
-                            };
-                            let candidates = self.source_constructor_candidates(
-                                scope,
-                                declaration.as_ref(),
-                                &cls,
-                            );
-
-                            // A real applicable constructor wins even when a same-named factory is
-                            // available. Interfaces deliberately contribute no constructible candidate;
-                            // their synthetic source shape exists for diagnostics, not as a callable.
-                            let selected = (!cls.is_interface() && !cls.is_object())
-                                .then(|| {
-                                    match self.select_source_constructor(
-                                        scope,
-                                        &arguments,
-                                        &candidates,
-                                    ) {
-                                        SourceConstructorSelection::Selected {
-                                            resolved: selected,
-                                            ..
-                                        } => Some(*selected),
-                                        SourceConstructorSelection::NoMatch { .. }
-                                        | SourceConstructorSelection::Ambiguous => None,
-                                    }
-                                })
-                                .flatten();
-                            if let Some(selected) = selected {
-                                if selected.low_priority {
-                                    low_priority_source_constructor = Some((cls.clone(), selected));
-                                } else {
-                                    let result = self.finish_source_constructor_call(
-                                        scope,
-                                        CallArgs {
-                                            call,
-                                            args,
-                                            arg_tys: &arg_tys,
-                                        },
-                                        &cls,
-                                        selected,
-                                        implicit_constructor_outer.map(|receiver| receiver.ty),
-                                        expected,
-                                        bare_alias_target,
-                                    );
-                                    if cls.inner_of.is_some() {
-                                        if let Some(receiver) = implicit_constructor_outer {
-                                            self.mark_implicit_receiver_selection(call, receiver);
-                                        }
-                                    }
-                                    return result;
-                                }
-                            } else {
-                                source_constructor_failure = Some((
-                                    arguments,
-                                    candidates,
-                                    declaration.map_or_else(
-                                        || cls.internal_name().nested_segment_ref().to_string(),
-                                        |declaration| declaration.name,
-                                    ),
-                                    cls.internal_name(),
-                                ));
                             }
                         }
                     }
@@ -32905,21 +25768,6 @@ impl<'a> Checker<'a> {
                         Err(error) => constructor_mapping_failure = Some(error),
                     }
                 }
-                if let Some((class, selected)) = low_priority_source_constructor {
-                    return self.finish_source_constructor_call(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
-                        &class,
-                        selected,
-                        None,
-                        expected,
-                        None,
-                    );
-                }
                 let mut candidates = self.resolver().top_level_candidates(&fname);
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
                 let had_rejected_callable = had_inapplicable_constructor
@@ -32943,22 +25791,6 @@ impl<'a> Checker<'a> {
                 if let Some(retained) = retained_receiver_call_failure {
                     self.report_retained_member_mapping_failure(call, &fname, args, retained);
                     return Ty::Error;
-                }
-                if let Some((arguments, candidates, class_name, internal)) =
-                    source_constructor_failure
-                {
-                    if !self.report_source_constructor_mapping_error(
-                        call,
-                        args,
-                        &arguments,
-                        &candidates,
-                        &class_name,
-                    ) && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags
-                            .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
-                    }
-                    return self.ctor_result_name(scope, call, internal, expected, None);
                 }
                 if let Some(error) = constructor_mapping_failure {
                     let result = error.result_type();
@@ -33426,7 +26258,7 @@ impl<'a> Checker<'a> {
                 // under, in the scope holding this statement — so it stays visible to the rest of
                 // the block AND to the class's own body (a member may name its own class).
                 if let Stmt::LocalClass(source) = self.file.stmt(s) {
-                    if let Some(internal) = self.active_classifier_internal(d, &cl) {
+                    if let Some(internal) = self.active_classifier_internal(d) {
                         scope.rebind(
                             &source.name,
                             Ns::Classifier,
@@ -35858,6 +28690,141 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
+    use std::cell::RefCell;
+    use std::ops::{Deref, DerefMut};
+
+    thread_local! {
+        static PARSED_TEST_SOURCES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    struct TestAnalysis {
+        symbols: SymbolTable,
+        types: Vec<Option<TypeInfo>>,
+        file_addresses: Vec<usize>,
+        module: crate::fir::FrontendModule,
+        active: Vec<crate::fir::ActiveSourceDeclarations>,
+    }
+
+    impl Deref for TestAnalysis {
+        type Target = SymbolTable;
+
+        fn deref(&self) -> &Self::Target {
+            &self.symbols
+        }
+    }
+
+    impl DerefMut for TestAnalysis {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.symbols
+        }
+    }
+
+    impl CheckerSymbolEnvironment for TestAnalysis {
+        fn libraries(&self) -> &dyn SemanticPlatform {
+            &*self.symbols.libraries
+        }
+
+        fn compilation_id(&self) -> u64 {
+            self.symbols.compilation_id
+        }
+    }
+
+    fn remember_test_source(source: &str) {
+        PARSED_TEST_SOURCES.with(|sources| sources.borrow_mut().push(source.to_string()));
+    }
+
+    fn take_test_sources(count: usize) -> Vec<String> {
+        PARSED_TEST_SOURCES.with(|sources| {
+            let mut sources = sources.borrow_mut();
+            assert!(
+                sources.len() >= count,
+                "test parsed {count} files without registering their source text"
+            );
+            let start = sources.len() - count;
+            sources.drain(start..).collect()
+        })
+    }
+
+    fn analyze_test_files(files: &[File], diagnostics: &mut DiagSink) -> TestAnalysis {
+        analyze_test_files_with_platform(files, Box::new(EmptySymbolSource), diagnostics)
+    }
+
+    fn analyze_test_files_with_platform(
+        files: &[File],
+        platform: Box<dyn SemanticPlatform>,
+        diagnostics: &mut DiagSink,
+    ) -> TestAnalysis {
+        let sources = take_test_sources(files.len());
+        let inputs = sources
+            .iter()
+            .map(|source| crate::source::SourceInput::kotlin(source))
+            .collect::<Vec<_>>();
+        let mut analysis = crate::frontend::analyze_source_set_with_features(
+            &inputs,
+            platform,
+            &LangFeatures::default(),
+            diagnostics,
+        );
+        let module = analysis
+            .streamed
+            .take()
+            .expect("source-set analysis retains finalized FIR")
+            .module;
+        let active = files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                crate::fir::ActiveSourceDeclarations::bind_complete_source(
+                    file,
+                    crate::fir::SourceFileId::from_raw(index as u32),
+                    module.index(),
+                )
+                .expect("test syntax binds to its finalized declaration inventory")
+            })
+            .collect();
+        TestAnalysis {
+            symbols: analysis.symbols,
+            types: analysis.types,
+            file_addresses: files
+                .iter()
+                .map(|file| std::ptr::from_ref(file).addr())
+                .collect(),
+            module,
+            active,
+        }
+    }
+
+    fn take_checked_test_file(
+        file: &File,
+        analysis: &mut TestAnalysis,
+        _diagnostics: &mut DiagSink,
+    ) -> TypeInfo {
+        let address = std::ptr::from_ref(file).addr();
+        let index = analysis
+            .file_addresses
+            .iter()
+            .position(|candidate| *candidate == address)
+            .expect("checked file belongs to the analyzed source set");
+        analysis.types[index].take().expect("file was checked")
+    }
+
+    fn make_test_checker<'a>(
+        file: &'a File,
+        file_index: u32,
+        _files: Option<&'a [File]>,
+        analysis: &'a TestAnalysis,
+        diagnostics: &'a mut DiagSink,
+    ) -> Checker<'a> {
+        make_checker_with_index(
+            file,
+            file_index,
+            analysis,
+            analysis.module.index(),
+            &analysis.active[file_index as usize],
+            None,
+            diagnostics,
+        )
+    }
 
     #[test]
     fn package_only_qualified_classifier_failure_reports_the_missing_tail() {
@@ -35895,7 +28862,7 @@ mod tests {
             panic!("local declaration must be a class")
         };
         let identity = type_name(&format!("{}/Alias", local.name.replace('.', "/")));
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         assert!(
@@ -35912,7 +28879,7 @@ mod tests {
             "value class UIntArray(private val storage: IntArray) { val size get() = storage.size }",
             &mut diagnostics,
         );
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         let class = symbols
@@ -35954,6 +28921,7 @@ mod tests {
         let mut builder = crate::fir::HeaderInventoryBuilder::default();
         builder.add_source(0, &input, Some(&file));
         let headers = builder.finish();
+        let local_contexts = [pass_one_local_class_context(&file, &[])];
 
         // Deliberately corrupt the transient declaration header after compact extraction. This is
         // a migration regression: production signature publication must no longer read these AST
@@ -36045,10 +29013,9 @@ mod tests {
         class.secondary_ctors[0].params[0].ty.name = "String".to_string();
         class.type_aliases.clear();
 
-        let files = [file];
-        let symbols = collect_signatures_with_cp_headers(
-            &files,
+        let symbols = collect_streamed_signatures_with_cp(
             &headers,
+            &local_contexts,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
         );
@@ -36080,21 +29047,35 @@ mod tests {
             .expect("compact carry metadata spellings");
         assert_eq!(carry_spellings.ret.alias, Some(type_name("Cargo")));
         assert_eq!(carry_spellings.params[0].alias, Some(type_name("Cargo")));
-        let count = &symbols.source_props[&(0, count_declaration.0)];
+        let stable_property = |name: &str| {
+            headers
+                .stubs
+                .iter()
+                .find(|stub| {
+                    stub.kind == crate::fir::DeclarationKind::Property
+                        && stub
+                            .lookup_name
+                            .and_then(|name| headers.lookup_names.get(name))
+                            == Some(name)
+                })
+                .expect("stable property declaration")
+                .id
+        };
+        let count = &symbols.stable_source_props[&stable_property("count")];
         assert_eq!(count.ty, Ty::Long);
         assert!(!count.is_var);
         assert!(!count.is_const);
         assert!(!count.is_lateinit);
         assert_eq!(count.annotations, [type_name("MarkerAnnotation")]);
         assert_eq!(
-            symbols.source_props[&(0, guarded_declaration.0)].setter_visibility,
+            symbols.stable_source_props[&stable_property("guarded")].setter_visibility,
             Visibility::Private
         );
         let extension = symbols
             .ext_props
             .values()
             .flatten()
-            .find(|property| property.source == (0, extension_declaration.0))
+            .find(|property| property.stable_declaration == Some(stable_property("first")))
             .expect("compact extension property signature");
         assert_eq!(extension.receiver, Ty::String);
         assert_eq!(extension.ty, Ty::Char);
@@ -36175,6 +29156,7 @@ mod tests {
         let mut builder = crate::fir::HeaderInventoryBuilder::default();
         builder.add_source(0, &input, Some(&file));
         let headers = builder.finish();
+        let local_contexts = [pass_one_local_class_context(&file, &[])];
         let expected = headers
             .stubs
             .iter()
@@ -36202,9 +29184,9 @@ mod tests {
             }
         }
         diagnostics.diags.clear();
-        let _ = collect_signatures_with_cp_headers(
-            &[file],
+        let _ = collect_streamed_signatures_with_cp(
             &headers,
+            &local_contexts,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
         );
@@ -36235,7 +29217,7 @@ mod tests {
             "package sample\nclass Record(val value: Int)\ntypealias LocalRecord = Record",
             &mut diagnostics,
         );
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         assert!(symbols
@@ -36339,8 +29321,7 @@ class CompanionHost {
 }
 fun after(): Int = 3
 "#;
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
+        let file = parse_file(source, &mut diagnostics);
         assert!(diagnostics.diags.is_empty());
 
         let selected = capture_discovery_scope(&file).declarations;
@@ -36680,11 +29661,10 @@ val result = object { fun value(): String = captured }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
         let mut d = DiagSink::new();
-        let toks = lex(src, &mut d);
-        let file = parse(src, &toks, &mut d);
+        let file = parse_file(src, &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
         (errs, Some(info))
     }
@@ -36710,8 +29690,8 @@ val result = object { fun value(): String = captured }
             parse_file(src, &mut diagnostics)
         };
         let files = vec![kotlin_annotations, exact_annotation, file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[2], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[2], &mut symbols, &mut diagnostics);
         let errors = diagnostics
             .diags
             .iter()
@@ -36724,8 +29704,8 @@ val result = object { fun value(): String = captured }
         let mut diagnostics = DiagSink::new();
         let file = parse_file_with_detected_features(src, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         diagnostics
             .diags
             .iter()
@@ -36858,8 +29838,8 @@ val result = object { fun value(): String = captured }
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         let captures = info
@@ -36888,8 +29868,7 @@ val result = object { fun value(): String = captured }
                       \u{20} return object {}\n\
                       }";
         let mut diagnostics = DiagSink::new();
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
+        let file = parse_file(source, &mut diagnostics);
         let function_start = file
             .decls
             .iter()
@@ -36907,8 +29886,8 @@ val result = object { fun value(): String = captured }
             })
             .expect("anonymous object");
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         let function_parameters = info.resolved_declaration_type_parameters(function_start);
@@ -36949,8 +29928,9 @@ val result = object { fun value(): String = captured }
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(Vec::new()),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
@@ -37009,8 +29989,9 @@ val result = object { fun value(): String = captured }
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::toolchain::stdlib_classpath(),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
@@ -37531,8 +30512,9 @@ fun use() {
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::toolchain::stdlib_classpath(),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
         assert!(matches!(
             info.expr_lowers.get(&check),
@@ -37553,7 +30535,7 @@ fun use() {
              fun <T> same(first: @Constraint T, second: T) {}",
             &mut diagnostics,
         );
-        let symbols = collect_signatures(&[declaration, use_site], &mut diagnostics);
+        let symbols = analyze_test_files(&[declaration, use_site], &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
         assert_eq!(symbols.funs["same"][0].exact_params, [true, false]);
     }
@@ -37597,7 +30579,7 @@ class Host {
         let annotation = file.declaration_type_parameter_annotations[&method.signature_span.lo][0]
             .annotations[0]
             .clone();
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert!(
@@ -37641,7 +30623,7 @@ class Host {
             .annotations[0]
             .clone();
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
 
         assert!(
             symbols
@@ -37650,7 +30632,7 @@ class Host {
             "nested annotation should bind to Host.Mark, got {:?}",
             symbols.resolved_annotation(0, &annotation)
         );
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
@@ -37659,7 +30641,7 @@ class Host {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("class Box<@DefinitelyAbsentAnnotation T>", &mut diagnostics);
 
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
 
         assert!(symbols.resolved_annotations.is_empty());
         assert_eq!(
@@ -37685,9 +30667,9 @@ typealias Alias<@Marker(2) T> = Target<T>
             &mut diagnostics,
         );
         let files = [file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
 
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_eq!(
             diagnostics
@@ -37901,7 +30883,7 @@ enum class EntryChoice {
                 "sample/EntryChoice$ENTRY$EntryOnly",
             ),
         ];
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         for (annotation, expected) in annotations {
@@ -38239,16 +31221,18 @@ enum class EntryChoice {
             let mut diagnostics = DiagSink::new();
             let file = parse_file(&source, &mut diagnostics);
             assert_no_diags(&diagnostics);
-            let function = file
-                .decls
+            let input = crate::source::SourceInput::kotlin(&source);
+            let mut builder = crate::fir::HeaderInventoryBuilder::default();
+            builder.add_source(0, &input, Some(&file));
+            let headers = builder.finish();
+            let declaration = headers
+                .stubs
                 .iter()
-                .find_map(|&declaration| match file.decl(declaration) {
-                    Decl::Fun(function) => Some(function),
-                    _ => None,
-                })
+                .find(|declaration| declaration.kind == crate::fir::DeclarationKind::Function)
+                .map(|declaration| declaration.id)
                 .expect("source should contain a function");
 
-            assert!(source_function_conflict_display(&file, function, 128).is_none());
+            assert!(streamed_function_conflict_display(&headers, declaration, 128).is_none());
         }
     }
 
@@ -38263,8 +31247,8 @@ enum class EntryChoice {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let elvis = files[0]
@@ -38288,8 +31272,8 @@ enum class EntryChoice {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let elvis = files[0]
@@ -38365,8 +31349,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -38410,8 +31394,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -38453,8 +31437,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let declarations = files[0]
@@ -38509,8 +31493,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let declarations = files[0]
@@ -38562,8 +31546,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let declarations = files[0]
@@ -38623,8 +31607,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let mut literal_binary = None;
@@ -38676,8 +31660,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let mut literal_binary = None;
@@ -38735,8 +31719,8 @@ class Child : Middle() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -38774,8 +31758,8 @@ class Child : Base() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -38809,8 +31793,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -38873,8 +31857,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -38953,8 +31937,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -38995,11 +31979,13 @@ fun box(): String {
     }
 
     fn parse_file(src: &str, d: &mut DiagSink) -> File {
+        remember_test_source(src);
         let toks = lex(src, d);
         parse(src, &toks, d)
     }
 
     fn parse_file_with_detected_features(src: &str, d: &mut DiagSink) -> File {
+        remember_test_source(src);
         let toks = lex(src, d);
         let features = LangFeatures::from_source(src);
         parse_with_features(src, &toks, d, &features)
@@ -39854,8 +32840,9 @@ fun box(): String {
         let extension_receiver_call = named_call(&file, "decorate");
         let dispatch_receiver_call = named_call(&file, "containerTag");
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let extension = info
@@ -39882,9 +32869,12 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let selected = info
@@ -39971,8 +32961,9 @@ fun box(): String {
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let signature = symbols.ext_funs["validate"]
@@ -40030,8 +33021,9 @@ fun box(): String {
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
@@ -40061,8 +33053,9 @@ fun box(): String {
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
@@ -40100,8 +33093,8 @@ fun box(): String {
             .expect("source should contain the dispatch-receiver property read");
         let choose = named_call(&file, "choose");
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         assert_eq!(info.ty(marker), Ty::Int);
@@ -40178,8 +33171,9 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = files[0]
@@ -40223,7 +33217,7 @@ fun box(): String {
             &mut d,
         );
         let files = vec![a, b];
-        let symbols = collect_signatures(&files, &mut d);
+        let symbols = analyze_test_files(&files, &mut d);
         let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
         assert!(
             errs.is_empty(),
@@ -40257,7 +33251,7 @@ fun box(): String {
         let a = parse_file("class Dup\nfun f() {}", &mut d);
         let b = parse_file("class Dup\nfun f() {}", &mut d);
         let files = vec![a, b];
-        let _ = collect_signatures(&files, &mut d);
+        let _ = analyze_test_files(&files, &mut d);
         let errs: Vec<String> = d.diags.iter().map(|x| x.msg.clone()).collect();
         assert!(
             errs.iter()
@@ -40315,7 +33309,7 @@ fun box(): String {
         );
         let files = vec![file];
         let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
-        let mut syms = collect_signatures_with_cp(
+        let mut syms = analyze_test_files_with_platform(
             &files,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(cp)),
             &mut d,
@@ -40331,7 +33325,7 @@ fun box(): String {
                 .is_some_and(|callables| !callables.properties().is_empty()),
             "String.length must be an ordinary property declaration"
         );
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -40407,8 +33401,9 @@ fun box(): String {
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::toolchain::stdlib_classpath(),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let owners = ["Direct", "Owner$Nested"];
@@ -40459,9 +33454,12 @@ fun box(): String {
             })
             .expect("source should contain the entries property");
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
         assert!(matches!(
             info.expr_lowers.get(&entries),
@@ -40482,8 +33480,9 @@ fun box(): String {
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::toolchain::stdlib_classpath(),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let resolved_properties = files[0]
@@ -40520,8 +33519,9 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -40637,9 +33637,12 @@ fun box(): String {
             })
             .expect("source should contain literalChoice call");
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
         let selected = info.resolved_extension(call).unwrap_or_else(|| {
             panic!(
@@ -40660,9 +33663,12 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         let expected = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
         let matching = diagnostics
             .diags
@@ -40716,9 +33722,12 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         let matching = diagnostics
             .diags
@@ -40755,9 +33764,12 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         let type_errors = diagnostics
             .diags
             .iter()
@@ -40800,9 +33812,12 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         let message = diagnostics
             .diags
@@ -40839,9 +33854,12 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         let expected = [
             "too many arguments for 'fun knownPair(a: Int, b: Int): Int'.",
             "too many arguments for 'fun known(a: Int, b: Int = ...): String'.",
@@ -40877,8 +33895,9 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -40909,8 +33928,9 @@ fun box(): String {
         let mut d = DiagSink::new();
         let file = parse_file("fun first(xs: BoxedIndex): String = xs[0]", &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -40938,8 +33958,9 @@ fun box(): String {
         let mut d = DiagSink::new();
         let file = parse_file("fun first(s: String): Char = s[0]", &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -40971,8 +33992,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -41012,8 +34033,8 @@ fun box(): String {
                 &mut d,
             ),
         ];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[1], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[1], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -41061,7 +34082,7 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let symbols = collect_signatures(&files, &mut diagnostics);
+        let symbols = analyze_test_files(&files, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let child = symbols
@@ -41092,8 +34113,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -41136,8 +34157,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -41196,8 +34217,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             !d.diags.is_empty(),
             "invalid contains return should reject the in-range expression"
@@ -41235,8 +34256,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let assign = files[0]
@@ -41273,8 +34294,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let assign = files[0]
@@ -41305,8 +34326,9 @@ fun box(): String {
         let mut d = DiagSink::new();
         let file = parse_file("fun write(b: BoxedIndex) { b[0] = \"x\" }", &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let assign = files[0]
@@ -41334,8 +34356,9 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let iterable = files[0]
@@ -41355,8 +34378,14 @@ fun box(): String {
             protocol.iter_ty,
             Ty::obj_args("BoxedIterator", &[Ty::String])
         );
-        assert_eq!(protocol.has_next.emit_name(), Some("hasNext"));
-        assert_eq!(protocol.next.emit_name(), Some("next"));
+        assert!(matches!(
+            protocol.has_next.as_ref(),
+            ResolvedCall::Member(resolved) if resolved.member.name == "hasNext"
+        ));
+        assert!(matches!(
+            protocol.next.as_ref(),
+            ResolvedCall::Member(resolved) if resolved.member.name == "next"
+        ));
         assert!(
             matches!(
                 protocol.iterator.as_ref(),
@@ -41377,8 +34406,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let stmt = files[0]
@@ -41419,8 +34448,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let stmt = files[0]
@@ -41475,8 +34504,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let stmt = files[0]
@@ -41529,8 +34558,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = named_call(&files[0], "pick");
@@ -41570,8 +34599,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = named_call(&files[0], "leaf");
@@ -41605,9 +34634,9 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
 
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
     }
@@ -41622,9 +34651,9 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
 
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -41649,9 +34678,9 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
 
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -41674,9 +34703,9 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
 
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
     }
@@ -41811,8 +34840,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = named_call(&files[0], "leaf");
@@ -41837,8 +34866,8 @@ fun box(): String {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = named_call(&files[0], "leaf");
@@ -41864,14 +34893,10 @@ fun box(): String {
             parse_file("fun helper(s: String): String = s", &mut d),
             parse_file("fun box(): String = helper(\"OK\")", &mut d),
         ];
-        let mut syms = collect_signatures(&files, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
         let helper_decl = top_level_fun_decl(&files[0], "helper", |_| true);
-        syms.fn_facades_by_decl
-            .insert((0, helper_decl.0), crate::types::type_name("AKt"));
-        syms.fn_facades
-            .insert("helper".to_string(), crate::types::type_name("AKt"));
         d.set_file(1);
-        let info = check_file_at(&files[1], 1, &mut syms, &mut d);
+        let info = take_checked_test_file(&files[1], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = named_call(&files[1], "helper");
@@ -41890,17 +34915,10 @@ fun box(): String {
             parse_file("fun helper(s: String): String = s", &mut d),
             parse_file("fun box(): String = helper(\"OK\")", &mut d),
         ];
-        let mut syms = collect_signatures(&files, &mut d);
-        let int_decl = top_level_fun_decl(&files[0], "helper", |_| true);
+        let mut syms = analyze_test_files(&files, &mut d);
         let string_decl = top_level_fun_decl(&files[1], "helper", |_| true);
-        syms.fn_facades_by_decl
-            .insert((0, int_decl.0), crate::types::type_name("AKt"));
-        syms.fn_facades_by_decl
-            .insert((1, string_decl.0), crate::types::type_name("BKt"));
-        syms.fn_facades
-            .insert("helper".to_string(), crate::types::type_name("AKt"));
         d.set_file(2);
-        let info = check_file_at(&files[2], 2, &mut syms, &mut d);
+        let info = take_checked_test_file(&files[2], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = named_call(&files[2], "helper");
@@ -41919,9 +34937,9 @@ fun box(): String {
             parse_file("package b\nfun helper(): String = \"OK\"", &mut d),
             parse_file("package b\nfun box(): String = helper()", &mut d),
         ];
-        let mut syms = collect_signatures(&files, &mut d);
+        let mut syms = analyze_test_files(&files, &mut d);
         d.set_file(2);
-        let info = check_file_at(&files[2], 2, &mut syms, &mut d);
+        let info = take_checked_test_file(&files[2], &mut syms, &mut d);
         assert_no_diags(&d);
 
         let call = named_call(&files[2], "helper");
@@ -41936,8 +34954,9 @@ fun box(): String {
         let mut d = DiagSink::new();
         let file = parse_file("fun direct(): String = knownTop(b = 2, a = \"x\")", &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -41993,9 +35012,12 @@ fun box(): String {
             let mut diagnostics = DiagSink::new();
             let file = parse_file(source, &mut diagnostics);
             let files = vec![file];
-            let mut symbols =
-                collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-            let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+            let mut symbols = analyze_test_files_with_platform(
+                &files,
+                Box::new(FakeMemberPlatform),
+                &mut diagnostics,
+            );
+            let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
             let diagnostic = diagnostics
                 .diags
@@ -42023,8 +35045,9 @@ fun box(): String {
         let mut d = DiagSink::new();
         let file = parse_file("val ref = ::knownTop", &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -42072,9 +35095,12 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let when_expression = files[0]
@@ -42113,9 +35139,12 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let reference = files[0]
@@ -42151,9 +35180,12 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
@@ -42167,9 +35199,12 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -42256,7 +35291,8 @@ fun box(): String {
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
         let class = symbols
             .class_by_internal("A")
             .expect("source class A must be registered");
@@ -42278,7 +35314,7 @@ fun box(): String {
             let scope = CheckerScope::root();
             let mut probe_diagnostics = DiagSink::new();
             let mut checker =
-                make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+                make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
             for (name, expected) in [
                 (
                     "arrayOf",
@@ -42392,7 +35428,7 @@ fun box(): String {
                 "startCoroutine metadata has no extension applicable to {start_receiver:?}; raw={raw_start_shapes:#?}"
             );
         }
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -42408,7 +35444,7 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -42436,14 +35472,15 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
         );
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
-        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+        let checker =
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             applied_common_supertype(
@@ -42468,14 +35505,15 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
         );
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
-        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+        let checker =
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             applied_common_supertype(
@@ -42500,14 +35538,15 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
         );
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
-        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+        let checker =
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             applied_common_supertype(
@@ -42525,7 +35564,7 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("", &mut diagnostics);
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -42533,7 +35572,7 @@ fun box(): String {
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
         let mut checker =
-            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
 
         assert_eq!(
@@ -42548,7 +35587,7 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("class A\nclass B\nclass Inv<T>", &mut diagnostics);
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -42556,7 +35595,7 @@ fun box(): String {
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
         let mut checker =
-            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             checker.join(
@@ -42574,7 +35613,7 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("class A\nclass B\ninterface Cov<out T>", &mut diagnostics);
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -42582,7 +35621,7 @@ fun box(): String {
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
         let mut checker =
-            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             checker.join(
@@ -42600,7 +35639,7 @@ fun box(): String {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("class A\nclass B\ninterface Contra<in T>", &mut diagnostics);
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -42608,7 +35647,7 @@ fun box(): String {
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
         let mut checker =
-            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             checker.join(
@@ -42644,8 +35683,8 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
     }
@@ -42655,7 +35694,7 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("class A\nclass B", &mut diagnostics);
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -42663,7 +35702,7 @@ fun use() {
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
         let mut checker =
-            make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             checker.join(
@@ -42692,14 +35731,15 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
         );
         assert_no_diags(&diagnostics);
         let mut probe_diagnostics = DiagSink::new();
-        let checker = make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+        let checker =
+            make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
 
         assert_eq!(
             applied_common_supertype(&checker.fed_source(), &checker, Ty::obj("A"), Ty::obj("B")),
@@ -42937,7 +35977,7 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let symbols = collect_signatures(&files, &mut diagnostics);
+        let symbols = analyze_test_files(&files, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -42985,9 +36025,12 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
         assert!(info.expr_lowers.values().any(|lowering| matches!(
@@ -43121,9 +36164,12 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -43140,13 +36186,16 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
         {
             let scope = CheckerScope::root();
             let mut probe_diagnostics = DiagSink::new();
             let mut checker =
-                make_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
+                make_test_checker(&files[0], 0, Some(&files), &symbols, &mut probe_diagnostics);
             for (name, outer) in [("of", "consume"), ("hostFoo", "withO")] {
                 let reference = files[0]
                     .expr_arena
@@ -43178,7 +36227,7 @@ fun use() {
                 );
             }
         }
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -43203,9 +36252,12 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -43222,9 +36274,12 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols =
-            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files_with_platform(
+            &files,
+            Box::new(FakeMemberPlatform),
+            &mut diagnostics,
+        );
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert!(
             diagnostics.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -43261,8 +36316,9 @@ fun use() {
         let mut d = DiagSink::new();
         let file = parse_file("class Foo(val i: Int)\nval ref = ::Foo", &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -43302,8 +36358,9 @@ fun use() {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -43341,8 +36398,9 @@ fun use() {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -43377,8 +36435,9 @@ fun use() {
             &mut d,
         );
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags.is_empty(),
             "unexpected diagnostics: {:?}",
@@ -43406,8 +36465,9 @@ fun use() {
         let mut d = DiagSink::new();
         let file = parse_file("fun ambiguous(s: String): String = s.tie(a = 1)", &mut d);
         let files = vec![file];
-        let mut syms = collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
+        let mut syms =
+            analyze_test_files_with_platform(&files, Box::new(FakeMemberPlatform), &mut d);
+        let info = take_checked_test_file(&files[0], &mut syms, &mut d);
         assert!(
             d.diags
                 .iter()
@@ -43768,8 +36828,8 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -43798,8 +36858,8 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -43821,8 +36881,8 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -43845,8 +36905,8 @@ fun use() {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_no_diags(&diagnostics);
         assert_eq!(
@@ -43933,8 +36993,8 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         let diagnostic = diagnostics
             .diags
@@ -43972,8 +37032,8 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         let diagnostic = diagnostics
             .diags
@@ -43998,8 +37058,8 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         let diagnostic = diagnostics
             .diags
@@ -44060,8 +37120,8 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_eq!(
             diagnostics
@@ -44113,8 +37173,8 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
         assert_eq!(
@@ -44138,7 +37198,7 @@ fun use() {
                       fun <N : Numeric> N.pick(value: Int, other: Int): Int = value + other";
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
         let string_overloads = symbols.ext_fun_overloads(Ty::obj("TextValue"), "pick");
@@ -44167,7 +37227,7 @@ fun use() {
                       fun Base.pick(value: Int): Int = value";
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
-        let symbols = collect_signatures(&[file], &mut diagnostics);
+        let symbols = analyze_test_files(&[file], &mut diagnostics);
         assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 
         assert_eq!(
@@ -44198,7 +37258,7 @@ fun use() {
             "interface E\nclass Box<T : E>(val value: T)\nclass Wrapper(val box: Box<*>)",
             &mut diagnostics,
         );
-        let mut symbols = collect_signatures(std::slice::from_ref(&file), &mut diagnostics);
+        let mut symbols = analyze_test_files(std::slice::from_ref(&file), &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let source = crate::module_symbols::ModuleSymbols::new(&symbols);
@@ -44206,7 +37266,7 @@ fun use() {
             .expect("source Box classifier");
         assert_eq!(classifier.type_param_bounds, vec![vec![Ty::obj("E")]]);
 
-        let info = check_file(&file, &mut symbols, &mut diagnostics);
+        let info = take_checked_test_file(&file, &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
         let property_type = file
             .decls
@@ -44301,8 +37361,8 @@ fun use() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
         assert!(
@@ -44335,8 +37395,8 @@ fun use(counter: Counter) {
             &mut diagnostics,
         );
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let unary = files[0]
@@ -44418,8 +37478,8 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         assert!(info.resolved_calls.values().any(
             |call| matches!(call, ResolvedCall::Member(member)
@@ -44492,8 +37552,8 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let targets = info
@@ -44540,14 +37600,14 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
         // Keep interface search active when superclass metadata is external.
         symbols
             .classes
             .get_mut(&type_name("DefaultCounter"))
             .expect("default counter signature")
             .super_internal = Some(type_name("platform/ClasspathBase"));
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let mut owners = info
@@ -44588,8 +37648,8 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(source, &mut diagnostics);
         let files = vec![file];
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
 
         let access_errors = diagnostics
             .diags
@@ -44616,9 +37676,9 @@ fun use(counter: Counter) {
             .iter()
             .map(|source| parse_file(source, &mut diagnostics))
             .collect::<Vec<_>>();
-        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let mut symbols = analyze_test_files(&files, &mut diagnostics);
         diagnostics.set_file(1);
-        let info = check_file_in_source_set(&files, 1, &mut symbols, &mut diagnostics);
+        let info = take_checked_test_file(&files[1], &mut symbols, &mut diagnostics);
 
         let unary = files[1]
             .expr_arena
@@ -44656,7 +37716,7 @@ fun use(counter: Counter) {
             .iter()
             .map(|source| parse_file(source, &mut diagnostics))
             .collect::<Vec<_>>();
-        let symbols = collect_signatures(&files, &mut diagnostics);
+        let symbols = analyze_test_files(&files, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let first = files[0].decls[0];
@@ -44695,8 +37755,9 @@ fun use(counter: Counter) {
         classpath_entries.push(jdk_modules);
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath_entries));
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
+        let info = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
 
         let unary_expressions = files[0]
@@ -44743,7 +37804,8 @@ fun use(counter: Counter) {
         let files = vec![file];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
         let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let mut symbols =
+            analyze_test_files_with_platform(&files, Box::new(platform), &mut diagnostics);
         {
             let module = crate::module_symbols::ModuleSymbols::new(&symbols);
             let outer = module
@@ -44771,7 +37833,7 @@ fun use(counter: Counter) {
                 .and_then(crate::symbol_resolver::Symbol::property_ref)
                 .is_some());
         }
-        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+        let _ = take_checked_test_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
     }
 
@@ -44785,7 +37847,7 @@ fun use(counter: Counter) {
             &mut diagnostics,
         );
         let files = vec![file];
-        let _symbols = collect_signatures_with_cp(
+        let _symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -44815,7 +37877,7 @@ fun use(counter: Counter) {
         assert_eq!(declaration_names, ["C", "C.Companion", "C.ZZZ"]);
 
         let files = vec![file];
-        let symbols = collect_signatures_with_cp(
+        let symbols = analyze_test_files_with_platform(
             &files,
             Box::new(crate::libraries::EmptySymbolSource),
             &mut diagnostics,
@@ -45977,47 +39039,32 @@ fn function_import_scope_with(
     )
 }
 
-fn make_checker<'a>(
-    file: &'a File,
-    file_index: u32,
-    source_files: Option<&'a [File]>,
-    syms: &'a SymbolTable,
-    diags: &'a mut DiagSink,
-) -> Checker<'a> {
-    make_checker_with_index(
-        file,
-        file_index,
-        source_files,
-        syms,
-        None,
-        None,
-        None,
-        diags,
-    )
-}
-
 trait CheckerSymbolEnvironment {
     fn libraries(&self) -> &dyn SemanticPlatform;
     fn compilation_id(&self) -> u64;
-    fn pass_one_symbols(&self) -> Option<&SymbolTable>;
-    fn pass_one_symbols_mut(&mut self) -> Option<&mut SymbolTable>;
 }
 
-impl CheckerSymbolEnvironment for SymbolTable {
+struct CheckerExternalEnvironment<'a> {
+    compilation_id: u64,
+    libraries: &'a dyn SemanticPlatform,
+}
+
+impl<'a> From<&'a SymbolTable> for CheckerExternalEnvironment<'a> {
+    fn from(symbols: &'a SymbolTable) -> Self {
+        Self {
+            compilation_id: symbols.compilation_id,
+            libraries: &*symbols.libraries,
+        }
+    }
+}
+
+impl CheckerSymbolEnvironment for CheckerExternalEnvironment<'_> {
     fn libraries(&self) -> &dyn SemanticPlatform {
-        &*self.libraries
+        self.libraries
     }
 
     fn compilation_id(&self) -> u64 {
         self.compilation_id
-    }
-
-    fn pass_one_symbols(&self) -> Option<&SymbolTable> {
-        Some(self)
-    }
-
-    fn pass_one_symbols_mut(&mut self) -> Option<&mut SymbolTable> {
-        Some(self)
     }
 }
 
@@ -46029,102 +39076,46 @@ impl CheckerSymbolEnvironment for PassTwoSymbols {
     fn compilation_id(&self) -> u64 {
         self.compilation_id
     }
-
-    fn pass_one_symbols(&self) -> Option<&SymbolTable> {
-        None
-    }
-
-    fn pass_one_symbols_mut(&mut self) -> Option<&mut SymbolTable> {
-        None
-    }
 }
 
 fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     file: &'a File,
     file_index: u32,
-    source_files: Option<&'a [File]>,
     syms: &'a S,
-    resolved_index: Option<&'a crate::fir::ResolvedModuleIndex>,
-    active_declarations: Option<&'a crate::fir::ActiveSourceDeclarations>,
+    resolved_index: &'a crate::fir::ResolvedModuleIndex,
+    active_declarations: &'a crate::fir::ActiveSourceDeclarations,
     streamed_cache: Option<&'a crate::fir::StreamedModuleProjectionCache>,
     diags: &'a mut DiagSink,
 ) -> Checker<'a> {
     let imports = import_map(file);
-    let function_import_scope = resolved_index.map_or_else(
-        || {
-            function_import_scope(
-                file,
-                syms.pass_one_symbols()
-                    .expect("legacy checking requires Pass-1 symbols"),
-            )
-        },
-        |index| {
-            streamed_function_import_scope(
-                file,
-                file_index,
-                syms.libraries(),
-                index,
-                streamed_cache,
-            )
-        },
+    let function_import_scope = streamed_function_import_scope(
+        file,
+        file_index,
+        syms.libraries(),
+        resolved_index,
+        streamed_cache,
     );
     let import_levels = function_import_scope.levels().clone();
-    let active_statement_suppressions = if resolved_index.is_some() {
-        // Production seeds file/declaration visibility policy from stable declaration facts after
-        // the active body set is selected below. The occurrence map is a legacy same-parse aid and
-        // is deliberately unavailable in Pass 2.
-        Vec::new()
-    } else {
-        let pass_one = syms
-            .pass_one_symbols()
-            .expect("legacy checking requires Pass-1 symbols");
-        file.file_annotations
-            .iter()
-            .filter(|(annotation, _)| {
-                pass_one
-                    .resolved_annotation(file_index, annotation)
-                    .is_some_and(|identity| identity.matches("kotlin/Suppress"))
-            })
-            .flat_map(|(_, arguments)| arguments)
-            .filter_map(|argument| file.const_string_value(*argument))
-            .map(|value| value.to_lossy())
-            .collect()
-    };
+    let active_statement_suppressions = Vec::new();
     Checker {
         file,
         libraries: syms.libraries(),
         compilation_id: syms.compilation_id(),
-        demand_name: None,
-        demand_call: None,
-        demand_member: None,
-        demand_rejects: None,
-        inference_only: false,
-        inference_incomplete: false,
         member_bound_retries: std::collections::HashSet::new(),
         stable_receiver_callable_cache: Default::default(),
         stable_callable_shape_cache: Default::default(),
         stable_federated_symbol_cache: Default::default(),
-        module: resolved_index.map_or_else(
-            || {
-                CheckerModuleSymbols::Legacy(crate::module_symbols::ModuleSymbols::for_file(
-                    syms.pass_one_symbols()
-                        .expect("legacy checking requires Pass-1 symbols"),
+        module: CheckerModuleSymbols(streamed_cache.map_or_else(
+            || crate::fir::StreamedModuleSymbols::for_file(resolved_index, file_index),
+            |cache| {
+                crate::fir::StreamedModuleSymbols::for_file_with_cache(
+                    resolved_index,
                     file_index,
-                ))
+                    cache,
+                )
             },
-            |index| {
-                CheckerModuleSymbols::Streamed(streamed_cache.map_or_else(
-                    || crate::fir::StreamedModuleSymbols::for_file(index, file_index),
-                    |cache| {
-                        crate::fir::StreamedModuleSymbols::for_file_with_cache(
-                            index, file_index, cache,
-                        )
-                    },
-                ))
-            },
-        ),
+        )),
         file_index,
-        source_files,
         resolved_index,
         active_declarations,
         diags,
@@ -46168,12 +39159,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         field_receiver_identity: None,
         in_script_body: false,
         expr_lowers: HashMap::new(),
-        inherited_method_constraints: HashMap::new(),
-        data_class_hash_owners: HashMap::new(),
-        unsupported_class_emission: HashMap::new(),
         resolved_sam_conversions: HashMap::new(),
-        inferred_fun_rets: HashMap::new(),
-        inferred_ext_fun_rets: HashMap::new(),
         inferred_method_rets: HashMap::new(),
         inferred_source_member_rets: HashMap::new(),
         inferred_stable_declaration_rets: HashMap::new(),
@@ -46297,144 +39283,6 @@ fn enclosing_enum_entry_context<'a>(
             .find(|(_, entry)| entry.name == entry_name)
             .map(|(entry_index, entry)| (declaration, owner, entry_index, entry))
     })
-}
-
-fn class_receiver_labels(
-    class: &ClassDecl,
-    file: &File,
-    symbols: &SymbolTable,
-    current: Option<Ty>,
-) -> Vec<(String, Ty, bool)> {
-    // Start from the collected signature's semantic nesting edge. Reconstructing the owner from
-    // `ClassDecl::name` / `inner_of` would make receiver labels depend on whether this declaration was
-    // spelled as a dotted nested source name, and previously required a separate fallback for an
-    // already-interned type name. Every caller has already selected `current` from the same collected
-    // signature, so its normalized internal name gives source files and later module consumers one
-    // origin-independent path to the lexical outer chain.
-    let current_internal = current.and_then(Ty::obj_internal);
-    let outer = current_internal
-        .and_then(|internal| symbols.class_by_type_name(internal))
-        .and_then(ClassSig::inner_of_name);
-    let mut roots = outer.into_iter().collect::<Vec<_>>();
-    // A named inner classifier can be parser-hoisted from an anonymous object's body. Its nominal
-    // `inner_of` chain reaches that anonymous classifier, while the next runtime edge is the
-    // anonymous object's checked enclosing-instance capture rather than a declared `inner_of`.
-    // Extend the receiver tower from that semantic capture record so FIR receives the exact
-    // multi-`this$0` depth; generated class spelling and source containment play no role here.
-    let mut enclosing = current_internal;
-    let mut visited = std::collections::HashSet::new();
-    while let Some(candidate) = enclosing.filter(|candidate| visited.insert(*candidate)) {
-        if let Some(captured) = anonymous_enclosing_instance_classifier(symbols, candidate) {
-            if !roots.contains(&captured) {
-                roots.push(captured);
-            }
-        }
-        enclosing = symbols
-            .class_by_type_name(candidate)
-            .and_then(ClassSig::inner_of_name);
-    }
-    let mut labels = enclosing_receiver_labels(symbols, roots);
-    // A classifier declared in an enum-entry body is physically inner to that anonymous entry
-    // subclass, but its source receiver is the enum value and its explicit label is the ENTRY name
-    // (`this@X`), not the enum declaration (`this@A`). The parser records the enum as `inner_of`
-    // because entries have no `Decl`; replace that one semantic receiver's spelling rather than
-    // inventing a second receiver rung.
-    if let Some((_, owner, _, entry)) = enclosing_enum_entry_context(file, class) {
-        let entry = entry.name.clone();
-        let receiver = Ty::obj_name(type_name(&class_internal(file, &owner.name)));
-        if let Some(label) = labels
-            .iter_mut()
-            .rev()
-            .find(|(_, candidate, _)| *candidate == receiver)
-        {
-            label.0 = entry;
-            label.2 = false;
-        } else {
-            labels.push((entry, receiver, false));
-        }
-    }
-    if let Some(ty) = current {
-        // The current AST declaration is the authoritative source spelling for its explicit label;
-        // using a reverse symbol-table lookup here would be ambiguous in an already-diagnosed duplicate
-        // declaration, even though either entry may normalize to the same internal name.
-        labels.push((class_declaration_label(&class.name).to_string(), ty, true));
-    }
-    labels
-}
-
-fn anonymous_enclosing_instance_classifier(
-    symbols: &SymbolTable,
-    classifier: TypeName,
-) -> Option<TypeName> {
-    let key = symbols
-        .anonymous_object_types
-        .iter()
-        .find_map(|(key, candidate)| (*candidate == classifier).then_some(*key))?;
-    symbols
-        .anonymous_object_captures
-        .get(&key)?
-        .iter()
-        .find_map(|capture| {
-            matches!(
-                capture.source,
-                AnonymousObjectCaptureSource::EnclosingInstance { .. }
-            )
-            .then(|| capture.ty.obj_internal())
-            .flatten()
-        })
-}
-
-/// Build receiver labels for one or more semantic enclosing-class roots. `roots` is nearest-first;
-/// each root's `inner_of` chain is expanded through the same path, deduplicated, then returned
-/// outermost-first. Ordinary inner classes and structurally owned anonymous objects feed this helper
-/// different roots but share the graph traversal and label construction policy.
-fn enclosing_receiver_labels(
-    symbols: &SymbolTable,
-    roots: impl IntoIterator<Item = TypeName>,
-) -> Vec<(String, Ty, bool)> {
-    let mut owners = Vec::new();
-    for root in roots {
-        let mut current = Some(root);
-        while let Some(internal) = current {
-            if owners.contains(&internal) {
-                break;
-            }
-            owners.push(internal);
-            current = symbols
-                .class_by_type_name(internal)
-                .and_then(ClassSig::inner_of_name);
-        }
-    }
-    owners
-        .into_iter()
-        .rev()
-        .filter_map(|internal| {
-            let signature = symbols.class_by_type_name(internal)?;
-            let declaration = symbols
-                .class_simple_name(internal)
-                .unwrap_or_else(|| "<anonymous>".to_string());
-            Some((
-                class_declaration_label(&declaration).to_string(),
-                Ty::obj_args_name(
-                    signature.internal_name(),
-                    &signature
-                        .type_params
-                        .iter()
-                        .zip(signature.type_param_bounds.iter())
-                        .chain(
-                            signature
-                                .captured_type_parameters
-                                .type_params
-                                .iter()
-                                .zip(signature.captured_type_parameters.type_param_bounds.iter()),
-                        )
-                        .map(|(name, bound)| Ty::ty_param(name, *bound))
-                        .collect::<Vec<_>>(),
-                ),
-                true,
-            ))
-        })
-        .collect()
 }
 
 /// Value-namespace declarations owned by an anonymous body.
@@ -46907,67 +39755,6 @@ fn record_anonymous_construction_captures(
         "anonymous captures selected declaration={declaration:?} captures={selected:?}",
     );
     captures.insert(declaration, selected);
-}
-
-fn install_anonymous_object_captures(
-    syms: &mut SymbolTable,
-    file_index: u32,
-    discovered: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) {
-    for (declaration, captures) in discovered {
-        let key = (file_index, declaration);
-        syms.anonymous_object_capture_discovered.insert(key);
-        let Some(internal) = syms.anonymous_object_types.get(&key).copied() else {
-            continue;
-        };
-        let Some(class) = syms.class_by_type_name_mut(internal) else {
-            continue;
-        };
-        for capture in &captures {
-            if class
-                .ctor_param_names
-                .iter()
-                .any(|(name, _)| name == &capture.name)
-            {
-                continue;
-            }
-            // Captures are constructor/storage slots, not Kotlin properties. Class-body lookup is
-            // given their checked field ordinals explicitly by
-            // `declare_body_class_storage_captures`; publishing them through `props` or
-            // `declared_props` would make a synthetic field shadow a real inherited property at a
-            // source use site (`object : Base(s) {}.s`). Common lowering consumes the capture list
-            // directly and remains responsible for choosing physical fields.
-            let stored_ty = capture.stored_ty();
-            class.props.push((capture.name.clone(), stored_ty, false));
-            if capture.storage_ty.is_none() && !class.declared_props.contains_key(&capture.name) {
-                class.declared_props.insert(
-                    capture.name.clone(),
-                    DeclaredPropertySig {
-                        ty: capture.ty,
-                        storage_ty: None,
-                        visibility: Visibility::Private,
-                        source_visible: false,
-                        is_const: false,
-                        annotations: Vec::new(),
-                        getter_name: property_getter_name(&capture.name),
-                        setter_name: None,
-                        setter_visibility: None,
-                        has_custom_getter: false,
-                        is_abstract: false,
-                        is_open: false,
-                        context_params: Vec::new(),
-                        source_member: None,
-                        stable_declaration: None,
-                    },
-                );
-            }
-            class.ctor_params.push(stored_ty);
-            class.ctor_param_shapes.push((stored_ty, false));
-            class.ctor_param_names.push((capture.name.clone(), false));
-            class.ctor_defaults.push(None);
-        }
-        syms.anonymous_object_captures.insert(key, captures);
-    }
 }
 
 /// Walk expression/statement arenas iteratively from already-identified declaration roots and
@@ -47479,43 +40266,14 @@ fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
 /// Classifier roots visible from a declaration in nearest-first order. Ordinary nested declarations
 /// may derive their source parents from their hoisted internal name; anonymous declarations may not —
 /// their generated `$` name is exact, and their parents come only from the structural ownership map.
-fn declaration_lexical_class_names(
-    file: &File,
-    declaration: DeclId,
-    scope: &AnonymousLexicalClassScope,
-    mut exists: impl FnMut(TypeName) -> bool,
-) -> Vec<TypeName> {
-    let mut classes = Vec::new();
-    for candidate in scope.declaration_chain(declaration) {
-        if let Decl::Class(class) = file.decl(candidate) {
-            let internal = type_name(&class_internal(file, &class.name));
-            if scope.declarations.contains(&candidate) {
-                if !classes.contains(&internal) {
-                    classes.push(internal);
-                }
-            } else {
-                for lexical in crate::symbol_resolver::lexical_enclosing_classifier_names(
-                    internal,
-                    &mut exists,
-                ) {
-                    if !classes.contains(&lexical) {
-                        classes.push(lexical);
-                    }
-                }
-            }
-        }
-    }
-    classes
-}
-
-fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
+fn discover_anonymous_object_captures_at(
     file: &File,
     file_index: u32,
-    syms: &mut S,
+    syms: &mut PassTwoSymbols,
     selected_declarations: Option<&std::collections::HashSet<Span>>,
     selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-    resolved_index: Option<&crate::fir::ResolvedModuleIndex>,
-    active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
+    resolved_index: &crate::fir::ResolvedModuleIndex,
+    active_declarations: &crate::fir::ActiveSourceDeclarations,
     selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
 ) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
     let declarations = file
@@ -47526,35 +40284,10 @@ fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
     if declarations.is_empty() {
         return HashMap::new();
     }
-    if resolved_index.is_none()
-        && syms.pass_one_symbols().is_some_and(|symbols| {
-            declarations.iter().all(|declaration| {
-                symbols
-                    .anonymous_object_capture_discovered
-                    .contains(&(file_index, *declaration))
-            })
-        })
-    {
-        let symbols = syms
-            .pass_one_symbols()
-            .expect("legacy capture discovery requires Pass-1 symbols");
-        return declarations
-            .into_iter()
-            .filter_map(|declaration| {
-                symbols
-                    .anonymous_object_captures
-                    .get(&(file_index, declaration))
-                    .cloned()
-                    .map(|captures| (declaration, captures))
-            })
-            .collect();
-    }
-
     let mut scratch = DiagSink::new();
     let info = check_file_at_impl_mode_with_index(
         file,
         file_index,
-        None,
         syms,
         resolved_index,
         &mut scratch,
@@ -47574,71 +40307,7 @@ fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
             discovered.entry(declaration).or_default();
         }
     }
-    if let Some(symbols) = syms.pass_one_symbols_mut() {
-        install_anonymous_object_captures(symbols, file_index, discovered.clone());
-    }
     discovered
-}
-
-pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable) {
-    // Bracketed as a module mutation: installing capture fields and constructor parameters changes
-    // the synthesized classes, and the table's derived indexes are rebuilt on `finish`. Without the
-    // bracket the members are written but nothing rebuilds, so an anonymous object that captures a
-    // local loses its methods entirely — `resumeWith` is absent from the emitted class and the JVM
-    // raises `AbstractMethodError` at the first call.
-    syms.begin_module_mutation();
-    // On the CHECKER's own stack: this walks whole files through the checker, and the depth guard
-    // that stops a deeply nested expression fires far later than a small caller stack runs out.
-    // Every other entry into a file-wide check is reserved the same way.
-    crate::wide_stack::on_wide_stack(|| {
-        for (file_index, file) in files.iter().enumerate() {
-            discover_anonymous_object_captures_at(
-                file,
-                file_index as u32,
-                syms,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
-        }
-    });
-    syms.finish_module_mutation();
-}
-
-/// Prepare only anonymous objects owned by retained inline body units. The root/body selections
-/// come from compact stable headers, so an inline declaration does not pull neighboring ordinary
-/// bodies into Pass 1.
-pub(crate) fn discover_inline_anonymous_object_captures(
-    files: &[File],
-    selected_declarations: &[std::collections::HashSet<Span>],
-    selected_body_declarations: &[std::collections::HashSet<Span>],
-    syms: &mut SymbolTable,
-) {
-    assert_eq!(files.len(), selected_declarations.len());
-    assert_eq!(files.len(), selected_body_declarations.len());
-    syms.begin_module_mutation();
-    crate::wide_stack::on_wide_stack(|| {
-        for (file_index, file) in files.iter().enumerate() {
-            let declarations = &selected_declarations[file_index];
-            let bodies = &selected_body_declarations[file_index];
-            if declarations.is_empty() {
-                continue;
-            }
-            discover_anonymous_object_captures_at(
-                file,
-                file_index as u32,
-                syms,
-                Some(declarations),
-                Some(bodies),
-                None,
-                None,
-                None,
-            );
-        }
-    });
-    syms.finish_module_mutation();
 }
 
 pub(crate) fn discover_anonymous_object_captures_in_pass_two_file(
@@ -47658,8 +40327,8 @@ pub(crate) fn discover_anonymous_object_captures_in_pass_two_file(
             symbols,
             Some(selected_declarations),
             Some(selected_body_declarations),
-            Some(index),
-            Some(active_declarations),
+            index,
+            active_declarations,
             Some(selected_stable_bodies),
         )
     })
@@ -47676,152 +40345,20 @@ fn function_needs_return_preinfer(function: &FunDecl) -> bool {
 /// Return the receiver and expression getter for the exact member-extension property shape consumed
 /// by the engine's member-extension property inference. An `Option` carries the operands as well as
 /// the eligibility decision, avoiding a parallel boolean predicate that could drift from it.
-fn member_extension_property_preinfer_body(property: &PropDecl) -> Option<(&TypeRef, ExprId)> {
-    match (&property.receiver, property.declared_ty(), &property.getter) {
-        (Some(receiver), None, Some(FunBody::Expr(getter))) => Some((receiver, *getter)),
-        _ => None,
-    }
-}
-
 /// Commit primary-constructor declaration types from the authoritative checker into the module
 /// signature. Signature collection runs before the full classifier graph exists and therefore keeps
 /// some projections conservative; consumers after checking must not continue seeing that provisional
 /// shape (`Box<*>`, `Box<T : E>` must become `Box<out E>`, not `Box<out Any?>`).
-fn publish_checked_primary_constructor_types(
-    file: &File,
-    file_index: u32,
-    syms: &mut SymbolTable,
-    checked: &HashMap<(u32, u32), Ty>,
-    active: Option<&crate::fir::ActiveSourceDeclarations>,
-    index: Option<&crate::fir::ResolvedModuleIndex>,
-) {
-    let declarations = syms
-        .classes
-        .values()
-        .filter(|class| class.source_file == file_index)
-        .filter_map(|class| {
-            let declaration = match active {
-                Some(active) => {
-                    let stable = class.stable_declaration?;
-                    let transient = active.class(file, stable)?.0;
-                    if index.is_some_and(|index| {
-                        active.canonical_classifier_declaration(transient, index) != Some(stable)
-                    }) {
-                        return None;
-                    }
-                    transient
-                }
-                None => class.source_decl?,
-            };
-            Some((class.internal_name(), declaration))
-        })
-        .collect::<Vec<_>>();
-    for (internal, declaration) in declarations {
-        let Decl::Class(source) = file.decl(declaration) else {
-            continue;
-        };
-        let parameters = source
-            .props
-            .iter()
-            .enumerate()
-            .map(|(index, parameter)| {
-                checked
-                    .get(&(parameter.ty.span.lo, parameter.ty.span.hi))
-                    .copied()
-                    .map(|ty| {
-                        (
-                            index,
-                            parameter.name.as_str(),
-                            parameter.is_property,
-                            semantic_value_parameter_ty(ty, parameter.is_vararg),
-                        )
-                    })
-            })
-            .collect::<Option<Vec<_>>>();
-        // A selected Pass-2 body checks only the local classifiers it actually contains. Other
-        // declarations in the reparsed file legitimately have no entry; publish each complete
-        // checked constructor atomically rather than requiring a whole-file legacy check.
-        let Some(parameters) = parameters else {
-            continue;
-        };
-        let Some(class) = syms.class_by_type_name_mut(internal) else {
-            continue;
-        };
-        let classifier_parameters = class
-            .type_parameters
-            .type_params
-            .iter()
-            .chain(class.captured_type_parameters.type_params.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        for (index, name, is_property, ty) in parameters {
-            if let Some(parameter) = class.ctor_params.get_mut(index) {
-                *parameter = ty;
-            }
-            if let Some((shape, _)) = class.ctor_param_shapes.get_mut(index) {
-                *shape = ty;
-            }
-            if !is_property {
-                continue;
-            }
-            if ty_mentions_param(ty, &classifier_parameters) {
-                class.generic_property_shapes.insert(name.to_string(), ty);
-            } else {
-                if let Some((_, property_ty, _)) = class
-                    .props
-                    .iter_mut()
-                    .find(|(property_name, _, _)| property_name == name)
-                {
-                    *property_ty = ty;
-                }
-                if let Some(property) = class.declared_props.get_mut(name) {
-                    property.ty = ty;
-                }
-            }
-        }
-    }
-}
-
-fn check_file_at_impl_mode(
-    file: &File,
-    file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-    capture_discovery: bool,
-    selected_declarations: Option<&std::collections::HashSet<Span>>,
-    selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-) -> TypeInfo {
-    check_file_at_impl_mode_with_index(
-        file,
-        file_index,
-        source_files,
-        syms,
-        None,
-        diags,
-        capture_discovery,
-        selected_declarations,
-        selected_body_declarations,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-    )
-}
-
 fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     file: &File,
     file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut S,
-    resolved_index: Option<&crate::fir::ResolvedModuleIndex>,
+    syms: &S,
+    resolved_index: &crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
     capture_discovery: bool,
     selected_declarations: Option<&std::collections::HashSet<Span>>,
     selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-    active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
+    active_declarations: &crate::fir::ActiveSourceDeclarations,
     selected_stable_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     signature_defaults_only: bool,
@@ -47832,7 +40369,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     let mut c = make_checker_with_index(
         file,
         file_index,
-        source_files,
         &*syms,
         resolved_index,
         active_declarations,
@@ -47848,9 +40384,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
-                resolved_index.is_some_and(|index| {
-                    index.declaration_suppresses_invisible_reference(*declaration)
-                })
+                resolved_index.declaration_suppresses_invisible_reference(*declaration)
             })
     }) {
         // File-level visibility suppressions were resolved and compacted into every stable
@@ -47864,9 +40398,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
-                resolved_index.is_some_and(|index| {
-                    index.declaration_suppresses_invisible_member(*declaration)
-                })
+                resolved_index.declaration_suppresses_invisible_member(*declaration)
             })
     }) {
         c.active_statement_suppressions
@@ -47875,9 +40407,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
-                resolved_index.is_some_and(|index| {
-                    index.declaration_suppresses_optional_declaration_usage(*declaration)
-                })
+                resolved_index.declaration_suppresses_optional_declaration_usage(*declaration)
             })
     }) {
         c.active_statement_suppressions
@@ -47900,13 +40430,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
     }
 
-    // The streaming path already published contracts as stable, semantically resolved Pass-1
-    // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
-    // body must neither rediscover a caller-visible signature fact nor patch the module table.
-    if !signature_defaults_only && resolved_index.is_none() {
-        c.collect_source_contracts(scope, selected_body_declarations);
-    }
-
+    // Pass 1 already published contracts as stable, semantically resolved declaration facts.
+    // Rechecking a source unit must neither rediscover a caller-visible signature fact nor patch
+    // the module table.
     // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
     // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
     // the authoritative check below owns annotation validation and folded values.
@@ -47960,7 +40486,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         // the exact nested classifier that owns the construction. During the scratch capture pass
         // those are the same bounded source region even when their declaration ranges differ.
         let selected_stable_root = signature_defaults_only.then(|| {
-            let stable = active_declarations.and_then(|active| active.file_declaration(file, d));
+            let stable = active_declarations.file_declaration(file, d);
             crate::trace_compiler!(
                 "fir",
                 "Pass 1 default root candidate parser={d:?} stable={stable:?} selected={selected_stable_roots:?}",
@@ -47993,11 +40519,12 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
     }
     if !capture_discovery {
-        if let (Some(index), Some(selected_bodies)) = (resolved_index, selected_stable_bodies) {
+        if let Some(selected_bodies) = selected_stable_bodies {
+            let index = resolved_index;
             let direct_classes = selected_inline_owned_anonymous_classes(
                 file,
                 index,
-                active_declarations,
+                Some(active_declarations),
                 selected_bodies,
                 &c.anonymous_lexical_scope,
             );
@@ -48105,20 +40632,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 // a second resolution authority.
                 continue;
             }
-            if resolved_index.is_none()
-                && syms.pass_one_symbols().is_some_and(|symbols| {
-                    symbols.resolved_annotations.contains_key(&(
-                        file_index,
-                        reference.span.lo,
-                        reference.span.hi,
-                    ))
-                })
-            {
-                // Annotation binding already committed this exact occurrence to a stable identity
-                // in its declaration scope. Rechecking its source spelling from file scope would
-                // lose nested classifiers and violate bind-once resolution.
-                continue;
-            }
             if reference.is_annotation() {
                 // Annotation occurrences are retained by their owning declaration and checked in
                 // that declaration's lexical scope. `detached_type_refs` carries the same reference
@@ -48140,19 +40653,11 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         class_literal_targets,
         applied_annotations,
         expr_lowers,
-        inherited_method_constraints,
-        data_class_hash_owners,
-        unsupported_class_emission,
         resolved_sam_conversions,
-        inferred_fun_rets,
-        inferred_ext_fun_rets,
-        inferred_method_rets,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
-        inferred_member_ext_fun_rets,
         checked_local_properties: _,
         checked_local_methods: _,
-        resolved_body_local_supertypes,
         checked_local_supertypes,
         stmt_lowers,
         stmt_return_targets,
@@ -48198,236 +40703,20 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_setvalue_targets,
         delegate_provide_targets,
         context_args,
-        super_ctor_params,
         discovered_anonymous_captures,
         discovered_local_class_captures,
         checked_local_class_declarations,
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
-        source_contracts,
         ..
     } = c;
-    if !capture_discovery {
-        if let Some(syms) = syms.pass_one_symbols_mut() {
-            publish_checked_primary_constructor_types(
-                file,
-                file_index,
-                syms,
-                &resolved_declaration_types,
-                active_declarations,
-                resolved_index,
-            );
-            for (internal, params) in super_ctor_params {
-                if let Some(cs) = syms.class_by_internal_mut(&internal) {
-                    cs.super_ctor_params = params;
-                }
-            }
-            // The decoded source contracts: patch them into the signature table so cross-file call
-            // sites and the `@Metadata` emitter read the same effects (the checker decoded them from
-            // the current file's top-level functions during checking).
-            for (decl, contract) in source_contracts {
-                // `decl` belongs to the ACTIVE bounded parser arena. In Pass 2 every top-level
-                // declaration is reparsed as its own unit, so its transient `DeclId` commonly starts
-                // at zero and cannot be compared with the Pass-1 whole-file `source_decl`. Translate
-                // it through the active declaration binding and publish by stable identity. The
-                // source-key fallback is retained for the legacy whole-file checker, which has no
-                // active declaration map.
-                let stable =
-                    active_declarations.and_then(|active| active.file_declaration(file, decl));
-                if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
-                    sigs.iter_mut().find(|s| {
-                        stable.is_some_and(|declaration| s.stable_declaration == Some(declaration))
-                            || (stable.is_none()
-                                && s.source_file == Some(file_index)
-                                && s.source_decl == Some(decl))
-                    })
-                }) {
-                    sig.contract = Some(contract.clone());
-                }
-                for families in syms.ext_funs.values_mut() {
-                    for overloads in families.values_mut() {
-                        if let Some(sig) = overloads.iter_mut().find(|s| {
-                            stable.is_some_and(|declaration| {
-                                s.stable_declaration == Some(declaration)
-                            }) || (stable.is_none()
-                                && s.source_file == Some(file_index)
-                                && s.source_decl == Some(decl))
-                        }) {
-                            sig.contract = Some(contract.clone());
-                        }
-                    }
-                }
-            }
-            for ((file, decl), ret) in inferred_fun_rets {
-                if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
-                    sigs.iter_mut().find(|s| {
-                        s.source_file == Some(file) && s.source_decl == Some(DeclId(decl))
-                    })
-                }) {
-                    sig.set_inferred_return(ret);
-                }
-            }
-            for ((file, decl, name), ret) in inferred_ext_fun_rets {
-                if let Some(sig) = syms.ext_funs.get_mut(&name).and_then(|families| {
-                    families.values_mut().find_map(|overloads| {
-                        overloads.iter_mut().find(|signature| {
-                            signature.source_file == Some(file)
-                                && signature.source_decl == Some(DeclId(decl))
-                        })
-                    })
-                }) {
-                    sig.set_inferred_return(ret);
-                }
-            }
-            for (&declaration, &ret) in &inferred_stable_declaration_rets {
-                if let Some(signature) = syms.funs.values_mut().find_map(|overloads| {
-                    overloads
-                        .iter_mut()
-                        .find(|signature| signature.stable_declaration == Some(declaration))
-                }) {
-                    signature.set_inferred_return(ret);
-                    continue;
-                }
-                if let Some(signature) = syms
-                    .ext_funs
-                    .values_mut()
-                    .flat_map(HashMap::values_mut)
-                    .find_map(|overloads| {
-                        overloads
-                            .iter_mut()
-                            .find(|signature| signature.stable_declaration == Some(declaration))
-                    })
-                {
-                    signature.set_inferred_return(ret);
-                    continue;
-                }
-                if let Some(signature) = syms
-                    .classes
-                    .values_mut()
-                    .flat_map(|class| class.methods.values_mut())
-                    .flat_map(|overloads| overloads.iter_mut())
-                    .find(|signature| signature.stable_declaration == Some(declaration))
-                {
-                    signature.set_inferred_return(ret);
-                    continue;
-                }
-                if let Some(signature) = syms
-                    .classes
-                    .values_mut()
-                    .flat_map(|class| class.member_ext_funs.values_mut())
-                    .flat_map(|overloads| overloads.iter_mut())
-                    .find(|signature| signature.signature.stable_declaration == Some(declaration))
-                {
-                    signature.signature.set_inferred_return(ret);
-                }
-            }
-            for ((internal, name, params), ret) in inferred_method_rets {
-                if let Some(sig) = syms
-                    .class_by_type_name_mut(internal)
-                    .and_then(|c| c.methods.get_mut(&name))
-                    .and_then(|ov| ov.iter_mut().find(|s| s.params == params))
-                {
-                    sig.set_inferred_return(ret);
-                }
-            }
-            for ((internal, name, receiver, params), ret) in inferred_member_ext_fun_rets {
-                if let Some(signature) = syms
-                    .class_by_type_name_mut(internal)
-                    .and_then(|class| class.member_ext_funs.get_mut(&name))
-                    .and_then(|overloads| {
-                        overloads.iter_mut().find(|signature| {
-                            signature.receiver_ty == receiver
-                                && signature.signature.params == params
-                        })
-                    })
-                {
-                    signature.signature.set_inferred_return(ret);
-                }
-            }
-            for (internal, supertypes) in resolved_body_local_supertypes {
-                if let Some(class) = syms.class_by_type_name_mut(internal) {
-                    for supertype in supertypes.iter().copied() {
-                        let Some(super_internal) = supertype.kotlin_class_internal() else {
-                            continue;
-                        };
-                        if let Some(ordinal) = class
-                            .interfaces
-                            .iter()
-                            .position(|interface| interface == super_internal)
-                        {
-                            if class.interface_type_args.len() <= ordinal {
-                                class.interface_type_args.resize(ordinal + 1, Vec::new());
-                            }
-                            class.interface_type_args[ordinal] = supertype.type_args().to_vec();
-                        } else {
-                            class.super_internal = Some(super_internal);
-                            class.super_type_args = supertype.type_args().to_vec();
-                        }
-                    }
-                }
-            }
-            let checked_interface_arguments = checked_local_supertypes
-                .iter()
-                .filter_map(|(&declaration, supertypes)| {
-                    let class = syms.class_by_stable_declaration(declaration)?;
-                    let arguments = class
-                        .interfaces
-                        .iter()
-                        .enumerate()
-                        .map(|(ordinal, interface)| {
-                            supertypes
-                                .iter()
-                                .find(|supertype| {
-                                    supertype.kotlin_class_internal() == Some(interface)
-                                })
-                                .map(|supertype| supertype.type_args().to_vec())
-                                .unwrap_or_else(|| {
-                                    class
-                                        .interface_type_args
-                                        .get(ordinal)
-                                        .cloned()
-                                        .unwrap_or_default()
-                                })
-                        })
-                        .collect::<Vec<_>>();
-                    Some((class.internal, arguments))
-                })
-                .collect::<Vec<_>>();
-            for (internal, arguments) in checked_interface_arguments {
-                if let Some(class) = syms.class_by_type_name_mut(internal) {
-                    class.interface_type_args = arguments;
-                }
-            }
-        }
-    }
-    if let Some(syms) = syms.pass_one_symbols_mut() {
-        syms.finish_module_mutation();
-    }
     let used_extension_receivers = extension_receiver_expr_uses
         .into_iter()
         .chain(extension_receiver_stmt_uses)
         .flatten()
         .map(|span| (span.lo, span.hi))
         .collect();
-    let anonymous_object_captures_by_class =
-        if capture_discovery || seeded_anonymous_captures.is_some() {
-            discovered_anonymous_captures
-        } else {
-            let pass_one = syms
-                .pass_one_symbols()
-                .expect("legacy checking requires Pass-1 anonymous-object bindings");
-            file.anonymous_object_classes
-                .values()
-                .copied()
-                .filter_map(|declaration| {
-                    pass_one
-                        .anonymous_object_captures
-                        .get(&(file_index, declaration))
-                        .cloned()
-                        .map(|captures| (declaration, captures))
-                })
-                .collect::<HashMap<_, _>>()
-        };
+    let anonymous_object_captures_by_class = discovered_anonymous_captures;
     let anonymous_object_captures_by_construction = file
         .anonymous_object_classes
         .iter()
@@ -48443,21 +40732,14 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         .values()
         .copied()
         .filter_map(|declaration| {
-            active_declarations
-                .and_then(|active| {
-                    let stable =
-                        active.canonical_classifier_declaration(declaration, resolved_index?)?;
-                    resolved_index?
-                        .classifier_header(stable)
-                        .map(|header| header.classifier)
-                })
-                .or_else(|| {
-                    syms.pass_one_symbols()?
-                        .anonymous_object_types
-                        .get(&(file_index, declaration))
-                        .copied()
-                })
-                .map(|ty| (declaration, ty))
+            (|| {
+                let stable = active_declarations
+                    .canonical_classifier_declaration(declaration, resolved_index)?;
+                resolved_index
+                    .classifier_header(stable)
+                    .map(|header| header.classifier)
+            })()
+            .map(|ty| (declaration, ty))
         })
         .collect();
     crate::trace_compiler!(
@@ -48483,10 +40765,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
         anonymous_object_types,
-        inherited_method_constraints,
-        data_class_hash_owners,
         expr_lowers,
-        unsupported_class_emission,
         resolved_sam_conversions,
         stmt_lowers,
         stmt_return_targets,
@@ -48614,62 +40893,16 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
             })
             .collect::<Vec<_>>();
-        let source_at = |index: u32| {
-            (index == file_index)
-                .then_some(file)
-                .or_else(|| source_files?.get(index as usize))
-        };
-        let source_annotations = if let Some(symbols) = syms.pass_one_symbols() {
-            symbols
-                .classes
-                .iter()
-                .filter_map(|(&classifier, class)| {
-                    let source = source_at(class.source_file)?;
-                    let declaration = match active_declarations {
-                        Some(active) if class.source_file == file_index => {
-                            active.class(source, class.stable_declaration?)?.1
-                        }
-                        Some(_) => return None,
-                        None => match source.decl(class.source_decl?) {
-                            Decl::Class(declaration) => declaration,
-                            Decl::Fun(_) | Decl::Property(_) => return None,
-                        },
-                    };
-                    let annotations = resolved_index.map_or_else(
-                        || {
-                            declaration
-                                .annotations
-                                .iter()
-                                .filter_map(|annotation| {
-                                    symbols.resolved_annotation(class.source_file, annotation)
-                                })
-                                .collect::<Vec<_>>()
-                        },
-                        |index| {
-                            class
-                                .stable_declaration
-                                .map(|declaration| {
-                                    index.declaration_annotations(declaration).to_vec()
-                                })
-                                .unwrap_or_default()
-                        },
-                    );
-                    Some((classifier, annotations))
-                })
-                .collect()
-        } else {
-            let index = resolved_index.expect("Pass 2 requires a finalized declaration index");
-            (0..index.declaration_count())
-                .filter_map(|raw| {
-                    let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
-                    let classifier = index.classifier_header(declaration)?.classifier;
-                    Some((
-                        classifier,
-                        index.declaration_annotations(declaration).to_vec(),
-                    ))
-                })
-                .collect()
-        };
+        let source_annotations = (0..resolved_index.declaration_count())
+            .filter_map(|raw| {
+                let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
+                let classifier = resolved_index.classifier_header(declaration)?.classifier;
+                Some((
+                    classifier,
+                    resolved_index.declaration_annotations(declaration).to_vec(),
+                ))
+            })
+            .collect();
         let context = crate::plugins::FrontendExpressionContext {
             calls,
             source_annotations,
@@ -48686,60 +40919,32 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     info
 }
 
-fn check_file_at_impl(
+pub(crate) fn check_active_source_with_index(
     file: &File,
     file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut SymbolTable,
+    active_declarations: &crate::fir::ActiveSourceDeclarations,
+    resolved_index: &crate::fir::ResolvedModuleIndex,
+    syms: &SymbolTable,
     diags: &mut DiagSink,
 ) -> TypeInfo {
-    check_file_at_impl_mode(
-        file,
-        file_index,
-        source_files,
-        syms,
-        diags,
-        false,
-        None,
-        None,
-    )
-}
-
-pub fn check_file(file: &File, syms: &mut SymbolTable, diags: &mut DiagSink) -> TypeInfo {
-    check_file_at(file, diags.current_file(), syms, diags)
-}
-
-pub fn check_file_at(
-    file: &File,
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    check_file_on_checker_stack(file, file_index, None, syms, diags)
-}
-
-pub fn check_file_in_source_set(
-    files: &[File],
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    let file = &files[file_index as usize];
-    check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
-}
-
-/// Check one file after [`preinfer_module_returns`] has already established the source set's
-/// expression-body signatures. Production source-set analysis uses this entry point so it does not
-/// reopen the same bodies in a redundant per-file fixpoint before their authoritative check.
-pub(crate) fn check_preinferred_file_in_source_set(
-    files: &[File],
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    let file = &files[file_index as usize];
+    let environment = CheckerExternalEnvironment::from(syms);
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl(file, file_index, Some(files), syms, diags)
+        check_file_at_impl_mode_with_index(
+            file,
+            file_index,
+            &environment,
+            resolved_index,
+            diags,
+            false,
+            None,
+            None,
+            active_declarations,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
     })
 }
 
@@ -48755,21 +40960,21 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
     selected_stable_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
     resolved_index: &crate::fir::ResolvedModuleIndex,
-    syms: &mut SymbolTable,
+    syms: &SymbolTable,
     diags: &mut DiagSink,
 ) -> TypeInfo {
+    let environment = CheckerExternalEnvironment::from(syms);
     crate::wide_stack::on_wide_stack(move || {
         check_file_at_impl_mode_with_index(
             file,
             file_index,
-            None,
-            syms,
-            Some(resolved_index),
+            &environment,
+            resolved_index,
             diags,
             false,
             Some(selected_declarations),
             Some(selected_body_declarations),
-            Some(active_declarations),
+            active_declarations,
             None,
             Some(selected_stable_bodies),
             false,
@@ -48796,14 +41001,13 @@ pub(crate) fn check_selected_declarations_in_pass_two(
         check_file_at_impl_mode_with_index(
             file,
             file_index,
-            None,
             symbols,
-            Some(index),
+            index,
             diags,
             false,
             Some(selected_declarations),
             Some(selected_body_declarations),
-            Some(active_declarations),
+            active_declarations,
             None,
             Some(selected_stable_bodies),
             false,
@@ -48822,52 +41026,28 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
     active_declarations: &crate::fir::ActiveSourceDeclarations,
     selected_stable_roots: &std::collections::HashSet<crate::fir::DeclarationId>,
     selected_stable_defaults: &std::collections::HashSet<crate::fir::DeclarationId>,
-    syms: &mut SymbolTable,
+    syms: &SymbolTable,
     index: &crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
 ) -> TypeInfo {
+    let environment = CheckerExternalEnvironment::from(syms);
     crate::wide_stack::on_wide_stack(move || {
         check_file_at_impl_mode_with_index(
             file,
             file_index,
-            None,
-            syms,
-            Some(index),
+            &environment,
+            index,
             diags,
             false,
             None,
             None,
-            Some(active_declarations),
+            active_declarations,
             Some(selected_stable_roots),
             Some(selected_stable_defaults),
             true,
             None,
             None,
         )
-    })
-}
-
-/// Enter the check on a same-thread grown stack segment; `expr_with_context` rechecks the remaining
-/// stack per recursion level so paths with large helper frames can chain further segments before
-/// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
-/// not the calling thread's stack — authoritative without moving non-`Send` symbols or
-/// caller-defined platform state (see [`crate::wide_stack`]).
-fn check_file_on_checker_stack(
-    file: &File,
-    file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    crate::wide_stack::on_wide_stack(move || {
-        if !file.anonymous_object_classes.is_empty() {
-            syms.begin_module_mutation();
-            discover_anonymous_object_captures_at(
-                file, file_index, syms, None, None, None, None, None,
-            );
-            syms.finish_module_mutation();
-        }
-        check_file_at_impl(file, file_index, source_files, syms, diags)
     })
 }
 
@@ -49225,60 +41405,31 @@ struct LambdaCheckMode {
 type AnnotationElements = Vec<(String, Ty)>;
 type AnnotationShape = (AnnotationElements, ParamList, AnnotationParameterPolicy);
 
-/// Current-module provider selected by frontend lifetime. Legacy inference runs before signature
-/// finalization; production Pass 2 overlays the finalized declaration index and may therefore
-/// destroy parser-keyed declaration families before constructing this checker.
-enum CheckerModuleSymbols<'a> {
-    Legacy(crate::module_symbols::ModuleSymbols<'a>),
-    Streamed(crate::fir::StreamedModuleSymbols<'a>),
-}
+/// Current-module provider for the authoritative Pass-2 checker.
+struct CheckerModuleSymbols<'a>(crate::fir::StreamedModuleSymbols<'a>);
 
 impl<'a> CheckerModuleSymbols<'a> {
-    /// The temporary signature graph exists only for pre-finalization inference. Callers must
-    /// handle its absence explicitly; authoritative Pass 2 has no graph-bearing variant to return.
-    fn legacy_symbols(&self) -> Option<&'a SymbolTable> {
-        match self {
-            Self::Legacy(source) => Some(source.pass_one_symbols()),
-            Self::Streamed(_) => None,
-        }
-    }
-
     fn declares_top_level(&self, name: &str) -> bool {
-        match self {
-            Self::Legacy(source) => source.declares_top_level(name),
-            Self::Streamed(source) => source.declares_top_level(name),
-        }
+        self.0.declares_top_level(name)
     }
 
     fn type_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
-        match self {
-            Self::Legacy(source) => source.type_alias_expansion(identity),
-            Self::Streamed(source) => source.type_alias_expansion(identity),
-        }
+        self.0.type_alias_expansion(identity)
     }
 
     fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
-        match self {
-            Self::Legacy(source) => source.type_parameter_extra_bounds(identity),
-            Self::Streamed(source) => source.type_parameter_extra_bounds(identity),
-        }
+        self.0.type_parameter_extra_bounds(identity)
     }
 
     fn annotation_retention(
         &self,
         classifier: TypeName,
     ) -> Option<crate::types::AnnotationRetention> {
-        match self {
-            Self::Legacy(source) => source.annotation_retention(classifier),
-            Self::Streamed(source) => source.annotation_retention(classifier),
-        }
+        self.0.annotation_retention(classifier)
     }
 
     fn annotation_targets(&self, classifier: TypeName) -> crate::types::AnnotationTargets {
-        match self {
-            Self::Legacy(source) => source.annotation_targets(classifier),
-            Self::Streamed(source) => source.annotation_targets(classifier),
-        }
+        self.0.annotation_targets(classifier)
     }
 
     fn finalized_function(
@@ -49287,21 +41438,14 @@ impl<'a> CheckerModuleSymbols<'a> {
         owner: TypeName,
         owner_is_interface: bool,
     ) -> Option<crate::libraries::FunctionInfo> {
-        match self {
-            Self::Legacy(_) => None,
-            Self::Streamed(source) => {
-                source.function_for_declaration(declaration, owner, owner_is_interface)
-            }
-        }
+        self.0
+            .function_for_declaration(declaration, owner, owner_is_interface)
     }
 }
 
 impl SymbolSource for CheckerModuleSymbols<'_> {
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        match self {
-            Self::Legacy(source) => source.package_exists(parent, name),
-            Self::Streamed(source) => source.package_exists(parent, name),
-        }
+        self.0.package_exists(parent, name)
     }
 
     fn symbols(
@@ -49309,10 +41453,7 @@ impl SymbolSource for CheckerModuleSymbols<'_> {
         namespace: crate::symbol_source::SymbolNamespace,
         name: &str,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        match self {
-            Self::Legacy(source) => source.symbols(namespace, name),
-            Self::Streamed(source) => source.symbols(namespace, name),
-        }
+        self.0.symbols(namespace, name)
     }
 }
 
@@ -49327,15 +41468,11 @@ struct Checker<'a> {
     /// so a user function/type shadows a library one of the same name.
     module: CheckerModuleSymbols<'a>,
     file_index: u32,
-    /// Borrowed source module for lazily rendering diagnostics from declaration ASTs. `None` for
-    /// single-file checker callers; never retained in semantic signatures or the lowering handoff.
-    source_files: Option<&'a [File]>,
-    /// Finalized stable declarations available to the authoritative Pass-2 checker. Legacy and
-    /// inference-only checker callers leave this absent; checked FIR production always supplies it.
-    resolved_index: Option<&'a crate::fir::ResolvedModuleIndex>,
+    /// Finalized stable declarations available to every checker invocation.
+    resolved_index: &'a crate::fir::ResolvedModuleIndex,
     /// Parser-native bindings for the current Pass-2 unit. Production declaration selection uses
     /// these identities and never joins the fresh AST back to Pass-1 source ranges.
-    active_declarations: Option<&'a crate::fir::ActiveSourceDeclarations>,
+    active_declarations: &'a crate::fir::ActiveSourceDeclarations,
     diags: &'a mut DiagSink,
     /// Exact inline declaration ranges selected for the temporary Pass-1 body check. `None` is an
     /// ordinary authoritative file check; `Some` defers every other body to Pass 2.
@@ -49346,34 +41483,6 @@ struct Checker<'a> {
     /// This selected Pass-1 check owns only parameter-default expressions. Finalized signatures
     /// already supply callable result types, so no ordinary body may be reopened for inference.
     signature_defaults_only: bool,
-    /// Resolve a module declaration whose own type is still being determined, ON DEMAND.
-    ///
-    /// Set only when the checker is typing ONE declaration on behalf of the resolution engine
-    /// (`src/type_engine.rs`), which is how an implicitly-typed declaration gets its type: the
-    /// engine jumps to it and runs this checker over its body. A reference to another such
-    /// declaration finds a placeholder in the symbol table, and reading the placeholder as the
-    /// answer declines a program kotlinc accepts, so it is asked for here instead. `None` for
-    /// ordinary file checking, where every declaration already has its type.
-    demand_name: Option<DemandName<'a>>,
-    /// The same, for a spelling that may be OVERLOADED. A name alone cannot choose between
-    /// overloads, so [`Checker::demand_name`] declines one; the call's argument types can, and are
-    /// what the call site has in hand.
-    demand_call: Option<DemandCall<'a>>,
-    /// The same seam for a read THROUGH a receiver, which resolves against the member records
-    /// rather than by name.
-    demand_member: Option<DemandMember<'a>>,
-    /// Whether this checker exists only to determine ONE declaration's type, rather than to check a
-    /// file.
-    inference_only: bool,
-    /// Set when such a run reached a declaration the symbol table does not carry YET — an anonymous
-    /// object declared later in `file.decls` than the declaration being typed, most often.
-    ///
-    /// This is a DECLINE, not a skip: the run cannot determine the type, so it reports no type and
-    /// the declaration is resolved again once collection has finished. Continuing and publishing
-    /// whatever the incomplete table produced is the miscompile this whole area exists to avoid.
-    /// For the authoritative check the same situation stays an assertion, because by then every
-    /// declaration is collected and a miss is a real broken invariant.
-    inference_incomplete: bool,
     /// The `(receiver, member)` pairs whose INTERSECTION-BOUND retry is already in progress.
     ///
     /// `where T : A, T : B` retries an unresolved member against each remaining bound, and a bound
@@ -49383,7 +41492,7 @@ struct Checker<'a> {
     member_bound_retries: std::collections::HashSet<(Ty, String)>,
     /// Immutable provider/member queries reused while checking one Pass-2 source unit. The key
     /// includes lexical class access because visibility can change across nested classifier bodies.
-    /// Pass-1 and legacy mutable-symbol checks bypass this cache entirely.
+    /// Pass-1 bounded checks use the same finalized declaration provider and cache discipline.
     stable_receiver_callable_cache:
         std::cell::RefCell<HashMap<(Ty, String, Vec<TypeName>), crate::libraries::Callables>>,
     /// Complete function supertypes of an applied classifier. This is immutable after the Pass-1
@@ -49394,11 +41503,6 @@ struct Checker<'a> {
     /// Generic inference repeatedly asks for the same classifier while walking one large body; the
     /// bounded checker owns this cache so no syntax, body, or mutable Pass-1 state can enter it.
     stable_federated_symbol_cache: SymbolQueryCache,
-    /// Whether the declaration being typed may not read this name AT ALL. An eager initializer runs
-    /// in declaration order, so a module property declared later in the same file has no value yet;
-    /// kotlinc rejects `val eager = later` with "variable 'later' must be initialized". The symbol
-    /// table has no notion of position, so the engine records the rejected read at its source span.
-    demand_rejects: Option<&'a dyn Fn(&str, Span) -> bool>,
     expr_types: Vec<Ty>,
     /// Trace-only duplicate-traversal detector. This is deliberately not a semantic cache: normal
     /// builds contain no field or branch, and trace builds report the caller bug to remove.
@@ -49487,12 +41591,7 @@ struct Checker<'a> {
     in_script_body: bool,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
-    inherited_method_constraints: HashMap<(TypeName, String), InheritedMethodConstraint>,
-    data_class_hash_owners: HashMap<(TypeName, String), TypeName>,
-    unsupported_class_emission: HashMap<DeclId, &'static str>,
     resolved_sam_conversions: HashMap<ExprId, crate::symbol_resolver::SamSignature>,
-    inferred_fun_rets: HashMap<(u32, u32), Ty>,
-    inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
@@ -49867,154 +41966,6 @@ struct ConstructionExpectations {
     /// supplies the classifier arguments before a contextual constructor argument is checked.
     type_param_bounds: Vec<Vec<Ty>>,
 }
-struct SourceConstructorBindings<'a> {
-    bindings: &'a mut [Ty],
-    lower: &'a mut [Vec<(Ty, ExprId)>],
-    upper: &'a mut [Vec<(Ty, ExprId)>],
-    explicitly_bound: &'a [bool],
-    seeded: &'a HashMap<String, Ty>,
-    lexically_fixed_seed: &'a [bool],
-    argument_fits_seed: &'a dyn Fn(Ty, Ty) -> bool,
-}
-
-fn merge_source_constructor_shape_bindings(
-    shape: Ty,
-    actual: Ty,
-    argument_expr: ExprId,
-    type_parameters: &[String],
-    covariant: bool,
-    inference: &mut SourceConstructorBindings<'_>,
-) {
-    match shape {
-        Ty::TyParam(name, _) => {
-            let Some(index) = type_parameters
-                .iter()
-                .position(|parameter| parameter == name)
-            else {
-                return;
-            };
-            if inference
-                .explicitly_bound
-                .get(index)
-                .copied()
-                .unwrap_or(false)
-            {
-                return;
-            }
-            let actual = crate::symbol_resolver::inference_actual(actual);
-            if covariant {
-                inference.lower[index].push((actual, argument_expr));
-                let current =
-                    (inference.bindings[index] != Ty::Error).then_some(inference.bindings[index]);
-                // The expected result is already a constraint on this invariant constructor
-                // result. Preserve its seed while each lower argument constraint fits it. Once
-                // one argument falls outside the seed, ordinary joining takes over permanently.
-                if let Some(&seed) = inference
-                    .seeded
-                    .get(name)
-                    .filter(|&&seed| current == Some(seed))
-                {
-                    crate::trace_compiler!(
-                        "expected_call",
-                        "constructor seed formal={name} seed={seed:?} actual={actual:?} lexically_fixed={}",
-                        inference
-                            .lexically_fixed_seed
-                            .get(index)
-                            .copied()
-                            .unwrap_or(false),
-                    );
-                    if seed.mentions_ty_param()
-                        && !actual.mentions_ty_param()
-                        && !inference
-                            .lexically_fixed_seed
-                            .get(index)
-                            .copied()
-                            .unwrap_or(false)
-                    {
-                        // An enclosing call's still-open type variable is a dependency constraint,
-                        // not concrete evidence for this constructor's own variable. Prefer the
-                        // argument's completed type here; the constructed result will subsequently
-                        // constrain the enclosing call. With no argument evidence the symbolic seed
-                        // remains intact, which is required by `fun <T> make(): Box<T> = Box()`.
-                        inference.bindings[index] = actual;
-                        return;
-                    }
-                    if (inference.argument_fits_seed)(actual, seed) {
-                        return;
-                    }
-                }
-                inference.bindings[index] =
-                    crate::symbol_resolver::merge_inferred_ty(current, actual);
-            } else {
-                inference.upper[index].push((actual, argument_expr));
-            }
-        }
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::OutProjection(inner) => {
-            merge_source_constructor_shape_bindings(
-                *inner,
-                crate::symbol_resolver::inference_actual(actual).non_null(),
-                argument_expr,
-                type_parameters,
-                covariant,
-                inference,
-            );
-        }
-        // A source star's computed bound is a read approximation, not constructor-argument
-        // evidence for any type parameter occurring inside that bound.
-        Ty::StarProjection(_) => {}
-        Ty::InProjection(inner) => {
-            merge_source_constructor_shape_bindings(
-                *inner,
-                crate::symbol_resolver::inference_actual(actual)
-                    .projection_inner()
-                    .unwrap_or(actual),
-                argument_expr,
-                type_parameters,
-                !covariant,
-                inference,
-            );
-        }
-        Ty::Obj(_, parameters) => {
-            if let Ty::Obj(_, arguments) = actual {
-                for (&parameter, &actual_argument) in parameters.iter().zip(arguments) {
-                    merge_source_constructor_shape_bindings(
-                        parameter,
-                        actual_argument,
-                        argument_expr,
-                        type_parameters,
-                        covariant,
-                        inference,
-                    );
-                }
-            }
-        }
-        Ty::Fun(signature) => {
-            if let Ty::Fun(actual) = actual {
-                // Function parameters contribute upper constraints.
-                for (&parameter, &actual_parameter) in signature.params.iter().zip(&actual.params) {
-                    merge_source_constructor_shape_bindings(
-                        parameter,
-                        actual_parameter,
-                        argument_expr,
-                        type_parameters,
-                        !covariant,
-                        inference,
-                    );
-                }
-                merge_source_constructor_shape_bindings(
-                    signature.ret,
-                    actual.ret,
-                    argument_expr,
-                    type_parameters,
-                    covariant,
-                    inference,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
 impl crate::assignable::TypeOracle for Checker<'_> {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         let mut supertypes = self.body_local_supertypes(ty);
@@ -50061,22 +42012,6 @@ impl crate::assignable::TypeOracle for Checker<'_> {
             .unwrap_or(lower)
     }
 }
-
-/// Join two spellings of the SAME semantic type/class while preserving their real nullability.
-///
-/// This is the single same-class path used by `Checker::join`:
-///
-/// * two non-generic `Obj`/`TyParam` spellings compare their semantic object identity, retaining a
-///   shared type-parameter identity when both sides carry the same variable;
-/// * generic applications are deliberately left to [`Checker::applied_common_supertype`], which
-///   reconstructs their arguments from declaration-site variance instead of erasing them;
-/// * an exact builtin/function shape keeps that canonical shape;
-/// * a builtin and its object spelling compare their Kotlin class identity, with the builtin shape
-///   winning (`String` + `Obj("kotlin/String")` -> `String`).
-///
-/// Nullability is reapplied from the ORIGINAL inputs. That last detail matters for mixed spellings:
-/// unequal `Ty` values do not imply that one was nullable, so two non-null String spellings must not
-/// accidentally become `String?`.
 fn common_result_nullability(a: Ty, b: Ty, base: Ty) -> Ty {
     if matches!(a, Ty::Nullable(_)) || matches!(b, Ty::Nullable(_)) {
         Ty::nullable(base.non_null())
@@ -50690,7 +42625,7 @@ impl<'a> Checker<'a> {
         declaration: Option<crate::fir::DeclarationId>,
         identity: &str,
     ) -> Option<bool> {
-        let index = self.resolved_index?;
+        let index = self.resolved_index;
         let declaration = declaration?;
         Some(
             index
@@ -50707,7 +42642,7 @@ impl<'a> Checker<'a> {
         &self,
         declaration: Option<crate::fir::DeclarationId>,
     ) -> Option<Ty> {
-        let index = self.resolved_index?;
+        let index = self.resolved_index;
         let property = index.property_for_declaration(declaration?)?;
         index.property(property)?.storage_type.map(|ty| ty.get())
     }
@@ -50719,7 +42654,7 @@ impl<'a> Checker<'a> {
         &self,
         declaration: Option<crate::fir::DeclarationId>,
     ) -> Option<bool> {
-        let index = self.resolved_index?;
+        let index = self.resolved_index;
         let declaration = declaration?;
         Some(
             index
@@ -50783,13 +42718,7 @@ impl<'a> Checker<'a> {
             return false;
         };
         self.stable_const_has_implicit_integer_coercion(access.property.stable_declaration)
-            .unwrap_or_else(|| {
-                access
-                    .property
-                    .source_key
-                    .and_then(|source| self.module.legacy_symbols()?.source_props.get(&source))
-                    .is_some_and(|property| property.is_const && property.implicit_integer_coercion)
-            })
+            .unwrap_or(false)
     }
 
     /// Declaration shape shared by semantic member-property reads and writes. The federated source
@@ -51177,9 +43106,6 @@ impl<'a> Checker<'a> {
     /// classifier overlays are deliberately unioned by their owning selectors after this query, so
     /// publishing a later local method cannot invalidate the stable portion cached here.
     fn stable_receiver_callables(&self, receiver: Ty, name: &str) -> crate::libraries::Callables {
-        if self.resolved_index.is_none() {
-            return self.resolver().receiver_callables(receiver, name);
-        }
         let key = (receiver, name.to_owned(), self.lexical_source_class_names());
         if let Some(callables) = self.stable_receiver_callable_cache.borrow().get(&key) {
             return callables.clone();
@@ -51192,9 +43118,6 @@ impl<'a> Checker<'a> {
     }
 
     fn stable_classifier_callable_signatures(&self, ty: Ty) -> Vec<Ty> {
-        if self.resolved_index.is_none() {
-            return crate::symbol_resolver::classifier_callable_signatures(&self.fed_source(), ty);
-        }
         if let Some(signatures) = self.stable_callable_shape_cache.borrow().get(&ty) {
             return signatures.clone();
         }
@@ -52091,60 +44014,31 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn property_inference_key(property: &crate::libraries::PropertyInfo) -> Option<DeclKey> {
-        property
-            .source_key
-            .map(|(file, declaration)| DeclKey::declaration(file, declaration))
-            .or_else(|| Self::source_member_inference_key(property.source_member))
-    }
-
-    fn source_member_inference_key(
-        source_member: Option<crate::libraries::SourceMember>,
-    ) -> Option<DeclKey> {
-        match source_member {
-            Some(crate::libraries::SourceMember::ClassProperty {
-                file,
-                owner,
-                property,
-            }) => Some(DeclKey::member(file, owner, property)),
-            _ => None,
-        }
-    }
-
     fn property_inference_failed(&self, property: &crate::libraries::PropertyInfo) -> bool {
         property
             .stable_declaration
             .is_some_and(|declaration| self.stable_property_inference_failed(declaration))
-            || Self::property_inference_key(property).is_some_and(|key| {
-                self.module
-                    .legacy_symbols()
-                    .is_some_and(|symbols| symbols.property_inference_failures.contains_key(&key))
-            })
     }
 
     fn source_member_inference_failed(
         &self,
-        source_member: Option<crate::libraries::SourceMember>,
+        _source_member: Option<crate::libraries::SourceMember>,
         stable_declaration: Option<crate::fir::DeclarationId>,
     ) -> bool {
         stable_declaration
             .is_some_and(|declaration| self.stable_property_inference_failed(declaration))
-            || Self::source_member_inference_key(source_member).is_some_and(|key| {
-                self.module
-                    .legacy_symbols()
-                    .is_some_and(|symbols| symbols.property_inference_failures.contains_key(&key))
-            })
     }
 
     fn stable_property_inference_failed(&self, declaration: crate::fir::DeclarationId) -> bool {
-        self.resolved_index.is_some_and(|index| {
-            index.signature(declaration).is_none()
-                && index.declaration_header(declaration).is_some_and(|header| {
+        self.resolved_index.signature(declaration).is_none()
+            && self
+                .resolved_index
+                .declaration_header(declaration)
+                .is_some_and(|header| {
                     header
                         .flags
                         .has(crate::fir::DeclarationFlags::INFERRED_PROPERTY_TYPE)
                 })
-        })
     }
 
     fn report_error_operand_not(
@@ -52238,30 +44132,15 @@ impl<'a> Checker<'a> {
     }
 
     fn source_callable_display(&self, function: &crate::libraries::FunctionInfo) -> Option<String> {
-        let (file_index, declaration) = function.source_key?;
-        let (file, declaration) = if file_index == self.file_index {
-            let declaration = function
-                .stable_declaration
-                .and_then(|declaration| self.active_declarations?.function(self.file, declaration))
-                .or_else(|| {
-                    self.active_declarations.is_none().then(|| {
-                        match self.file.decl_arena.get(declaration as usize)? {
-                            Decl::Fun(function) => Some(function),
-                            Decl::Class(_) | Decl::Property(_) => None,
-                        }
-                    })?
-                })?;
-            (self.file, declaration)
-        } else {
-            let file = self.source_files?.get(file_index as usize)?;
-            let declaration = match file.decl_arena.get(declaration as usize)? {
-                Decl::Fun(function) => function,
-                Decl::Class(_) | Decl::Property(_) => return None,
-            };
-            (file, declaration)
-        };
+        let (file_index, _) = function.source_key?;
+        if file_index != self.file_index {
+            return None;
+        }
+        let declaration = function
+            .stable_declaration
+            .and_then(|declaration| self.active_declarations.function(self.file, declaration))?;
         Some(source_function_display(
-            file,
+            self.file,
             declaration,
             function.callable.ret,
         ))
@@ -56071,28 +47950,11 @@ impl<'a> Checker<'a> {
         if *is_class || *labelled_receiver != receiver {
             return None;
         }
-        let declaration = class
-            .stable_declaration
-            .and_then(|declaration| {
-                self.active_declarations?
-                    .class(self.file, declaration)
-                    .map(|(_, class)| class)
-            })
-            .or_else(|| {
-                // Whole-file legacy checks still use the parser declaration recorded during
-                // collection. A bounded Pass-2 unit must never reinterpret that arena index.
-                self.active_declarations.is_none().then(|| {
-                    let declaration = self
-                        .module
-                        .legacy_symbols()?
-                        .class_by_type_name(internal)?
-                        .source_decl?;
-                    match self.file.decl_arena.get(declaration.0 as usize)? {
-                        Decl::Class(class) => Some(class),
-                        Decl::Fun(_) | Decl::Property(_) => None,
-                    }
-                })?
-            })?;
+        let declaration = class.stable_declaration.and_then(|declaration| {
+            self.active_declarations
+                .class(self.file, declaration)
+                .map(|(_, class)| class)
+        })?;
         if !declaration.is_enum() {
             return None;
         }
@@ -56612,10 +48474,7 @@ impl<'a> Checker<'a> {
             .and_then(|owner| self.resolver().classifier(owner))?;
         let delegated_interfaces = class
             .stable_declaration
-            .and_then(|declaration| {
-                self.resolved_index
-                    .and_then(|index| index.classifier_header(declaration))
-            })
+            .and_then(|declaration| self.resolved_index.classifier_header(declaration))
             .map(|header| {
                 header
                     .interface_delegations
@@ -56661,20 +48520,16 @@ impl<'a> Checker<'a> {
     /// for pre-finalization/same-parse checker entry points. Candidate selection still goes through
     /// `select_top_level_property`, which handles context applicability and ambiguity.
     fn module_declares_top_level_property(&self, name: &str) -> bool {
-        if let Some(index) = self.resolved_index {
-            return (0..index.declaration_count()).any(|raw| {
-                let declaration = crate::fir::DeclarationId::from_raw(
-                    u32::try_from(raw).expect("too many stable module declarations"),
-                );
-                index.declaration_header(declaration).is_some_and(|header| {
-                    header.kind == crate::fir::DeclarationKind::Property
-                        && header.owner.is_none()
-                        && index.declaration_name(declaration) == Some(name)
-                })
-            });
-        }
-        self.module.legacy_symbols().is_some_and(|symbols| {
-            symbols.props.contains_key(name) || symbols.context_prop_names.contains(name)
+        let index = self.resolved_index;
+        (0..index.declaration_count()).any(|raw| {
+            let declaration = crate::fir::DeclarationId::from_raw(
+                u32::try_from(raw).expect("too many stable module declarations"),
+            );
+            index.declaration_header(declaration).is_some_and(|header| {
+                header.kind == crate::fir::DeclarationKind::Property
+                    && header.owner.is_none()
+                    && index.declaration_name(declaration) == Some(name)
+            })
         })
     }
 
@@ -56685,7 +48540,7 @@ impl<'a> Checker<'a> {
         candidate.source_key.map(|(file, _)| file).or_else(|| {
             candidate
                 .stable_declaration
-                .and_then(|declaration| self.resolved_index?.declaration_anchor(declaration))
+                .and_then(|declaration| self.resolved_index.declaration_anchor(declaration))
                 .map(|anchor| anchor.source.raw())
         })
     }
@@ -57009,7 +48864,8 @@ impl<'a> Checker<'a> {
         // classifier's source spelling can hide the enclosing instance needed by a constructor
         // default. Select the physical outer from the surviving semantic receiver rungs directly.
         let receivers = self.implicit_receivers(scope);
-        let enum_parent = self.resolved_index.and_then(|index| {
+        let enum_parent = (|| {
+            let index = self.resolved_index;
             let declaration = index.classifier_declaration(classifier)?;
             let entry = index
                 .declaration_anchor(declaration)?
@@ -57022,7 +48878,7 @@ impl<'a> Checker<'a> {
             index
                 .enclosing_classifier(entry)
                 .map(|parent| parent.classifier)
-        });
+        })();
         receivers.into_iter().find(|receiver| {
             self.receiver_is_assignable(receiver.ty, Ty::obj_name(outer))
                 || enum_parent.is_some_and(|parent| {
@@ -57075,7 +48931,7 @@ impl<'a> Checker<'a> {
             classifier: receiver
                 .class_receiver
                 .then(|| {
-                    self.resolved_index?
+                    self.resolved_index
                         .classifier_declaration(receiver.ty.non_null().kotlin_class_internal()?)
                 })
                 .flatten(),
@@ -57213,84 +49069,6 @@ impl<'a> Checker<'a> {
 
     /// Decode every top-level function's `contract { … }` block up front (see the call site in
     /// `check_file_at_impl_mode`).
-    fn collect_source_contracts(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-    ) {
-        let file = self.file;
-        for &d in &file.decls {
-            let Decl::Fun(f) = file.decl(d) else { continue };
-            // An enclosing top-level declaration can be active solely to recreate the lexical
-            // scope of a nested inline body. Its ordinary body was deliberately removed from the
-            // compact Pass-1 syntax and does not own work in this check.
-            if selected_body_declarations.is_some_and(|selected| !selected.contains(&f.span)) {
-                continue;
-            }
-            if let Some(contract) = self.decode_fun_contract(scope, f) {
-                // Contract type conditions belong to the CALLEE declaration. Resolve them while
-                // that declaration's type parameters and imports are still in scope, then keep the
-                // resulting stable semantic identities on the signature/metadata handoff. Deferring
-                // a source spelling such as `R` until a call site incorrectly asks the caller's
-                // lexical scope to resolve the callee's formal.
-                let declaration_scope = scope.child(ScopeKind::Function { receiver: None });
-                let type_parameters = TParams::symbolic_from_decl_with(
-                    &f.type_params,
-                    &f.type_param_bounds,
-                    &|name| self.select_classifier(scope, name).found(),
-                )
-                .alpha_renamed_declaration(
-                    &f.type_params,
-                    self.compilation_id,
-                    self.file_index,
-                    f.signature_span.lo,
-                );
-                declaration_scope.declare_tparams(&f.type_params, &type_parameters, |name| {
-                    f.reified_type_params.contains(name)
-                });
-                let contract = contract.with_resolved_types(&mut |reference| {
-                    let ty = self.type_ref_ty_silent(&declaration_scope, reference);
-                    (ty != Ty::Error).then_some(ty)
-                });
-                self.source_contracts
-                    .insert(d, std::sync::Arc::new(contract));
-            }
-        }
-    }
-
-    /// The decoded contract of a source function, or `None` when its body has no (confirmed)
-    /// `kotlin.contracts.contract { … }` statement.
-    fn decode_fun_contract(
-        &self,
-        scope: &CheckerScope<'_>,
-        f: &FunDecl,
-    ) -> Option<crate::contracts::Contract> {
-        let crate::ast::FunBody::Block(block) = f.body else {
-            return None;
-        };
-        let Expr::Block { stmts, trailing } = self.file.expr(block) else {
-            return None;
-        };
-        let expression = stmts
-            .iter()
-            .filter_map(|statement| match self.file.stmt(*statement) {
-                Stmt::Expr(expression) => Some(*expression),
-                _ => None,
-            })
-            .chain(trailing.iter().copied())
-            .find(|expression| self.is_contract_call(scope, *expression))?;
-        let params: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-        crate::contracts::decode_source(
-            self.file,
-            expression,
-            &params,
-            &f.name,
-            f.receiver.is_some(),
-        )
-    }
-
-    /// The contract of the function a call resolved to — decoded from same-file source through the
-    /// selected declaration identity, or read from metadata attached to the selected callable.
     fn contract_for_call(
         &self,
         call: ExprId,
@@ -57572,10 +49350,7 @@ impl<'a> Checker<'a> {
                 && candidate.params == member.params
                 && (candidate
                     .stable_declaration
-                    .and_then(|declaration| {
-                        self.resolved_index
-                            .and_then(|index| index.declaration_anchor(declaration))
-                    })
+                    .and_then(|declaration| self.resolved_index.declaration_anchor(declaration))
                     .is_some_and(|anchor| anchor.source.raw() == self.file_index)
                     || candidate
                         .source_member
@@ -58229,35 +50004,15 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         property: &crate::libraries::PropertyInfo,
     ) -> Option<Ty> {
-        let constant = property
-            .compile_time_constant
-            .clone()
-            .or_else(|| {
-                property.stable_declaration.and_then(|declaration| {
-                    self.resolved_index?
-                        .compile_time_constant(declaration)
-                        .cloned()
-                })
-            })
-            .or_else(|| {
-                self.resolved_index.is_none().then(|| {
-                    property.source_key.and_then(|source| {
-                        self.module
-                            .legacy_symbols()?
-                            .source_props
-                            .get(&source)
-                            .and_then(|property| property.compile_time_constant.clone())
-                    })
-                })?
-            })?;
+        let constant = property.compile_time_constant.clone().or_else(|| {
+            property
+                .stable_declaration
+                .and_then(|declaration| self.resolved_index.compile_time_constant(declaration))
+                .cloned()
+        })?;
         let implicit_integer_coercion = self
             .stable_const_has_implicit_integer_coercion(property.stable_declaration)
-            .unwrap_or_else(|| {
-                property
-                    .source_key
-                    .and_then(|source| self.module.legacy_symbols()?.source_props.get(&source))
-                    .is_some_and(|property| property.is_const && property.implicit_integer_coercion)
-            });
+            .unwrap_or(false);
         if implicit_integer_coercion {
             self.constant_integer_coercion_reads.insert(expression);
         }
@@ -58267,6 +50022,15 @@ impl<'a> Checker<'a> {
     }
 
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
+        let t = if t.mentions_pending() {
+            self.diags.error(
+                self.span(e),
+                "internal error: unresolved signature type reached body checking",
+            );
+            Ty::Error
+        } else {
+            t
+        };
         let previous = self.expr_types[e.0 as usize];
         if previous != t && previous != Ty::Error {
             crate::trace_compiler!(
@@ -59041,30 +50805,16 @@ impl<'a> Checker<'a> {
         selected: &crate::libraries::FunctionInfo,
         resolved_ret: Ty,
     ) -> Option<String> {
-        let syntax = selected.source_key.and_then(|(file_index, decl)| {
-            if file_index == self.file_index {
-                selected
-                    .stable_declaration
-                    .and_then(|declaration| {
-                        self.active_declarations?.function(self.file, declaration)
+        let syntax = selected.source_key.and_then(|(file_index, _)| {
+            (file_index == self.file_index)
+                .then(|| {
+                    selected.stable_declaration.and_then(|declaration| {
+                        self.active_declarations
+                            .function(self.file, declaration)
+                            .map(|function| (self.file, function))
                     })
-                    .or_else(|| {
-                        self.active_declarations.is_none().then(|| {
-                            match self.file.decl_arena.get(decl as usize)? {
-                                Decl::Fun(function) => Some(function),
-                                Decl::Class(_) | Decl::Property(_) => None,
-                            }
-                        })?
-                    })
-                    .map(|function| (self.file, function))
-            } else {
-                self.source_files
-                    .and_then(|files| files.get(file_index as usize))
-                    .and_then(|file| match file.decl_arena.get(decl as usize)? {
-                        Decl::Fun(function) => Some((file, function)),
-                        Decl::Class(_) | Decl::Property(_) => None,
-                    })
-            }
+                })
+                .flatten()
         });
         if let Some((file, function)) = syntax {
             return Some(source_function_display(file, function, resolved_ret));
@@ -59380,19 +51130,6 @@ impl<'a> Checker<'a> {
         if candidates.is_empty() {
             return false;
         }
-        let mut seen_keys = std::collections::HashSet::new();
-        let legacy_symbols = self.module.legacy_symbols();
-        let conflict_keys = candidates
-            .iter()
-            .filter_map(|candidate| {
-                let source = candidate.source_key?;
-                legacy_symbols?
-                    .conflicting_top_level_key_by_source
-                    .get(&source)
-                    .filter(|key| seen_keys.insert((*key).clone()))
-                    .cloned()
-            })
-            .collect::<Vec<_>>();
         let mut mapping_errors = Vec::new();
         for (index, candidate) in candidates.iter().enumerate() {
             let context_count = candidate.context_count.min(candidate.callable.params.len());
@@ -59449,53 +51186,29 @@ impl<'a> Checker<'a> {
         let prefix = INAPPLICABLE_OVERLOAD_PREFIX;
         let mut displays: Vec<String> = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
         let mut display_bytes = 0usize;
-        let mut seen = std::collections::HashSet::new();
-        for key in conflict_keys {
-            let Some(conflicts) = self
-                .module
-                .legacy_symbols()
-                .and_then(|symbols| symbols.conflicting_top_level_candidates.get(&key))
-            else {
-                continue;
-            };
-            let local = conflicts
-                .by_file
-                .get(&self.file_index)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            for candidate in conflicts
-                .public
-                .first()
+        {
+            // Seed the bounded diagnostic with one representative from each visibility class
+            // before following declaration order, so a large run of private declarations cannot
+            // erase every package-visible overload (or vice versa) from the diagnostic surface.
+            let mut displayed_candidates = std::collections::HashSet::new();
+            let prioritized = candidates
+                .iter()
+                .position(|candidate| !candidate.visibility.is_private())
                 .into_iter()
-                .chain(local.first())
-                .chain(&conflicts.public)
-                .chain(local)
-            {
+                .chain(
+                    candidates
+                        .iter()
+                        .position(|candidate| candidate.visibility.is_private()),
+                )
+                .chain(0..candidates.len());
+            for index in prioritized {
                 if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
                     break;
                 }
-                if !seen.insert((candidate.file, candidate.declaration)) {
+                if !displayed_candidates.insert(index) {
                     continue;
                 }
-                let separator_bytes = if displays.is_empty() { 2 } else { 1 };
-                if prefix
-                    .len()
-                    .saturating_add(display_bytes)
-                    .saturating_add(separator_bytes)
-                    .saturating_add(candidate.display.len())
-                    > MAX_OVERLOAD_DIAGNOSTIC_BYTES
-                {
-                    break;
-                }
-                display_bytes += separator_bytes + candidate.display.len();
-                displays.push(candidate.display.clone());
-            }
-        }
-        if displays.is_empty() {
-            for candidate in &candidates {
-                if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
-                    break;
-                }
+                let candidate = &candidates[index];
                 let display = self
                     .module_source_display(candidate, candidate.callable.ret)
                     .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
@@ -59679,23 +51392,13 @@ impl<'a> Checker<'a> {
         &self,
         selected: &crate::libraries::FunctionInfo,
     ) -> Option<(&'a File, &'a FunDecl)> {
-        let (file_index, declaration) = selected.source_key?;
-        if file_index == self.file_index {
-            if let Some(active) = self.active_declarations {
-                return active
-                    .function(self.file, selected.stable_declaration?)
-                    .map(|function| (self.file, function));
-            }
+        let (file_index, _) = selected.source_key?;
+        if file_index != self.file_index {
+            return None;
         }
-        let file = if file_index == self.file_index {
-            self.file
-        } else {
-            self.source_files?.get(file_index as usize)?
-        };
-        match file.decl(DeclId(declaration)) {
-            Decl::Fun(function) => Some((file, function)),
-            _ => None,
-        }
+        self.active_declarations
+            .function(self.file, selected.stable_declaration?)
+            .map(|function| (self.file, function))
     }
 
     fn dnn_null_inference_formal(
@@ -60592,9 +52295,7 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Captures visible as storage inside one local/anonymous classifier body. Capture discovery
-    /// checks that body in the current lexical Pass-2 unit. Legacy whole-file analysis may consume
-    /// its installed parser-keyed record; streamed checking never crosses back into that arena.
+    /// Captures visible as storage inside one local/anonymous classifier body.
     fn body_class_storage_captures(&self, declaration: DeclId) -> Vec<AnonymousObjectCapture> {
         if let Some(captures) = self
             .discovered_local_class_captures
@@ -60603,36 +52304,7 @@ impl<'a> Checker<'a> {
         {
             return captures.clone();
         }
-        let CheckerModuleSymbols::Legacy(source) = &self.module else {
-            return Vec::new();
-        };
-        source
-            .pass_one_symbols()
-            .anonymous_object_captures
-            .get(&(self.file_index, declaration))
-            .or_else(|| {
-                // Retained inline syntax is compacted before its checked FIR is detached, so its
-                // parser-local declaration numbers may differ from the capture-discovery arena.
-                // Both arenas are already bound to the same stable classifier declaration. Follow
-                // that identity back to the still-live Pass-1 capture record; no source range or
-                // spelling is used, and this path disappears with the Pass-1 AST.
-                let active = self.active_declarations?;
-                let stable = active.classifier_declaration(declaration)?;
-                let class = source
-                    .pass_one_symbols()
-                    .class_by_stable_declaration(stable)?;
-                (class.source_file == self.file_index)
-                    .then_some(class.source_decl)
-                    .flatten()
-                    .and_then(|original| {
-                        source
-                            .pass_one_symbols()
-                            .anonymous_object_captures
-                            .get(&(self.file_index, original))
-                    })
-            })
-            .cloned()
-            .unwrap_or_default()
+        Vec::new()
     }
 
     /// Recreate the labeled receiver rungs captured by a local/anonymous classifier whose body is
@@ -60936,62 +52608,24 @@ impl<'a> Checker<'a> {
             entry.name
         ));
         for (method_index, method) in entry.methods.iter().enumerate() {
-            let stable_declaration = match self.active_declarations {
-                Some(active) => active.enum_entry_method_declaration(
-                    owner_declaration,
-                    entry_index as u32,
-                    method_index as u32,
-                ),
-                None => self.resolved_index.and_then(|index| {
-                    index.declaration_at(
-                        crate::fir::SourceFileId::from_raw(self.file_index),
-                        method.span,
-                        crate::fir::DeclarationKind::Function,
-                    )
-                }),
-            };
-            let ret = stable_declaration
-                .and_then(|declaration| self.resolved_index?.signature(declaration))
-                .map(|signature| signature.result.get())
-                .or_else(|| {
-                    method
-                        .ret
-                        .as_ref()
-                        .map(|reference| self.type_ref_ty(scope, reference))
-                })
-                .or_else(|| match method.body {
-                    FunBody::Expr(body) => Some(self.expr(scope, body)),
-                    FunBody::Block(_) | FunBody::None => None,
-                })
-                .unwrap_or(Ty::Unit);
+            let stable_declaration = self.active_declarations.enum_entry_method_declaration(
+                owner_declaration,
+                entry_index as u32,
+                method_index as u32,
+            );
             let source_member = crate::libraries::SourceMember::EnumEntry {
                 file: self.file_index,
                 owner: owner_declaration.0,
                 entry: entry_index as u32,
                 method: method_index as u32,
             };
-            let mut signature = if let Some(function) = stable_declaration.and_then(|declaration| {
-                self.module
-                    .finalized_function(declaration, entry_owner, false)
-            }) {
-                signature_from_resolved_function(&function)
-            } else {
-                let CheckerModuleSymbols::Legacy(module) = &self.module else {
-                    panic!("a streamed enum-entry method must have a finalized callable header")
-                };
-                enum_entry_member_signature(
-                    self.file,
-                    method,
-                    ret,
-                    &module.pass_one_symbols().class_names,
-                    &TParams::default(),
-                    self.compilation_id,
-                    self.file_index,
-                    source_member,
-                    self.libraries,
-                    self.diags,
-                )
-            };
+            let function = stable_declaration
+                .and_then(|declaration| {
+                    self.module
+                        .finalized_function(declaration, entry_owner, false)
+                })
+                .expect("an enum-entry method must have a finalized callable header");
+            let mut signature = signature_from_resolved_function(&function);
             signature.stable_declaration = stable_declaration;
             signature.source_member = Some(source_member);
             self.register_lexical_member(scope, &method.name, receiver, entry_owner, signature);
@@ -61115,12 +52749,13 @@ impl<'a> Checker<'a> {
             // directly; inherited properties still come from the ordinary semantic provider.
             let deferred_body_local = checker
                 .resolved_index
-                .and_then(|index| {
-                    index
-                        .classifier_declaration(owner)
-                        .map(|declaration| (index, declaration))
+                .classifier_declaration(owner)
+                .is_some_and(|declaration| {
+                    checker
+                        .resolved_index
+                        .classifier_header(declaration)
+                        .is_none()
                 })
-                .is_some_and(|(index, declaration)| index.classifier_header(declaration).is_none())
                 && checker.resolved_body_local_supertypes.contains_key(&owner);
             if deferred_body_local {
                 for parent in checker.body_local_supertypes(applied) {
@@ -61159,11 +52794,9 @@ impl<'a> Checker<'a> {
                     let owner_storage_ty = property
                         .stable_declaration
                         .and_then(|declaration| {
-                            checker
-                                .resolved_index?
-                                .property_for_declaration(declaration)
+                            checker.resolved_index.property_for_declaration(declaration)
                         })
-                        .and_then(|property| checker.resolved_index?.property(property))
+                        .and_then(|property| checker.resolved_index.property(property))
                         .and_then(|property| property.storage_type)
                         .map(|storage| {
                             crate::symbol_resolver::specialize_signature_output_type(
@@ -61171,22 +52804,6 @@ impl<'a> Checker<'a> {
                                 storage.get(),
                                 &bindings,
                             )
-                        })
-                        .or_else(|| {
-                            let source_member = property.source_member?;
-                            let class = checker
-                                .module
-                                .legacy_symbols()?
-                                .class_by_type_name(property.owner)?;
-                            let storage = class
-                                .declared_props
-                                .values()
-                                .chain(class.contextual_props.values().flatten())
-                                .find(|candidate| candidate.source_member == Some(source_member))?
-                                .storage_ty?;
-                            Some(crate::symbol_resolver::specialize_signature_output_type(
-                                source, storage, &bindings,
-                            ))
                         });
                     properties.push(ScopedProperty {
                         name: property.name.clone(),
@@ -61962,58 +53579,6 @@ impl<'a> Checker<'a> {
     /// `class Point(val x: Int)` said that instead of "no value passed for parameter 'x'.", which is what
     /// every other callable origin reports for the same mistake. Re-run the argument mapping over the
     /// candidates to recover it. Returns whether a canonical error was reported.
-    fn report_source_constructor_mapping_error(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        arguments: &CtorDelegationCall,
-        candidates: &[CtorDelegationCandidate],
-        class_name: &str,
-    ) -> bool {
-        let names: Option<&[Option<String>]> = arguments
-            .names
-            .iter()
-            .any(Option::is_some)
-            .then_some(&arguments.names);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut failures = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            let params = crate::libraries::ParamList {
-                visibility: Visibility::Public,
-                names: candidate.param_names.clone(),
-                defaults: candidate.defaults.clone(),
-                types: candidate.target.params().to_vec(),
-                recv_fun: candidate.lambda_receivers.clone(),
-                vararg: candidate.vararg,
-                annotation: None,
-            };
-            if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
-                failures.push((failure, index));
-            }
-        }
-        match take_unanimous_mapping_error(&mut failures) {
-            Some((failure, index)) => {
-                if let Some(candidate) = candidates.get(index) {
-                    if self.report_constructor_too_many_arguments(
-                        call,
-                        args,
-                        &failure,
-                        class_name,
-                        candidate.target.params(),
-                        &candidate.param_names,
-                        &candidate.defaults,
-                        candidate.vararg,
-                    ) {
-                        return true;
-                    }
-                }
-                self.report_call_arg_mapping_error(call, args, failure);
-                true
-            }
-            None => false,
-        }
-    }
-
     fn report_constructor_too_many_arguments(
         &mut self,
         call: ExprId,
@@ -62745,7 +54310,6 @@ impl<'a> Checker<'a> {
             vararg: candidate.vararg,
             default_masks,
             parameter_constraints: candidate.parameter_constraints.clone(),
-            low_priority: candidate.low_priority,
         })
     }
 
@@ -62869,14 +54433,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A MODULE class declared in THIS file's package, by source name (`Wrapper`, or the dotted
-    /// nested spelling `Outer.Inner`). The class map keys on internal names, so a same-simple-name
-    /// class in another package never answers here.
-    fn same_package_class(&self, name: &str) -> Option<&ClassSig> {
-        existing_type_name(&class_internal(self.file, name))
-            .and_then(|internal| self.module.legacy_symbols()?.classes.get(&internal))
-    }
-
     /// Stable identity of a classifier declared in this file's package.
     ///
     /// Production Pass 2 has already destroyed the parser-backed module class map. Same-package
@@ -62885,16 +54441,9 @@ impl<'a> Checker<'a> {
     /// provider query supplies the complete semantic classifier shape.
     fn same_package_classifier_name(&self, name: &str) -> Option<TypeName> {
         let internal = existing_type_name(&class_internal(self.file, name))?;
-        if let Some(index) = self.resolved_index {
-            return index
-                .classifier_declaration(internal)
-                .is_some()
-                .then_some(internal);
-        }
-        self.module
-            .legacy_symbols()?
-            .classes
-            .contains_key(&internal)
+        self.resolved_index
+            .classifier_declaration(internal)
+            .is_some()
             .then_some(internal)
     }
 
@@ -63240,12 +54789,8 @@ impl<'a> Checker<'a> {
     /// the fallback for ordinary module and dependency classifiers.
     fn classifier_is_interface(&self, classifier: TypeName) -> Option<bool> {
         self.resolved_index
-            .and_then(|index| {
-                index
-                    .classifier_declaration(classifier)
-                    .map(|id| (index, id))
-            })
-            .and_then(|(index, declaration)| index.declaration_header(declaration))
+            .classifier_declaration(classifier)
+            .and_then(|declaration| self.resolved_index.declaration_header(declaration))
             .map(|header| header.flags.has(crate::fir::DeclarationFlags::INTERFACE))
             .or_else(|| {
                 self.resolver()
@@ -63311,8 +54856,8 @@ impl<'a> Checker<'a> {
             })
             .collect();
         for (index, (candidate, anonymous)) in chain.into_iter().enumerate() {
-            if let Decl::Class(class) = self.file.decl(candidate) {
-                if let Some(internal) = self.active_classifier_internal(candidate, class) {
+            if let Decl::Class(_) = self.file.decl(candidate) {
+                if let Some(internal) = self.active_classifier_internal(candidate) {
                     // The current declaration already enters through `this_labels`; only structural
                     // owners belong in the supplemental context. Anonymous roots at either position
                     // stay exact so a `$` in their generated name never invents another source owner.
@@ -63477,20 +55022,6 @@ impl<'a> Checker<'a> {
         if import_path {
             return None;
         }
-        // Legacy signature inference owns a per-file spelling table. Production Pass 2 does not:
-        // it resolves the spelling through the stable import/module providers below, after the
-        // temporary signature graph (including `class_names`) has been destroyed.
-        if let CheckerModuleSymbols::Legacy(source) = &self.module {
-            if let Some(expansion) = source
-                .pass_one_symbols()
-                .class_names
-                .alias_expansion(name)
-                .filter(|alias| alias.target == internal)
-            {
-                return Some(expansion.clone());
-            }
-        }
-
         let matches_selected = |identity| {
             self.libraries
                 .type_alias_expansion(identity)
@@ -63737,9 +55268,17 @@ impl<'a> Checker<'a> {
         } else {
             semantic
         };
-        self.resolved_declaration_types
-            .insert((reference.span.lo, reference.span.hi), declaration);
+        self.record_finalized_declaration_type(reference, declaration);
         semantic
+    }
+
+    /// Retained analysis exposes declaration annotations through both the general occurrence map
+    /// and the declaration-specific map. A finalized Pass-1 type is already bound, so publishing it
+    /// here preserves that API without re-resolving its source spelling in Pass 2.
+    fn record_finalized_declaration_type(&mut self, reference: &TypeRef, semantic: Ty) {
+        let occurrence = (reference.span.lo, reference.span.hi);
+        self.resolved_type_tys.insert(occurrence, semantic);
+        self.resolved_declaration_types.insert(occurrence, semantic);
     }
 
     fn check_associated_companion_receiver_type(
@@ -63747,17 +55286,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         reference: &TypeRef,
     ) -> Ty {
-        let visible = scope.visible_tparams();
-        let declaration = match self.module.legacy_symbols() {
-            Some(symbols) => associated_companion_receiver_ty(
-                self.file,
-                reference,
-                &symbols.class_names,
-                &visible,
-                self.diags,
-            ),
-            None => self.type_ref_ty(scope, reference),
-        };
+        let declaration = self.type_ref_ty(scope, reference);
         if declaration.contains_error() {
             self.report_unresolved_type_ref(reference);
         }
@@ -63845,17 +55374,6 @@ impl<'a> Checker<'a> {
             t
         } else if let Some(t) = typeref_leaf(r, &mut |x| self.type_ref_ty(scope, x)) {
             t
-        } else if let Some(primitive_alias) = match &self.module {
-            CheckerModuleSymbols::Legacy(source) => source
-                .pass_one_symbols()
-                .class_names
-                .get(&r.name)
-                .and_then(|internal| internal.strip_prefix("__ty/")),
-            // Finalized type aliases are resolved through the lexical/provider branches above.
-            // The synthetic `__ty/*` spelling exists only in Pass 1's compatibility map.
-            CheckerModuleSymbols::Streamed(_) => None,
-        } {
-            Ty::from_name(&primitive_alias).unwrap_or(Ty::Error)
         } else if let Some(t) = self.scoped_source_alias_ty(scope, r) {
             t
         } else {
@@ -63970,57 +55488,8 @@ impl<'a> Checker<'a> {
     /// while an imported alias must never shadow a same-package classifier with the same spelling.
     fn lexical_source_alias_identity(&self, name: &str) -> Option<TypeName> {
         for owner in self.lexical_source_class_names() {
-            if let Some(index) = self.resolved_index {
-                if let Some(header) = index.type_alias_in_classifier(owner, name) {
-                    return Some(header.identity);
-                }
-                continue;
-            }
-            let Some(class) = self
-                .module
-                .legacy_symbols()
-                .and_then(|symbols| symbols.class_by_type_name(owner))
-            else {
-                continue;
-            };
-            if class.source_file != self.file_index {
-                continue;
-            }
-            let declaration = match self.active_declarations {
-                Some(active) => {
-                    let Some((_, declaration)) = class
-                        .stable_declaration
-                        .and_then(|stable| active.class(self.file, stable))
-                    else {
-                        continue;
-                    };
-                    declaration
-                }
-                None => {
-                    let Some(Decl::Class(declaration)) =
-                        class.source_decl.map(|id| self.file.decl(id))
-                    else {
-                        continue;
-                    };
-                    declaration
-                }
-            };
-            if !declaration
-                .type_aliases
-                .iter()
-                .any(|alias| alias.name == name)
-            {
-                continue;
-            }
-            let owner = declaration.name.replace('.', "/");
-            let package = self.file.package.as_deref().unwrap_or("").replace('.', "/");
-            let identity = type_name(&if package.is_empty() {
-                format!("{owner}/{name}")
-            } else {
-                format!("{package}/{owner}/{name}")
-            });
-            if self.source_alias_declared(identity) {
-                return Some(identity);
+            if let Some(header) = self.resolved_index.type_alias_in_classifier(owner, name) {
+                return Some(header.identity);
             }
         }
         None
@@ -64055,53 +55524,10 @@ impl<'a> Checker<'a> {
             let (owner_name, alias_tail) = name.split_at(split);
             let alias = &alias_tail[1..];
             let owner = self.select_classifier(scope, owner_name).found()?;
-            if let Some(index) = self.resolved_index {
-                return index
-                    .type_alias_in_classifier(owner, alias)
-                    .map(|header| header.identity);
-            }
-            let signature = self.module.legacy_symbols()?.class_by_type_name(owner)?;
-            let declaration = if signature.source_file == self.file_index {
-                match self.active_declarations {
-                    Some(active) => active.class(self.file, signature.stable_declaration?)?.1,
-                    None => match self.file.decl(signature.source_decl?) {
-                        Decl::Class(declaration) => declaration,
-                        Decl::Fun(_) | Decl::Property(_) => return None,
-                    },
-                }
-            } else {
-                let source = self
-                    .source_files
-                    .and_then(|files| files.get(signature.source_file as usize))?;
-                match source.decl(signature.source_decl?) {
-                    Decl::Class(declaration) => declaration,
-                    Decl::Fun(_) | Decl::Property(_) => return None,
-                }
-            };
-            if !declaration
-                .type_aliases
-                .iter()
-                .any(|candidate| candidate.name == alias)
-            {
-                return None;
-            }
-            let package = if signature.source_file == self.file_index {
-                self.file.package.as_deref()
-            } else {
-                self.source_files
-                    .and_then(|files| files.get(signature.source_file as usize))?
-                    .package
-                    .as_deref()
-            }
-            .unwrap_or("")
-            .replace('.', "/");
-            let declaration_owner = declaration.name.replace('.', "/");
-            let identity = type_name(&if package.is_empty() {
-                format!("{declaration_owner}/{alias}")
-            } else {
-                format!("{package}/{declaration_owner}/{alias}")
-            });
-            return self.source_alias_declared(identity).then_some(identity);
+            return self
+                .resolved_index
+                .type_alias_in_classifier(owner, alias)
+                .map(|header| header.identity);
         }
         // Nested aliases occupy a lexical classifier rung, ahead of every package/import level.
         if let Some(identity) = self.lexical_source_alias_identity(name) {
@@ -65307,38 +56733,18 @@ impl<'a> Checker<'a> {
                 if access.property.context_count != 0 {
                     return None;
                 }
-                if let Some(index) = self.resolved_index {
-                    let declaration = access.property.stable_declaration?;
-                    let anchor = index.declaration_anchor(declaration)?;
-                    if anchor.source.raw() != self.file_index {
-                        return None;
-                    }
-                    let flags = index.declaration_header(declaration)?.flags;
-                    if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-                        || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-                        || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-                        || flags.has(crate::fir::DeclarationFlags::EXTERNAL)
-                        || flags.has(crate::fir::DeclarationFlags::EXPECT)
-                    {
-                        return None;
-                    }
-                    return Some(access.property.ty);
+                let index = self.resolved_index;
+                let declaration = access.property.stable_declaration?;
+                let anchor = index.declaration_anchor(declaration)?;
+                if anchor.source.raw() != self.file_index {
+                    return None;
                 }
-                let property = {
-                    let (source_file, source_decl) = access.property.source_key?;
-                    if source_file != self.file_index {
-                        return None;
-                    }
-                    let Decl::Property(property) = self.file.decl(DeclId(source_decl)) else {
-                        return None;
-                    };
-                    property
-                };
-                if property.is_var
-                    || property.getter_declared
-                    || property.delegate.is_some()
-                    || property.is_external
-                    || property.is_expect
+                let flags = index.declaration_header(declaration)?.flags;
+                if flags.has(crate::fir::DeclarationFlags::MUTABLE)
+                    || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
+                    || flags.has(crate::fir::DeclarationFlags::DELEGATED)
+                    || flags.has(crate::fir::DeclarationFlags::EXTERNAL)
+                    || flags.has(crate::fir::DeclarationFlags::EXPECT)
                 {
                     return None;
                 }
@@ -65381,42 +56787,25 @@ impl<'a> Checker<'a> {
             let recv = ty.non_null();
             let internal = recv.obj_internal()?;
             let class = self.resolver().classifier(internal)?;
-            if let Some(index) = self.resolved_index {
-                let source = self.fed_source();
-                let callables =
-                    crate::symbol_resolver::members_in_hierarchy(&source, recv, segment);
-                let property = callables
-                    .properties()
-                    .iter()
-                    .find(|property| property.kind == crate::libraries::PropKind::Member)?;
-                let flags = index
-                    .declaration_header(property.stable_declaration?)?
-                    .flags;
-                if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-                    || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-                    || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-                    || (flags.has(crate::fir::DeclarationFlags::OPEN) && !class.is_final())
-                    || property.context_count != 0
-                {
-                    return None;
-                }
-                ty = property.ty.projection_read_ty();
-                continue;
-            }
-            let symbols = self.module.legacy_symbols()?;
-            let (owner, property) = symbols.declared_member_prop(internal, segment)?;
-            if property.setter_name.is_some()
-                || property.has_custom_getter
-                || (property.is_open && !class.is_final())
-                || !property.context_params.is_empty()
+            let index = self.resolved_index;
+            let source = self.fed_source();
+            let callables = crate::symbol_resolver::members_in_hierarchy(&source, recv, segment);
+            let property = callables
+                .properties()
+                .iter()
+                .find(|property| property.kind == crate::libraries::PropKind::Member)?;
+            let flags = index
+                .declaration_header(property.stable_declaration?)?
+                .flags;
+            if flags.has(crate::fir::DeclarationFlags::MUTABLE)
+                || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
+                || flags.has(crate::fir::DeclarationFlags::DELEGATED)
+                || (flags.has(crate::fir::DeclarationFlags::OPEN) && !class.is_final())
+                || property.context_count != 0
             {
                 return None;
             }
-            // Use the same generic-property instantiation as ordinary member reads and probes; a
-            // path proof is sound only when its declared and read-time types are identical.
-            ty = symbols
-                .applied_declared_member_prop_ty(recv, owner, segment, property.ty)
-                .projection_read_ty();
+            ty = property.ty.projection_read_ty();
         }
         Some(ty)
     }
@@ -66862,20 +58251,23 @@ impl<'a> Checker<'a> {
 
     fn is_optional_expectation_classifier(&self, classifier: TypeName) -> bool {
         self.libraries.is_optional_expectation(classifier)
-            || self.resolved_index.is_some_and(|index| {
-                index
-                    .classifier_declaration(classifier)
-                    .is_some_and(|declaration| {
-                        index.declaration_header(declaration).is_some_and(|header| {
+            || self
+                .resolved_index
+                .classifier_declaration(classifier)
+                .is_some_and(|declaration| {
+                    self.resolved_index
+                        .declaration_header(declaration)
+                        .is_some_and(|header| {
                             header.flags.has(crate::fir::DeclarationFlags::EXPECT)
                                 && header
                                     .flags
                                     .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
-                        }) && index
+                        })
+                        && self
+                            .resolved_index
                             .declaration_annotations(declaration)
                             .contains(&type_name("kotlin/OptionalExpectation"))
-                    })
-            })
+                })
     }
 
     fn check_annotation_application(
@@ -66897,18 +58289,7 @@ impl<'a> Checker<'a> {
             // value scopes; unrelated annotation expressions are outside the retained fragment.
             return;
         }
-        let legacy_prebound = self
-            .resolved_index
-            .is_none()
-            .then(|| {
-                self.module
-                    .legacy_symbols()?
-                    .resolved_annotation(self.file_index, annotation)
-            })
-            .flatten();
-        let internal = if let Some(internal) = legacy_prebound {
-            internal
-        } else {
+        let internal = {
             // Pass 1 binds declaration-header annotations only. A local declaration first appears
             // while its active Pass-2 body is checked, where the real lexical type scope is finally
             // available; resolve it here instead of requiring a whole-body annotation inventory
@@ -67271,12 +58652,10 @@ impl<'a> Checker<'a> {
         if f.is_inline() {
             self.allow_lambda_mutation = true;
         }
-        let stable_declaration = source_decl.and_then(|source| {
-            self.active_declarations
-                .and_then(|active| active.file_declaration(self.file, source))
-        });
+        let stable_declaration = source_decl
+            .and_then(|source| self.active_declarations.file_declaration(self.file, source));
         let (finalized_result, finalized_parameters) = stable_declaration
-            .and_then(|declaration| self.resolved_index?.signature(declaration))
+            .and_then(|declaration| self.resolved_index.signature(declaration))
             .map(|signature| {
                 (
                     Some(signature.result.get()),
@@ -67290,6 +58669,10 @@ impl<'a> Checker<'a> {
                 )
             })
             .unwrap_or((None, None));
+        let finalized_receiver = stable_declaration
+            .and_then(|declaration| self.resolved_index.callable_for_declaration(declaration))
+            .and_then(|callable| callable.shape.extension_receiver)
+            .map(|receiver| receiver.get());
         let parameter_types = match finalized_parameters
             .as_deref()
             .filter(|parameters| parameters.len() == f.params.len())
@@ -67321,7 +58704,10 @@ impl<'a> Checker<'a> {
         let prev_extension_receiver = self.this_extension_receiver;
         // `this` inside the body and inside every parameter default is the extension receiver.
         let extension_receiver = f.receiver.as_ref().map(|r| {
-            if f.is_companion_extension() {
+            if let Some(receiver) = finalized_receiver {
+                self.record_finalized_declaration_type(r, receiver);
+                receiver
+            } else if f.is_companion_extension() {
                 self.check_associated_companion_receiver_type(scope, r)
             } else {
                 self.check_declaration_type(scope, r)
@@ -67343,92 +58729,28 @@ impl<'a> Checker<'a> {
             self.this_extension_receiver = Some(recv_ref.span);
             // Pick THIS declaration's overload out of the receiver+name overload set by matching its
             // parameter list (an extension may be overloaded by arity — `fun R.f()` and `fun R.f(x)`).
-            let want = parameter_types.clone();
             self.ret_ty = if let Some(ret) = &f.ret {
                 if let Some(result) = finalized_result {
-                    self.resolved_declaration_types
-                        .insert((ret.span.lo, ret.span.hi), result);
+                    self.record_finalized_declaration_type(ret, result);
                     result
                 } else {
                     self.check_declaration_type(scope, ret)
                 }
             } else {
-                finalized_result
-                    .or_else(|| {
-                        source_decl
-                            .and_then(|declaration| {
-                                self.module.legacy_symbols()?.source_extension_signature(
-                                    &f.name,
-                                    self.file_index,
-                                    declaration,
-                                )
-                            })
-                            .map(|(_, signature)| {
-                                signature
-                                    .generic_sig
-                                    .as_ref()
-                                    .map_or(signature.ret, |generic| generic.ret)
-                            })
-                    })
-                    .or_else(|| {
-                        self.module
-                            .legacy_symbols()?
-                            .ext_fun_overloads_in_import_scope(
-                                recv_ty,
-                                &f.name,
-                                &self.function_import_scope,
-                            )
-                            .iter()
-                            .find(|signature| signature.params == want)
-                            .map(|signature| {
-                                signature
-                                    .generic_sig
-                                    .as_ref()
-                                    .map_or(signature.ret, |generic| generic.ret)
-                            })
-                    })
-                    .unwrap_or(Ty::Unit)
+                finalized_result.unwrap_or(Ty::Unit)
             };
         } else {
             // Use this declaration's own collected return type; companion methods fall back to the
             // declared return type because they are not stored in `funs`.
-            let want = parameter_types
-                .iter()
-                .copied()
-                .map(erased_type_key)
-                .collect::<Vec<_>>();
             let explicit_result = f.ret.as_ref().map(|ret| {
                 if let Some(result) = finalized_result {
-                    self.resolved_declaration_types
-                        .insert((ret.span.lo, ret.span.hi), result);
+                    self.record_finalized_declaration_type(ret, result);
                     result
                 } else {
                     self.check_declaration_type(scope, ret)
                 }
             });
-            let own_ret = explicit_result
-                .or(finalized_result)
-                .or_else(|| {
-                    source_decl
-                        .and_then(|declaration| {
-                            self.module.legacy_symbols()?.source_function_signature(
-                                &f.name,
-                                self.file_index,
-                                declaration,
-                            )
-                        })
-                        .map(|signature| {
-                            signature
-                                .generic_sig
-                                .as_ref()
-                                .map_or(signature.ret, |generic| generic.ret)
-                        })
-                })
-                .or_else(|| {
-                    self.module
-                        .legacy_symbols()?
-                        .fun_ret_by_erased_params(&f.name, &want)
-                });
+            let own_ret = explicit_result.or(finalized_result);
             self.ret_ty = own_ret.unwrap_or(Ty::Unit);
         }
         // For expression-body functions with no explicit return type, infer the return type from the
@@ -67498,12 +58820,7 @@ impl<'a> Checker<'a> {
                     if inferred != Ty::Error {
                         self.ret_ty = inferred;
                         if let Some(declaration) = source_decl {
-                            self.record_checked_function_result(
-                                declaration,
-                                &f.name,
-                                f.receiver.is_some(),
-                                inferred,
-                            );
+                            self.record_checked_function_result(declaration, inferred);
                         }
                     }
                 }
@@ -67593,11 +58910,8 @@ impl<'a> Checker<'a> {
                 .selected_stable_body_declarations
                 .as_ref()
                 .is_some_and(|selected| {
-                    let Some(active) = self.active_declarations else {
-                        return false;
-                    };
                     selected.iter().any(|declaration| {
-                        active
+                        self.active_declarations
                             .function(self.file, *declaration)
                             .is_some_and(|candidate| std::ptr::eq(candidate, function))
                     })
@@ -67611,10 +58925,7 @@ impl<'a> Checker<'a> {
         self.signature_defaults_only
             && self
                 .active_declarations
-                .zip(self.resolved_index)
-                .and_then(|(active, index)| {
-                    active.source_member_declaration(self.file, index, member)
-                })
+                .source_member_declaration(self.file, self.resolved_index, member)
                 .is_some_and(|declaration| {
                     self.selected_stable_body_declarations
                         .as_ref()
@@ -67632,23 +58943,21 @@ impl<'a> Checker<'a> {
                 .selected_stable_body_declarations
                 .as_ref()
                 .is_some_and(|selected| {
-                    let Some(active) = self.active_declarations else {
-                        return false;
-                    };
-                    let Some(classifier) = active.classifier_declaration(class) else {
+                    let Some(classifier) = self.active_declarations.classifier_declaration(class)
+                    else {
                         return false;
                     };
                     selected.iter().any(|declaration| {
-                        let Some(anchor) = self
-                            .resolved_index
-                            .and_then(|index| index.declaration_anchor(*declaration))
+                        let Some(anchor) = self.resolved_index.declaration_anchor(*declaration)
                         else {
                             return false;
                         };
                         anchor.kind == crate::fir::DeclarationKind::Constructor
                             && anchor.owner.is_some_and(|owner| {
                                 owner == classifier
-                                    || active.same_parser_declaration(owner, classifier)
+                                    || self
+                                        .active_declarations
+                                        .same_parser_declaration(owner, classifier)
                             })
                             && anchor.sibling
                                 == secondary.map_or(0, |index| {
@@ -67700,7 +59009,6 @@ impl<'a> Checker<'a> {
                 self.type_ref_ty_reported(scope, r)
             }
         });
-        let inference_key = DeclKey::declaration(self.file_index, d.0);
         let explicit_type_required = p.declared_ty().is_none()
             && p.init.is_none()
             && matches!(p.getter, Some(FunBody::Block(_)));
@@ -67709,9 +59017,7 @@ impl<'a> Checker<'a> {
         // on their own (`val LOG = logger<Foo>()` reports the unresolved reference, not a
         // second inference error — kotlinc parity).
         let body_diag_mark = self.diags.diags.len();
-        let stable_property = self
-            .active_declarations
-            .and_then(|active| active.top_level_property_declaration(d));
+        let stable_property = self.active_declarations.top_level_property_declaration(d);
         let context_receivers = p
             .context_params
             .iter()
@@ -67768,38 +59074,12 @@ impl<'a> Checker<'a> {
                 .or(getter_annotation)
                 .or_else(|| {
                     stable_property
-                        .and_then(|declaration| self.resolved_index?.signature(declaration))
+                        .and_then(|declaration| self.resolved_index.signature(declaration))
                         .map(|signature| signature.result.get())
-                })
-                .or_else(|| {
-                    self.resolved_index.is_none().then(|| {
-                        self.module
-                            .legacy_symbols()?
-                            .source_extension_property((self.file_index, d.0))
-                            .map(|signature| signature.ty)
-                    })?
-                })
-                .or_else(|| {
-                    self.resolved_index.is_none().then(|| {
-                        self.module
-                            .legacy_symbols()?
-                            .source_props
-                            .get(&(self.file_index, d.0))
-                            .map(|property| property.ty)
-                    })?
                 })
                 .unwrap_or(Ty::Error);
             let storage_ty = self
                 .stable_property_storage_type(stable_property)
-                .or_else(|| {
-                    self.resolved_index.is_none().then(|| {
-                        self.module
-                            .legacy_symbols()?
-                            .source_props
-                            .get(&(self.file_index, d.0))
-                            .and_then(|property| property.storage_ty)
-                    })?
-                })
                 .filter(|ty| !ty.mentions_pending())
                 .unwrap_or(prop_ty);
             if prop_ty != Ty::Error {
@@ -67884,15 +59164,6 @@ impl<'a> Checker<'a> {
         if let Some(init) = p.init.filter(|_| check_ordinary_property_body) {
             let declared = if p.explicit_backing_field.is_some() {
                 self.stable_property_storage_type(stable_property)
-                    .or_else(|| {
-                        self.resolved_index.is_none().then(|| {
-                            self.module
-                                .legacy_symbols()?
-                                .source_props
-                                .get(&(self.file_index, d.0))
-                                .and_then(|property| property.storage_ty)
-                        })?
-                    })
                     .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
             } else {
                 (!resolved_property_ty.mentions_error()).then_some(resolved_property_ty)
@@ -67955,7 +59226,6 @@ impl<'a> Checker<'a> {
             && p.delegate.is_none()
         {
             self.report_property_inference_failure(
-                inference_key,
                 p.span,
                 &p.name,
                 body_diag_mark,
@@ -67968,7 +59238,6 @@ impl<'a> Checker<'a> {
 
     fn report_property_inference_failure(
         &mut self,
-        key: DeclKey,
         declaration_span: Span,
         name: &str,
         body_diag_mark: usize,
@@ -67977,37 +59246,17 @@ impl<'a> Checker<'a> {
         if explicit_type_required {
             return;
         }
-        match self
-            .module
-            .legacy_symbols()
-            .and_then(|symbols| symbols.property_inference_failures.get(&key).cloned())
+        if !self.diags.diags[body_diag_mark..]
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
         {
-            Some(PropertyInferenceFailure::Recursive { span }) => {
-                self.diags.error(span, RECURSIVE_INFERENCE_MESSAGE);
-            }
-            Some(PropertyInferenceFailure::UninitializedReads(reads)) => {
-                for (span, name) in reads {
-                    self.diags
-                        .error(span, format!("variable '{name}' must be initialized."));
-                }
-            }
-            Some(PropertyInferenceFailure::Untypeable) | None
-                if !self.diags.diags[body_diag_mark..]
-                    .iter()
-                    .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error) =>
-            {
-                self.diags
-                    .error(declaration_span, cannot_infer_property_message(name));
-            }
-            Some(PropertyInferenceFailure::Untypeable) | None => {}
+            self.diags
+                .error(declaration_span, cannot_infer_property_message(name));
         }
     }
 
     fn stable_signature_failed(&self, declaration: Option<crate::fir::DeclarationId>) -> bool {
-        declaration.is_some_and(|declaration| {
-            self.resolved_index
-                .is_some_and(|index| index.signature(declaration).is_none())
-        })
+        declaration.is_some_and(|declaration| self.resolved_index.signature(declaration).is_none())
     }
 
     fn report_property_inference_before_body(
@@ -68019,62 +59268,6 @@ impl<'a> Checker<'a> {
             self.diags
                 .error(declaration_span, EXPLICIT_PROPERTY_TYPE_MESSAGE);
         }
-    }
-
-    /// Snapshot the nearest base-class method for every inherited source name. A same-name overload
-    /// family is deliberately recorded as ambiguous by reserving the name without a constraint: a
-    /// later synthesis decision must not pick one overload arbitrarily.
-    fn record_inherited_method_constraints(&mut self, owner: TypeName) {
-        let resolver = self.resolver();
-        let direct_superclass = |classifier: &crate::libraries::LibraryType| {
-            classifier
-                .supertype_templates
-                .iter()
-                .filter_map(|supertype| supertype.non_null().obj_internal())
-                .find(|supertype| {
-                    resolver
-                        .classifier(*supertype)
-                        .is_some_and(|classifier| !classifier.is_interface())
-                })
-        };
-        let Some(mut current) = resolver
-            .classifier(owner)
-            .and_then(|classifier| direct_superclass(&classifier))
-        else {
-            return;
-        };
-        let mut visited_classes = std::collections::HashSet::new();
-        let mut visited_names = std::collections::HashSet::new();
-        let mut constraints = Vec::new();
-        while visited_classes.insert(current) {
-            let Some(classifier) = resolver.classifier(current) else {
-                break;
-            };
-            for (name, callables) in &classifier.declared_callables {
-                if !visited_names.insert(name.clone()) {
-                    continue;
-                }
-                let methods = callables
-                    .functions()
-                    .iter()
-                    .filter(|method| method.kind == crate::libraries::FnKind::Member)
-                    .collect::<Vec<_>>();
-                if let [method] = methods.as_slice() {
-                    constraints.push((
-                        (owner, name.clone()),
-                        InheritedMethodConstraint {
-                            is_final: method.flags.is_final,
-                        },
-                    ));
-                }
-            }
-            let Some(superclass) = direct_superclass(&classifier) else {
-                break;
-            };
-            current = superclass;
-        }
-        drop(resolver);
-        self.inherited_method_constraints.extend(constraints);
     }
 
     /// Whether the nearest declaration of every callable in `owner`'s normalized hierarchy is
@@ -68185,7 +59378,8 @@ impl<'a> Checker<'a> {
         // exact semantic signature; consume those stable plans while checking subclasses.
         let mut delegated_functions = std::collections::HashSet::<MemberKey>::new();
         let mut delegated_properties = std::collections::HashSet::<String>::new();
-        if let Some(index) = self.resolved_index {
+        {
+            let index = self.resolved_index;
             for (classifier, _, _) in &hierarchy {
                 let Some(declaration) = index.classifier_declaration(*classifier) else {
                     continue;
@@ -68276,88 +59470,6 @@ impl<'a> Checker<'a> {
             owner.render(),
         );
         unresolved.is_empty()
-    }
-
-    /// Fix the virtual `hashCode` dispatch owner of every generated data-class property while
-    /// classifier metadata is available. Lowering receives this closed decision; it does not inspect
-    /// source or dependency symbols while building the synthetic method body.
-    fn record_data_class_hash_owners(&mut self, owner: TypeName, span: Span) {
-        let properties = self
-            .resolved_index
-            .and_then(|index| {
-                let owner = index.classifier_declaration(owner)?;
-                Some(
-                    index
-                        .owned_declarations(owner)
-                        .iter()
-                        .filter_map(|declaration| {
-                            let declaration = *declaration;
-                            let header = index.declaration_header(declaration)?;
-                            (header.kind == crate::fir::DeclarationKind::Property
-                                && header
-                                    .flags
-                                    .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER))
-                            .then(|| {
-                                Some((
-                                    index.declaration_name(declaration)?.to_string(),
-                                    index.signature(declaration)?.result.get(),
-                                ))
-                            })?
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .or_else(|| match &self.module {
-                CheckerModuleSymbols::Legacy(source) => source
-                    .pass_one_symbols()
-                    .class_by_type_name(owner)
-                    .map(|class| {
-                        class
-                            .props
-                            .iter()
-                            .map(|(name, ty, _)| (name.clone(), *ty))
-                            .collect()
-                    }),
-                CheckerModuleSymbols::Streamed(_) => None,
-            })
-            .unwrap_or_default();
-        for (property, ty) in properties {
-            let ty = ty.non_null();
-            if ty.is_array()
-                || matches!(
-                    ty,
-                    Ty::Int
-                        | Ty::Short
-                        | Ty::Byte
-                        | Ty::Char
-                        | Ty::Boolean
-                        | Ty::Long
-                        | Ty::Double
-                        | Ty::Float
-                )
-            {
-                continue;
-            }
-            let classifier = ty.kotlin_class_internal();
-            let hash_owner = match classifier {
-                None => wk::any(),
-                Some(classifier) => match self.resolver().classifier(classifier) {
-                    Some(shape) if shape.is_interface() => wk::any(),
-                    Some(_) => classifier,
-                    None => {
-                        self.diags.error(
-                            span,
-                            format!(
-                                "missing classifier metadata for data-class property '{property}'"
-                            ),
-                        );
-                        continue;
-                    }
-                },
-            };
-            self.data_class_hash_owners
-                .insert((owner, property), hash_owner);
-        }
     }
 
     /// A concrete result constraint available without resolving every read in a local property's
@@ -68499,11 +59611,8 @@ impl<'a> Checker<'a> {
         };
         let deferred_body_local = self
             .resolved_index
-            .and_then(|index| {
-                index
-                    .classifier_declaration(internal)
-                    .map(|declaration| index.classifier_header(declaration).is_none())
-            })
+            .classifier_declaration(internal)
+            .map(|declaration| self.resolved_index.classifier_header(declaration).is_none())
             .unwrap_or(false);
         let active_bindings = || {
             // A deferred body-local header is intentionally absent from the module provider
@@ -68511,9 +59620,9 @@ impl<'a> Checker<'a> {
             // the live parser unit and are already resolved on that lexical declaration.
             let formals = self
                 .resolved_index
-                .and_then(|index| index.classifier_declaration(internal))
+                .classifier_declaration(internal)
                 .and_then(|declaration| {
-                    self.active_declarations?
+                    self.active_declarations
                         .span(self.file, declaration)
                         .map(|span| span.lo)
                 })
@@ -68611,20 +59720,19 @@ impl<'a> Checker<'a> {
                 if inferred == Ty::Error || inferred.mentions_pending() {
                     continue;
                 }
-                let stable_declaration = self
-                    .resolved_index
-                    .and_then(|index| {
-                        let owner = self
-                            .active_classifier_internal(declaration, class)
-                            .and_then(|owner| index.classifier_declaration(owner))?;
-                        index.owned_declaration(
-                            owner,
-                            crate::fir::DeclarationKind::Property,
-                            u32::try_from(primary_parameter_count + property_index)
-                                .expect("too many local class properties"),
-                        )
-                    })
-                    .or(properties[unresolved].stable_declaration);
+                let stable_declaration = (|| {
+                    let index = self.resolved_index;
+                    let owner = self
+                        .active_classifier_internal(declaration)
+                        .and_then(|owner| index.classifier_declaration(owner))?;
+                    index.owned_declaration(
+                        owner,
+                        crate::fir::DeclarationKind::Property,
+                        u32::try_from(primary_parameter_count + property_index)
+                            .expect("too many local class properties"),
+                    )
+                })()
+                .or(properties[unresolved].stable_declaration);
                 self.property_decl_types
                     .insert((property.span.lo, property.span.hi), inferred);
                 self.record_checked_source_member_result(
@@ -68712,7 +59820,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        let current_owner = self.active_classifier_internal(d, cl);
+        let current_owner = self.active_classifier_internal(d);
         // A retained default may make an `inner` classifier the bounded Pass-1 checker root. Its
         // enclosing class parser node is then intentionally not reopened, but the enclosing class
         // type parameters remain lexical Kotlin bindings. Recreate only that stable scope rung;
@@ -68810,20 +59918,15 @@ impl<'a> Checker<'a> {
             || current_owner
                 .and_then(|owner| self.resolver().classifier(owner))
                 .and_then(|class| class.stable_declaration)
-                .and_then(|declaration| {
-                    self.resolved_index
-                        .and_then(|index| index.declaration_header(declaration))
-                })
+                .and_then(|declaration| self.resolved_index.declaration_header(declaration))
                 .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS));
         if body_local_class {
-            if let Some((declaration, classifier)) = self
-                .active_declarations
-                .zip(self.resolved_index)
-                .and_then(|(active, index)| {
-                    let declaration = active.canonical_classifier_declaration(d, index)?;
-                    Some((declaration, current_owner?))
-                })
-            {
+            if let Some((declaration, classifier)) = (|| {
+                let declaration = self
+                    .active_declarations
+                    .canonical_classifier_declaration(d, self.resolved_index)?;
+                Some((declaration, current_owner?))
+            })() {
                 self.checked_local_classifier_identities
                     .insert(declaration, classifier);
             }
@@ -69007,27 +60110,6 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if !body_local_class && self.active_declarations.is_none() {
-            // The retained inspection pipeline keeps the original declaration AST so editor
-            // navigation can point from each header occurrence to the declaration selected by the
-            // frontend. Signature finalization already checked these supertypes; resolve them on
-            // the same lexical type-parameter rung solely to populate TypeInfo's occurrence map.
-            // Production Pass 2 always has `active_declarations` and therefore never repeats this
-            // header lookup.
-            let header_scope = scope.child(ScopeKind::Block);
-            header_scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
-            if let Some(base) = cl.base_class.as_deref() {
-                let reference = base_class_type_ref(
-                    base,
-                    &cl.base_type_args,
-                    cl.base_class_span.unwrap_or(cl.span),
-                );
-                self.type_ref_ty(&header_scope, &reference);
-            }
-            for reference in &cl.supertypes {
-                self.type_ref_ty(&header_scope, reference);
-            }
-        }
         // Ordinary local/anonymous classifiers are declarations of the active Pass-2 body unit.
         // Resolve their superclass header on that exact lexical rung: statement-local typealiases
         // and enclosing classifier bindings intentionally do not exist in the module-level Pass-1
@@ -69066,12 +60148,6 @@ impl<'a> Checker<'a> {
                     self.resolved_body_local_supertypes
                         .insert(owner, supertypes.into_boxed_slice());
                 }
-            }
-        }
-        if let Some(owner) = current_owner {
-            self.record_inherited_method_constraints(owner);
-            if cl.is_data {
-                self.record_data_class_hash_owners(owner, cl.span);
             }
         }
         if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
@@ -69130,10 +60206,8 @@ impl<'a> Checker<'a> {
                 && cl.modality != crate::ast::Modality::Abstract
                 && !self.has_no_unimplemented_abstract_members(owner);
             if leaves_abstract_members {
-                // This is a Kotlin declaration error, not an emitter capability gate. The old AST
-                // lowerer consumed `unsupported_class_emission`; the checked-FIR pipeline quite
-                // correctly does not. Diagnose it while the complete semantic hierarchy is live so
-                // an invalid concrete class can never reach either lowering path.
+                // Diagnose while the complete semantic hierarchy is live so an invalid concrete
+                // class can never reach checked FIR.
                 self.diags.error(
                     cl.span,
                     format!(
@@ -69141,28 +60215,6 @@ impl<'a> Checker<'a> {
                         cl.name
                     ),
                 );
-            }
-            let unsupported = if cl.is_enum() || !separate_emission {
-                None
-            } else if let Some(shape) = inheritance {
-                let discharged = !shape.is_abstract
-                    || cl.modality == crate::ast::Modality::Abstract
-                    || !leaves_abstract_members;
-                if !discharged {
-                    Some("gate:nonlocal-superclass-abstract-obligations")
-                } else if cl.primary_ctor_annotations.is_some()
-                    && cl.base_args.is_empty()
-                    && !shape.has_no_arg_constructor
-                {
-                    Some("gate:nonlocal-superclass-no-zero-arg-constructor")
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some(reason) = unsupported {
-                self.unsupported_class_emission.insert(d, reason);
             }
         }
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
@@ -69198,74 +60250,6 @@ impl<'a> Checker<'a> {
                     dispatch_arguments
                         .push(lexical.unwrap_or_else(|| Ty::ty_param(&semantic, bound)));
                 }
-            } else if let Some(class) = current_owner.and_then(|owner| {
-                self.module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.class_by_type_name(owner))
-            }) {
-                let captured = &class.captured_type_parameters.type_params;
-                if class.inner_of.is_some() {
-                    // A class declaration is checked once, against its declaration variables. The
-                    // concrete enclosing receiver exists only at a construction/use site. Carry the
-                    // complete captured formal list here; call resolution later substitutes it from
-                    // the selected outer instance.
-                    dispatch_arguments.extend(captured.iter().enumerate().map(|(index, name)| {
-                        Ty::ty_param(
-                            name,
-                            class
-                                .captured_type_parameters
-                                .type_param_bounds
-                                .get(index)
-                                .copied()
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                        )
-                    }));
-                } else if !captured.is_empty() {
-                    let visible = scope.visible_tparams();
-                    let receiver_bindings = scope
-                        .implicit_receivers()
-                        .into_iter()
-                        .chain(
-                            self.this_labels
-                                .iter()
-                                .rev()
-                                .filter(|(_, _, is_class)| *is_class)
-                                .map(|(_, ty, _)| *ty),
-                        )
-                        .filter_map(|receiver| {
-                            let owner = receiver.kotlin_class_internal()?;
-                            self.resolver().classifier(owner).map(|classifier| {
-                                crate::symbol_resolver::classifier_bindings(&classifier, receiver)
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    for (captured_ordinal, semantic) in captured.iter().enumerate() {
-                        let lexical = visible.erasure.values().copied().find(|binding| {
-                            binding.ty_param_name().is_some_and(|name| name == semantic)
-                        });
-                        let receiver = receiver_bindings
-                            .iter()
-                            .find_map(|bindings| bindings.get(semantic).copied());
-                        match lexical.or(receiver) {
-                            Some(argument) => dispatch_arguments.push(argument),
-                            None => {
-                                // A retained inline-owned classifier can be checked as its own
-                                // declaration unit, outside the source function rung that supplied
-                                // this capture. Its finalized classifier header already owns the
-                                // exact captured semantic formal, so declaration checking uses that
-                                // symbolic slot; construction sites still substitute the concrete
-                                // enclosing argument independently.
-                                let bound = class
-                                    .captured_type_parameters
-                                    .type_param_bounds
-                                    .get(captured_ordinal)
-                                    .copied()
-                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                                dispatch_arguments.push(Ty::ty_param(semantic, bound));
-                            }
-                        }
-                    }
-                }
             } else if body_local_class {
                 // A production Pass-2 unit has no legacy `ClassSig`, and a deferred local
                 // classifier has no finalized applied layout yet. Its parser header already owns
@@ -69278,8 +60262,7 @@ impl<'a> Checker<'a> {
             if body_local_class {
                 if let Some(declaration) = self
                     .active_declarations
-                    .zip(self.resolved_index)
-                    .and_then(|(active, index)| active.canonical_classifier_declaration(d, index))
+                    .canonical_classifier_declaration(d, self.resolved_index)
                 {
                     self.checked_local_classifier_type_arguments
                         .insert(declaration, dispatch_arguments.clone());
@@ -69295,62 +60278,37 @@ impl<'a> Checker<'a> {
                 })
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
-            let captured_type_parameters = if let Some(parameters) =
-                self.active_classifier_captured_type_parameters(d)
-            {
-                let mut captured = TParams::default();
-                let captured_source_names = parameters
-                    .into_iter()
-                    .map(|(source, semantic, bound)| {
-                        captured.insert_binding(
-                            &source,
-                            Ty::ty_param(&semantic, bound),
-                            Vec::new(),
-                        );
-                        source
-                    })
-                    .collect::<Vec<_>>();
-                Some((captured_source_names, captured))
-            } else if let Some(class) = current_owner.and_then(|owner| {
-                self.module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.class_by_type_name(owner))
-            }) {
-                let mut captured = TParams::default();
-                let captured_source_names = class
-                    .captured_type_parameters
-                    .type_params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, semantic)| {
-                        let source = crate::types::type_parameter_source_name(semantic).to_string();
-                        let bound = class
-                            .captured_type_parameters
-                            .type_param_bounds
-                            .get(index)
-                            .copied()
-                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                        captured.insert_binding(&source, Ty::ty_param(semantic, bound), Vec::new());
-                        source
-                    })
-                    .collect::<Vec<_>>();
-                Some((captured_source_names, captured))
-            } else if body_local_class {
-                let own_count = cl.type_params.len();
-                let mut captured = TParams::default();
-                let captured_source_names = cl
-                    .lexical_type_parameter_captures
-                    .iter()
-                    .zip(dispatch_arguments.iter().skip(own_count))
-                    .map(|(source, binding)| {
-                        captured.insert_binding(source, *binding, Vec::new());
-                        source.clone()
-                    })
-                    .collect::<Vec<_>>();
-                Some((captured_source_names, captured))
-            } else {
-                None
-            };
+            let captured_type_parameters =
+                if let Some(parameters) = self.active_classifier_captured_type_parameters(d) {
+                    let mut captured = TParams::default();
+                    let captured_source_names = parameters
+                        .into_iter()
+                        .map(|(source, semantic, bound)| {
+                            captured.insert_binding(
+                                &source,
+                                Ty::ty_param(&semantic, bound),
+                                Vec::new(),
+                            );
+                            source
+                        })
+                        .collect::<Vec<_>>();
+                    Some((captured_source_names, captured))
+                } else if body_local_class {
+                    let own_count = cl.type_params.len();
+                    let mut captured = TParams::default();
+                    let captured_source_names = cl
+                        .lexical_type_parameter_captures
+                        .iter()
+                        .zip(dispatch_arguments.iter().skip(own_count))
+                        .map(|(source, binding)| {
+                            captured.insert_binding(source, *binding, Vec::new());
+                            source.clone()
+                        })
+                        .collect::<Vec<_>>();
+                    Some((captured_source_names, captured))
+                } else {
+                    None
+                };
             // Primary-constructor parameters, class context parameters, and class bounds are
             // classifier-header declarations. Resolve them before the class dispatch-receiver rung
             // exists. Nested declarations are still lexical classifier bindings in primary
@@ -69471,10 +60429,9 @@ impl<'a> Checker<'a> {
                             .collect::<Vec<_>>()
                             .into_boxed_slice()
                     });
-                if let Some(declaration) = current_owner.and_then(|owner| {
-                    self.resolved_index
-                        .and_then(|index| index.classifier_declaration(owner))
-                }) {
+                if let Some(declaration) = current_owner
+                    .and_then(|owner| self.resolved_index.classifier_declaration(owner))
+                {
                     self.checked_local_supertypes.insert(declaration, checked);
                 }
             }
@@ -69525,24 +60482,23 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: (cl.props.len() + property_index) as u32,
                     };
-                    let stable_declaration = self
-                        .resolved_index
-                        .and_then(|index| {
-                            let owner = current_owner
-                                .and_then(|owner| index.classifier_declaration(owner))?;
-                            index.owned_declaration(
-                                owner,
-                                crate::fir::DeclarationKind::Property,
-                                u32::try_from(cl.props.len() + property_index)
-                                    .expect("too many local class properties"),
-                            )
-                        })
-                        .or_else(|| {
-                            props
-                                .iter()
-                                .find(|candidate| candidate.source_member == Some(source_member))
-                                .and_then(|candidate| candidate.stable_declaration)
-                        });
+                    let stable_declaration = (|| {
+                        let index = self.resolved_index;
+                        let owner =
+                            current_owner.and_then(|owner| index.classifier_declaration(owner))?;
+                        index.owned_declaration(
+                            owner,
+                            crate::fir::DeclarationKind::Property,
+                            u32::try_from(cl.props.len() + property_index)
+                                .expect("too many local class properties"),
+                        )
+                    })()
+                    .or_else(|| {
+                        props
+                            .iter()
+                            .find(|candidate| candidate.source_member == Some(source_member))
+                            .and_then(|candidate| candidate.stable_declaration)
+                    });
                     // An explicit or already-finalized property type does not need local
                     // inference, but its declaration still belongs to this body-local classifier
                     // and therefore is absent from the immutable provider used by member reads.
@@ -69943,10 +60899,9 @@ impl<'a> Checker<'a> {
                     // provide the complete non-extension override shape; do not diagnose it as
                     // absent merely because its result is being checked on this lexical rung.
                     if !overrides_super && m.receiver.is_none() {
-                        overrides_super = self.resolved_index.is_some_and(|index| {
-                            let Some(active) = self.active_declarations else {
-                                return false;
-                            };
+                        let index = self.resolved_index;
+                        let active = self.active_declarations;
+                        overrides_super = {
                             direct_supertypes.iter().any(|supertype| {
                                 let Some(owner_name) = supertype.non_null().kotlin_class_internal()
                                 else {
@@ -69973,7 +60928,7 @@ impl<'a> Checker<'a> {
                                         )
                                 })
                             })
-                        });
+                        };
                     }
                     if !is_any_member(m) && !overrides_super {
                         self.diags.error(
@@ -70006,11 +60961,9 @@ impl<'a> Checker<'a> {
                                     .anonymous_lexical_scope
                                     .declarations
                                     .contains(&declaration)
-                                && self
-                                    .active_classifier_internal(declaration, class)
-                                    .is_some_and(|classifier| {
-                                        classifier.nested_owner() == Some(owner)
-                                    }) =>
+                                && self.active_classifier_internal(declaration).is_some_and(
+                                    |classifier| classifier.nested_owner() == Some(owner),
+                                ) =>
                         {
                             Some((declaration, class.clone()))
                         }
@@ -70066,18 +61019,17 @@ impl<'a> Checker<'a> {
                     owner: d.0,
                     method: method_index as u32,
                 };
-                let stable_declaration = self
-                    .resolved_index
-                    .and_then(|index| {
-                        let owner =
-                            current_owner.and_then(|owner| index.classifier_declaration(owner))?;
-                        index.owned_declaration(
-                            owner,
-                            crate::fir::DeclarationKind::Function,
-                            u32::try_from(method_index).expect("too many class methods"),
-                        )
-                    })
-                    .or_else(|| self.active_source_member_declaration(source_member));
+                let stable_declaration = (|| {
+                    let index = self.resolved_index;
+                    let owner =
+                        current_owner.and_then(|owner| index.classifier_declaration(owner))?;
+                    index.owned_declaration(
+                        owner,
+                        crate::fir::DeclarationKind::Function,
+                        u32::try_from(method_index).expect("too many class methods"),
+                    )
+                })()
+                .or_else(|| self.active_source_member_declaration(source_member));
                 let selected = if self.signature_defaults_only {
                     default_owned_class
                         || self.selected_signature_default_source_member(source_member)
@@ -70170,67 +61122,26 @@ impl<'a> Checker<'a> {
                             .render(),
                         entry.name
                     ));
-                    let entry_tparams = class_tparams.clone();
                     for (method_index, method) in entry.methods.iter().enumerate() {
-                        let stable_declaration = match self.active_declarations {
-                            Some(active) => active.enum_entry_method_declaration(
+                        let stable_declaration =
+                            self.active_declarations.enum_entry_method_declaration(
                                 d,
                                 entry_index as u32,
                                 method_index as u32,
-                            ),
-                            None => self.resolved_index.and_then(|index| {
-                                index.declaration_at(
-                                    crate::fir::SourceFileId::from_raw(self.file_index),
-                                    method.span,
-                                    crate::fir::DeclarationKind::Function,
-                                )
-                            }),
-                        };
-                        let ret = stable_declaration
-                            .and_then(|declaration| self.resolved_index?.signature(declaration))
-                            .map(|signature| signature.result.get())
-                            .or_else(|| {
-                                method
-                                    .ret
-                                    .as_ref()
-                                    .map(|ret| self.type_ref_ty(entry_scope, ret))
-                            })
-                            .or_else(|| match method.body {
-                                FunBody::Expr(body) => Some(self.expr(entry_scope, body)),
-                                FunBody::Block(_) | FunBody::None => None,
-                            })
-                            .unwrap_or(Ty::Unit);
+                            );
                         let source_member = crate::libraries::SourceMember::EnumEntry {
                             file: self.file_index,
                             owner: d.0,
                             entry: entry_index as u32,
                             method: method_index as u32,
                         };
-                        let mut signature = if let Some(function) =
-                            stable_declaration.and_then(|declaration| {
+                        let function = stable_declaration
+                            .and_then(|declaration| {
                                 self.module
                                     .finalized_function(declaration, entry_owner, false)
-                            }) {
-                            signature_from_resolved_function(&function)
-                        } else {
-                            let CheckerModuleSymbols::Legacy(module) = &self.module else {
-                                panic!(
-                                    "a streamed enum-entry method must have a finalized callable header"
-                                )
-                            };
-                            enum_entry_member_signature(
-                                self.file,
-                                method,
-                                ret,
-                                &module.pass_one_symbols().class_names,
-                                &entry_tparams,
-                                self.compilation_id,
-                                self.file_index,
-                                source_member,
-                                self.libraries,
-                                self.diags,
-                            )
-                        };
+                            })
+                            .expect("an enum-entry method must have a finalized callable header");
+                        let mut signature = signature_from_resolved_function(&function);
                         signature.stable_declaration = stable_declaration;
                         signature.source_member = Some(source_member);
                         self.register_lexical_member(
@@ -70438,7 +61349,7 @@ impl<'a> Checker<'a> {
                         let stable_declaration = self
                             .active_source_member_declaration(source_member)
                             .or_else(|| {
-                                let index = self.resolved_index?;
+                                let index = self.resolved_index;
                                 let owner = current_owner
                                     .and_then(|owner| index.classifier_declaration(owner))?;
                                 let entry = index.owned_declaration(
@@ -70500,77 +61411,60 @@ impl<'a> Checker<'a> {
                 }
             }
             // Secondary constructors: check and record one delegation target before the body.
-            let collected = match (&self.module, self.active_declarations) {
-                (CheckerModuleSymbols::Legacy(source), None) => current_owner
-                    .and_then(|owner| source.pass_one_symbols().class_by_type_name(owner)),
-                (CheckerModuleSymbols::Legacy(_), Some(_))
-                | (CheckerModuleSymbols::Streamed(_), _) => None,
-            };
-            if collected.is_none() && self.inference_only && self.active_declarations.is_none() {
-                // Not yet collected: this run cannot determine the type it was asked for, so it
-                // declines and the declaration is resolved again after collection finishes.
-                self.inference_incomplete = true;
-                self.active_statement_suppressions
-                    .truncate(class_suppression_depth);
-                return;
-            }
-            let (primary_params, source_primary_params, secondary_params) = if self
-                .active_declarations
-                .is_some()
-            {
-                let finalized = self.active_declarations.zip(self.resolved_index).and_then(
-                    |(active, index)| {
-                        let owner = active.canonical_classifier_declaration(d, index)?;
-                        let primary = index
-                            .owned_declaration(owner, crate::fir::DeclarationKind::Constructor, 0)
-                            .and_then(|declaration| index.signature(declaration))
-                            .map(|signature| {
-                                signature
-                                    .parameters
-                                    .iter()
-                                    .map(|parameter| parameter.get())
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        let primary_context_count = index
-                            .owned_declaration(owner, crate::fir::DeclarationKind::Constructor, 0)
-                            .and_then(|declaration| index.callable_for_declaration(declaration))
-                            .map_or(0, |callable| {
-                                callable.shape.context_parameter_count as usize
-                            });
-                        let source_primary = if cl.props.is_empty() {
-                            Vec::new()
-                        } else {
-                            primary
-                                .get(primary_context_count..primary_context_count + cl.props.len())?
-                                .to_vec()
-                        };
-                        let secondary = cl
-                            .secondary_ctors
-                            .iter()
-                            .enumerate()
-                            .map(|(ordinal, _)| {
-                                let sibling = u32::try_from(ordinal + 1)
-                                    .expect("too many secondary constructors");
-                                index
-                                    .owned_declaration(
-                                        owner,
-                                        crate::fir::DeclarationKind::Constructor,
-                                        sibling,
-                                    )
-                                    .and_then(|declaration| index.signature(declaration))
-                                    .map(|signature| {
-                                        signature
-                                            .parameters
-                                            .iter()
-                                            .map(|parameter| parameter.get())
-                                            .collect::<Vec<_>>()
-                                    })
-                            })
-                            .collect::<Option<Vec<_>>>()?;
-                        Some((primary, source_primary, secondary))
-                    },
-                );
+            let (primary_params, source_primary_params, secondary_params) = {
+                let finalized = (|| {
+                    let active = self.active_declarations;
+                    let index = self.resolved_index;
+                    let owner = active.canonical_classifier_declaration(d, index)?;
+                    let primary = index
+                        .owned_declaration(owner, crate::fir::DeclarationKind::Constructor, 0)
+                        .and_then(|declaration| index.signature(declaration))
+                        .map(|signature| {
+                            signature
+                                .parameters
+                                .iter()
+                                .map(|parameter| parameter.get())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let primary_context_count = index
+                        .owned_declaration(owner, crate::fir::DeclarationKind::Constructor, 0)
+                        .and_then(|declaration| index.callable_for_declaration(declaration))
+                        .map_or(0, |callable| {
+                            callable.shape.context_parameter_count as usize
+                        });
+                    let source_primary = if cl.props.is_empty() {
+                        Vec::new()
+                    } else {
+                        primary
+                            .get(primary_context_count..primary_context_count + cl.props.len())?
+                            .to_vec()
+                    };
+                    let secondary = cl
+                        .secondary_ctors
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, _)| {
+                            let sibling = u32::try_from(ordinal + 1)
+                                .expect("too many secondary constructors");
+                            index
+                                .owned_declaration(
+                                    owner,
+                                    crate::fir::DeclarationKind::Constructor,
+                                    sibling,
+                                )
+                                .and_then(|declaration| index.signature(declaration))
+                                .map(|signature| {
+                                    signature
+                                        .parameters
+                                        .iter()
+                                        .map(|parameter| parameter.get())
+                                        .collect::<Vec<_>>()
+                                })
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    Some((primary, source_primary, secondary))
+                })();
                 match finalized {
                     Some(shapes) => shapes,
                     None if body_local_class => {
@@ -70630,42 +61524,16 @@ impl<'a> Checker<'a> {
                         )
                     }
                 }
-            } else if let Some(class_signature) = collected {
-                // Constructor selection uses the erased ABI-facing parameter list above. Inside
-                // the generic class declaration, however, the source parameter is still expressed
-                // in the class's symbolic form (`T`, `Generator<T>`, ...). Erasing it here loses
-                // constraints from receiver calls in property initializers before any use-site
-                // class arguments exist.
-                let source_primary_params = class_signature
-                    .ctor_param_shapes
-                    .get(..cl.props.len())
-                    .expect("collected primary constructor must contain every source parameter")
-                    .iter()
-                    .map(|(ty, _)| *ty)
-                    .collect::<Vec<_>>();
-                (
-                    class_signature.ctor_params.clone(),
-                    source_primary_params,
-                    class_signature.secondary_ctors.clone(),
-                )
-            } else {
-                assert!(
-                    self.signature_defaults_only,
-                    "checked class has a collected signature"
-                );
-                self.declared_default_provider_constructor_shapes(scope, cl)
             };
             if body_local_class {
-                if let Some((owner, internal)) = self
-                    .active_declarations
-                    .zip(self.resolved_index)
-                    .and_then(|(active, index)| {
-                        Some((
-                            active.canonical_classifier_declaration(d, index)?,
-                            current_owner?,
-                        ))
-                    })
-                {
+                if let Some((owner, internal)) = (|| {
+                    let active = self.active_declarations;
+                    let index = self.resolved_index;
+                    Some((
+                        active.canonical_classifier_declaration(d, index)?,
+                        current_owner?,
+                    ))
+                })() {
                     self.record_checked_local_constructor_shapes(
                         scope,
                         owner,
@@ -71129,30 +61997,18 @@ impl<'a> Checker<'a> {
                     } else {
                         scope
                     };
-                    let interfaces = if self.active_declarations.is_some() {
-                        self.active_declarations.zip(self.resolved_index).and_then(
-                            |(active, index)| {
-                                active
-                                    .canonical_classifier_declaration(d, index)
-                                    .and_then(|declaration| index.classifier_header(declaration))
-                                    .map(|header| {
-                                        header
-                                            .interface_delegations
-                                            .iter()
-                                            .map(|delegation| delegation.interface.get())
-                                            .collect::<Vec<_>>()
-                                    })
-                            },
-                        )
-                    } else {
-                        current_owner
-                            .and_then(|owner| {
-                                self.module
-                                    .legacy_symbols()
-                                    .and_then(|symbols| symbols.class_by_type_name(owner))
-                            })
-                            .map(|class| class.delegated_interfaces.clone())
-                    };
+                    let index = self.resolved_index;
+                    let interfaces = self
+                        .active_declarations
+                        .canonical_classifier_declaration(d, index)
+                        .and_then(|declaration| index.classifier_header(declaration))
+                        .map(|header| {
+                            header
+                                .interface_delegations
+                                .iter()
+                                .map(|delegation| delegation.interface.get())
+                                .collect::<Vec<_>>()
+                        });
                     let finalized_delegation_interfaces = match interfaces {
                         Some(interfaces) if interfaces.len() == cl.interface_delegations.len() => {
                             interfaces
@@ -71289,41 +62145,38 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: source_property_index as u32,
                     };
-                    let stable_property = self
-                        .resolved_index
-                        .and_then(|index| {
-                            let owner = current_owner
-                                .and_then(|owner| index.classifier_declaration(owner))?;
-                            index.owned_declaration(
-                                owner,
-                                crate::fir::DeclarationKind::Property,
-                                u32::try_from(source_property_index)
-                                    .expect("too many class properties"),
-                            )
-                        })
-                        .or_else(|| self.active_source_member_declaration(source_member))
-                        .or_else(|| {
-                            props
-                                .iter()
-                                .find(|candidate| candidate.source_member == Some(source_member))
-                                .and_then(|candidate| candidate.stable_declaration)
-                        });
+                    let stable_property = (|| {
+                        let index = self.resolved_index;
+                        let owner =
+                            current_owner.and_then(|owner| index.classifier_declaration(owner))?;
+                        index.owned_declaration(
+                            owner,
+                            crate::fir::DeclarationKind::Property,
+                            u32::try_from(source_property_index)
+                                .expect("too many class properties"),
+                        )
+                    })()
+                    .or_else(|| self.active_source_member_declaration(source_member))
+                    .or_else(|| {
+                        props
+                            .iter()
+                            .find(|candidate| candidate.source_member == Some(source_member))
+                            .and_then(|candidate| candidate.stable_declaration)
+                    });
                     let extension_receiver = bp
                         .receiver
                         .as_ref()
                         .map(|receiver| self.type_ref_ty(scope, receiver));
-                    let stable_storage = stable_property.zip(self.resolved_index).and_then(
-                        |(declaration, index)| {
-                            index
-                                .property_for_declaration(declaration)
-                                .and_then(|property| index.property(property))
-                                .and_then(|property| property.storage_type)
-                                .map(|storage| storage.get())
-                        },
-                    );
+                    let stable_storage = stable_property.and_then(|declaration| {
+                        let index = self.resolved_index;
+                        index
+                            .property_for_declaration(declaration)
+                            .and_then(|property| index.property(property))
+                            .and_then(|property| property.storage_type)
+                            .map(|storage| storage.get())
+                    });
                     let stable_result = stable_property
-                        .zip(self.resolved_index)
-                        .and_then(|(declaration, index)| index.signature(declaration))
+                        .and_then(|declaration| self.resolved_index.signature(declaration))
                         .map(|signature| signature.result.get())
                         .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
                     let declared_property = current_owner
@@ -71380,8 +62233,6 @@ impl<'a> Checker<'a> {
                                 )
                             })
                         });
-                    let inference_key =
-                        DeclKey::member(self.file_index, d.0, source_property_index as u32);
                     let explicit_type_required = bp.declared_ty().is_none()
                         && bp.init.is_none()
                         && matches!(bp.getter, Some(FunBody::Block(_)));
@@ -71643,7 +62494,6 @@ impl<'a> Checker<'a> {
                         && (bp.init.is_some() || getter_covered)
                     {
                         self.report_property_inference_failure(
-                            inference_key,
                             bp.span,
                             &bp.name,
                             body_diag_mark,
@@ -71698,29 +62548,10 @@ impl<'a> Checker<'a> {
                 std::mem::replace(&mut self.static_companion_this, static_this);
             let streamed_enum_owner = self
                 .active_declarations
-                .zip(self.resolved_index)
-                .and_then(|(active, index)| active.canonical_classifier_declaration(d, index));
-            let enum_signature = streamed_enum_owner.is_none().then(|| {
-                current_owner
-                    .and_then(|owner| {
-                        self.module
-                            .legacy_symbols()
-                            .and_then(|symbols| symbols.class_by_type_name(owner))
-                    })
-                    .expect("checked enum has a collected signature")
-                    .clone()
-            });
-            let constructor_candidates = if let Some(owner) = streamed_enum_owner {
-                self.streamed_source_constructor_candidates(scope, owner, Some(cl))
-            } else {
-                self.source_constructor_candidates(
-                    scope,
-                    Some(cl),
-                    enum_signature
-                        .as_ref()
-                        .expect("legacy enum signature must be available"),
-                )
-            };
+                .canonical_classifier_declaration(d, self.resolved_index)
+                .expect("checked enum must have a stable classifier declaration");
+            let constructor_candidates =
+                self.streamed_source_constructor_candidates(scope, streamed_enum_owner, Some(cl));
             for entry in &cl.enum_entries {
                 // Establish non-contextual argument types before selection, exactly as an ordinary
                 // source-constructor call does. Lambdas and callable references remain postponed
@@ -71795,42 +62626,22 @@ impl<'a> Checker<'a> {
                 let (primary, stable_declaration) = match &selected.target {
                     ResolvedCtorDelegationTarget::ThisPrimary { .. } => (
                         true,
-                        streamed_enum_owner
-                            .and_then(|owner| {
-                                self.resolved_index?.owned_declaration(
-                                    owner,
-                                    crate::fir::DeclarationKind::Constructor,
-                                    0,
-                                )
-                            })
-                            .or_else(|| {
-                                enum_signature
-                                    .as_ref()
-                                    .and_then(|signature| signature.primary_constructor_declaration)
-                            }),
+                        self.resolved_index.owned_declaration(
+                            streamed_enum_owner,
+                            crate::fir::DeclarationKind::Constructor,
+                            0,
+                        ),
                     ),
                     ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => {
                         let sibling = u32::try_from(*index + 1)
                             .expect("too many enum secondary constructors");
                         (
                             false,
-                            streamed_enum_owner
-                                .and_then(|owner| {
-                                    self.resolved_index?.owned_declaration(
-                                        owner,
-                                        crate::fir::DeclarationKind::Constructor,
-                                        sibling,
-                                    )
-                                })
-                                .or_else(|| {
-                                    enum_signature.as_ref().and_then(|signature| {
-                                        signature
-                                            .secondary_constructor_declarations
-                                            .get(*index)
-                                            .copied()
-                                            .flatten()
-                                    })
-                                }),
+                            self.resolved_index.owned_declaration(
+                                streamed_enum_owner,
+                                crate::fir::DeclarationKind::Constructor,
+                                sibling,
+                            ),
                         )
                     }
                     ResolvedCtorDelegationTarget::Super { .. } => {
@@ -71840,10 +62651,10 @@ impl<'a> Checker<'a> {
                 self.resolved_enum_entry_constructors.insert(
                     (entry.span.lo, entry.span.hi),
                     ResolvedConstructor::Source {
-                        owner: streamed_enum_owner
-                            .and_then(|owner| self.resolved_index?.classifier_header(owner))
+                        owner: self
+                            .resolved_index
+                            .classifier_header(streamed_enum_owner)
                             .map(|header| header.classifier)
-                            .or_else(|| enum_signature.as_ref().map(ClassSig::internal_name))
                             .expect("checked enum must have a semantic owner"),
                         stable_declaration,
                         outer: None,
@@ -71942,7 +62753,7 @@ impl<'a> Checker<'a> {
             source_member.and_then(|source| self.active_source_member_declaration(source))
         });
         let (finalized_result, finalized_parameters) = stable_declaration
-            .and_then(|declaration| self.resolved_index?.signature(declaration))
+            .and_then(|declaration| self.resolved_index.signature(declaration))
             .map(|signature| {
                 (
                     Some(signature.result.get()),
@@ -71989,8 +62800,7 @@ impl<'a> Checker<'a> {
                 // header. Pass 2 records that finalized semantic type against the fresh syntax
                 // occurrence; reparsing must not perform a second scope-tower selection that can
                 // drift after the temporary signature graph has been destroyed.
-                self.resolved_declaration_types
-                    .insert((reference.span.lo, reference.span.hi), result);
+                self.record_finalized_declaration_type(reference, result);
                 result
             }
             (Some(reference), None) => self.check_declaration_type(scope, reference),
@@ -73674,810 +64484,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn expect_source_constructor_args(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        class: &ClassSig,
-        params: &[Ty],
-        parameter_shapes: &[(Ty, bool)],
-        slots: Option<&[Option<ExprId>]>,
-        implicit_integer_coercion: &[bool],
-        whole_array_varargs: Option<&[bool]>,
-        expected_result: Option<Ty>,
-        bound_outer: Option<Ty>,
-        arguments_name_an_applied_classifier: bool,
-    ) -> Vec<Ty> {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        // A call through a typealias has already consumed the written arguments while expanding
-        // the alias. They are not necessarily the constructed classifier's own arguments: for
-        // `typealias A<K, L> = Generic<K>.Inner<L>`, `A<Int, String>` expands to
-        // `Inner<String, Int>`. Re-reading `<Int, String>` here as `Inner` arguments would bind its
-        // sole own parameter `L` to `Int`. The applied semantic classifier is the authoritative
-        // constructor-result constraint on this path; direct classifier calls still read their
-        // written arguments below.
-        let explicit_refs = (!arguments_name_an_applied_classifier)
-            .then(|| self.file.call_type_args.get(&call.0).cloned())
-            .flatten();
-        let mut bindings = vec![Ty::Error; class.type_params.len()];
-        let mut explicitly_bound = vec![false; bindings.len()];
-        if let Some(refs) = &explicit_refs {
-            for (index, type_ref) in refs.iter().enumerate().take(bindings.len()) {
-                if !type_ref.is_inference_placeholder() {
-                    bindings[index] = self.type_ref_ty_silent(scope, type_ref);
-                    explicitly_bound[index] = true;
-                }
-            }
-        }
-        // A constructor's result participates in the same bidirectional inference as any other
-        // generic callable result. Infer through the complete applied hierarchy, not only when the
-        // expected classifier is the constructed classifier itself: `Success()` may be expected as
-        // `Step<Owner>` through `Success<I> : Terminal<I> : Step<I>`. Falling back to I's recursive
-        // bound before applying that result constraint loses the concrete Owner permanently.
-        let mut expected_bindings = crate::symbol_resolver::GSigBinds::new();
-        self.constrain_source_constructor_result(class, expected_result, &mut expected_bindings);
-        crate::trace_compiler!(
-            "expected_call",
-            "source constructor={} expected_result={expected_result:?} result_bindings={expected_bindings:?}",
-            class.internal_name(),
-        );
-        for (index, (name, binding)) in class
-            .type_params
-            .iter()
-            .zip(bindings.iter_mut())
-            .enumerate()
-        {
-            if explicitly_bound.get(index).copied().unwrap_or(false) {
-                continue;
-            }
-            if let Some(expected) = expected_bindings.get(name).copied() {
-                *binding = expected.projection_inner().unwrap_or(expected);
-            }
-        }
-        // A result constraint can specialize a nested constructor argument before this
-        // constructor infers from it: `Holder<String>(Cell("x"))` must check `Cell("x")` as
-        // `Cell<String>`, not first freeze it as `Cell<Any>` and then reject the invariant shell.
-        // This is ordinary expected-type propagation over the selected semantic constructor shape.
-        let mut seeded = class
-            .type_params
-            .iter()
-            .cloned()
-            .zip(bindings.iter().copied())
-            .filter(|(_, binding)| *binding != Ty::Error)
-            .collect::<HashMap<_, _>>();
-        let captured_bindings =
-            self.source_constructor_captured_bindings(scope, class, bound_outer);
-        seeded.extend(
-            captured_bindings
-                .iter()
-                .map(|(name, ty)| (name.clone(), *ty)),
-        );
-        let mut contextual_actuals = HashMap::new();
-        for (slot, &(shape, definitely_non_null)) in parameter_shapes.iter().enumerate() {
-            let Some((argument, _)) = self.source_constructor_argument(slot, slots, args, arg_tys)
-            else {
-                continue;
-            };
-            let expected = crate::symbol_resolver::ty_subst_keep_unbound(shape, &seeded);
-            let expected = if definitely_non_null {
-                definitely_non_null_binding(expected)
-            } else {
-                expected
-            };
-            let retains_constructor_formal =
-                class.type_params.iter().enumerate().any(|(index, formal)| {
-                    ty_mentions_param(expected, std::slice::from_ref(formal))
-                        && !explicitly_bound.get(index).copied().unwrap_or(false)
-                        && !expected_bindings.contains_key(formal)
-                });
-            if retains_constructor_formal {
-                continue;
-            }
-            let contextual = match (self.file.expr(argument), expected.non_null()) {
-                (Expr::Lambda { .. }, Ty::Fun(signature)) => Some(
-                    self.check_lambda_with_fixed_function_type_and_params_labeled(
-                        scope,
-                        argument,
-                        signature,
-                        &signature.params,
-                        signature.has_receiver,
-                        None,
-                    ),
-                ),
-                (Expr::CallableRef { .. }, _) => {
-                    Some(self.expr_expected(scope, argument, expected))
-                }
-                _ if self.call_result_can_bind_expected(argument, expected) => {
-                    Some(self.expr_expected(scope, argument, expected))
-                }
-                _ => None,
-            };
-            if let Some(actual) = contextual {
-                contextual_actuals.insert(argument, actual);
-            }
-        }
-        let mut inferred_constraints = vec![Vec::new(); bindings.len()];
-        let mut inferred_upper_constraints = vec![Vec::new(); bindings.len()];
-        let mut enclosing_context_formals = vec![false; bindings.len()];
-        let lexical_type_parameters = scope
-            .visible_tparams()
-            .erasure
-            .values()
-            .filter_map(|binding| binding.ty_param_name())
-            .collect::<std::collections::HashSet<_>>();
-        let lexically_fixed_seed = bindings
-            .iter()
-            .map(|binding| {
-                let mut mentioned = Vec::new();
-                ty_param_names_into(*binding, &mut mentioned);
-                !mentioned.is_empty()
-                    && mentioned
-                        .iter()
-                        .all(|identity| lexical_type_parameters.contains(identity))
-            })
-            .collect::<Vec<_>>();
-        {
-            let argument_fits_seed = |actual, seed| self.receiver_is_assignable(actual, seed);
-            let mut inference = SourceConstructorBindings {
-                bindings: &mut bindings,
-                lower: &mut inferred_constraints,
-                upper: &mut inferred_upper_constraints,
-                explicitly_bound: &explicitly_bound,
-                seeded: &seeded,
-                lexically_fixed_seed: &lexically_fixed_seed,
-                argument_fits_seed: &argument_fits_seed,
-            };
-            for (slot, &(shape, _)) in parameter_shapes.iter().enumerate() {
-                if let Some((argument, probed_actual)) =
-                    self.source_constructor_argument(slot, slots, args, arg_tys)
-                {
-                    let actual = contextual_actuals
-                        .get(&argument)
-                        .copied()
-                        .unwrap_or(probed_actual);
-                    // A nested generic producer can have only a provisional result until this
-                    // enclosing invariant parameter supplies its expectation. This includes both
-                    // PCLA calls and an otherwise unconstrained constructor whose visible type is
-                    // merely its declaration fallback (`Descriptor<Any?>` for `Descriptor<T>`).
-                    // Neither is argument evidence. Complete this constructor from its declared
-                    // bound below, then recheck the nested call against the selected parameter.
-                    if self.call_result_has_postponed_input_formal(argument)
-                        || self.unbound_contextual_result_signature(argument).is_some()
-                    {
-                        for (type_parameter, formal) in class.type_params.iter().enumerate() {
-                            if ty_mentions_param(shape, std::slice::from_ref(formal)) {
-                                enclosing_context_formals[type_parameter] = true;
-                            }
-                        }
-                        continue;
-                    }
-                    let actual =
-                        Self::source_constructor_type_parameter(class, parameter_shapes, slot)
-                            .and_then(|(parameter, _, _)| {
-                                class.type_param_bounds.get(parameter).copied()
-                            })
-                            .filter(|bound| {
-                                call_arg_kind(self.file, argument, actual)
-                                    .adapts_integer_literal_to(*bound)
-                            })
-                            .unwrap_or(actual);
-                    // A non-generic singleton argument can still carry generic evidence through an
-                    // applied supertype: `object Empty : Stream<Nothing>` passed to
-                    // `Box<T>(stream: Stream<T>)` contributes `T = Nothing`. The legacy structural
-                    // merge below cannot see that through the empty `Empty` argument list. Project
-                    // precisely that semantic object shape to the parameter owner. Ordinary class
-                    // and generic actuals retain the existing merge path: replacing them wholesale
-                    // changes variance/PCLA behavior for constructor and inline-class inference.
-                    let actual = actual
-                        .non_null()
-                        .type_args()
-                        .is_empty()
-                        .then(|| actual.non_null().obj_internal())
-                        .flatten()
-                        .filter(|owner| {
-                            self.resolver()
-                                .classifier(*owner)
-                                .is_some_and(|classifier| classifier.is_object())
-                        })
-                        // Project only a CONSTRUCTED parameter such as `Stream<T>`. For a direct
-                        // type variable `T : OperandType<J>`, the nominal singleton itself is the
-                        // inference constraint (`T = SInt32`); replacing it with its bound view
-                        // erases the most specific solution before bound validation.
-                        .and_then(|_| match shape.non_null() {
-                            Ty::Obj(owner, _) => Some(owner),
-                            _ => None,
-                        })
-                        .filter(|expected_owner| {
-                            actual.non_null().obj_internal() != Some(*expected_owner)
-                        })
-                        .and_then(|expected_owner| {
-                            crate::symbol_resolver::applied_hierarchy(&self.fed_source(), actual)
-                                .into_iter()
-                                .find_map(|(owner, applied, _)| {
-                                    (owner == expected_owner).then_some(applied)
-                                })
-                        })
-                        .unwrap_or(actual);
-                    merge_source_constructor_shape_bindings(
-                        shape,
-                        actual,
-                        argument,
-                        &class.type_params,
-                        true,
-                        &mut inference,
-                    );
-                }
-            }
-        }
-        // With no independent constructor constraint, Kotlin completes an enclosing variable from
-        // its written upper bound before feeding that expectation back into the postponed producer.
-        // Keep this completion scoped to the formals explicitly marked above; unrelated empty
-        // constructors retain their existing not-enough-information behavior.
-        for type_parameter in 0..bindings.len() {
-            if explicitly_bound[type_parameter]
-                || !enclosing_context_formals[type_parameter]
-                || bindings[type_parameter] != Ty::Error
-            {
-                continue;
-            }
-            let known = class
-                .type_params
-                .iter()
-                .take(type_parameter)
-                .cloned()
-                .zip(bindings.iter().take(type_parameter).copied())
-                .filter(|(_, binding)| *binding != Ty::Error)
-                .collect::<HashMap<_, _>>();
-            if let Some(&bound) = class
-                .type_param_bounds
-                .get(type_parameter)
-                .filter(|bound| **bound != Ty::Error)
-            {
-                bindings[type_parameter] =
-                    crate::symbol_resolver::ty_subst_keep_unbound(bound, &known);
-            }
-        }
-        let formal_bounds = class
-            .type_param_bounds
-            .iter()
-            .map(|bound| {
-                (*bound != Ty::Error)
-                    .then_some(*bound)
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let mut result_bindings = class
-            .type_params
-            .iter()
-            .cloned()
-            .zip(bindings.iter().copied())
-            .filter(|(_, binding)| *binding != Ty::Error)
-            .collect::<HashMap<_, _>>();
-        crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
-            &self.fed_source(),
-            class.internal_name(),
-            &class.type_params,
-            &formal_bounds,
-            expected_result,
-            &mut result_bindings,
-        );
-        for (index, formal) in class.type_params.iter().enumerate() {
-            if bindings[index] == Ty::Error {
-                if let Some(&seed) = result_bindings.get(formal) {
-                    bindings[index] = seed;
-                }
-            }
-        }
-        // Prefer the declared bound over an unconstrained `Any` join.
-        for type_parameter in 0..bindings.len() {
-            if explicitly_bound[type_parameter] {
-                continue;
-            }
-            let Some(&declared_bound) = class
-                .type_param_bounds
-                .get(type_parameter)
-                .filter(|bound| **bound != Ty::Error)
-            else {
-                continue;
-            };
-            let known = class
-                .type_params
-                .iter()
-                .take(type_parameter)
-                .cloned()
-                .zip(bindings.iter().take(type_parameter).copied())
-                .filter(|(_, binding)| *binding != Ty::Error)
-                .collect::<HashMap<_, _>>();
-            let bound = crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &known);
-            let all_within_bound = !inferred_constraints[type_parameter].is_empty()
-                && inferred_constraints[type_parameter]
-                    .iter()
-                    .all(|(constraint, _)| {
-                        crate::assignable::is_assignable(
-                            &crate::assignable::TyCtx::new(),
-                            self,
-                            *constraint,
-                            bound,
-                        )
-                    });
-            let merged_within_bound = crate::assignable::is_assignable(
-                &crate::assignable::TyCtx::new(),
-                self,
-                bindings[type_parameter],
-                bound,
-            );
-            if bindings[type_parameter].is_erased_top()
-                && !bindings[type_parameter].mentions_ty_param()
-                && all_within_bound
-                && !merged_within_bound
-            {
-                bindings[type_parameter] = bound;
-            }
-        }
-        // Contravariant-only evidence selects the narrowest representable upper constraint.
-        for type_parameter in 0..bindings.len() {
-            if explicitly_bound[type_parameter] {
-                continue;
-            }
-            if bindings[type_parameter] != Ty::Error
-                || inferred_upper_constraints[type_parameter].is_empty()
-            {
-                continue;
-            }
-            let mut upper_constraints = inferred_upper_constraints[type_parameter]
-                .iter()
-                .map(|(constraint, _)| *constraint)
-                .filter(|constraint| *constraint != Ty::Error)
-                .collect::<Vec<_>>();
-            if let Some(&declared_bound) = class
-                .type_param_bounds
-                .get(type_parameter)
-                .filter(|bound| **bound != Ty::Error)
-            {
-                let known = class
-                    .type_params
-                    .iter()
-                    .take(type_parameter)
-                    .cloned()
-                    .zip(bindings.iter().take(type_parameter).copied())
-                    .filter(|(_, binding)| *binding != Ty::Error)
-                    .collect::<HashMap<_, _>>();
-                let bound = crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &known);
-                upper_constraints.push(bound);
-            }
-            let Some((&first, rest)) = upper_constraints.split_first() else {
-                continue;
-            };
-            let mut candidate = first;
-            for &upper in rest {
-                let candidate_within_upper = crate::assignable::is_assignable(
-                    &crate::assignable::TyCtx::new(),
-                    self,
-                    candidate,
-                    upper,
-                );
-                if candidate_within_upper {
-                    continue;
-                }
-                let upper_within_candidate = crate::assignable::is_assignable(
-                    &crate::assignable::TyCtx::new(),
-                    self,
-                    upper,
-                    candidate,
-                );
-                candidate = if upper_within_candidate {
-                    upper
-                } else {
-                    Ty::Nothing
-                };
-            }
-            bindings[type_parameter] = candidate;
-        }
-        for (type_parameter, binding) in bindings.iter_mut().enumerate() {
-            if explicitly_bound[type_parameter] {
-                continue;
-            }
-            let nullable_bottom = matches!(*binding, Ty::Nullable(inner) if *inner == Ty::Nothing);
-            let required_dnn = parameter_shapes.iter().enumerate().any(|(slot, _)| {
-                Self::source_constructor_type_parameter(class, parameter_shapes, slot)
-                    .is_some_and(|(parameter, dnn, _)| parameter == type_parameter && dnn)
-            });
-            let required_dnn_null_argument = required_dnn
-                && parameter_shapes.iter().enumerate().any(|(slot, _)| {
-                    Self::source_constructor_type_parameter(class, parameter_shapes, slot)
-                        .is_some_and(|(parameter, dnn, _)| {
-                            parameter == type_parameter
-                                && dnn
-                                && self
-                                    .source_constructor_argument(slot, slots, args, arg_tys)
-                                    .is_some_and(|(_, actual)| Self::null_only_type(actual))
-                        })
-                });
-            if required_dnn_null_argument
-                || (required_dnn && (*binding == Ty::Null || nullable_bottom))
-            {
-                let name = class
-                    .type_params
-                    .get(type_parameter)
-                    .map(|name| crate::types::type_parameter_source_name(name))
-                    .unwrap_or("T");
-                self.diags.error(
-                    self.span(call),
-                    format!(
-                        "cannot infer type for type parameter '{name}'. Specify it explicitly."
-                    ),
-                );
-                *binding = Ty::Error;
-            }
-        }
-        let mut constructor_bindings = class
-            .type_params
-            .iter()
-            .cloned()
-            .zip(bindings.iter().copied())
-            .collect::<HashMap<_, _>>();
-        constructor_bindings.extend(
-            captured_bindings
-                .iter()
-                .map(|(name, ty)| (name.clone(), *ty)),
-        );
-        for (type_parameter, &binding) in bindings.iter().enumerate() {
-            if binding == Ty::Error {
-                continue;
-            }
-            let Some(&declared_bound) = class.type_param_bounds.get(type_parameter) else {
-                continue;
-            };
-            if declared_bound == Ty::Error {
-                continue;
-            }
-            let bound = crate::symbol_resolver::ty_subst_keep_unbound(
-                declared_bound,
-                &constructor_bindings,
-            );
-            if let Some(type_ref) = explicit_refs.as_ref().and_then(|refs| {
-                refs.get(type_parameter)
-                    .filter(|reference| !reference.is_inference_placeholder())
-            }) {
-                self.expect_assignable(bound, binding, type_ref.span, "type argument");
-                continue;
-            }
-            let mut prior_valid_binding = None;
-            let mut violation = None;
-            for &(constraint, argument) in &inferred_constraints[type_parameter] {
-                let within_bound = crate::assignable::is_assignable(
-                    &crate::assignable::TyCtx::new(),
-                    self,
-                    constraint,
-                    bound,
-                );
-                if !within_bound {
-                    violation = Some((prior_valid_binding.unwrap_or(bound), constraint, argument));
-                    break;
-                }
-                let merged =
-                    crate::symbol_resolver::merge_inferred_ty(prior_valid_binding, constraint);
-                prior_valid_binding = Some(
-                    if crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        self,
-                        merged,
-                        bound,
-                    ) {
-                        merged
-                    } else {
-                        bound
-                    },
-                );
-            }
-            if let Some((expected, constraint, argument)) = violation {
-                self.expect_assignable(expected, constraint, self.span(argument), "type argument");
-            } else {
-                self.expect_assignable(bound, binding, self.span(call), "type argument");
-            }
-        }
-        let substitution = constructor_bindings;
-        for (index, expected) in params.iter().enumerate() {
-            let Some((argument, probed_actual)) =
-                self.source_constructor_argument(index, slots, args, arg_tys)
-            else {
-                continue;
-            };
-            let (substituted, has_receiver) = parameter_shapes
-                .get(index)
-                .map(|&(shape, definitely_non_null)| {
-                    let substituted =
-                        crate::symbol_resolver::ty_subst_keep_unbound(shape, &substitution);
-                    (
-                        if definitely_non_null {
-                            definitely_non_null_binding(substituted)
-                        } else {
-                            substituted
-                        },
-                        matches!(shape.non_null(), Ty::Fun(signature) if signature.has_receiver),
-                    )
-                })
-                .unwrap_or((*expected, false));
-            let actual = if matches!(self.file.expr(argument), Expr::Lambda { .. })
-                && class.type_params.iter().any(|formal| {
-                    ty_mentions_param(
-                        self.expr_types[argument.0 as usize],
-                        std::slice::from_ref(formal),
-                    )
-                })
-                && !class
-                    .type_params
-                    .iter()
-                    .any(|formal| ty_mentions_param(substituted, std::slice::from_ref(formal)))
-            {
-                // PCLA initially checks this lambda against the constructor's symbolic parameter
-                // so nested calls and assignments can solve the classifier variables. Once the
-                // solution is known, commit the lambda again against the concrete selected shape;
-                // checked FIR must not retain the constructor declaration's open type parameter in
-                // a non-generic caller body.
-                self.check_argument_expected(scope, argument, substituted, has_receiver, None)
-            } else if self.call_result_can_bind_expected(argument, substituted) {
-                self.expr_expected(scope, argument, substituted)
-            } else {
-                probed_actual
-            };
-            if whole_array_varargs
-                .and_then(|arguments| arguments.get(index))
-                .copied()
-                .unwrap_or(false)
-            {
-                self.expect_whole_array_vararg_arg(Some(scope), argument, actual, substituted);
-                continue;
-            }
-            if self.implicit_integer_coercion_applies(
-                argument,
-                substituted,
-                implicit_integer_coercion
-                    .get(index)
-                    .copied()
-                    .unwrap_or(false),
-            ) {
-                continue;
-            }
-            self.expect_call_arg(scope, substituted, argument, actual);
-        }
-        for (index, binding) in bindings.iter_mut().enumerate() {
-            if *binding == Ty::Null {
-                *binding = Ty::nullable(Ty::Nothing);
-            } else if *binding == Ty::Error {
-                *binding = class
-                    .type_param_bounds
-                    .get(index)
-                    .copied()
-                    .filter(|bound| *bound != Ty::Error)
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            }
-        }
-        bindings
-    }
-
-    /// Bind the declaration identities captured by an inner/local classifier to this construction
-    /// site's lexical enclosing type. These variables are not explicit constructor type arguments,
-    /// but they still specialize constructor parameter shapes before argument checking.
-    fn source_constructor_captured_bindings(
-        &self,
-        scope: &CheckerScope<'_>,
-        class: &ClassSig,
-        bound_outer: Option<Ty>,
-    ) -> HashMap<String, Ty> {
-        let captured = &class.captured_type_parameters.type_params;
-        if captured.is_empty() {
-            return HashMap::new();
-        }
-        if let Some(outer_owner) = class.inner_of {
-            let applied_outer = bound_outer
-                .into_iter()
-                .chain(self.implicit_receiver_types(scope))
-                .find_map(|receiver| {
-                    crate::symbol_resolver::applied_hierarchy(&self.fed_source(), receiver)
-                        .into_iter()
-                        .find_map(|(owner, applied, _)| (owner == outer_owner).then_some(applied))
-                });
-            if let Some(applied_outer) = applied_outer {
-                return captured
-                    .iter()
-                    .cloned()
-                    .zip(applied_outer.type_args().iter().copied())
-                    .collect();
-            }
-        }
-        let visible = scope.visible_tparams();
-        captured
-            .iter()
-            .filter_map(|captured| {
-                visible
-                    .erasure
-                    .values()
-                    .copied()
-                    .find(|binding| binding.ty_param_name() == Some(captured.as_str()))
-                    .map(|binding| (captured.clone(), binding))
-            })
-            .collect()
-    }
-
-    /// Constrain a source classifier's own type parameters from an expected application of any
-    /// semantic supertype. The hierarchy is already normalized in the stable class model, so this
-    /// is the same inference operation for a direct expected `Box<T>` and an expected `Base<T>`
-    /// reached through one or more declared supertypes.
-    fn constrain_source_constructor_result(
-        &self,
-        class: &ClassSig,
-        expected: Option<Ty>,
-        bindings: &mut crate::symbol_resolver::GSigBinds,
-    ) {
-        let Some(classifier) = self.resolved_type_name(class.internal_name()) else {
-            return;
-        };
-        self.constrain_provider_constructor_result(
-            class.internal_name(),
-            &classifier,
-            expected,
-            bindings,
-        );
-    }
-
-    /// Constrain a classifier's own parameters from an expected application of any of its
-    /// semantic supertypes. The operation is provider-neutral and therefore remains available after
-    /// the temporary Pass-1 graph has been destroyed.
-    fn constrain_provider_constructor_result(
-        &self,
-        owner: TypeName,
-        classifier: &crate::libraries::LibraryType,
-        expected: Option<Ty>,
-        bindings: &mut crate::symbol_resolver::GSigBinds,
-    ) {
-        fn collect_exact_expected_bindings(
-            declared: Ty,
-            expected: Ty,
-            bindings: &mut crate::symbol_resolver::GSigBinds,
-        ) {
-            // A use-site projection is a directional bound, not an equality. Constructor value
-            // arguments remain free to infer a more precise classifier argument beneath it.
-            if matches!(
-                expected,
-                Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)
-            ) || matches!(
-                declared,
-                Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)
-            ) {
-                return;
-            }
-            match declared {
-                Ty::TyParam(name, _) => {
-                    bindings.entry(name.to_string()).or_insert(expected);
-                }
-                Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
-                    collect_exact_expected_bindings(*inner, expected.non_null(), bindings);
-                }
-                Ty::Obj(owner, arguments) => {
-                    let Ty::Obj(expected_owner, expected_arguments) = expected.non_null() else {
-                        return;
-                    };
-                    if owner != expected_owner {
-                        return;
-                    }
-                    for (&declared, &expected) in arguments.iter().zip(expected_arguments) {
-                        collect_exact_expected_bindings(declared, expected, bindings);
-                    }
-                }
-                Ty::Fun(declared) => {
-                    let Ty::Fun(expected) = expected.non_null() else {
-                        return;
-                    };
-                    if declared.params.len() != expected.params.len() {
-                        return;
-                    }
-                    for (&declared, &expected) in declared.params.iter().zip(&expected.params) {
-                        collect_exact_expected_bindings(declared, expected, bindings);
-                    }
-                    collect_exact_expected_bindings(declared.ret, expected.ret, bindings);
-                }
-                _ => {}
-            }
-        }
-
-        let Some(expected) = expected
-            .filter(|expected| *expected != Ty::Error)
-            .map(Ty::non_null)
-        else {
-            return;
-        };
-        let Some(expected_owner) = expected.obj_internal() else {
-            return;
-        };
-        let symbolic_arguments = classifier
-            .type_params()
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                Ty::ty_param(
-                    name,
-                    classifier
-                        .type_param_bounds()
-                        .get(index)
-                        .and_then(|bounds| bounds.first())
-                        .copied()
-                        .filter(|bound| *bound != Ty::Error)
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                )
-            })
-            .collect::<Vec<_>>();
-        let symbolic = Ty::obj_args_name(owner, &symbolic_arguments);
-        let source = self.fed_source();
-        let applied = crate::symbol_resolver::applied_hierarchy(&source, symbolic)
-            .into_iter()
-            .find_map(|(candidate, applied, _)| (candidate == expected_owner).then_some(applied));
-        let Some(applied) = applied else {
-            return;
-        };
-        collect_exact_expected_bindings(applied, expected, bindings);
-        bindings.retain(|name, ty| classifier.type_params().contains(name) && *ty != Ty::Error);
-    }
-
-    /// Match a bare `T`, `T?`, or `T & Any` constructor parameter.
-    fn source_constructor_type_parameter(
-        class: &ClassSig,
-        parameter_shapes: &[(Ty, bool)],
-        slot: usize,
-    ) -> Option<(usize, bool, bool)> {
-        let &(shape, definitely_non_null) = parameter_shapes.get(slot)?;
-        let (name, nullable) = match shape {
-            Ty::TyParam(name, _) => (name, false),
-            Ty::Nullable(&Ty::TyParam(name, _)) => (name, true),
-            _ => return None,
-        };
-        class
-            .type_params
-            .iter()
-            .position(|parameter| parameter == name)
-            .map(|index| (index, definitely_non_null, nullable))
-    }
-
-    fn source_constructor_argument(
-        &self,
-        slot: usize,
-        slots: Option<&[Option<ExprId>]>,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-    ) -> Option<(ExprId, Ty)> {
-        let argument = match slots {
-            Some(slots) => slots.get(slot).copied().flatten()?,
-            None => *args.get(slot)?,
-        };
-        let ty = match slots {
-            Some(_) => args
-                .iter()
-                .position(|candidate| *candidate == argument)
-                .and_then(|source| arg_tys.get(source))
-                .copied()
-                .unwrap_or(self.expr_types[argument.0 as usize]),
-            None => *arg_tys.get(slot)?,
-        };
-        Some((argument, ty))
-    }
-
-    /// Record that `e`'s PLATFORM type is committed to a declared non-null `expected` here.
-    ///
-    /// A Java value arrives as `T!`, which is usable as both `T` and `T?`; a declared non-null type
-    /// is where the source picks the non-null bound and every later consumer — Kotlin call sites that
-    /// skip null handling, Java nullness checkers reading `@NotNull`, krusty's own smart casts — is
-    /// entitled to rely on it. kotlinc guards exactly this transition (see
-    /// [`TypeInfo::platform_narrowings`]); positions that keep the flexibility (`T?`, another `T!`) or
-    /// unbox into a primitive are left alone, the latter because unboxing already fails on null here.
-    ///
-    /// The expression's RECORDED type is read rather than a caller-supplied one: lowering consumes
-    /// the same `expr_types` entry, so a caller that has already narrowed the type for a diagnostic
-    /// cannot make the two disagree.
     fn narrow_platform_value(&mut self, expected: Ty, e: ExprId, position: PlatformNarrowing) {
         if !matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_)) {
             return;
@@ -77463,25 +67469,7 @@ impl<'a> Checker<'a> {
                 return self.expr_inner_member(scope, e, receiver, name)
             }
             Expr::Call { callee, args } => {
-                let called = self.check_call(scope, e, callee, &args, self.span(e), expected);
-                // The callee's own return may not be determined yet — its body is an expression the
-                // walk could not type. Ask for that declaration rather than taking the marker as
-                // the call's type, which would publish it into whatever this call initializes.
-                if called == Ty::Pending {
-                    let arg_tys = args
-                        .iter()
-                        .map(|&argument| {
-                            self.expr_types
-                                .get(argument.0 as usize)
-                                .copied()
-                                .unwrap_or(Ty::Error)
-                        })
-                        .collect::<Vec<_>>();
-                    if let Some(ty) = self.demand_call_target(scope, callee, &arg_tys) {
-                        return self.set(e, ty);
-                    }
-                }
-                called
+                self.check_call(scope, e, callee, &args, self.span(e), expected)
             }
             Expr::If {
                 cond,
@@ -77507,33 +67495,7 @@ impl<'a> Checker<'a> {
                 return self.expr_inner_when(scope, e, expected, value_required, subject, arms)
             }
             Expr::CallableRef { receiver, name } => {
-                let referenced =
-                    self.expr_inner_callable_ref(scope, e, expected, receiver, name.clone());
-                // The reference's type is built FROM the target's, so an undetermined target makes
-                // the reference undetermined — `(::foo).let { it(1, 2) }` then types as the marker
-                // and the declaration that owns it settles to `Unit`. The reference spells its own
-                // target: ask for that declaration and put the answer where the marker sits.
-                if referenced.mentions_pending() {
-                    if let Some(answered) = self.demand_callable_reference_target(scope, e) {
-                        // The reference's FUNCTION type is recorded beside the expression table —
-                        // it is what a call THROUGH the reference reads — so the answer goes into
-                        // both, or the call resolves against the marker it was meant to replace.
-                        if let Some(function) = self.callable_reference_types.get(&e).copied() {
-                            self.callable_reference_types
-                                .insert(e, crate::types::ty_replace_pending(function, answered));
-                        }
-                        let answered = crate::types::ty_replace_pending(referenced, answered);
-                        // A FUNCTION reference whose target's return was undetermined is typed
-                        // `KFunctionN<…>`; with the return in hand the reference types as the
-                        // function type itself, which is what every consumer of a function-valued
-                        // declaration reads. Normalize to the shape the determined path produces,
-                        // so that the answer does not also change the reference's KIND.
-                        let answered = natural_function_reference_ty(answered);
-                        self.expr_types[e.0 as usize] = answered;
-                        return answered;
-                    }
-                }
-                return referenced;
+                return self.expr_inner_callable_ref(scope, e, expected, receiver, name);
             }
         };
         self.set(e, t)
@@ -78381,7 +68343,7 @@ impl<'a> Checker<'a> {
                 // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
                 // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
                 // BOXED element of the range — so it stays a comparison chain, guarded by the
-                // `instanceof` the boxed element type implies (see `ir_lower::expr_inner_in_range`).
+                // `instanceof` the boxed element type implies (see `fir_lower::expr_inner_in_range`).
                 let comparison = range_st
                     .range_counter_type()
                     .expect("widened direct membership is restricted to counted primitive ranges");
@@ -78717,198 +68679,6 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    /// Ask the engine for the declaration a CALLABLE REFERENCE names.
-    ///
-    /// The reference spells its target directly — `::foo` a module declaration, `C::foo` a member
-    /// of the classifier it names, `value::foo` a member of the receiver's type — so the same three
-    /// demands a call uses answer it. The answer replaces the marker inside the reference's type
-    /// rather than becoming that type: `KFunction2<Int, Int, R>` keeps its shape and gains its `R`.
-    fn demand_callable_reference_target(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        reference: ExprId,
-    ) -> Option<Ty> {
-        let determined = |answered: &Ty| *answered != Ty::Error && !answered.mentions_pending();
-        let Expr::CallableRef { receiver, name } = self.file.expr(reference) else {
-            return None;
-        };
-        let (receiver, name) = (*receiver, name.clone());
-        let Some(receiver) = receiver else {
-            // `::foo` — a module declaration, or a member of an enclosing `this`.
-            if let Some(ty) = self
-                .demand_name
-                .and_then(|demand| demand(&name))
-                .filter(determined)
-            {
-                return Some(ty);
-            }
-            let demand_member = self.demand_member?;
-            let tower: Vec<Ty> = self
-                .this_labels
-                .iter()
-                .rev()
-                .map(|(_, ty, _)| *ty)
-                .collect();
-            return tower.into_iter().find_map(|dispatch| {
-                (dispatch != Ty::Error && !dispatch.mentions_pending())
-                    .then(|| demand_member(dispatch.non_null(), &name, &[]))
-                    .flatten()
-                    .filter(determined)
-            });
-        };
-        let demand_member = self.demand_member?;
-        // A BOUND reference names its owner with the receiver EXPRESSION's type; an UNBOUND one
-        // spells a classifier, which is not a value and has no expression type — its own spelling
-        // is the owner.
-        let owner = self
-            .expr_types
-            .get(receiver.0 as usize)
-            .copied()
-            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
-            .or_else(|| match self.file.expr(receiver) {
-                Expr::Name(spelling) => {
-                    let spelling = spelling.clone();
-                    self.same_package_class(&spelling)
-                        .map(ClassSig::internal_name)
-                        .map(Ty::obj_name)
-                }
-                _ => None,
-            })?;
-        let _ = scope;
-        demand_member(owner.non_null(), &name, &[]).filter(determined)
-    }
-
-    /// Ask the engine for the declaration a CALL names, when the call's own type came back
-    /// undetermined.
-    ///
-    /// A call reaches its callable four ways, and each names the declaration differently:
-    ///
-    /// * a bare spelling that is a module declaration — the name index answers it;
-    /// * a bare spelling that is a member of an enclosing `this` — the receiver TOWER answers it,
-    ///   innermost rung first, which is the order name resolution itself walked;
-    /// * a qualified spelling — the receiver names the owner and the callee spells the member;
-    /// * the `invoke` convention — `method(i)` and `method.invoke(i)` are the same declaration
-    ///   reached under different syntax, and neither spells `invoke` where the first two look.
-    ///
-    /// A rung or a receiver that answers `Error` or the marker has NOT answered: taking that would
-    /// type the call wrongly AND stop the search before a later source could answer.
-    fn demand_call_target(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        callee: ExprId,
-        arg_tys: &[Ty],
-    ) -> Option<Ty> {
-        let determined = |answered: &Ty| *answered != Ty::Error && !answered.mentions_pending();
-        let demand_member = self.demand_member?;
-        let on_receiver = |receiver: Ty, name: &str, arg_tys: &[Ty]| {
-            (receiver != Ty::Error && !receiver.mentions_pending())
-                .then(|| demand_member(receiver.non_null(), name, arg_tys))
-                .flatten()
-                .filter(determined)
-        };
-        // A callee spelled as a bare name is not typed as a VALUE by the call path, so its
-        // recorded expression type is absent; the scope binding is where its type lives.
-        let callee_ty = || match self.file.expr(callee) {
-            Expr::Name(name) => self
-                .lookup(scope, name)
-                .map(|local| local.ty)
-                .or_else(|| self.expr_types.get(callee.0 as usize).copied()),
-            _ => self.expr_types.get(callee.0 as usize).copied(),
-        };
-        match self.file.expr(callee) {
-            Expr::Name(name) => {
-                let name = name.clone();
-                // The overload-aware demand subsumes the plain one: it tries the by-spelling
-                // index first and only then chooses among overloads by argument type.
-                if let Some(ty) = self
-                    .demand_call
-                    .and_then(|demand| demand(&name, arg_tys))
-                    .or_else(|| self.demand_name.and_then(|demand| demand(&name)))
-                    .filter(determined)
-                {
-                    return Some(ty);
-                }
-                let tower: Vec<Ty> = self
-                    .this_labels
-                    .iter()
-                    .rev()
-                    .map(|(_, ty, _)| *ty)
-                    .collect();
-                if let Some(ty) = tower
-                    .into_iter()
-                    .find_map(|receiver| on_receiver(receiver, &name, arg_tys))
-                {
-                    return Some(ty);
-                }
-                // `method(i)` where `method` is a VALUE with an `invoke` operator.
-                on_receiver(callee_ty()?, "invoke", arg_tys)
-            }
-            Expr::Member { receiver, name } => {
-                let (receiver, name) = (*receiver, name.clone());
-                // `super.foo()` / `super<B>.foo()` names a SUPERTYPE's declaration. The qualifier is
-                // encoded on the receiver name and has no expression type, so the ordinary receiver
-                // route says nothing — and the tower would offer this class, whose own `foo` is the
-                // one being determined.
-                if let Expr::Name(spelling) = self.file.expr(receiver) {
-                    if is_super_qualifier(spelling) {
-                        let spelling = spelling.clone();
-                        // `super<B>` names its supertype outright; a bare `super` means the
-                        // declaring class's own superclass. Either way the answer is a SUPERTYPE's
-                        // declaration — asking the receiver tower instead would offer this class,
-                        // whose same-named member is the one being determined.
-                        let qualified = spelling
-                            .strip_prefix("super<")
-                            .and_then(|rest| rest.split('>').next())
-                            .and_then(|classifier| self.same_package_class(classifier))
-                            .map(ClassSig::internal_name);
-                        let owner = qualified.or_else(|| {
-                            let dispatch = self.super_receiver_selection(scope, &spelling)?.ty;
-                            self.enum_entry_supertype(dispatch)
-                                .and_then(Ty::obj_internal)
-                                .or_else(|| {
-                                    self.direct_superclass_name(dispatch.kotlin_class_internal()?)
-                                })
-                        })?;
-                        return on_receiver(Ty::obj_name(owner), &name, arg_tys);
-                    }
-                }
-                let receiver_ty = self.expr_types.get(receiver.0 as usize).copied()?;
-                if let Some(ty) = on_receiver(receiver_ty, &name, arg_tys) {
-                    return Some(ty);
-                }
-                // A MEMBER EXTENSION is declared on an enclosing class and called on another
-                // receiver entirely (`fun Outer.foo()` inside `Inner`), so the receiver alone does
-                // not name its owner — the tower does.
-                let tower: Vec<Ty> = self
-                    .this_labels
-                    .iter()
-                    .rev()
-                    .map(|(_, ty, _)| *ty)
-                    .collect();
-                tower
-                    .into_iter()
-                    .find_map(|dispatch| on_receiver(dispatch, &name, arg_tys))
-            }
-            _ => on_receiver(callee_ty()?, "invoke", arg_tys),
-        }
-    }
-
-    /// The type of a member read, with the marker replaced by the declaration's own answer.
-    ///
-    /// A read through an implicit receiver resolves against the symbol table, which holds the
-    /// marker while that member's own type is being determined. The receiver names the owner, which
-    /// is all the demand needs. Returns `ty` unchanged when it is already determined or when
-    /// nothing answers.
-    fn demanded_member_read(&mut self, ty: Ty, receiver: Ty, name: &str) -> Ty {
-        if !ty.mentions_pending() || receiver == Ty::Error || receiver.mentions_pending() {
-            return ty;
-        }
-        self.demand_member
-            .and_then(|demand| demand(receiver.non_null(), name, &[]))
-            .filter(|answered| *answered != Ty::Error && !answered.mentions_pending())
-            .unwrap_or(ty)
-    }
-
     fn expr_inner_safe_call(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -79199,18 +68969,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // The selected callable's return may still be UNDETERMINED — its own body is an
-            // expression nothing has typed yet. Ask for that declaration through the receiver, the
-            // same demand the qualified spelling makes; without it the marker propagates into
-            // everything built on this call and the enclosing declaration settles to `Unit`.
-            let result = if result.mentions_pending() {
-                self.demand_member
-                    .and_then(|demand| demand(safe_rt, &name, &[]))
-                    .filter(|answered| *answered != Ty::Error && !answered.mentions_pending())
-                    .unwrap_or(result)
-            } else {
-                result
-            };
             let result = if result == Ty::Error {
                 self.receiver_function_value(scope, &name)
                     .and_then(|(signature, origin)| {
@@ -79560,22 +69318,7 @@ impl<'a> Checker<'a> {
         expected: Option<Ty>,
     ) -> Ty {
         self.declined_read_targets.remove(&self.span(e));
-        let mut lookup = self.lookup(scope, &n);
-        // A binding whose type is not determined YET — a sibling member, or one inherited from a
-        // base class, that the engine has not resolved. Ask for it at the READ, where it is
-        // actually needed: resolving every undetermined binding up front costs a full run per
-        // sibling and turns a cycle among them into a decline for members that are individually
-        // fine.
-        if let Some(local) = lookup.as_mut() {
-            if local.ty == Ty::Pending {
-                if let Some(resolved) = self.demand_name.and_then(|demand| demand(&n)) {
-                    local.ty = resolved;
-                    if local.write_ty == Some(Ty::Pending) {
-                        local.write_ty = Some(resolved);
-                    }
-                }
-            }
-        }
+        let lookup = self.lookup(scope, &n);
         crate::trace_compiler!(
             "name_type",
             "name={n} expression={e:?} span={:?} binding_type={:?} binding_origin={:?} implicit_receivers={:?} this_narrow={:?}",
@@ -79597,32 +69340,6 @@ impl<'a> Checker<'a> {
         }
         let t = match lookup {
             Some(l) => {
-                // The binding's recorded type is the marker while that declaration's own type is
-                // being determined. Ask for it BEFORE the origin-specific paths below: each of them
-                // reads the binding or re-selects the member from the symbol table, and both hold
-                // the marker at this point. The receiver tower names the owner, innermost first,
-                // exactly as name resolution walked it.
-                if l.ty.mentions_pending() {
-                    if let Some(demand) = self.demand_member {
-                        let tower: Vec<Ty> = self
-                            .this_labels
-                            .iter()
-                            .rev()
-                            .map(|(_, ty, _)| *ty)
-                            .collect();
-                        let answered = tower.into_iter().find_map(|receiver| {
-                            (receiver != Ty::Error && !receiver.mentions_pending())
-                                .then(|| demand(receiver.non_null(), &n, &[]))
-                                .flatten()
-                                .filter(|answered| {
-                                    *answered != Ty::Error && !answered.mentions_pending()
-                                })
-                        });
-                        if let Some(answered) = answered {
-                            return self.set(e, answered);
-                        }
-                    }
-                }
                 crate::trace_compiler!("resolve", "name read {n} origin={:?}", l.origin);
                 if let ReceiverFnValueOrigin::ClassStorage(field)
                 | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } = l.origin
@@ -79684,43 +69401,11 @@ impl<'a> Checker<'a> {
                             } else {
                                 selected_ty
                             };
-                            // The member selection reads the symbol table, which still holds the
-                            // marker while that member's own type is being determined — and it wins
-                            // over the scope binding on purpose (a nearer receiver's same-named
-                            // property must). Undetermined is not a type to win with: ask for the
-                            // declaration, exactly as a qualified read of it would.
-                            if ty.mentions_pending() {
-                                if let Some(answered) = self
-                                    .demand_member
-                                    .and_then(|demand| demand(receiver.ty, &n, &[]))
-                                    .filter(|answered| !answered.mentions_pending())
-                                {
-                                    return self.set(e, answered);
-                                }
-                            }
                             return self.set(e, ty);
                         }
                     }
                 }
                 let ty = self.local_narrowing(scope, &n).unwrap_or(l.ty);
-                // No receiver in the tower answered, so the binding's own recorded type stands —
-                // and while that member's type is being determined it is the marker. The binding
-                // knows its OWNER, which is what the demand needs; without this a read of an
-                // inferred member from inside a member EXTENSION of the same class types as
-                // undetermined and the extension settles to `Unit`.
-                if ty.mentions_pending() {
-                    if let ReceiverFnValueOrigin::DispatchProperty { owner, .. } = l.origin {
-                        if let Some(answered) = self
-                            .demand_member
-                            .and_then(|demand| demand(Ty::obj_name(owner), &n, &[]))
-                            .filter(|answered| {
-                                *answered != Ty::Error && !answered.mentions_pending()
-                            })
-                        {
-                            return self.set(e, answered);
-                        }
-                    }
-                }
                 if let Some(declared) = l.write_ty {
                     if declared != ty {
                         // A narrowing shadow replaced the read type (a `t = null` write narrows
@@ -79833,35 +69518,8 @@ impl<'a> Checker<'a> {
                     let ty = self.record_associated_property(Some(e), property, true);
                     return self.set(e, ty);
                 }
-                if self
-                    .demand_rejects
-                    .is_some_and(|rejects| rejects(&n, self.span(e)))
-                {
-                    let _ = self.demand_name.and_then(|demand| demand(&n));
-                    self.diags
-                        .error(self.span(e), format!("unresolved reference '{n}'."));
-                    Ty::Error
-                } else if self.module_declares_top_level_property(&n) {
+                if self.module_declares_top_level_property(&n) {
                     match self.select_top_level_property(scope, &n) {
-                        // A module property is REGISTERED before its type is known, as a placeholder
-                        // the engine fills in later. Selection therefore succeeds with `Ty::Error`,
-                        // or fails outright, while the declaration is still being resolved — both
-                        // mean "not yet", not "no such property", so both ask the engine.
-                        TopLevelPropertySelection::Selected(property)
-                            if property.property.ty == Ty::Pending =>
-                        {
-                            let ty = self
-                                .demand_name
-                                .and_then(|demand| demand(&n))
-                                .unwrap_or(Ty::Error);
-                            if ty == Ty::Error && self.property_inference_failed(&property.property)
-                            {
-                                self.silent_error_exprs.insert(e);
-                            }
-                            self.expr_lowers
-                                .insert(e, ExprLowering::TopLevelPropertyGet(property));
-                            ty
-                        }
                         TopLevelPropertySelection::Selected(property) => {
                             if let Some(ty) =
                                 self.record_top_level_source_constant(e, &property.property)
@@ -79900,16 +69558,9 @@ impl<'a> Checker<'a> {
                             Ty::Error
                         }
                         TopLevelPropertySelection::None => {
-                            match self.demand_name.and_then(|demand| demand(&n)) {
-                                Some(ty) => ty,
-                                None => {
-                                    self.diags.error(
-                                        self.span(e),
-                                        format!("unresolved reference '{n}'."),
-                                    );
-                                    Ty::Error
-                                }
-                            }
+                            self.diags
+                                .error(self.span(e), format!("unresolved reference '{n}'."));
+                            Ty::Error
                         }
                     }
                 } else if let Some((receiver, declared_name, _)) =
@@ -79972,12 +69623,6 @@ impl<'a> Checker<'a> {
                     );
                     ty
                 } else if let Some(ty) = self.context_sensitive_name_ty(scope, e, &n, expected) {
-                    ty
-                } else if let Some(ty) = self.demand_name.and_then(|demand| demand(&n)) {
-                    // Every ordinary rung has been tried and none knew the name. When this checker
-                    // is typing one declaration for the resolution engine, that can simply mean the
-                    // declaration it names has not been typed YET — ask for it rather than reporting
-                    // it unresolved.
                     ty
                 } else {
                     self.diags
@@ -80298,11 +69943,9 @@ impl<'a> Checker<'a> {
             None
         };
         let stable_is_lateinit = |declaration: Option<crate::fir::DeclarationId>| {
-            self.resolved_index.is_none_or(|index| {
-                declaration
-                    .and_then(|declaration| index.declaration_header(declaration))
-                    .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LATEINIT))
-            })
+            declaration
+                .and_then(|declaration| self.resolved_index.declaration_header(declaration))
+                .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::LATEINIT))
         };
         // Associated `companion lateinit var C.p` declarations live on an implicit/classifier
         // receiver rung even though that receiver is only a lookup coordinate. Select the exact
@@ -80349,25 +69992,14 @@ impl<'a> Checker<'a> {
             return None;
         };
         let declaration = property.property.stable_declaration;
-        if let Some(index) = self.resolved_index {
-            let declaration = declaration?;
-            let current_source = index
-                .declaration_anchor(declaration)
-                .is_some_and(|anchor| anchor.source.raw() == self.file_index);
-            return (current_source && stable_is_lateinit(Some(declaration))).then(|| {
-                (
-                    Some(declaration),
-                    property.property.owner,
-                    property.property.name.clone(),
-                    true,
-                )
-            });
-        }
-        let source = property.property.source_key?;
-        let header = self.module.legacy_symbols()?.source_props.get(&source)?;
-        (source.0 == self.file_index && header.is_lateinit).then(|| {
+        let declaration = declaration?;
+        let current_source = self
+            .resolved_index
+            .declaration_anchor(declaration)
+            .is_some_and(|anchor| anchor.source.raw() == self.file_index);
+        (current_source && stable_is_lateinit(Some(declaration))).then(|| {
             (
-                declaration,
+                Some(declaration),
                 property.property.owner,
                 property.property.name.clone(),
                 true,
@@ -80629,18 +70261,6 @@ impl<'a> Checker<'a> {
                 }
             }
             let declared = self.check_member(scope, rt, &name, self.span(e), Some(e));
-            // A member whose own type is still being determined reads as a placeholder. Ask the
-            // engine for that declaration before accepting the failure. This sits here rather than
-            // inside `check_member`, which is also called speculatively without reporting by
-            // implicit-receiver and intersection-bound selection. A hook there would fire on every
-            // probe of every candidate receiver.
-            let declared = if declared == Ty::Pending || declared == Ty::Error {
-                self.demand_member
-                    .and_then(|demand| demand(rt, &name, &[]))
-                    .map_or(declared, |ty| self.set(e, ty))
-            } else {
-                declared
-            };
             if self.resolved_constants.contains_key(&e)
                 && !matches!(
                     receiver_qualifier,
@@ -80888,7 +70508,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .flatten()
                         .filter_map(|declaration| {
-                            self.resolved_index?.declaration_range(*declaration)
+                            self.resolved_index.declaration_range(*declaration)
                         })
                         .map(|range| range.hi)
                         .max()
@@ -81754,27 +71374,17 @@ impl<'a> Checker<'a> {
             expression,
             ExprLowering::ConstructorRef {
                 internal,
-                source_primary: self
-                    .resolved_index
-                    .and_then(|index| {
-                        let declaration = selected.stable_declaration?;
-                        let owner = index.classifier_declaration(internal)?;
-                        let primary = index.owned_declaration(
-                            owner,
-                            crate::fir::DeclarationKind::Constructor,
-                            0,
-                        )?;
-                        Some(declaration == primary)
-                    })
-                    .or_else(|| match &self.module {
-                        CheckerModuleSymbols::Legacy(source) => source
-                            .pass_one_symbols()
-                            .class_by_type_name(internal)
-                            .map(|class| {
-                                class.has_primary_ctor && class.ctor_params == selected.params
-                            }),
-                        CheckerModuleSymbols::Streamed(_) => None,
-                    }),
+                source_primary: (|| {
+                    let index = self.resolved_index;
+                    let declaration = selected.stable_declaration?;
+                    let owner = index.classifier_declaration(internal)?;
+                    let primary = index.owned_declaration(
+                        owner,
+                        crate::fir::DeclarationKind::Constructor,
+                        0,
+                    )?;
+                    Some(declaration == primary)
+                })(),
                 constructor: Box::new(selected),
                 outer: outer_binding,
                 argument_mapping,
@@ -84478,18 +74088,6 @@ impl<'a> Checker<'a> {
                 }
                 None => selected.ret,
             }
-        };
-        // A member whose own return is still being determined reads as the marker here. Ask the
-        // engine for that declaration BEFORE substituting: the answer is the declared return —
-        // `fun get() = value` is `T` — and the substitution below is what turns it into this call's
-        // type. Asking after would leave `T` to leak out as the call's type.
-        let ret = match ret.mentions_pending() {
-            true => self
-                .demand_member
-                .and_then(|demand| demand(selected.receiver, &selected.member.name, &[]))
-                .filter(|answered| !answered.mentions_pending())
-                .unwrap_or(ret),
-            false => ret,
         };
         // Receiver applicability above deliberately uses the symbolic postponed receiver so every
         // member argument can contribute constraints during the collection round. Once a member is
@@ -87289,73 +76887,6 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // Signature inference must preserve constructor type arguments.
-        let legacy_class = match &self.module {
-            CheckerModuleSymbols::Legacy(source) => {
-                source.pass_one_symbols().class_by_type_name(internal)
-            }
-            CheckerModuleSymbols::Streamed(_) => None,
-        };
-        if let (Some(class), Expr::Call { args, .. }) = (legacy_class, self.file.expr(call).clone())
-        {
-            if !class.type_params.is_empty()
-                && class.ctor_param_shapes.len() == class.ctor_params.len()
-                && self.symbolic_signature_inference
-            {
-                let mut bindings = HashMap::new();
-                let arg_names = self.file.call_arg_names.get(&call.0);
-                for (source_index, argument) in args.iter().enumerate() {
-                    let parameter_index = arg_names
-                        .and_then(|names| names.get(source_index))
-                        .and_then(|name| name.as_ref())
-                        .and_then(|name| {
-                            class
-                                .ctor_param_names
-                                .iter()
-                                .position(|(parameter, _)| parameter == name)
-                        })
-                        .unwrap_or(source_index);
-                    let Some((parameter, _)) = class.ctor_param_shapes.get(parameter_index) else {
-                        continue;
-                    };
-                    let actual = self.expr_types[argument.0 as usize];
-                    // Constructor and caller type parameters are declaration-scoped. Their source
-                    // names may coincide (`class Wrapper<T>` inside `class Container<T>`), but the
-                    // constructor's `T` must still bind to the caller's symbolic `T`. Generic
-                    // call inference deliberately ignores `T` against itself within one signature;
-                    // constructor inference crosses declaration owners and therefore retains it.
-                    Self::constrain_constructor_parameter(*parameter, actual, &mut bindings);
-                }
-                crate::symbol_resolver::constrain_constructor_result(
-                    internal,
-                    &class.type_params,
-                    expected,
-                    &mut bindings,
-                );
-                if !bindings.is_empty() {
-                    let inferred = class
-                        .type_params
-                        .iter()
-                        .enumerate()
-                        .map(|(index, name)| {
-                            bindings.get(name).copied().unwrap_or_else(|| {
-                                class
-                                    .type_param_bounds
-                                    .get(index)
-                                    .copied()
-                                    .filter(|bound| *bound != Ty::Error)
-                                    .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    crate::trace_compiler!(
-                        "resolve",
-                        "source constructor result owner={internal:?} bindings={bindings:?} inferred={inferred:?}"
-                    );
-                    return Ty::obj_args_name(internal, &inferred);
-                }
-            }
-        }
         // No explicit `<T>` — INFER a classpath generic type's arguments from the constructor call's
         // argument types (`Pair(1, 2)` → `Pair<Int, Int>`), so members/`componentN` type concretely.
         if let Expr::Call { args, .. } = self.file.expr(call).clone() {
@@ -87494,27 +77025,6 @@ impl<'a> Checker<'a> {
     }
 
     /// Attach inferred source type arguments to a constructor result.
-    fn ctor_result_name_with_inferred(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        internal: TypeName,
-        inferred: Vec<Ty>,
-        bound_outer: Option<Ty>,
-        expected: Option<Ty>,
-    ) -> Ty {
-        // `expect_source_constructor_args` returns the complete declaration-order solution: written
-        // arguments are preserved and `_` positions are filled by the same argument/expected-type
-        // constraints. Use that authoritative solution instead of rebuilding the source spelling,
-        // which would turn an underscore back into `Ty::Error` at the FIR boundary.
-        let result = self
-            .resolved_type_name(internal)
-            .filter(|classifier| inferred.len() == classifier.type_params().len())
-            .map(|_| Ty::obj_args_name(internal, &inferred))
-            .unwrap_or_else(|| self.ctor_result_name(scope, call, internal, expected, None));
-        self.attach_captured_classifier_arguments(scope, call, internal, result, bound_outer)
-    }
-
     fn attach_captured_classifier_arguments(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -87523,11 +77033,8 @@ impl<'a> Checker<'a> {
         instance: Ty,
         bound_outer: Option<Ty>,
     ) -> Ty {
-        if let Some((classifier, index)) = self.resolved_index.and_then(|index| {
-            index
-                .classifier_declaration(internal)
-                .map(|classifier| (classifier, index))
-        }) {
+        if let Some(classifier) = self.resolved_index.classifier_declaration(internal) {
+            let index = self.resolved_index;
             let parameters = index
                 .classifier_type_arguments(classifier)
                 .unwrap_or_default();
@@ -87788,19 +77295,7 @@ impl<'a> Checker<'a> {
         match vis {
             Visibility::Public => true,
             Visibility::Internal => {
-                let module_owned = match self.resolved_index {
-                    // The finalized module index contains only this compilation module. A
-                    // dependency-source fallback is deliberately exposed through the semantic
-                    // provider instead, so mere resolver visibility cannot grant `internal`
-                    // access across that module boundary.
-                    Some(index) => index.classifier_declaration(owner).is_some(),
-                    // The legacy whole-source checker has no stable index; its module symbol
-                    // table remains the only way to identify a same-compilation owner.
-                    None => self
-                        .module
-                        .legacy_symbols()
-                        .is_some_and(|symbols| symbols.class_by_type_name(owner).is_some()),
-                };
+                let module_owned = self.resolved_index.classifier_declaration(owner).is_some();
                 let friend = self.libraries.internal_accessible(owner);
                 module_owned || friend
             }
@@ -88010,11 +77505,6 @@ impl<'a> Checker<'a> {
         self.applied_annotations
             .get(&(annotation.span.lo, annotation.span.hi))
             .map(|applied| applied.internal)
-            .or_else(|| {
-                self.module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-            })
             .or_else(|| {
                 self.select_classifier(&CheckerScope::root(), &annotation.name)
                     .found()

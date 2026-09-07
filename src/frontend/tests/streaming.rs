@@ -141,11 +141,10 @@ fn emission_analysis_drops_pass_one_ast_and_type_info_before_returning() {
     )
     .with_file_stem("Streaming")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -179,11 +178,10 @@ fn emission_inline_preparation_streams_each_sources_syntax_and_checked_side_tabl
         .with_file_stem("SecondInline"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -209,11 +207,10 @@ fn emission_pass_one_checks_inline_bodies_but_defers_ordinary_body_diagnostics()
     )
     .with_file_stem("PassBoundary")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -224,7 +221,7 @@ fn emission_pass_one_checks_inline_bodies_but_defers_ordinary_body_diagnostics()
         .expect("explicit signatures and the inline body must finalize in Pass 1");
     assert_eq!(streamed.module.inline_bodies().len(), 1);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert_eq!(census.failures.len(), 1);
     assert_eq!(
         census.failures[0].stage,
@@ -247,11 +244,10 @@ fn inferred_signature_reports_a_missing_member_during_pass_one() {
     )
     .with_file_stem("MissingSignatureMember")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -291,17 +287,16 @@ fn inferred_member_extension_result_keeps_dispatch_type_arguments() {
     )
     .with_file_stem("AppliedMemberExtension")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some());
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 }
@@ -320,17 +315,16 @@ fn emission_signature_collection_does_not_reject_valid_init_order_member_calls()
     )
     .with_file_stem("InitOrder")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some());
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -349,16 +343,15 @@ fn pass_two_resolves_local_type_parameter_annotations_in_lexical_class_scope() {
     )
     .with_file_stem("LocalAnnotation")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -381,17 +374,12 @@ fn pass_two_uses_stable_header_flags_for_top_level_val_smart_casts() {
             crate::toolchain::classpath_jars_for("// WITH_REFLECT"),
         )),
     ));
-    let analysis = analyze_source_set_with_features_and_prepare(
-        &inputs,
-        platform,
-        &LangFeatures::new(),
-        |_, _| {},
-        &mut diagnostics,
-    );
+    let analysis =
+        analyze_source_set_with_features(&inputs, platform, &LangFeatures::new(), &mut diagnostics);
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.files.is_empty(), "Pass 1 AST must be released");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -405,11 +393,10 @@ fn inferred_object_extension_call_shapes_an_unused_implicit_it_in_both_passes() 
     )
     .with_file_stem("ObjectExtension")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -418,7 +405,7 @@ fn inferred_object_extension_call_shapes_an_unused_implicit_it_in_both_passes() 
         analysis.streamed.is_some(),
         "Pass 1 signatures must finalize"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -433,11 +420,10 @@ fn emission_pass_one_does_not_check_ordinary_members_beside_an_inline_member() {
     )
     .with_file_stem("InlineMember")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -448,7 +434,7 @@ fn emission_pass_one_does_not_check_ordinary_members_beside_an_inline_member() {
         .expect("the class header and inline member must finalize in Pass 1");
     assert_eq!(streamed.module.inline_bodies().len(), 1);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert_eq!(census.failures.len(), 1);
     assert_eq!(
         census.failures[0].stage,
@@ -468,11 +454,10 @@ fn unresolved_body_local_classifier_header_is_checked_in_pass_two() {
                   }\n";
     let inputs = [SourceInput::kotlin(source).with_file_stem("UnresolvedLocalHeader")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -482,7 +467,7 @@ fn unresolved_body_local_classifier_header_is_checked_in_pass_two() {
         "an ordinary local header must not be checked during Pass 1: {:?}",
         diagnostics.diags
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert_eq!(census.failures.len(), 1, "{:?}", census.failures);
     assert_eq!(
         census.failures[0].stage,
@@ -515,11 +500,10 @@ fn emission_pass_one_defers_ordinary_anonymous_captures_to_the_active_file() {
     )
     .with_file_stem("DeferredCapture")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -569,7 +553,7 @@ fn emission_pass_one_defers_ordinary_anonymous_captures_to_the_active_file() {
         })
     }));
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -593,17 +577,16 @@ fn pass_two_publishes_anonymous_context_method_parameters_without_double_offset(
     )
     .with_file_stem("AnonymousContextMethod")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -626,11 +609,10 @@ fn pass_two_checks_inline_owned_anonymous_members_from_compact_capture_context()
     )
     .with_file_stem("InlineOwnedAnonymous")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -643,7 +625,7 @@ fn pass_two_checks_inline_owned_anonymous_members_from_compact_capture_context()
     assert!(analysis.files.is_empty());
     assert!(analysis.types.is_empty());
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -663,11 +645,10 @@ fn pass_two_keeps_inline_anonymous_members_enclosing_extension_receiver_label() 
     )
     .with_file_stem("InlineAnonymousExtensionReceiver")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -680,7 +661,7 @@ fn pass_two_keeps_inline_anonymous_members_enclosing_extension_receiver_label() 
     assert!(analysis.files.is_empty());
     assert!(analysis.types.is_empty());
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -700,11 +681,10 @@ fn pass_two_invokes_captured_extension_function_value_with_explicit_receiver_arg
     )
     .with_file_stem("InlineCapturedExtensionInvoke")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -717,7 +697,7 @@ fn pass_two_invokes_captured_extension_function_value_with_explicit_receiver_arg
     assert!(analysis.files.is_empty());
     assert!(analysis.types.is_empty());
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -737,11 +717,10 @@ fn pass_two_invokes_captured_extension_function_value_with_qualified_receiver() 
     )
     .with_file_stem("InlineCapturedQualifiedExtensionInvoke")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -754,7 +733,7 @@ fn pass_two_invokes_captured_extension_function_value_with_qualified_receiver() 
     assert!(analysis.files.is_empty());
     assert!(analysis.types.is_empty());
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -778,11 +757,10 @@ fn pass_one_finalizes_ordinary_anonymous_member_signatures_without_retaining_bod
     )
     .with_file_stem("LocalInvokeExtension")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -792,7 +770,7 @@ fn pass_one_finalizes_ordinary_anonymous_member_signatures_without_retaining_bod
         "explicit public signatures must finalize without checking body-local overrides"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -811,11 +789,10 @@ fn undemanded_anonymous_member_signature_remains_pass_two_lexical_work() {
     )
     .with_file_stem("AnonymousSiblingSignature")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -835,7 +812,7 @@ fn undemanded_anonymous_member_signature_remains_pass_two_lexical_work() {
         "an ordinary local member not demanded by a non-local signature must not be retained from Pass 1"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -859,11 +836,10 @@ fn pass_one_records_local_anonymous_hierarchy_for_pass_two_super_selection() {
     )
     .with_file_stem("LocalAnonymousHierarchy")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -873,7 +849,7 @@ fn pass_one_records_local_anonymous_hierarchy_for_pass_two_super_selection() {
         "compact local classifier headers must finalize before ordinary body checking"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -889,11 +865,10 @@ fn inferred_package_qualified_inline_call_shapes_its_lambda_before_body_streamin
         SourceInput::kotlin("fun box() = lib.apply { \"OK\" }\n").with_file_stem("Main"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -903,7 +878,7 @@ fn inferred_package_qualified_inline_call_shapes_its_lambda_before_body_streamin
         .as_ref()
         .expect("the package-qualified inferred signature must finalize");
     assert_eq!(streamed.module.inline_bodies().len(), 1);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -920,11 +895,10 @@ fn inferred_nested_classifier_companion_property_keeps_the_classifier_qualifier(
     )
     .with_file_stem("NestedCompanion")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -933,7 +907,7 @@ fn inferred_nested_classifier_companion_property_keeps_the_classifier_qualifier(
         analysis.streamed.is_some(),
         "the nested companion property must finalize the inferred result"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -949,11 +923,10 @@ fn inferred_qualified_enum_entry_property_keeps_the_enum_value_prefix() {
     )
     .with_file_stem("EnumEntryValue")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -962,7 +935,7 @@ fn inferred_qualified_enum_entry_property_keeps_the_enum_value_prefix() {
         analysis.streamed.is_some(),
         "the enum-entry-qualified inferred signature must finalize"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -979,17 +952,16 @@ fn enum_entry_initializer_call_keeps_stable_member_and_receiver_decisions() {
     )
     .with_file_stem("EnumEntryCall")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1011,20 +983,15 @@ fn enum_entry_generic_member_signature_finalizes_from_compact_headers() {
             crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
         )),
     ));
-    let analysis = analyze_source_set_with_features_and_prepare(
-        &inputs,
-        platform,
-        &LangFeatures::new(),
-        |_, _| {},
-        &mut diagnostics,
-    );
+    let analysis =
+        analyze_source_set_with_features(&inputs, platform, &LangFeatures::new(), &mut diagnostics);
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(
         analysis.streamed.is_some(),
         "the header-only enum-entry member must finalize in Pass 1"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1043,11 +1010,10 @@ fn enum_entry_generic_member_signature_honors_source_subtype_bound() {
     )
     .with_file_stem("EnumEntryGenericSourceBound")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1056,7 +1022,7 @@ fn enum_entry_generic_member_signature_honors_source_subtype_bound() {
         analysis.streamed.is_some(),
         "the source-bounded enum-entry member must finalize in Pass 1"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1070,17 +1036,16 @@ fn object_name_call_uses_the_selected_singleton_invoke_extension() {
     )
     .with_file_stem("ObjectInvoke")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1095,17 +1060,16 @@ fn inferred_generic_constructor_uses_the_completed_lambda_result_type() {
     )
     .with_file_stem("GenericConstructorLambda")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1119,17 +1083,16 @@ fn concrete_constructor_argument_solves_before_symbolic_outer_expectation() {
     )
     .with_file_stem("NestedConstructorInference")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1159,11 +1122,10 @@ fn pass_two_reparse_removes_the_complete_actualized_expect_class_subtree() {
         .with_file_stem("Actual"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1172,7 +1134,7 @@ fn pass_two_reparse_removes_the_complete_actualized_expect_class_subtree() {
         analysis.streamed.is_some(),
         "Pass 1 must finalize actual signatures"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1195,11 +1157,10 @@ fn source_optional_expectation_keeps_finalized_constructor_and_file_suppression(
         std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         platform,
         &LangFeatures::from_source(source),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1216,7 +1177,7 @@ fn source_optional_expectation_keeps_finalized_constructor_and_file_suppression(
         "Pass 2 must consume the finalized annotation constructor signature"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1238,16 +1199,15 @@ fn actualization_keeps_a_distinct_common_overload_after_body_compaction() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1277,16 +1237,15 @@ fn actualization_selects_overloads_through_an_actual_typealias() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1312,16 +1271,15 @@ fn inferred_common_result_keeps_exact_actual_overload_identity() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1346,16 +1304,15 @@ fn intermediate_actual_keeps_the_expect_type_until_a_later_typealias() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1371,16 +1328,15 @@ fn anonymous_unit_cannot_rebind_an_earlier_top_level_classifier_header() {
     )
     .with_file_stem("AnonymousUnit")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1404,16 +1360,15 @@ fn actualized_class_keeps_expect_constructor_and_member_defaults_in_pass_two() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1433,16 +1388,15 @@ fn pass_one_default_resolves_an_imported_sibling_source_package() {
         .with_file_stem("Helpers"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1466,11 +1420,10 @@ fn reparsed_body_resolves_a_platform_class_from_the_finalized_module_index() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1492,7 +1445,7 @@ fn reparsed_body_resolves_a_platform_class_from_the_finalized_module_index() {
         "the finalized classifier must expose its primary constructor"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1509,11 +1462,10 @@ fn reparsed_anonymous_object_retains_its_own_property_surface() {
     )
     .with_file_stem("AnonymousProperty")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1564,7 +1516,7 @@ fn reparsed_anonymous_object_retains_its_own_property_surface() {
         "the stable classifier provider must expose the anonymous object's property"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1583,11 +1535,10 @@ fn non_local_property_signature_publishes_demanded_anonymous_member_surface() {
     )
     .with_file_stem("AnonymousMemberProperty")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1611,7 +1562,7 @@ fn non_local_property_signature_publishes_demanded_anonymous_member_surface() {
         "a demanded inferred member must survive as stable callable metadata"
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1630,11 +1581,10 @@ fn streamed_classifier_members_do_not_depend_on_legacy_callable_maps() {
     )
     .with_file_stem("StableMembers")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1697,11 +1647,10 @@ fn streamed_cross_file_companion_const_keeps_checked_payload_on_selected_propert
         .with_file_stem("Use"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1749,16 +1698,15 @@ fn same_file_actual_keeps_expect_default_after_expect_removal_changes_sibling_or
     )
     .with_file_stem("Actual")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1780,7 +1728,7 @@ fn same_file_suspend_actual_keeps_expect_default_in_production_stream() {
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "signatures must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1808,16 +1756,15 @@ fn actualized_declarations_keep_callable_reference_and_lambda_expect_defaults() 
         .with_file_stem("Actual"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1843,16 +1790,15 @@ fn actualized_function_keeps_defaults_that_reference_prior_parameters() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1884,11 +1830,10 @@ fn nested_actualized_generic_member_inherits_expect_default_by_stable_ownership(
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1907,7 +1852,7 @@ fn nested_actualized_generic_member_inherits_expect_default_by_stable_ownership(
         !inner.constructors.is_empty(),
         "inner constructors must be projected without ClassSig"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1929,16 +1874,15 @@ fn actual_typealias_to_object_is_a_singleton_value_in_pass_two() {
         .with_file_stem("Actual"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(inputs[0].text),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1955,11 +1899,10 @@ fn pass_two_typealias_resolution_uses_the_finalized_index() {
     )
     .with_file_stem("StableAlias")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -1978,7 +1921,7 @@ fn pass_two_typealias_resolution_uses_the_finalized_index() {
         Some(crate::types::type_name("TextCell"))
     );
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -1993,17 +1936,16 @@ fn pass_two_resolves_and_validates_an_explicit_enum_entry_import() {
     )
     .with_file_stem("ImportedEnumEntry")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2038,19 +1980,18 @@ fn dependency_receiver_function_typealias_keeps_its_function_shape() {
             crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
         )),
     ));
-    let analysis = analyze_source_set_with_features_and_prepare_prefix(
+    let analysis = analyze_source_set_prefix_with_features(
         &inputs,
         1,
         1,
         platform,
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2070,17 +2011,16 @@ fn qualified_alias_of_body_local_class_remains_pass_two_lexical_state() {
     let inputs = [SourceInput::kotlin(source).with_file_stem("BodyLocalNestedAlias")];
     let features = LangFeatures::from_source(source);
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &features,
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2099,17 +2039,16 @@ fn compact_constructor_completion_preserves_integer_literal_bound_adaptation() {
     let inputs = [SourceInput::kotlin(source).with_file_stem("ConstructorLiteralBound")];
     let features = LangFeatures::from_source(source);
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &features,
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2129,16 +2068,15 @@ fn retained_inline_member_annotations_are_checked_under_the_enclosing_suppressio
         .with_file_stem("RetainedInlineAnnotation"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2159,11 +2097,10 @@ fn contextual_smartcast_signature_keeps_the_declaration_type_parameter() {
     )
     .with_file_stem("ContextualSmartcast")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2172,7 +2109,7 @@ fn contextual_smartcast_signature_keeps_the_declaration_type_parameter() {
         analysis.streamed.is_some(),
         "the generic signature must finalize"
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2189,16 +2126,15 @@ fn statement_suppression_applies_while_streaming_only_its_body_subtree() {
     )
     .with_file_stem("ScopedSuppression")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2212,16 +2148,15 @@ fn file_suppression_seeds_each_streamed_body_lexical_scope() {
     )
     .with_file_stem("FileSuppression")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2235,16 +2170,15 @@ fn data_object_does_not_publish_a_generated_copy_candidate() {
     )
     .with_file_stem("DataObjectCopy")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2260,16 +2194,15 @@ fn delegated_superclass_member_is_a_concrete_super_selection() {
     )
     .with_file_stem("DelegatedSuper")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2289,11 +2222,10 @@ fn emission_pass_one_discovers_captures_only_inside_retained_inline_bodies() {
     )
     .with_file_stem("InlineCaptureBoundary")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2321,7 +2253,7 @@ fn emission_pass_one_discovers_captures_only_inside_retained_inline_bodies() {
         .count();
     assert_eq!(generated_capture_fields, 1);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2338,11 +2270,10 @@ fn pass_one_inline_fir_publishes_owned_anonymous_object_members() {
     )
     .with_file_stem("InlineAnonymousMember")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2432,7 +2363,7 @@ fn pass_one_inline_fir_publishes_owned_anonymous_object_members() {
         "the inferred anonymous-member result must be published under its stable identity before the retained inline FIR is checked",
     );
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2457,16 +2388,15 @@ fn pass_one_inline_anonymous_member_retains_its_local_classifier_subtree() {
     )
     .with_file_stem("InlineAnonymousLocalClassifiers")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2479,11 +2409,10 @@ fn pass_one_inline_fir_reads_an_inferred_anonymous_property_by_its_canonical_ide
     )
     .with_file_stem("InlineAnonymousProperty")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2509,7 +2438,7 @@ fn pass_one_inline_fir_reads_an_inferred_anonymous_property_by_its_canonical_ide
         .expect("stable result declaration");
     assert_eq!(index.signature(result).unwrap().result.get(), Ty::String);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2527,11 +2456,10 @@ fn pass_one_retains_an_inline_member_nested_in_an_ordinary_property_initializer(
     )
     .with_file_stem("InlineInOrdinaryInitializer")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2542,7 +2470,7 @@ fn pass_one_retains_an_inline_member_nested_in_an_ordinary_property_initializer(
         .expect("the nested inline member must bind to its stable anonymous owner");
     assert_eq!(streamed.module.inline_bodies().len(), 1);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2561,11 +2489,10 @@ fn pass_one_inline_check_publishes_an_inferred_generic_anonymous_override() {
     )
     .with_file_stem("InlineGenericAnonymousOverride")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2588,7 +2515,7 @@ fn pass_one_inline_check_publishes_an_inferred_generic_anonymous_override() {
         .expect("anonymous apply declaration");
     assert!(index.signature(apply).is_some());
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2606,11 +2533,10 @@ fn emission_pass_one_retains_inline_accessor_fir_only() {
     )
     .with_file_stem("InlineAccessors")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -2639,7 +2565,7 @@ fn emission_pass_one_retains_inline_accessor_fir_only() {
         .count();
     assert_eq!(inline_accessors, 3);
 
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2655,17 +2581,16 @@ fn inline_accessor_binding_ignores_released_sibling_body_spans() {
     )
     .with_file_stem("MixedInlineAccessors")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2696,7 +2621,7 @@ fn signature_default_binding_ignores_released_ordinary_local_class_ownership() {
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -2752,14 +2677,25 @@ fn production_pass_one_publishes_checked_const_expression_payloads_only_for_cons
         .decls
         .iter()
         .filter_map(|declaration| match analysis.files[0].decl(*declaration) {
-            crate::ast::Decl::Property(property) => Some((property.name.as_str(), *declaration)),
+            crate::ast::Decl::Property(property) => Some((property.name.as_str(), property.span)),
             crate::ast::Decl::Fun(_) | crate::ast::Decl::Class(_) => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
     let constant = |name: &str| {
-        analysis.symbols.source_props[&(0, properties[name].0)]
-            .compile_time_constant
-            .clone()
+        let declaration = stable_declaration_at(
+            &analysis,
+            0,
+            properties[name],
+            crate::fir::DeclarationKind::Property,
+        );
+        analysis
+            .streamed
+            .as_ref()
+            .expect("Pass 1 must finalize")
+            .module
+            .index()
+            .compile_time_constant(declaration)
+            .cloned()
     };
     assert_eq!(
         constant("answer"),
@@ -3266,11 +3202,10 @@ fn nested_anonymous_inner_constructor_default_is_checked_and_owned_in_pass_one()
     )
     .with_file_stem("NestedDefault")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -3280,7 +3215,7 @@ fn nested_anonymous_inner_constructor_default_is_checked_and_owned_in_pass_one()
         .as_ref()
         .expect("the local constructor default must finish Pass 1");
     assert_eq!(streamed.module.default_arguments().len(), 1);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3298,11 +3233,10 @@ fn local_constructor_default_captures_enclosing_class_header_parameter() {
     )
     .with_file_stem("CapturedHeaderDefault")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -3312,7 +3246,7 @@ fn local_constructor_default_captures_enclosing_class_header_parameter() {
         .as_ref()
         .expect("the captured local constructor default must finish Pass 1");
     assert_eq!(streamed.module.default_arguments().len(), 1);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3330,11 +3264,10 @@ fn constructor_default_publishes_local_classifier_members_checked_inside_the_def
     )
     .with_file_stem("DefaultLocalClassifier")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -3344,7 +3277,7 @@ fn constructor_default_publishes_local_classifier_members_checked_inside_the_def
         .as_ref()
         .expect("the default's checked local signatures must finish Pass 1");
     assert_eq!(streamed.module.default_arguments().len(), 1);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3360,11 +3293,10 @@ fn secondary_constructor_default_is_selected_from_the_stable_parameter_header() 
     )
     .with_file_stem("StableSecondaryDefault")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -3374,7 +3306,7 @@ fn secondary_constructor_default_is_selected_from_the_stable_parameter_header() 
         .as_ref()
         .expect("the secondary constructor default must finish Pass 1");
     assert_eq!(streamed.module.default_arguments().len(), 1);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3392,17 +3324,16 @@ fn pass_two_top_level_property_stability_uses_the_active_stable_declaration() {
     )
     .with_file_stem("StableTopLevelPropertyPath")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3421,11 +3352,10 @@ fn nested_anonymous_member_default_is_fully_published_from_the_retained_default(
     )
     .with_file_stem("NestedAnonymousDefault")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -3435,7 +3365,7 @@ fn nested_anonymous_member_default_is_fully_published_from_the_retained_default(
         .as_ref()
         .expect("both nested defaults must finish Pass 1");
     assert_eq!(streamed.module.default_arguments().len(), 2);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3449,16 +3379,15 @@ fn default_check_does_not_reopen_released_declaration_annotation_arguments() {
     )
     .with_file_stem("AnnotatedDefault")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3479,17 +3408,16 @@ fn reparsed_local_member_result_is_joined_by_stable_declaration() {
     )
     .with_file_stem("StableLocalMemberResult")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3510,18 +3438,17 @@ fn reparsed_local_constructor_result_keeps_captured_type_parameter() {
     )
     .with_file_stem("StableLocalCapturedConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3541,18 +3468,17 @@ fn reparsed_inner_constructor_uses_finalized_captured_parameter_shape() {
     )
     .with_file_stem("StableInnerConstructorShape")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3567,18 +3493,17 @@ fn reparsed_secondary_constructor_respects_explicit_classifier_arguments() {
     )
     .with_file_stem("StableExplicitSecondaryConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3599,18 +3524,17 @@ fn reparsed_constructor_combines_contravariant_argument_and_expected_supertype_c
     )
     .with_file_stem("ContravariantConstructorResult")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3630,18 +3554,17 @@ fn reparsed_expected_supertype_contextualizes_a_nested_constructor_lambda() {
     )
     .with_file_stem("ExpectedSupertypeNestedLambda")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3662,18 +3585,17 @@ fn reparsed_constructor_bound_contextualizes_a_postponed_builder_result() {
     )
     .with_file_stem("PostponedBuilderConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3693,18 +3615,17 @@ fn reparsed_anonymous_function_spells_a_postponed_extension_receiver_parameter()
     )
     .with_file_stem("AnonymousFunctionBuilder")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3723,18 +3644,17 @@ fn reparsed_constructor_retains_a_lambda_body_inference_solution() {
     )
     .with_file_stem("ConstructorLambdaInference")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3752,18 +3672,17 @@ fn reparsed_constructor_merges_fixed_and_inferred_type_arguments() {
     )
     .with_file_stem("PartialExplicitConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3781,18 +3700,17 @@ fn reparsed_constructor_infers_from_an_explicitly_typed_lambda_parameter() {
     )
     .with_file_stem("TypedLambdaConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3814,18 +3732,17 @@ fn reparsed_typealias_constructor_infers_omitted_arguments_from_selected_context
     )
     .with_file_stem("ContextualTypealiasConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3844,18 +3761,17 @@ fn reparsed_constructor_infers_integer_literal_from_the_class_parameter_bound() 
     )
     .with_file_stem("BoundedIntegerLiteralConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3874,18 +3790,17 @@ fn reparsed_secondary_constructor_infers_its_class_type_argument() {
     )
     .with_file_stem("GenericSecondaryConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3900,18 +3815,17 @@ fn reparsed_constructor_preserves_a_lexically_fixed_class_type_argument() {
     )
     .with_file_stem("LexicalGenericConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3931,16 +3845,15 @@ fn reparsed_no_arg_constructor_uses_a_symbolic_local_expected_type() {
     )
     .with_file_stem("SymbolicExpectedConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3955,16 +3868,15 @@ fn reparsed_interface_name_does_not_preempt_a_same_named_factory() {
     )
     .with_file_stem("InterfaceFactory")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -3978,16 +3890,15 @@ fn reparsed_object_typealias_selects_the_singleton_invoke() {
     )
     .with_file_stem("ObjectAliasInvoke")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4002,18 +3913,17 @@ fn reparsed_super_constructor_contextualizes_a_nested_generic_constructor() {
     )
     .with_file_stem("ContextualSuperConstructorArgument")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4027,18 +3937,17 @@ fn reparsed_equality_contextualizes_an_otherwise_unbound_generic_constructor() {
     )
     .with_file_stem("ContextualEqualityConstructor")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4055,18 +3964,17 @@ fn reparsed_call_parameter_contextualizes_a_bare_enum_entry() {
     .with_file_stem("ContextualEnumArgument")];
     let mut diagnostics = DiagSink::new();
     let features = LangFeatures::from_source(inputs[0].text);
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &features,
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4080,18 +3988,17 @@ fn reparsed_call_parameter_contextualizes_an_empty_reference_array_factory() {
     )
     .with_file_stem("ContextualEmptyArrayFactory")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4105,18 +4012,17 @@ fn reparsed_classifier_identity_shadows_same_spelled_array_synthetic() {
     )
     .with_file_stem("ArraySyntheticShadow")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4137,17 +4043,16 @@ fn reparsed_inferred_function_result_updates_only_its_stable_declaration() {
         .with_file_stem("Calls"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4165,17 +4070,16 @@ fn nested_inline_check_does_not_reopen_its_released_enclosing_body() {
     )
     .with_file_stem("NestedInline")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4203,17 +4107,16 @@ fn nested_classifier_inside_local_class_publishes_inferred_member_result() {
     )
     .with_file_stem("NestedClassifierInLocalClass")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4242,17 +4145,16 @@ fn bounded_reparse_binds_multiple_local_classifier_subtrees_in_source_order() {
     )
     .with_file_stem("MultipleLocalClassifierSubtrees")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4277,11 +4179,10 @@ fn excluded_expect_annotation_policy_never_reopens_released_arguments() {
         .with_file_stem("Actual"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -4301,17 +4202,16 @@ fn stable_member_result_never_falls_back_to_active_parser_coordinates() {
     )
     .with_file_stem("StableMemberResult")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4331,18 +4231,17 @@ fn reparsed_callable_references_use_stable_declarations_without_emit_owners() {
     )
     .with_file_stem("StableCallableReferences")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4370,18 +4269,12 @@ fn reparsed_contextual_collection_literal_replaces_its_fallback_call_target() {
         std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
     ));
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
-        &inputs,
-        platform,
-        &features,
-        |_, _| {},
-        &mut diagnostics,
-    );
+    let analysis = analyze_source_set_with_features(&inputs, platform, &features, &mut diagnostics);
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
     let analysis = finish_pass_one(analysis);
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4407,11 +4300,10 @@ fn constructor_parameter_coercion_annotation_survives_bounded_reparse() {
     ];
     let features = LangFeatures::from_source(inputs[1].text);
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &features,
-        |_, _| {},
         &mut diagnostics,
     );
 
@@ -4464,17 +4356,16 @@ fn bounded_body_binding_allows_distinct_declarations_with_shared_active_span() {
     )
     .with_file_stem("SharedActiveBodySpan")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
@@ -4495,17 +4386,16 @@ fn retained_inline_body_publishes_constructors_of_lexical_local_classes() {
     )
     .with_file_stem("InlineLocalConstructors")];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(analysis.streamed.is_some(), "Pass 1 must finalize");
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }

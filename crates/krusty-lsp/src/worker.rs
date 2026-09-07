@@ -1190,9 +1190,6 @@ fn render_dump_request(
         platform,
         &features,
     );
-    // A second handle over the same `Rc<Classpath>`: the semantic platform was moved into the
-    // analysis as a `Box<dyn SemanticPlatform>`, which cannot be re-borrowed as a `TargetRuntime`.
-    let runtime = JvmLibraries::new(classpath.clone());
     let response = render_analyzed_dump(
         &analysis,
         &sources[request.target],
@@ -1200,7 +1197,6 @@ fn render_dump_request(
         &request.label,
         &request.cache_key,
         &request.cache_root,
-        &runtime,
     );
     if stub_overlay_set {
         classpath.clear_stub_overlay();
@@ -1210,9 +1206,8 @@ fn render_dump_request(
 
 /// Render the analyzed target file's document and store it under `cache_root`.
 ///
-/// Everything the document needs — including driving the lowering that fills its IR section — is
-/// the dump renderer's own business; the worker only picks the file out of its analysis and decides
-/// where the result is written.
+/// Inspection retains syntax and checked editor facts, but executable common IR exists only while
+/// the production streaming compiler consumes checked FIR. Do not reconstruct it from this AST.
 fn render_analyzed_dump(
     analysis: &compiler_analysis::SourceSetAnalysis,
     source: &str,
@@ -1220,7 +1215,6 @@ fn render_analyzed_dump(
     label: &str,
     cache_key: &str,
     cache_root: &Path,
-    runtime: &JvmLibraries,
 ) -> Option<DumpResponse> {
     let file_analysis = analysis.files.get(target)?;
     let text = krusty::dump::render_file_dump_with_limit(
@@ -1228,11 +1222,9 @@ fn render_analyzed_dump(
             label,
             source,
             file: &file_analysis.file,
-            file_index: target,
             info: file_analysis.types.as_ref(),
-            symbols: &analysis.symbols,
-            runtime,
             diagnostics: &file_analysis.diagnostics,
+            ir: Err("common IR was not captured during streaming compilation"),
         },
         crate::dump_cache::MAX_DUMP_BYTES,
     );

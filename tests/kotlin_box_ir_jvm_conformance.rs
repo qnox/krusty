@@ -361,7 +361,7 @@ class ResultContinuation : Continuation<Any?> {
 "#;
 
 /// Compile a `// FILE: name.kt`-split multi-file test as ONE module: parse each block, collect global
-/// signatures, populate the cross-file function→facade map (`SymbolTable.fn_facades`, like the CLI
+/// signatures and preserve the selected declaration identity across files, like the CLI
 /// driver), then type-check + lower + emit each file, returning ALL classes. Returns `None` if any file
 /// uses something the IR backend can't lower (e.g. a cross-file *class* reference — only cross-file
 /// top-level functions are modeled so far), so the test SKIPS rather than miscompiles.

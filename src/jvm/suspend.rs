@@ -1,6 +1,6 @@
 //! JVM coroutine (`suspend fun`) IR lowering pass — an **optional, JVM-only** IR→IR transform.
 //!
-//! `ir_lower` keeps a `suspend fun` as a plain function (its declared Kotlin signature) and records its
+//! `fir_lower` keeps a `suspend fun` as a plain function (its declared Kotlin signature) and records its
 //! `FunId` in `ir.suspend_funs`, so the platform-agnostic IR stays neutral (a JS backend realizes
 //! suspension differently). This pass realizes kotlinc's JVM continuation-passing-style (CPS) ABI:
 //!
@@ -309,7 +309,7 @@ pub fn lower_suspend(
         let has_susp =
             forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
         // A `suspendCoroutineUninterceptedOrReturn` block that reads its continuation is a
-        // first-class suspension point (ir_lower registered it separately from callable nodes): the
+        // first-class suspension point (fir_lower registered it separately from callable nodes): the
         // machine passes ITSELF as the continuation, so `it.resume(v)` re-enters this machine at
         // the resume label — kotlinc's protocol (coroutines/tailCallToNothing).
         crate::trace_compiler!(
@@ -344,7 +344,7 @@ pub fn lower_suspend(
             *chk = None;
         }
 
-        // The continuation parameter's value-index is `params + (this ? 1 : 0)`; ir_lower numbered body
+        // The continuation parameter's value-index is `params + (this ? 1 : 0)`; fir_lower numbered body
         // locals from that same index, so shift every body local up by one to make room for it.
         let p_old =
             ir.functions[fid as usize].params.len() as u32 - 1 + if is_static { 0 } else { 1 };
@@ -435,7 +435,7 @@ pub fn lower_suspend(
         }
     }
     // Suspend LAMBDAS with multiple suspensions / control flow: their `invokeSuspend` is a state machine
-    // whose continuation is the lambda instance itself (ir_lower handled the single-suspension shapes).
+    // whose continuation is the lambda instance itself (fir_lower handled the single-suspension shapes).
     for (fid, class_id, field_base) in ir.suspend_lambda_sm.clone() {
         if !build_lambda_state_machine(
             ir,
@@ -2283,7 +2283,7 @@ fn hoist_expr(
         if !hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude) {
             return e;
         }
-        // Logical return type of the suspension: from ir_lower for a cross-unit call or intrinsic
+        // Logical return type of the suspension: from fir_lower for a cross-unit call or intrinsic
         // point, else the callee's `orig_rets` entry (a same-file callee), else `Object`.
         let ty = value_class_suspension_result(ir, e, suspend_set)
             .map(crate::ir::IrValueClassSuspendResult::boundary_ty)

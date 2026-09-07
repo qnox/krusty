@@ -1,8 +1,8 @@
-//! Coverage-focused end-to-end tests for the IR backend (`src/ir_lower.rs`, `src/jvm/ir_emit.rs`).
+//! Coverage-focused end-to-end tests for the IR backend (`src/fir_lower.rs`, `src/jvm/ir_emit.rs`).
 //!
 //! Two kinds of test live here, both driving the FULL pipeline:
 //!
-//!  * `box_ok(src)` — compile `src` in-process (the exact `lex → parse → check → ir_lower →
+//!  * `box_ok(src)` — compile `src` in-process (the exact `lex → parse → check → fir_lower →
 //!    value-class → suspend → ir_emit` pipeline the conformance harness uses) and run its `box()` on a
 //!    persistent JVM, asserting it returns `"OK"`. Each exercises an UNCOMMON-but-supported codegen
 //!    branch (a rare numeric type/operator combination, a primitive array kind, a control-flow shape in

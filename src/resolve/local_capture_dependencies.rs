@@ -307,7 +307,7 @@ impl Checker<'_> {
         let classifier = stable_constructor
             .and_then(|declaration| {
                 self.active_declarations
-                    .and_then(|active| active.constructor(self.file, declaration))
+                    .constructor(self.file, declaration)
                     .map(|(classifier, _, _)| classifier)
             })
             .or_else(|| {
@@ -318,8 +318,8 @@ impl Checker<'_> {
                     .find(|declaration| {
                         matches!(
                             self.file.decl(*declaration),
-                            Decl::Class(class)
-                                if self.active_classifier_internal(*declaration, class) == Some(owner)
+                            Decl::Class(_)
+                                if self.active_classifier_internal(*declaration) == Some(owner)
                         )
                     })
             })?;

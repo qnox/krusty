@@ -3,9 +3,7 @@
 //! `TODO()` throws `kotlin.NotImplementedError`, resolved from the stdlib on the classpath.
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
-use krusty::lexer::lex;
-use krusty::parser::parse;
+use krusty::frontend::{analyze_source_set_with_features, SourceInput};
 
 use super::common;
 
@@ -33,19 +31,18 @@ fn diverging_property_initializer_runs() {
 
     // Sanity: the checker accepts it with the same semantic classpath used for compilation.
     let mut d = DiagSink::new();
-    let toks = lex(SRC, &mut d);
-    let files = vec![parse(SRC, &toks, &mut d)];
-    let mut syms = collect_signatures_with_cp(
-        &files,
+    let features = krusty::features::LangFeatures::from_source(SRC);
+    let _ = analyze_source_set_with_features(
+        &[SourceInput::kotlin(SRC)],
         Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
             std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
                 stdlib.clone(),
                 jdk.clone(),
             ])),
         )),
+        &features,
         &mut d,
     );
-    let _ = check_file(&files[0], &mut syms, &mut d);
     assert!(
         !d.has_errors(),
         "krusty errors: {:?}",

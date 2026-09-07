@@ -1,13 +1,17 @@
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures, parse_source_with_detected_features};
+use krusty::frontend::{analyze_source_set_with_features, SourceInput};
 
 fn main() {
     for path in std::env::args().skip(1) {
         let src = std::fs::read_to_string(&path).unwrap_or_default();
         let mut d = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(&src, &mut d)];
-        let mut syms = collect_signatures(&files, &mut d);
-        check_file(&files[0], &mut syms, &mut d);
+        let inputs = [SourceInput::kotlin(&src)];
+        let _ = analyze_source_set_with_features(
+            &inputs,
+            Box::new(krusty::libraries::EmptySymbolSource),
+            &krusty::features::LangFeatures::default(),
+            &mut d,
+        );
         if d.diags.is_empty() {
             println!("{path}: OK");
         } else {

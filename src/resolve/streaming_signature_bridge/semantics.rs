@@ -305,7 +305,8 @@ impl ProductionSignatureSemantics<'_> {
 
     fn source_parameters_specialized_by_receiver(
         &self,
-        source: (u32, u32),
+        source: Option<(u32, u32)>,
+        stable_declaration: Option<crate::fir::DeclarationId>,
         receiver: Ty,
         signature: &crate::fir::ResolvedSignature,
     ) -> Option<Vec<Ty>> {
@@ -316,8 +317,15 @@ impl ProductionSignatureSemantics<'_> {
             .flat_map(HashMap::values)
             .flatten()
             .find(|callable| {
-                callable.source_file == Some(source.0)
-                    && callable.source_decl == Some(DeclId(source.1))
+                stable_declaration.map_or_else(
+                    || {
+                        source.is_some_and(|(file, declaration)| {
+                            callable.source_file == Some(file)
+                                && callable.source_decl == Some(DeclId(declaration))
+                        })
+                    },
+                    |declaration| callable.stable_declaration == Some(declaration),
+                )
             })?;
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
         crate::symbol_resolver::unify_inferred_ty(
@@ -564,6 +572,7 @@ impl ProductionSignatureSemantics<'_> {
             .table
             .source_props
             .values()
+            .chain(self.table.stable_source_props.values())
             .find(|property| property.stable_declaration == Some(scope.owner))
         {
             let bounds = property
@@ -849,20 +858,19 @@ impl ProductionSignatureSemantics<'_> {
             return Ok(None);
         };
         self.commit_postponed_bindings(scope, postponed_bindings);
-        if let Some(source) = source {
-            if let Some(signature) = self.demanded_source_signature(None, declaration, demand)? {
-                return self
-                    .apply_demanded_source_callable(
-                        source,
-                        Some(receiver),
-                        &signature,
-                        &argument_types,
-                        None,
-                        &resolved_type_arguments,
-                        None,
-                    )
-                    .map(Some);
-            }
+        if let Some(signature) = self.demanded_source_signature(None, declaration, demand)? {
+            return self
+                .apply_demanded_source_callable(
+                    source,
+                    declaration,
+                    Some(receiver),
+                    &signature,
+                    &argument_types,
+                    None,
+                    &resolved_type_arguments,
+                    None,
+                )
+                .map(Some);
         }
         crate::fir::ResolvedTy::new(result)
             .map(Some)
@@ -2367,34 +2375,36 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         &selected_argument_types,
                     );
                 }
-                if let Some(source) = source {
-                    if let Some(signature) =
-                        self.demanded_source_signature(None, declaration, demand)?
-                    {
-                        // Preserve receiver-derived substitutions independently from ordinary
-                        // argument inference. Comparing this exact declared shape with the
-                        // materialized arguments relates active builder variables to the outer
-                        // receiver's type arguments instead of approximating both to a common
-                        // bound.
-                        if let Some(parameters) = self
-                            .source_parameters_specialized_by_receiver(source, receiver, &signature)
-                        {
-                            self.record_scoped_argument_constraints(
-                                scope,
-                                &parameters,
-                                &selected_argument_types,
-                            );
-                        }
-                        return self.apply_demanded_source_callable(
-                            source,
-                            Some(receiver),
-                            &signature,
+                if let Some(signature) =
+                    self.demanded_source_signature(None, declaration, demand)?
+                {
+                    // Preserve receiver-derived substitutions independently from ordinary
+                    // argument inference. Comparing this exact declared shape with the
+                    // materialized arguments relates active builder variables to the outer
+                    // receiver's type arguments instead of approximating both to a common
+                    // bound.
+                    if let Some(parameters) = self.source_parameters_specialized_by_receiver(
+                        source,
+                        declaration,
+                        receiver,
+                        &signature,
+                    ) {
+                        self.record_scoped_argument_constraints(
+                            scope,
+                            &parameters,
                             &selected_argument_types,
-                            None,
-                            &resolved_type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
                         );
                     }
+                    return self.apply_demanded_source_callable(
+                        source,
+                        declaration,
+                        Some(receiver),
+                        &signature,
+                        &selected_argument_types,
+                        None,
+                        &resolved_type_arguments,
+                        expected.map(crate::fir::ResolvedTy::get),
+                    );
                 }
                 crate::trace_compiler!(
                     "signature",
@@ -2729,11 +2739,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             && match candidate.visibility {
                                 crate::types::Visibility::Public => false,
                                 crate::types::Visibility::Internal => {
-                                    candidate.source_key.is_some()
+                                    candidate.source_file.is_some()
                                 }
-                                crate::types::Visibility::Private => candidate
-                                    .source_key
-                                    .is_some_and(|(file, _)| file == scope.source.raw()),
+                                crate::types::Visibility::Private => {
+                                    candidate.source_file == Some(scope.source.raw())
+                                }
                                 crate::types::Visibility::PackagePrivate
                                 | crate::types::Visibility::Protected => false,
                             }
@@ -2869,43 +2879,50 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     callable.name,
                     callable.ret,
                 );
-                if let Some(source) = source {
-                    if let Some(signature) =
-                        self.demanded_source_signature(None, declaration, demand)?
-                    {
-                        let context_count = self
-                            .table
-                            .funs
-                            .values()
-                            .flatten()
-                            .find(|candidate| {
-                                candidate.source_file == Some(source.0)
-                                    && candidate.source_decl == Some(DeclId(source.1))
-                            })
-                            .map(|candidate| candidate.context_count)
-                            .unwrap_or_default()
-                            .min(signature.parameters.len());
-                        let parameters = signature.parameters[context_count..]
-                            .iter()
-                            .map(|parameter| parameter.get())
-                            .collect::<Vec<_>>();
-                        self.record_scoped_argument_constraints(
-                            scope,
-                            &parameters,
-                            &selected_argument_types,
-                        );
-                        return self.apply_demanded_source_callable(
-                            source,
-                            None,
-                            &signature,
-                            &selected_argument_types,
-                            (!trailing_lambda
-                                && arguments.iter().all(|argument| argument.name.is_none()))
-                            .then_some(argument_kinds.as_slice()),
-                            &resolved_type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        );
-                    }
+                if let Some(signature) =
+                    self.demanded_source_signature(None, declaration, demand)?
+                {
+                    let context_count = self
+                        .table
+                        .funs
+                        .values()
+                        .flatten()
+                        .find(|candidate| {
+                            declaration.map_or_else(
+                                || {
+                                    source.is_some_and(|(file, source_declaration)| {
+                                        candidate.source_file == Some(file)
+                                            && candidate.source_decl
+                                                == Some(DeclId(source_declaration))
+                                    })
+                                },
+                                |declaration| candidate.stable_declaration == Some(declaration),
+                            )
+                        })
+                        .map(|candidate| candidate.context_count)
+                        .unwrap_or_default()
+                        .min(signature.parameters.len());
+                    let parameters = signature.parameters[context_count..]
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect::<Vec<_>>();
+                    self.record_scoped_argument_constraints(
+                        scope,
+                        &parameters,
+                        &selected_argument_types,
+                    );
+                    return self.apply_demanded_source_callable(
+                        source,
+                        declaration,
+                        None,
+                        &signature,
+                        &selected_argument_types,
+                        (!trailing_lambda
+                            && arguments.iter().all(|argument| argument.name.is_none()))
+                        .then_some(argument_kinds.as_slice()),
+                        &resolved_type_arguments,
+                        expected.map(crate::fir::ResolvedTy::get),
+                    );
                 }
                 crate::fir::ResolvedTy::new(callable.ret).map_err(|_| Self::failure())
             }
@@ -3170,11 +3187,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             && match candidate.visibility {
                                 crate::types::Visibility::Public => true,
                                 crate::types::Visibility::Internal => {
-                                    candidate.source_key.is_some()
+                                    candidate.source_file.is_some()
                                 }
-                                crate::types::Visibility::Private => candidate
-                                    .source_key
-                                    .is_some_and(|(file, _)| file == scope.source.raw()),
+                                crate::types::Visibility::Private => {
+                                    candidate.source_file == Some(scope.source.raw())
+                                }
                                 crate::types::Visibility::PackagePrivate
                                 | crate::types::Visibility::Protected => false,
                             }
@@ -4376,6 +4393,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         unbound: bool,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let receiver = receiver.get();
+        // A bare reference-array classifier denotes its existential readable shape in a class
+        // literal. This is the same semantic array predicate used by ordinary body checking; the
+        // backend spelling is not consulted and the compact signature graph therefore finalizes
+        // `Array::class` as `KClass<Array<out Any?>>` before Pass 2.
+        let receiver =
+            if unbound && receiver.is_reference_array() && receiver.type_args().is_empty() {
+                Ty::obj_args_name(
+                    receiver
+                        .obj_internal()
+                        .expect("a reference array has a classifier identity"),
+                    &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+                )
+            } else {
+                receiver
+            };
         if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {
             return Err(Self::failure());
         }
@@ -5097,25 +5129,22 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 &argument_types,
             );
         }
-        if let Some(source) = source {
-            if let Some(signature) =
-                self.demanded_source_signature(None, source_declaration, demand)?
-            {
-                return self
-                    .apply_demanded_source_callable(
-                        source,
-                        Some(receiver.get()),
-                        &signature,
-                        &argument_types,
-                        None,
-                        &type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )
-                    .map(|ty| crate::fir::ResolvedMemberCall {
-                        ty: Some(ty),
-                        declaration: source_declaration,
-                    });
-            }
+        if let Some(signature) = self.demanded_source_signature(None, source_declaration, demand)? {
+            return self
+                .apply_demanded_source_callable(
+                    source,
+                    source_declaration,
+                    Some(receiver.get()),
+                    &signature,
+                    &argument_types,
+                    None,
+                    &type_arguments,
+                    expected.map(crate::fir::ResolvedTy::get),
+                )
+                .map(|ty| crate::fir::ResolvedMemberCall {
+                    ty: Some(ty),
+                    declaration: source_declaration,
+                });
         }
         let declaration = member.and_then(|member| member.stable_declaration);
         let ty = crate::fir::ResolvedTy::new(result).ok();
@@ -5416,20 +5445,19 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
                 }
             }
-            if let Some(source) = selected.source_key {
-                if let Some(signature) =
-                    self.demanded_source_signature(None, selected.stable_declaration, demand)?
-                {
-                    return self.apply_demanded_source_callable(
-                        source,
-                        Some(callee.get()),
-                        &signature,
-                        &argument_types,
-                        None,
-                        &[],
-                        None,
-                    );
-                }
+            if let Some(signature) =
+                self.demanded_source_signature(None, selected.stable_declaration, demand)?
+            {
+                return self.apply_demanded_source_callable(
+                    selected.source_key,
+                    selected.stable_declaration,
+                    Some(callee.get()),
+                    &signature,
+                    &argument_types,
+                    None,
+                    &[],
+                    None,
+                );
             }
             return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
         }

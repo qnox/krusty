@@ -650,14 +650,13 @@ fn reparsed_cross_file_constructor_retains_nullable_top_type_argument() {
             .with_file_stem("Use"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
 
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     assert!(census.failures.is_empty(), "{:?}", census.failures);

@@ -1,46 +1,16 @@
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::frontend::CheckedFile;
-use crate::runtime::TargetRuntime;
 
-pub struct JsBackend<R> {
-    runtime: R,
-}
+pub struct JsBackend;
 
-impl<R> JsBackend<R> {
-    pub fn new(runtime: R) -> Self {
-        Self { runtime }
+impl JsBackend {
+    pub fn new() -> Self {
+        Self
     }
 }
 
-impl<R> Backend for JsBackend<R>
-where
-    R: TargetRuntime,
-{
+impl Backend for JsBackend {
     type State = ();
-
-    fn lower_file(
-        &self,
-        checked: CheckedFile<'_>,
-        stem: &str,
-        _state: &mut Self::State,
-        diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        let Some(ir) = crate::ir_lower::lower_file_at(
-            checked.file,
-            checked.file_index,
-            checked.info,
-            checked.symbols,
-            &self.runtime,
-        ) else {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                "krusty: this construct is not yet supported by the IR backend".to_string(),
-            );
-            return Vec::new();
-        };
-        vec![(format!("{stem}.js"), super::emit_file(&ir).into_bytes())]
-    }
 
     fn lower_ir_file(
         &self,
@@ -98,7 +68,7 @@ mod tests {
         let outputs = crate::compiler::emit_analyzed(
             analysis,
             &stems,
-            &super::JsBackend::new(EmptySymbolSource),
+            &super::JsBackend::new(),
             "main",
             &mut diags,
         );

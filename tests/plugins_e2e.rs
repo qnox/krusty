@@ -9,11 +9,8 @@
 use std::rc::Rc;
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
-use krusty::ir_lower::lower_file;
+use krusty::frontend::{analyze_source_set_with_features, SourceInput};
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::lexer::lex;
-use krusty::parser::parse;
 use krusty::plugins::serialization::{SerializationPlugin, SERIALIZABLE_FQ};
 use krusty::plugins::{PluginContext, PluginHost};
 
@@ -34,23 +31,20 @@ fn lower_with_classpath(
     let cp = Rc::new(krusty::jvm::classpath::Classpath::new(jars));
 
     let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
-    if d.has_errors() {
-        return None;
-    }
+    let features = krusty::features::LangFeatures::from_source(src);
     let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
+    let mut analysis =
+        analyze_source_set_with_features(&[SourceInput::kotlin(src)], platform, &features, &mut d);
     if d.has_errors() {
         return None;
     }
-    let info = check_file(&files[0], &mut syms, &mut d);
-    if d.has_errors() {
+    let (mut captured, diagnostics) =
+        common::capture_common_ir(src, "PluginInput", Box::new(JvmLibraries::new(cp.clone())));
+    if !diagnostics.is_empty() {
         return None;
     }
-    let runtime = JvmLibraries::new(cp.clone());
-    let ir = lower_file(&files[0], &info, &syms, &runtime)?;
-    let [file] = <[krusty::ast::File; 1]>::try_from(files).ok()?;
+    let ir = captured.pop()?;
+    let file = analysis.files.pop()?;
     Some((file, ir))
 }
 

@@ -138,11 +138,6 @@ fn project_classifier_parents(
 /// This function may shrink as checker queries move to `ResolvedModuleIndex`; it must never grow
 /// lookup or inference behavior. The compact solver has already made every semantic decision.
 pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &mut SymbolTable) {
-    let anonymous_classifiers = table
-        .anonymous_object_types
-        .values()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
     let mut stable_spellings = Vec::new();
     for signature in table.funs.values().flatten().chain(
         table
@@ -177,7 +172,9 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
         let Some(stable) = property.stable_declaration else {
             continue;
         };
-        let (source, declaration) = property.source;
+        let Some((source, declaration)) = property.source else {
+            continue;
+        };
         if let Some(spelling) = table
             .declared_spellings
             .get(&(source, crate::ast::DeclId(declaration)))
@@ -296,6 +293,37 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
             }
         }
     }
+    let mut stable_property_updates = Vec::new();
+    for property in table.stable_source_props.values_mut() {
+        let Some(declaration) = property.stable_declaration else {
+            continue;
+        };
+        let Some(signature) = index.signature(declaration) else {
+            continue;
+        };
+        property.ty = signature.result.get();
+        property.storage_ty = index
+            .property_for_declaration(declaration)
+            .and_then(|property| index.property(property))
+            .and_then(|property| property.storage_type)
+            .map(|storage| storage.get())
+            .or(property
+                .storage_ty
+                .filter(|storage| *storage != crate::types::Ty::Pending));
+        property.context_params = signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect();
+        if property.context_params.is_empty() {
+            stable_property_updates.push((property.name.clone(), signature.result.get()));
+        }
+    }
+    for (name, ty) in stable_property_updates {
+        if let Some((legacy, _, _)) = table.props.get_mut(&name) {
+            *legacy = ty;
+        }
+    }
     for property in table.ext_props.values_mut().flatten() {
         let Some(declaration) = property.stable_declaration else {
             continue;
@@ -319,7 +347,14 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
     }
 
     for class in table.classes.values_mut() {
-        let anonymous = anonymous_classifiers.contains(&class.internal);
+        let anonymous = class
+            .stable_declaration
+            .and_then(|declaration| index.declaration_header(declaration))
+            .is_some_and(|header| {
+                header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
+            });
         project_classifier_parents(index, class, anonymous);
         for plan in &mut class.source_methods {
             project_class_callable(
@@ -481,14 +516,20 @@ pub(crate) fn publish_stable_declaration_metadata(
             suppressions.optional_declaration_usage,
         );
     }
-    for property in table.source_props.values() {
+    for property in table
+        .source_props
+        .values()
+        .chain(table.stable_source_props.values())
+    {
         let (Some(declaration), Some(constant)) = (
             property.stable_declaration,
             property.compile_time_constant.as_ref(),
         ) else {
             continue;
         };
-        index.publish_compile_time_constant(declaration, constant.clone());
+        if index.compile_time_constant(declaration).is_none() {
+            index.publish_compile_time_constant(declaration, constant.clone());
+        }
     }
     for class in table.classes.values() {
         for (name, constant) in &class.constants {
@@ -499,7 +540,9 @@ pub(crate) fn publish_stable_declaration_metadata(
             else {
                 continue;
             };
-            index.publish_compile_time_constant(declaration, constant.clone());
+            if index.compile_time_constant(declaration).is_none() {
+                index.publish_compile_time_constant(declaration, constant.clone());
+            }
         }
     }
 }

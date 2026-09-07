@@ -7,16 +7,7 @@
 //! directly to verify the synthesized class shape — the structural half of the differential-vs-kotlinc
 //! check.
 
-use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
-use krusty::ir_lower::lower_file;
-use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
-use krusty::jvm::ir_emit::emit_all;
-use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::jvm::names::file_class_name;
-use krusty::lexer::lex;
-use krusty::parser::parse;
 
 use super::common;
 
@@ -25,25 +16,8 @@ const ACC_STATIC: u16 = 0x0008;
 #[test]
 fn value_class_synthesizes_box_unbox_constructor_impl() {
     let src = "@JvmInline\nvalue class S(val x: Int)\nfun box(): String = \"OK\"\n";
-    let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
-    assert!(!d.has_errors(), "unexpected parse errors");
-
-    // `check_file` accepts value-class files (use-site unboxing is wired); the file resolves clean.
-    let cp = std::rc::Rc::new(Classpath::new(vec![common::stdlib_jar()]));
-    let mut syms =
-        collect_signatures_with_cp(&files, Box::new(JvmLibraries::new(cp.clone())), &mut d);
-    let info = check_file(&files[0], &mut syms, &mut d);
-    assert!(!d.has_errors(), "value-class file should check clean");
-
-    let runtime = JvmLibraries::new(cp.clone());
-    let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
-    let facade = file_class_name("S", None);
-    // The value-class `-impl` members are synthesized by the JVM passes (not `ir_lower`).
-    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms, &cp)
-        .expect("backend passes should accept this value class");
-    let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
+    let classes = common::compile_in_process(src, "S", &[common::stdlib_jar()], None)
+        .expect("production compiler should emit the value class");
 
     let (_, bytes) = classes
         .iter()
@@ -81,7 +55,7 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     assert!(ci.method("getX", "()I").is_some(), "getX()I getter");
 
     // The static `-impl` members must NOT leak onto the top-level facade.
-    if let Some((_, fbytes)) = classes.iter().find(|(n, _)| *n == facade) {
+    if let Some((_, fbytes)) = classes.iter().find(|(n, _)| n == "SKt") {
         let fc = parse_class(fbytes).expect("parse facade");
         assert!(
             fc.methods_named("box-impl").is_empty(),
@@ -93,23 +67,8 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
 #[test]
 fn value_class_is_property_uses_javabean_getter_name() {
     let src = "@JvmInline\nvalue class Flag(val isOpen: Boolean)\nfun box(): String = \"OK\"\n";
-    let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
-    assert!(!d.has_errors(), "unexpected parse errors");
-
-    let cp = std::rc::Rc::new(Classpath::new(vec![common::stdlib_jar()]));
-    let mut syms =
-        collect_signatures_with_cp(&files, Box::new(JvmLibraries::new(cp.clone())), &mut d);
-    let info = check_file(&files[0], &mut syms, &mut d);
-    assert!(!d.has_errors(), "value-class file should check clean");
-
-    let runtime = JvmLibraries::new(cp.clone());
-    let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
-    let facade = file_class_name("Flag", None);
-    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms, &cp)
-        .expect("backend passes should accept this value class");
-    let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
+    let classes = common::compile_in_process(src, "Flag", &[common::stdlib_jar()], None)
+        .expect("production compiler should emit the value class");
 
     let (_, bytes) = classes
         .iter()

@@ -82,13 +82,13 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
             continue;
         };
         register_top_level_function_conflict(
-            TopLevelFunctionConflictDisplaySource::Compact(headers),
+            headers,
             &mut groups,
             TopLevelFunctionConflictRegistration {
                 key,
                 declaration: TopLevelFunctionConflictDecl {
                     file: entry.source,
-                    declaration: TopLevelFunctionConflictDeclaration::Stable(entry.declaration),
+                    declaration: entry.declaration,
                     diagnostic_span: streamed_callable_signature_span(headers, entry.declaration)
                         .expect("a top-level callable must retain its signature origin"),
                 },

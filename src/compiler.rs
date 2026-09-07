@@ -1,5 +1,6 @@
 //! Compiler orchestration.
 
+mod declaration_metadata;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
@@ -7,7 +8,7 @@ mod streaming_tests;
 use crate::ast::File;
 pub use crate::backend::{Artifact, Backend};
 use crate::diag::{DiagSink, Span};
-use crate::frontend::{check_source_set, CheckedFile, FrontendSymbols, StreamingSourceSetAnalysis};
+use crate::frontend::StreamingSourceSetAnalysis;
 
 /// Transfer line-only output metadata while one bounded Pass-2 parser unit is live. This belongs
 /// to orchestration rather than checked-FIR lowering: the lowerer never observes source syntax.
@@ -203,7 +204,7 @@ fn check_active_diagnostic_unit(
 /// that semantic product and owned source text; it discovers ordinary bodies from each sequentially
 /// reparsed declaration unit, checks and lowers them, then drops the unit.
 pub fn emit_analyzed<B: Backend>(
-    analysis: impl Into<StreamingSourceSetAnalysis>,
+    analysis: StreamingSourceSetAnalysis,
     stems: &[String],
     backend: &B,
     module_name: &str,
@@ -213,7 +214,7 @@ pub fn emit_analyzed<B: Backend>(
         symbols,
         reparse_sources,
         streamed,
-    } = analysis.into();
+    } = analysis;
     let Some(streamed) = streamed else {
         crate::trace_compiler!(
             "fir",
@@ -451,7 +452,7 @@ pub fn emit_analyzed<B: Backend>(
 /// file. This is the lowering-only conformance boundary: callers do not construct a target backend,
 /// and target realization or emission cannot influence the result.
 pub fn lower_analyzed_to_common_ir(
-    analysis: impl Into<StreamingSourceSetAnalysis>,
+    analysis: StreamingSourceSetAnalysis,
     stems: &[String],
     module_name: &str,
     diags: &mut DiagSink,
@@ -460,16 +461,6 @@ pub fn lower_analyzed_to_common_ir(
 
     impl Backend for DiscardCommonIr {
         type State = ();
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("common-lowering census accepts streamed checked FIR only")
-        }
 
         fn lower_ir_file(
             &self,
@@ -979,14 +970,14 @@ impl crate::fir::CheckedBodySink for DiscardCheckedBodies {
 /// counted as refusals too — for a source the reference compiler accepts, a diagnostic IS a
 /// conformance failure.
 pub fn check_frontend_only(
-    analysis: impl Into<StreamingSourceSetAnalysis>,
+    analysis: StreamingSourceSetAnalysis,
     diags: &mut DiagSink,
 ) -> FrontendCensus {
     let StreamingSourceSetAnalysis {
         mut symbols,
         reparse_sources,
         streamed,
-    } = analysis.into();
+    } = analysis;
     let mut census = FrontendCensus::default();
     // A diagnostic the front end has ALREADY reported is the primary failure. Signature
     // finalization also fails whenever an ordinary diagnostic made a signature unsolvable, so
@@ -1272,84 +1263,13 @@ pub fn check_frontend_only(
     census
 }
 
-/// Check each parsed file and hand it to the backend.
-pub fn compile<B: Backend>(
-    files: &[File],
-    stems: &[String],
-    syms: &mut FrontendSymbols,
-    backend: &B,
-    module_name: &str,
-    diags: &mut DiagSink,
-) -> Vec<Artifact> {
-    let types = check_source_set(files, syms, diags);
-    emit_checked(files, stems, &types, syms, backend, module_name, diags)
-}
-
-/// Hand a checked source set to a backend.
-pub fn emit_checked<B: Backend>(
-    files: &[File],
-    stems: &[String],
-    types: &[Option<crate::frontend::FrontendTypeInfo>],
-    syms: &FrontendSymbols,
-    backend: &B,
-    module_name: &str,
-    diags: &mut DiagSink,
-) -> Vec<Artifact> {
-    if files.len() != stems.len() || files.len() != types.len() {
-        diags.error(
-            Span::new(0, 0),
-            "internal error: source files, stems, and checked types have different lengths",
-        );
-        return Vec::new();
-    }
-    if let Some(index) = files.iter().position(|file| file.is_script) {
-        diags.set_file(index as u32);
-        diags.error(
-            Span::new(0, 0),
-            "Kotlin scripts can be analyzed but cannot be emitted",
-        );
-        return Vec::new();
-    }
-    let mut outputs = Vec::new();
-    let mut state = B::State::default();
-    for (i, ((file, stem), info)) in files.iter().zip(stems).zip(types).enumerate() {
-        diags.set_file(i as u32);
-        let Some(info) = info.as_ref() else {
-            continue;
-        };
-        if diags.has_errors() {
-            continue;
-        }
-        outputs.extend(backend.lower_file(
-            CheckedFile {
-                file,
-                file_index: i as u32,
-                info,
-                symbols: syms,
-                module_name,
-            },
-            stem,
-            &mut state,
-            diags,
-        ));
-    }
-    if !diags.has_errors() {
-        outputs.extend(backend.finalize(state, module_name));
-    }
-    outputs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::Artifact;
     use crate::features::LangFeatures;
-    use crate::frontend::{
-        analyze_source_set_with_features, collect_signatures, parse_source_with_detected_features,
-    };
-    use crate::lexer::lex;
+    use crate::frontend::analyze_source_set_with_features;
     use crate::libraries::EmptySymbolSource;
-    use crate::parser::parse_script_with_features;
     use crate::source::SourceInput;
     use crate::types::Ty;
 
@@ -1367,17 +1287,6 @@ mod tests {
 
     impl Backend for RecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            checked: CheckedFile<'_>,
-            stem: &str,
-            state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            *state += checked.file.decls.len();
-            vec![(format!("{stem}.out"), Vec::new())]
-        }
 
         fn lower_ir_file(
             &self,
@@ -1402,16 +1311,6 @@ mod tests {
 
     impl Backend for ModuleCallRecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
 
         fn lower_ir_file(
             &self,
@@ -1447,16 +1346,6 @@ mod tests {
     impl Backend for FileAnnotationRecordingBackend {
         type State = usize;
 
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
-
         fn lower_ir_file(
             &self,
             file: crate::backend::CheckedIrFile<'_>,
@@ -1477,16 +1366,6 @@ mod tests {
 
     impl Backend for MemberAnnotationRecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
 
         fn lower_ir_file(
             &self,
@@ -1524,16 +1403,6 @@ mod tests {
     impl Backend for BodylessClassAnnotationRecordingBackend {
         type State = usize;
 
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
-
         fn lower_ir_file(
             &self,
             file: crate::backend::CheckedIrFile<'_>,
@@ -1562,16 +1431,6 @@ mod tests {
 
     impl Backend for EnumEntryCallRecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
 
         fn lower_ir_file(
             &self,
@@ -1641,7 +1500,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(
             census.is_conformant(),
             "Pass-2 nested bodies must receive Pass-1 checked capture context: {:?}",
@@ -1675,7 +1534,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1701,7 +1560,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1737,7 +1596,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1765,7 +1624,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1789,7 +1648,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1813,7 +1672,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1839,7 +1698,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1875,7 +1734,7 @@ mod tests {
             2,
             "the base declaration and its overriding call target share checked default payload"
         );
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1906,7 +1765,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1944,7 +1803,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1972,7 +1831,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -1999,7 +1858,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -2021,7 +1880,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -2049,7 +1908,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &RecordingBackend,
             "main",
@@ -2083,7 +1942,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -2115,7 +1974,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -2143,7 +2002,7 @@ mod tests {
         );
 
         assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-        let census = check_frontend_only(analysis, &mut diagnostics);
+        let census = check_frontend_only(analysis.into(), &mut diagnostics);
         assert!(census.is_conformant(), "{:?}", census.failures);
     }
 
@@ -2160,7 +2019,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &RecordingBackend,
             "main",
@@ -2190,7 +2049,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &FileAnnotationRecordingBackend,
             "main",
@@ -2225,7 +2084,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &MemberAnnotationRecordingBackend,
             "main",
@@ -2256,7 +2115,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &BodylessClassAnnotationRecordingBackend,
             "main",
@@ -2298,16 +2157,15 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &EnumEntryCallRecordingBackend,
             "main",
@@ -2356,16 +2214,15 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &RecordingBackend,
             "main",
@@ -2397,16 +2254,15 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &RecordingBackend,
             "main",
@@ -2462,16 +2318,15 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &RecordingBackend,
             "main",
@@ -2502,16 +2357,15 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &RecordingBackend,
             "main",
@@ -2535,7 +2389,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &RecordingBackend,
             "main",
@@ -2580,7 +2434,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &ModuleCallRecordingBackend,
             "main",
@@ -2600,18 +2454,17 @@ mod tests {
         let stems = ["Caller".to_string(), "Helper".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2650,18 +2503,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2689,18 +2541,17 @@ mod tests {
         let stems = ["SourceProperties".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2753,18 +2604,17 @@ mod tests {
         let stems = ["Use".to_string(), "Declarations".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2793,18 +2643,17 @@ mod tests {
         let stems = ["SamLambda".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2829,18 +2678,17 @@ mod tests {
         let stems = ["ObjectReceiver".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2865,18 +2713,17 @@ mod tests {
         let stems = ["UseObject".to_string(), "ObjectDeclaration".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2918,13 +2765,12 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
@@ -2951,7 +2797,7 @@ mod tests {
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -2985,18 +2831,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3029,18 +2874,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3078,18 +2922,17 @@ mod tests {
         let stems = ["SourceReferences".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3115,18 +2958,17 @@ mod tests {
         let stems = ["ReferenceTarget".to_string(), "ReferenceCaller".to_string()];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3164,18 +3006,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3247,18 +3088,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3296,18 +3136,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3341,18 +3180,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3411,18 +3249,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3462,18 +3299,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3524,18 +3360,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3574,18 +3409,17 @@ mod tests {
         }
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
         let mut diagnostics = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        let analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
             Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
                 classpath.clone(),
             )),
             &LangFeatures::new(),
-            |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
         );
 
         let outputs = emit_analyzed(
-            analysis,
+            analysis.into(),
             &stems,
             &crate::jvm::JvmBackend::new(classpath),
             "main",
@@ -3602,16 +3436,17 @@ mod tests {
     #[test]
     fn compiler_orchestrates_frontend_then_backend() {
         let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(
-            "fun box(): String = \"OK\"",
+        let sources = [SourceInput::kotlin("fun box(): String = \"OK\"")];
+        let analysis = analyze_source_set_with_features(
+            &sources,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
-        )];
+        );
         let stems = vec!["Main".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
+        let outputs = emit_analyzed(
+            analysis.into(),
             &stems,
-            &mut syms,
             &RecordingBackend,
             "main",
             &mut diags,
@@ -3626,16 +3461,17 @@ mod tests {
     #[test]
     fn compiler_does_not_lower_after_frontend_error() {
         let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(
-            "fun box(): Int = \"no\"",
+        let sources = [SourceInput::kotlin("fun box(): Int = \"no\"")];
+        let analysis = analyze_source_set_with_features(
+            &sources,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
-        )];
+        );
         let stems = vec!["Main".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
+        let outputs = emit_analyzed(
+            analysis.into(),
             &stems,
-            &mut syms,
             &RecordingBackend,
             "main",
             &mut diags,
@@ -3650,16 +3486,17 @@ mod tests {
         let parameter = "value".repeat(14 * 1024);
         let source = format!("fun crowded({parameter}: Int): Int = 0");
         let mut diags = DiagSink::new();
-        let files = vec![
-            parse_source_with_detected_features(&source, &mut diags),
-            parse_source_with_detected_features(&source, &mut diags),
-        ];
+        let sources = [SourceInput::kotlin(&source), SourceInput::kotlin(&source)];
+        let analysis = analyze_source_set_with_features(
+            &sources,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
         let stems = vec!["First".to_string(), "Second".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
+        let outputs = emit_analyzed(
+            analysis.into(),
             &stems,
-            &mut syms,
             &RecordingBackend,
             "main",
             &mut diags,
@@ -3678,13 +3515,17 @@ mod tests {
         let source = "fun crowded(value: Int): Int = value\n\
                       private fun crowded(value: Int): Int = value";
         let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(source, &mut diags)];
+        let sources = [SourceInput::kotlin(source)];
+        let analysis = analyze_source_set_with_features(
+            &sources,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
         let stems = vec!["Main".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
+        let outputs = emit_analyzed(
+            analysis.into(),
             &stems,
-            &mut syms,
             &RecordingBackend,
             "main",
             &mut diags,
@@ -3705,24 +3546,26 @@ mod tests {
     #[test]
     fn cross_file_private_context_function_cannot_reach_lowering() {
         let mut diags = DiagSink::new();
-        let files = vec![
-            parse_source_with_detected_features(
+        let sources = [
+            SourceInput::kotlin(
                 "fun <T, R> with(receiver: T, block: T.() -> R): R = receiver.block()\n\
                  class Scope\n\
                  fun use(scope: Scope): Int = with(scope) { hidden(1) }",
-                &mut diags,
             ),
-            parse_source_with_detected_features(
+            SourceInput::kotlin(
                 "private context(scope: Scope) fun hidden(value: Int): Int = value",
-                &mut diags,
             ),
         ];
+        let analysis = analyze_source_set_with_features(
+            &sources,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diags,
+        );
         let stems = vec!["Caller".to_string(), "Hidden".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
+        let outputs = emit_analyzed(
+            analysis.into(),
             &stems,
-            &mut syms,
             &RecordingBackend,
             "main",
             &mut diags,
@@ -3744,19 +3587,17 @@ mod tests {
     fn compiler_does_not_emit_kotlin_scripts() {
         let source = "val value = 1";
         let mut diags = DiagSink::new();
-        let tokens = lex(source, &mut diags);
-        let files = vec![parse_script_with_features(
-            source,
-            &tokens,
-            &mut diags,
+        let sources = [SourceInput::kotlin_script(source)];
+        let analysis = analyze_source_set_with_features(
+            &sources,
+            Box::new(EmptySymbolSource),
             &LangFeatures::new(),
-        )];
+            &mut diags,
+        );
         let stems = vec!["Script".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
+        let outputs = emit_analyzed(
+            analysis.into(),
             &stems,
-            &mut syms,
             &RecordingBackend,
             "main",
             &mut diags,
@@ -3767,27 +3608,5 @@ mod tests {
             .diags
             .iter()
             .any(|diagnostic| diagnostic.msg.contains("cannot be emitted")));
-    }
-
-    #[test]
-    fn checked_emission_rejects_misaligned_source_metadata() {
-        let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(
-            "fun box(): String = \"OK\"",
-            &mut diags,
-        )];
-        let syms = collect_signatures(&files, &mut diags);
-        let outputs = emit_checked(
-            &files,
-            &[],
-            &[],
-            &syms,
-            &RecordingBackend,
-            "main",
-            &mut diags,
-        );
-
-        assert!(outputs.is_empty());
-        assert!(diags.has_errors());
     }
 }

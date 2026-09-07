@@ -5,7 +5,7 @@
 //! physically renamed by a mapped interface) is invisible through a supertype reference without a
 //! synthetic `ACC_BRIDGE` method carrying the supertype's descriptor. Descriptors, erasure, accessor
 //! names and `@JvmName` mangling are all JVM realizations of a declaration, so the derivation belongs
-//! here rather than in `ir_lower`, which only records what the source declares.
+//! here rather than in `fir_lower`, which only records what the source declares.
 //!
 //! The pass consumes exact override edges selected while Pass 1's declaration providers were live. It
 //! runs before the value-class pass so an existing bridge's target is retargeted/renamed with the

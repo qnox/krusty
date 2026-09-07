@@ -11,7 +11,6 @@ fn expressions(body: &FirBody) -> impl Iterator<Item = &FirExpr> {
 
 fn assert_production_frontend_accepts(source: &str) {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("DelegateFir")];
-    let stems = ["DelegateFir".to_string()];
     let mut paths = Vec::new();
     if let Some(stdlib) = crate::jvm::kotlin_stdlib_jar() {
         paths.push(stdlib);
@@ -21,11 +20,10 @@ fn assert_production_frontend_accepts(source: &str) {
     }
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
     let mut diagnostics = crate::diag::DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+    let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
         &crate::features::LangFeatures::new(),
-        |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
 

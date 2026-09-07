@@ -349,7 +349,7 @@ fn primitive_bounded_type_param_signature_uses_wrapper() {
 fn reference_bounded_type_param_emits_class_signature() {
     // A reference bound — a user interface `T : I` or a stdlib `T : CharSequence` — must appear in the
     // class generic Signature as its erased descriptor; krusty previously emitted NO Signature at all
-    // (ir_lower dropped the bound). A PARAMETERIZED bound (`T : Comparable<T>`) is still suppressed.
+    // (fir_lower dropped the bound). A PARAMETERIZED bound (`T : Comparable<T>`) is still suppressed.
     let src = "interface I\n\
         class Usr<T : I>(val n: Int)\n\
         class Seq<T : CharSequence>(val n: Int)\n\

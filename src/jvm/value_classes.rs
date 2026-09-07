@@ -1,6 +1,6 @@
 //! JVM `@JvmInline value class` IR lowering pass — an **optional, JVM-only** IR→IR transform.
 //!
-//! `ir_lower` keeps a value class as a plain `Class{X}` so the platform-agnostic IR stays neutral (a JS
+//! `fir_lower` keeps a value class as a plain `Class{X}` so the platform-agnostic IR stays neutral (a JS
 //! backend, or a future Valhalla JVM with *native* value types, leaves value classes alone). The old
 //! JVM has no native value types, so this pass realizes kotlinc's unboxed representation:
 //!   * a NON-nullable `X` erases to its single field's (underlying) type `U` everywhere — signatures,
@@ -10,7 +10,7 @@
 //!   * a value-class parameter that erased to a primitive loses its non-null `checkNotNullParameter`.
 //!
 //! The value class's own synthesized members (`box-impl`/`unbox-impl`/`constructor-impl`/getter/`<init>`
-//! — emitted by `ir_lower::synth_value_members`) genuinely operate on the boxed object, so they are NOT
+//! — emitted by `fir_lower::synth_value_members`) genuinely operate on the boxed object, so they are NOT
 //! rewritten (only their signatures erase, and `box-impl`'s return stays the boxed `X`).
 //!
 //! NOTE: box/unbox insertion at representation boundaries (a value flowing to `Any`/generic, or back) is
@@ -508,7 +508,7 @@ pub fn lower_value_classes(
     // already have their final instance ABI and must not be lowered again as user value-class members.
     let mut synthesized_value_class_instance_entries = HashSet::new();
     // Synthesize each value class's `-impl`/`equals`/`hashCode`/`toString` members up front (a JVM
-    // concern — `ir_lower` only emits the plain single-field class). Done before the analysis below so
+    // concern — `fir_lower` only emits the plain single-field class). Done before the analysis below so
     // they participate in `vc_methods`/erasure like any other method.
     for cid in value_class_ids {
         // A real value class always has its single backing field; guard malformed fieldless input.
@@ -5786,7 +5786,7 @@ fn is_boxed_vc(
         // `e as X` / `e as X?` yields a boxed `X` (e.g. casting an `Any` returned by a value-class method
         // seen through a supertype) — the property access then `unbox-impl`s it. EXCEPT when the operand is
         // ALREADY an unboxed `X` (a generic value-class receiver erased to its underlying, with a no-op
-        // `(X)v` self-cast `ir_lower` inserts): there the cast is identity (step 5 strips it) and the
+        // `(X)v` self-cast `fir_lower` inserts): there the cast is identity (step 5 strips it) and the
         // value is the underlying, so the access is identity too.
         IrExpr::TypeOp {
             op:
@@ -6462,9 +6462,9 @@ fn descriptor_param_refs(descriptor: &str) -> Vec<bool> {
 }
 
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
-/// this pass, NOT `ir_lower`): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
+/// this pass, NOT `fir_lower`): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
-/// (field, `<init>`, getter) is already emitted by `ir_lower`.
+/// (field, `<init>`, getter) is already emitted by `fir_lower`.
 fn synth_value_members(
     ir: &mut IrFile,
     class_id: u32,
@@ -6694,7 +6694,7 @@ fn synth_value_members(
     // constructor-impl(U): U  — runs the `init { … }` block (side effects/validation), then returns the
     // arg. The init runs HERE, not in `box-impl`/`<init>`: `box-impl` only wraps an already-built value, so
     // it must NOT re-run the init. MOVE `init_body` out of the class (clearing it, so `<init>` keeps only
-    // the field assignment) and inline it: `ir_lower` lowered it in an INSTANCE frame (`this`@0, ctor param
+    // the field assignment) and inline it: `fir_lower` lowered it in an INSTANCE frame (`this`@0, ctor param
     // @1), so a sole-field read `this.<field>` is the param — rewrite it to the param, then shift every
     // value slot down by one. The resulting body still runs over the UNBOXED param (slot 0), so step-4
     // rewrites its nested value-class accesses (see the `constructor-impl` entry added to `s4_bodies`).

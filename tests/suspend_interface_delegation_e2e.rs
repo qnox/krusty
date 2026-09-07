@@ -230,7 +230,7 @@ fun box(): String {
 
 /// The intrinsic call must never type as `Nothing` — even in a `(): Nothing` fn without an
 /// explicit type argument (kotlinc infers the free `T` as `Unit`). A `Nothing` type made
-/// ir_lower drop the statements after the intrinsic as unreachable, so the resume-then-throw
+/// fir_lower drop the statements after the intrinsic as unreachable, so the resume-then-throw
 /// protocol lost the throw.
 #[test]
 fn intrinsic_call_never_types_as_nothing() {

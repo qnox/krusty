@@ -12,45 +12,20 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 mod header_validation;
 mod inline_preparation;
 mod retained_syntax;
-pub(crate) use crate::resolve::class_internal_resolver;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
-pub(crate) use crate::resolve::ClassModel as FrontendClassModel;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub(crate) use crate::resolve::DeclaredPropertySig as FrontendDeclaredPropertySig;
 pub use crate::resolve::ExtPropSig as FrontendExtPropSig;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
+pub(crate) use crate::resolve::{check_active_source_with_index, Signature, SourcePropertySig};
 pub use crate::resolve::{
-    check_file, check_file_at, check_file_in_source_set, collect_signatures,
-    collect_signatures_with_cp, AnonymousObjectCapture, AnonymousObjectCaptureSource,
-    CompoundAssignmentTarget, SourceConstructorMatcher,
+    AnonymousObjectCapture, AnonymousObjectCaptureSource, CompoundAssignmentTarget,
+    SourceConstructorMatcher,
 };
-pub(crate) use crate::resolve::{
-    check_preinferred_file_in_source_set, AdaptedRefArgument, CallableReferenceBinding,
-    CallableReferenceTarget, ConstructorReferenceOuter, CtorDefaultValue, DelegateGetValueTarget,
-    DestructureComponentTarget, ExprLowering, ImplicitPropertyWriteTarget,
-    ImplicitReceiverSelection, IncDecSite, InvokeKind, LambdaCapture, LambdaInfo,
-    PlatformNarrowing, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
-    ResolvedContextArgument, ResolvedCtorDelegationTarget, ResolvedExtensionCall, ResolvedIncDec,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedPropertyAccess, ResolvedSuperCall,
-    ResolvedTopLevelCall, ResolvedTopLevelFunctionRef, ReturnTarget, SigFlags, Signature,
-    SingletonValue, StmtLowering,
-};
-pub(crate) use crate::resolve::{selected_context_values, SelectedContextSources};
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
 pub use crate::source::{SourceInput, SourceKind};
-
-/// A single parsed file together with the frontend facts needed by a backend.
-pub struct CheckedFile<'a> {
-    pub file: &'a File,
-    pub file_index: u32,
-    pub info: &'a FrontendTypeInfo,
-    pub symbols: &'a FrontendSymbols,
-    /// The compilation's module name (kotlinc `-module-name`), for the serialization plugin's
-    /// `write$Self$<module>` helper. `"main"` by default.
-    pub module_name: &'a str,
-}
 
 /// Analysis result for a jointly compiled source set.
 ///
@@ -76,6 +51,7 @@ pub struct StreamingSourceSetAnalysis {
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
+#[cfg(test)]
 impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
     fn from(analysis: SourceSetAnalysis) -> Self {
         let SourceSetAnalysis {
@@ -190,8 +166,8 @@ impl ReparseSource {
     }
 }
 
-/// Connected stable-identity product of Pass 1. It is kept beside the legacy AST result only while
-/// callers migrate; none of its fields can retain syntax or a temporary signature graph.
+/// Connected stable-identity product of Pass 1. None of its fields can retain syntax or a temporary
+/// signature graph.
 pub(crate) struct StreamedPassState {
     pub module: crate::fir::FrontendModule,
     pub diagnostic_recovery: bool,
@@ -649,7 +625,6 @@ pub fn analyze_source_set_with_features(
         sources.len(),
         platform,
         project_features,
-        |_, _| {},
         diags,
         false,
         true,
@@ -671,7 +646,6 @@ pub fn analyze_source_set_prefix_with_features(
         inferred_count,
         platform,
         project_features,
-        |_, _| {},
         diags,
         false,
         true,
@@ -693,31 +667,9 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
         inferred_count,
         platform,
         project_features,
-        |_, _| {},
         diags,
         true,
         true,
-    )
-}
-
-pub fn analyze_source_set_with_features_and_prepare<F>(
-    sources: &[SourceInput<'_>],
-    platform: Box<dyn SemanticPlatform>,
-    project_features: &LangFeatures,
-    prepare_symbols: F,
-    diags: &mut DiagSink,
-) -> SourceSetAnalysis
-where
-    F: FnOnce(&[File], &mut FrontendSymbols),
-{
-    analyze_source_set_with_features_and_prepare_prefix(
-        sources,
-        sources.len(),
-        sources.len(),
-        platform,
-        project_features,
-        prepare_symbols,
-        diags,
     )
 }
 
@@ -731,60 +683,39 @@ pub fn analyze_source_set_streaming_with_features(
     project_features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> StreamingSourceSetAnalysis {
-    analyze_source_set_impl(
+    let SourceSetAnalysis {
+        symbols,
+        reparse_sources,
+        streamed,
+        ..
+    } = analyze_source_set_impl(
         sources,
         sources.len(),
         sources.len(),
         platform,
         project_features,
-        |_, _| {},
         diags,
         false,
         false,
-    )
-    .into()
-}
-
-fn analyze_source_set_with_features_and_prepare_prefix<F>(
-    sources: &[SourceInput<'_>],
-    checked_count: usize,
-    inferred_count: usize,
-    platform: Box<dyn SemanticPlatform>,
-    project_features: &LangFeatures,
-    prepare_symbols: F,
-    diags: &mut DiagSink,
-) -> SourceSetAnalysis
-where
-    F: FnOnce(&[File], &mut FrontendSymbols),
-{
-    analyze_source_set_impl(
-        sources,
-        checked_count,
-        inferred_count,
-        platform,
-        project_features,
-        prepare_symbols,
-        diags,
-        false,
-        false,
-    )
+    );
+    StreamingSourceSetAnalysis {
+        symbols: symbols.into_pass_two_symbols(),
+        reparse_sources,
+        streamed,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn analyze_source_set_impl<F>(
+fn analyze_source_set_impl(
     sources: &[SourceInput<'_>],
     checked_count: usize,
     inferred_count: usize,
     platform: Box<dyn SemanticPlatform>,
     project_features: &LangFeatures,
-    prepare_symbols: F,
     diags: &mut DiagSink,
     trim_support_bodies: bool,
-    retain_legacy_analysis: bool,
-) -> SourceSetAnalysis
-where
-    F: FnOnce(&[File], &mut FrontendSymbols),
-{
+    retain_inspection_analysis: bool,
+) -> SourceSetAnalysis {
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
@@ -834,8 +765,7 @@ where
         let extracted = pass1_builder.add_source(
             index,
             source,
-            (index < inferred_count && !parse_error && source.kind != SourceKind::Java)
-                .then_some(&file),
+            (!parse_error && source.kind != SourceKind::Java).then_some(&file),
         );
         if let Some((source, stubs)) = extracted {
             source_contracts.extend(crate::resolve::extract_source_contract_candidates(
@@ -856,7 +786,7 @@ where
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
                 });
             local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &stubs));
-            if !retain_legacy_analysis && index < inferred_count && !multiplatform {
+            if !retain_inspection_analysis && index < inferred_count && !multiplatform {
                 if needs_bounded_pass_one_syntax {
                     retained_syntax::compact(&mut file);
                 } else {
@@ -908,7 +838,7 @@ where
         let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
         // Actualization publishes stable expect-default providers before syntax is compacted. Once
         // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
-        if !retain_legacy_analysis {
+        if !retain_inspection_analysis {
             for (file, _source) in files
                 .iter_mut()
                 .zip(&mut reparse_sources)
@@ -928,32 +858,15 @@ where
             std::collections::HashSet::new(),
         )
     };
-    let platform = if inferred_count < files.len() {
-        let mut dependency_diags = DiagSink::new();
-        let mut dependency_symbols =
-            collect_signatures_with_cp(&files[inferred_count..], platform, &mut dependency_diags);
-        dependency_symbols.offset_source_files(inferred_count as u32);
-        let platform = std::mem::replace(
-            &mut dependency_symbols.libraries,
-            Box::new(EmptySymbolSource),
-        );
-        Box::new(crate::resolve::DependencyPlatform::new(
-            platform,
-            dependency_symbols,
-        )) as Box<dyn SemanticPlatform>
-    } else {
-        platform
-    };
     let inferred_end = inferred_count.min(files.len());
     if trim_support_bodies {
         for file in &mut files[inferred_end..] {
             file.release_body_arenas();
         }
     }
-    let mut symbols = crate::resolve::collect_signatures_with_cp_headers_and_local_contexts(
-        &files[..inferred_end],
+    let mut symbols = crate::resolve::collect_streamed_signatures_with_cp(
         &pass1_headers,
-        &local_class_contexts[..inferred_end],
+        &local_class_contexts,
         platform,
         diags,
     );
@@ -966,33 +879,9 @@ where
             diags,
         );
     }
-    prepare_symbols(&files, &mut symbols);
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
-    let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
-    let has_inline_capture_roots = inline_capture_selection
-        .roots
-        .iter()
-        .take(inferred_end)
-        .any(|roots| !roots.is_empty());
-    if retain_legacy_analysis {
-        crate::resolve::discover_anonymous_object_captures(&files[..inferred_end], &mut symbols);
-    } else if has_inline_capture_roots {
-        crate::resolve::discover_inline_anonymous_object_captures(
-            &files[..inferred_end],
-            &inline_capture_selection.roots[..inferred_end],
-            &inline_capture_selection.bodies[..inferred_end],
-            &mut symbols,
-        );
-    }
-    if retain_legacy_analysis || has_inline_capture_roots {
-        crate::resolve::install_streamed_anonymous_capture_declarations(
-            &files[..inferred_end],
-            &mut pass1_headers,
-            &mut symbols,
-        );
-    }
-    if !retain_legacy_analysis {
-        // Signature collection, target preparation, and inline-capture projection are the last
+    if !retain_inspection_analysis {
+        // Signature collection and inline-capture projection are the last
         // consumers of declaration-only legacy `File` views. From here on, retain a parser fragment
         // only when it still owns executable syntax that Pass 1 must turn into checked FIR
         // (inline/default/const work). The compact headers and signature graph are authoritative for
@@ -1024,6 +913,8 @@ where
         // consumed; retain only the folded payload before the signature graph and arenas die.
         crate::resolve::publish_checked_compile_time_constants(
             &files[..inferred_end],
+            &pass1_headers,
+            &mut index,
             &mut symbols,
         );
         crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
@@ -1090,9 +981,44 @@ where
             file.release_body_arenas();
         }
     }
-    let (types, streamed) = if retain_legacy_analysis {
-        let types =
-            check_source_set_skipping(&files, &mut symbols, &parse_errors, checked_count, diags);
+    let (types, streamed) = if retain_inspection_analysis {
+        let retained_index = pending_streamed
+            .as_ref()
+            .map(|(module, _, _)| module.index())
+            .or_else(|| {
+                recovery_streamed
+                    .as_ref()
+                    .map(|streamed| streamed.module.index())
+            });
+        let types: Vec<Option<FrontendTypeInfo>> = if let Some(index) = retained_index {
+            files
+                .iter()
+                .enumerate()
+                .map(|(source, file)| {
+                    if source >= checked_count || parse_errors.get(source).copied().unwrap_or(false)
+                    {
+                        return None;
+                    }
+                    diags.set_file(source as u32);
+                    let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
+                        file,
+                        crate::fir::SourceFileId::from_raw(source as u32),
+                        index,
+                    )
+                    .expect("retained Pass-1 syntax must bind to the stable declaration inventory");
+                    Some(check_active_source_with_index(
+                        file,
+                        source as u32,
+                        &active,
+                        index,
+                        &mut symbols,
+                        diags,
+                    ))
+                })
+                .collect()
+        } else {
+            std::iter::repeat_with(|| None).take(files.len()).collect()
+        };
         let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
             inline_preparation::from_checked_analysis(
                 module,
@@ -1125,7 +1051,7 @@ where
     let streamed = streamed.or(recovery_streamed);
     diags.collapse_duplicates_from(diagnostics_start);
     let analysis = SourceSetAnalysis {
-        files: if retain_legacy_analysis {
+        files: if retain_inspection_analysis {
             files
         } else {
             Vec::new()
@@ -1148,48 +1074,6 @@ where
     analysis
 }
 
-fn check_source_set_skipping(
-    files: &[File],
-    symbols: &mut FrontendSymbols,
-    skip: &[bool],
-    checked_count: usize,
-    diags: &mut DiagSink,
-) -> Vec<Option<FrontendTypeInfo>> {
-    let types = files
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            if index >= checked_count || skip.get(index).copied().unwrap_or(false) {
-                None
-            } else {
-                diags.set_file(index as u32);
-                Some(check_preinferred_file_in_source_set(
-                    files,
-                    index as u32,
-                    symbols,
-                    diags,
-                ))
-            }
-        })
-        .collect();
-    types
-}
-
-/// Check a parsed source set whose signatures have already been collected.
-pub fn check_source_set(
-    files: &[File],
-    symbols: &mut FrontendSymbols,
-    diags: &mut DiagSink,
-) -> Vec<Option<FrontendTypeInfo>> {
-    let diagnostics_start = diags.diags.len();
-    // Capture discovery, for the same reason as the other entry point: an anonymous object's capture
-    // fields and constructor parameters are facts the backend needs before it can lower one at all.
-    crate::resolve::discover_anonymous_object_captures(files, symbols);
-    let types = check_source_set_skipping(files, symbols, &[], files.len(), diags);
-    diags.collapse_duplicates_from(diagnostics_start);
-    types
-}
-
 /// Analyze a source set using only per-source feature directives.
 pub fn analyze_source_set(
     sources: &[&str],
@@ -1209,18 +1093,18 @@ pub fn analyze_source(
     platform: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
 ) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
-    let mut files = vec![parse_source_with_detected_features(src, diags)];
-    if diags.has_errors() {
-        return (files.pop().unwrap_or_default(), None, None);
-    }
-
-    let mut syms = collect_signatures_with_cp(&files, platform, diags);
-    if diags.has_errors() {
-        return (files.pop().unwrap_or_default(), Some(syms), None);
-    }
-
-    let info = check_file(&files[0], &mut syms, diags);
-    (files.pop().unwrap_or_default(), Some(syms), Some(info))
+    let inputs = [SourceInput::kotlin(src)];
+    let SourceSetAnalysis {
+        mut files,
+        symbols,
+        mut types,
+        ..
+    } = analyze_source_set_with_features(&inputs, platform, &LangFeatures::from_source(src), diags);
+    (
+        files.pop().unwrap_or_default(),
+        Some(symbols),
+        types.pop().flatten(),
+    )
 }
 
 /// Parse and check a source with no external libraries.

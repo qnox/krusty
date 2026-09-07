@@ -9,7 +9,7 @@
 //! a short frame is rejected with "Inconsistent stackmap frames at branch target N".
 //!
 //! The relations `<`/`<=`/`>`/`>=` are not exercised as vararg elements: lowering still declines a
-//! branchy element on the vararg-pack paths (`is_branchy` in `ir_lower`), so those shapes skip rather
+//! branchy element on the vararg-pack paths (`is_branchy` in `fir_lower`), so those shapes skip rather
 //! than emit. `==`/`!=` is listed there too but only fires when the LHS is syntactically a primitive
 //! literal, which is why `listOf(x == y, …)` over parameters reaches emit at all. The arms that DO
 //! reach emit — `==`/`!=` (numeric, reference and null) and `===`/`!==` — all share the same

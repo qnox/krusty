@@ -765,7 +765,7 @@ fn declared_callables(
     specialize_declared_callables(source, classifier, receiver, callables.clone())
 }
 
-fn specialize_declared_callables(
+pub(crate) fn specialize_declared_callables(
     source: &dyn SymbolSource,
     classifier: &crate::libraries::LibraryType,
     receiver: Ty,
@@ -6158,7 +6158,7 @@ impl<'a> SymbolResolver<'a> {
 
 // --- Navigation helpers (member/constructor resolution expressed purely against the trait) --------
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
-// this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
+// this layer (not the oracle). `resolve` and `fir_lower` share one implementation, backend-agnostic.
 
 pub(crate) fn apply_platform_call_parameter_nullability(
     mut params: Vec<Ty>,

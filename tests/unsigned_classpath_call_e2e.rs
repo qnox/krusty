@@ -427,7 +427,7 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
 /// the source shapes closest to putting a boxed unsigned in receiver position, and whatever the
 /// lowerer decides about any of them, the result must be a class that verifies and runs — or a
 /// decline. The query's own arms are covered where they can be reached directly, by the walk's unit
-/// tests in `src/ir_lower.rs`.
+/// tests in `src/fir_lower.rs`.
 #[test]
 fn unsigned_member_calls_on_a_reference_carried_receiver_verify() {
     // A nullable local: the value lives boxed, and `!!` brings it back to a member call.

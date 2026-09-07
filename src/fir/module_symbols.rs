@@ -635,6 +635,10 @@ impl<'a> StreamedModuleSymbols<'a> {
         function.call_sig = call_sig;
         function.default_values = vec![None; parameter_count];
         function.context_count = context_count;
+        function.source_file = self
+            .index
+            .declaration_anchor(declaration)
+            .map(|anchor| anchor.source.raw());
         function.stable_declaration = Some(declaration);
         Some(function)
     }
@@ -884,6 +888,10 @@ impl<'a> StreamedModuleSymbols<'a> {
             function.call_sig = call_sig.clone();
             function.default_values = vec![None; parameters.len()];
             function.context_count = context_count;
+            function.source_file = self
+                .index
+                .declaration_anchor(declaration)
+                .map(|anchor| anchor.source.raw());
             function.stable_declaration = Some(declaration);
             function.annotations = self.index.declaration_annotations(declaration).to_vec();
             functions.push(function);
@@ -960,7 +968,10 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
-            if header.kind != DeclarationKind::Property || header.owner != Some(owner) {
+            if header.kind != DeclarationKind::Property
+                || header.owner != Some(owner)
+                || header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+            {
                 continue;
             }
             let property = self
@@ -1295,6 +1306,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             function.call_sig = call_sig;
             function.default_values = vec![None; parameters.len()];
             function.context_count = context_count;
+            function.source_file = Some(anchor.source.raw());
             function.stable_declaration = Some(declaration);
             function.annotations = self.index.declaration_annotations(declaration).to_vec();
             functions.push(function);

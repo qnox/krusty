@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{ClassDecl, Decl, DeclId, File, FunBody, FunDecl, PropDecl, TypeRef};
+use crate::ast::{ClassDecl, Decl, DeclId, File, FunBody, FunDecl, TypeRef};
 use crate::diag::Span;
 use crate::types::{Ty, TypeName};
 
@@ -30,14 +30,12 @@ pub(super) use declaration_spellings::collect_compact_declared_spellings;
 pub(super) use header_projection::*;
 
 #[cfg(test)]
+pub(crate) use local_signatures::publish_checked_local_signatures;
+#[cfg(test)]
 pub(crate) use local_signatures::publish_checked_local_signatures_in_active_root;
 pub(crate) use local_signatures::{
     publish_checked_default_local_signatures, publish_checked_inline_local_signatures,
     publish_checked_local_signatures_in_pass_two_root,
-};
-#[cfg(test)]
-pub(crate) use local_signatures::{
-    publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 
@@ -2024,16 +2022,19 @@ impl ProductionSignatureSemantics<'_> {
                 let Ok(extension) = extension else {
                     return Ok(None);
                 };
-                if let Some(source) = extension.source_key {
-                    if let Some(signature) = self.demanded_source_signature(
-                        Some(scope),
-                        extension.stable_declaration,
-                        demand,
-                    )? {
-                        return self
-                            .apply_demanded_source_property(source, receiver, &signature)
-                            .map(Some);
-                    }
+                if let Some(signature) = self.demanded_source_signature(
+                    Some(scope),
+                    extension.stable_declaration,
+                    demand,
+                )? {
+                    return self
+                        .apply_demanded_source_property(
+                            extension.source_key,
+                            extension.stable_declaration,
+                            receiver,
+                            &signature,
+                        )
+                        .map(Some);
                 }
                 return crate::fir::ResolvedTy::new(extension.ty)
                     .map(Some)
@@ -2180,7 +2181,8 @@ impl ProductionSignatureSemantics<'_> {
 
     fn apply_demanded_source_callable(
         &self,
-        source: (u32, u32),
+        source: Option<(u32, u32)>,
+        stable_declaration: Option<crate::fir::DeclarationId>,
         receiver: Option<Ty>,
         signature: &crate::fir::ResolvedSignature,
         arguments: &[Ty],
@@ -2188,7 +2190,6 @@ impl ProductionSignatureSemantics<'_> {
         explicit_type_arguments: &[Ty],
         expected: Option<Ty>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let declaration = DeclId(source.1);
         let Some(callable) = self
             .table
             .funs
@@ -2202,7 +2203,15 @@ impl ProductionSignatureSemantics<'_> {
                     .flatten(),
             )
             .find(|callable| {
-                callable.source_file == Some(source.0) && callable.source_decl == Some(declaration)
+                stable_declaration.map_or_else(
+                    || {
+                        source.is_some_and(|(file, declaration)| {
+                            callable.source_file == Some(file)
+                                && callable.source_decl == Some(DeclId(declaration))
+                        })
+                    },
+                    |declaration| callable.stable_declaration == Some(declaration),
+                )
             })
         else {
             crate::trace_compiler!(
@@ -2211,7 +2220,10 @@ impl ProductionSignatureSemantics<'_> {
             );
             return Err(Self::failure());
         };
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source.0);
+        let source_file = callable
+            .source_file
+            .expect("a demanded source callable retains its source file");
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source_file);
         let semantic_source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
@@ -2312,27 +2324,27 @@ impl ProductionSignatureSemantics<'_> {
             crate::symbol_resolver::ty_subst_keep_unbound(signature.result.get(), &bindings);
         crate::trace_compiler!(
             "signature",
-            "apply demanded source callable source={source:?} expected={expected:?} arguments={arguments:?} bindings={bindings:?} result={result:?}",
+            "apply demanded source callable source={source:?} stable={stable_declaration:?} expected={expected:?} arguments={arguments:?} bindings={bindings:?} result={result:?}",
         );
         crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
     }
 
     fn apply_demanded_source_property(
         &self,
-        source: (u32, u32),
+        source: Option<(u32, u32)>,
+        stable_declaration: Option<crate::fir::DeclarationId>,
         receiver: Ty,
         signature: &crate::fir::ResolvedSignature,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let Some(property) = self
-            .table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.source == source)
-        else {
+        let Some(property) = self.table.ext_props.values().flatten().find(|property| {
+            stable_declaration.map_or_else(
+                || source.is_some_and(|source| property.source == Some(source)),
+                |declaration| property.stable_declaration == Some(declaration),
+            )
+        }) else {
             crate::trace_compiler!(
                 "signature",
-                "demanded source extension property missing source={source:?}",
+                "demanded source extension property missing source={source:?} stable={stable_declaration:?}",
             );
             return Err(Self::failure());
         };
@@ -3612,91 +3624,6 @@ fn compact_header_value_parameter_star_bounds(
     ))
 }
 
-/// Give capture storage owned by retained Pass-1 bodies stable, non-source-visible identities.
-/// The declaration is needed only by signature publication for the retained inline/default unit;
-/// ordinary Pass-2 captures stay in checked FIR as classifier/field coordinates and never enter the
-/// module header index.
-pub(crate) fn install_streamed_anonymous_capture_declarations(
-    files: &[File],
-    headers: &mut crate::fir::StreamedHeaderModule,
-    table: &mut SymbolTable,
-) {
-    use crate::fir::{DeclarationAnchor, DeclarationFlags, DeclarationKind, DeclarationStub};
-
-    let captures = table
-        .anonymous_object_captures
-        .iter()
-        .map(|(&key, captures)| (key, captures.clone()))
-        .collect::<Vec<_>>();
-    for ((source, transient), captures) in captures {
-        let Some(Decl::Class(class)) = files
-            .get(source as usize)
-            .and_then(|file| file.decl_arena.get(transient.0 as usize))
-        else {
-            continue;
-        };
-        let Some(classifier) = table
-            .anonymous_object_types
-            .get(&(source, transient))
-            .copied()
-        else {
-            continue;
-        };
-        let Some(owner) = table
-            .class_by_type_name(classifier)
-            .and_then(|class| class.stable_declaration)
-        else {
-            continue;
-        };
-
-        for (ordinal, capture) in captures.iter().enumerate() {
-            let synthetic_storage_property = table
-                .class_by_type_name(classifier)
-                .and_then(|class| class.declared_props.get(&capture.name))
-                .is_some_and(|property| !property.source_visible);
-            if !synthetic_storage_property {
-                // A same-named source property keeps its own stable declaration. Capture storage
-                // is addressed by its checked ordinal in FIR and may share that property's
-                // physical field later; it must never replace the source-visible signature.
-                continue;
-            }
-            let sibling = u32::MAX
-                .checked_sub(u32::try_from(ordinal).expect("too many anonymous-object captures"))
-                .expect("too many anonymous-object captures");
-            let declaration = headers.declarations.intern(DeclarationAnchor {
-                source: crate::fir::SourceFileId::from_raw(source),
-                range: class.span,
-                owner: Some(owner),
-                kind: DeclarationKind::Property,
-                sibling,
-            });
-            let name = headers.lookup_names.intern(&capture.name);
-            headers.push_stub(DeclarationStub {
-                id: declaration,
-                source: crate::fir::SourceFileId::from_raw(source),
-                range: class.span,
-                lookup_name: Some(name),
-                body: None,
-                signature_inference: None,
-                initialization_order: None,
-                kind: DeclarationKind::Property,
-                visibility: crate::types::Visibility::Private,
-                flags: DeclarationFlags::default()
-                    .with(DeclarationFlags::LOCAL_CLASS, true)
-                    .with(DeclarationFlags::COMPILER_GENERATED, true)
-                    .with(DeclarationFlags::FINAL, true),
-            });
-            if let Some(property) = table
-                .class_by_type_name_mut(classifier)
-                .and_then(|class| class.declared_props.get_mut(&capture.name))
-            {
-                debug_assert!(!property.source_visible);
-                property.stable_declaration = Some(declaration);
-            }
-        }
-    }
-}
-
 /// Give declarations contributed by frontend plugins stable module identities before the
 /// temporary collection table is projected into [`crate::fir::ResolvedModuleIndex`]. Plugins
 /// contribute complete semantic callable shapes, so these declarations need no compact source
@@ -4095,6 +4022,7 @@ pub(crate) fn finalized_streamed_signature_index(
         if let Some(property) = table
             .source_props
             .values()
+            .chain(table.stable_source_props.values())
             .find(|property| property.stable_declaration == Some(declaration))
         {
             return Some((property.context_params.clone(), property.ty, None));
@@ -4168,6 +4096,7 @@ pub(crate) fn finalized_streamed_signature_index(
         if let Some(property) = table
             .source_props
             .values()
+            .chain(table.stable_source_props.values())
             .find(|property| property.stable_declaration == Some(declaration))
         {
             return Some(&property.annotations);
@@ -5246,38 +5175,13 @@ pub(crate) fn finalized_streamed_signature_index(
         {
             stop_with_failure!(stub.id);
         }
-        let mutable = headers
-            .declarations
-            .anchor(stub.id)
-            .and_then(|anchor| anchor.owner)
-            .and_then(|owner| classifier_types.get(&owner))
-            .and_then(|classifier| {
-                table
-                    .anonymous_object_types
-                    .iter()
-                    .find_map(|(source, candidate)| {
-                        (*candidate == *classifier && source.0 == stub.source.raw())
-                            .then_some(source)
-                    })
-            })
-            .and_then(|source| table.anonymous_object_captures.get(source))
-            .and_then(|captures| {
-                let name = stub
-                    .lookup_name
-                    .and_then(|name| headers.lookup_names.get(name))?;
-                captures
-                    .iter()
-                    .find(|capture| capture.name == name)
-                    .map(|capture| capture.shared_cell)
-            })
-            .unwrap_or(false);
         index.publish_property_shape(
             crate::fir::PropertyId::from_raw(stub.id.raw()),
             stub.id,
             0,
             0,
             None,
-            mutable,
+            false,
         );
     }
     // Classifier publication consumes exact own-member override facts while it closes interface
@@ -5458,13 +5362,12 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(declaration) = headers.syntax.declaration(stub.id) else {
             continue;
         };
-        let (type_parameters, bounds, declaration_start) = match declaration.kind {
+        let (type_parameters, bounds) = match declaration.kind {
             crate::fir::HeaderDeclarationKind::Callable {
                 type_parameters,
                 bounds,
-                signature_start,
                 ..
-            } => (type_parameters, Some(bounds), signature_start),
+            } => (type_parameters, Some(bounds)),
             crate::fir::HeaderDeclarationKind::Property {
                 type_parameters,
                 bounds,
@@ -5474,10 +5377,10 @@ pub(crate) fn finalized_streamed_signature_index(
                 type_parameters,
                 bounds,
                 ..
-            } => (type_parameters, Some(bounds), stub.range.lo),
+            } => (type_parameters, Some(bounds)),
             crate::fir::HeaderDeclarationKind::TypeAlias {
                 type_parameters, ..
-            } => (type_parameters, None, stub.range.lo),
+            } => (type_parameters, None),
             crate::fir::HeaderDeclarationKind::Constructor { .. } => continue,
         };
         let packed = headers.syntax.type_parameters(type_parameters);
@@ -5517,16 +5420,23 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
-        let symbolic =
-            super::TParams::symbolic_from_decl_with(&declared_names, &declared_bounds, &|name| {
-                table.class_names.get(name)
-            })
-            .alpha_renamed_declaration(
-                &declared_names,
-                table.compilation_id,
-                stub.source.raw(),
-                declaration_start,
-            );
+        let signature_scope = crate::fir::SignatureScope {
+            owner: stub.id,
+            source: stub.source,
+        };
+        let symbolic = match semantics
+            .with_signature_type_scope(signature_scope, |lexical| lexical.visible_tparams())
+        {
+            Ok(symbolic) => symbolic,
+            Err(_) => {
+                crate::trace_compiler!(
+                    "fir",
+                    "signature finalization declined {:?}: type parameter scope did not resolve",
+                    stub.id,
+                );
+                stop_with_failure!(stub.id);
+            }
+        };
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
             let semantic_name = semantic.ty_param_name().unwrap_or(source_name);
@@ -6210,35 +6120,6 @@ pub(crate) fn finalized_streamed_signature_index(
                             )
                         }),
                 );
-                let anchor = headers
-                    .declarations
-                    .anchor(stub.id)
-                    .expect("a constructor stub must retain its stable anchor");
-                if anchor.sibling == 0 {
-                    let anonymous_captures = anchor
-                        .owner
-                        .and_then(|owner| classifier_types.get(&owner))
-                        .and_then(|owner| {
-                            table
-                                .anonymous_object_types
-                                .iter()
-                                .find_map(|(source, ty)| {
-                                    (*ty == *owner && source.0 == stub.source.raw())
-                                        .then_some(source)
-                                })
-                        })
-                        .and_then(|source| table.anonymous_object_captures.get(source));
-                    published_parameters.extend(anonymous_captures.into_iter().flatten().map(
-                        |capture| {
-                            (
-                                capture.name.as_str(),
-                                crate::fir::ResolvedValueParameterFlags::new(
-                                    false, false, true, false,
-                                ),
-                            )
-                        },
-                    ));
-                }
                 index.publish_callable_parameters(callable, published_parameters);
             }
             DeclarationKind::Property

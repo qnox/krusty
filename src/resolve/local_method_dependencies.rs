@@ -55,6 +55,24 @@ impl Checker<'_> {
                     .get(&owner)
                     .and_then(|methods| methods.get(name))
                 {
+                    let source = self.fed_source();
+                    let local = source
+                        .classifier(owner)
+                        .map(|classifier| {
+                            crate::symbol_resolver::specialize_declared_callables(
+                                &source,
+                                &classifier,
+                                candidate_receiver,
+                                crate::libraries::Callables::Functions(
+                                    crate::libraries::FunctionSet {
+                                        overloads: local.clone(),
+                                    },
+                                ),
+                            )
+                            .functions()
+                            .to_vec()
+                        })
+                        .unwrap_or_default();
                     for candidate in local
                         .iter()
                         .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
@@ -100,10 +118,7 @@ impl Checker<'_> {
         properties: &[ScopedProperty],
         source: crate::libraries::SourceMember,
     ) {
-        if self.signature_defaults_only
-            || self.capture_scope.is_some()
-            || self.active_declarations.is_none()
-        {
+        if self.signature_defaults_only || self.capture_scope.is_some() {
             return;
         }
         let Some(declaration) = self.active_source_member_declaration(source) else {
@@ -144,7 +159,7 @@ impl Checker<'_> {
         declaration: crate::fir::DeclarationId,
     ) {
         let (owner_name, owner_is_interface) = match self.file.decl(owner) {
-            Decl::Class(class) => match self.active_classifier_internal(owner, class) {
+            Decl::Class(class) => match self.active_classifier_internal(owner) {
                 Some(owner_name) => (owner_name, class.is_interface()),
                 None => return,
             },
@@ -401,7 +416,7 @@ impl Checker<'_> {
             Decl::Class(class) => match class.methods.get(dependency.method) {
                 Some(function) => (
                     function.clone(),
-                    self.active_classifier_internal(dependency.owner, class),
+                    self.active_classifier_internal(dependency.owner),
                 ),
                 None => {
                     self.checking_local_method_dependencies.remove(&declaration);

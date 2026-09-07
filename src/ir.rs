@@ -124,7 +124,7 @@ pub enum Callee {
     },
     /// A top-level function defined in ANOTHER source file of the same multi-file compilation —
     /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `Ty`s
-    /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
+    /// (the JVM backend builds the descriptor), so `fir_lower` needn't know JVM descriptors. Distinct
     /// from `Local` (same IrFile, by index) and `Static` (a resolved classpath/library method).
     CrossFile {
         facade: TypeName,
@@ -260,7 +260,7 @@ pub enum Callee {
         /// arrive as `Callee::Static` instead and leave this unset.
         source_member: Option<crate::libraries::SourceMember>,
         /// Stable current-module callable when this special call realizes a source declaration.
-        /// This remains present in compact-header Pass 2 even when the legacy source-member
+        /// This remains present in compact-header Pass 2 even when the parser source-member
         /// coordinate is deliberately absent.
         source: Option<crate::fir::CallableId>,
     },
@@ -1020,7 +1020,7 @@ pub enum IrExpr {
     /// `FunctionN.invoke` returns an `Object`. Another backend realizes the unit value differently.
     UnitInstance,
     /// The enclosing suspend function's own `Continuation` — the receiver bound to the lambda parameter
-    /// of `suspendCoroutineUninterceptedOrReturn { c -> … }`. A placeholder emitted by `ir_lower` that the
+    /// of `suspendCoroutineUninterceptedOrReturn { c -> … }`. A placeholder emitted by `fir_lower` that the
     /// CPS pass (`jvm/suspend.rs`) rewrites to the real continuation value (`GetValue(<cont slot>)`) once
     /// the trailing `Continuation` parameter exists. It must never survive to the emitter.
     CurrentContinuation,
@@ -2747,10 +2747,10 @@ pub struct IrFile {
     /// how an inline declaration is represented (the JVM emitter, for example, adds kotlinc's
     /// `$i$f$<name>` local marker to emitted non-suspend bodies).
     pub top_level_inline_functions: std::collections::HashSet<u32>,
-    /// `FunId`s of `suspend fun`s, tagged by ir_lower. The coroutine pass (`jvm::suspend`) owns the
+    /// `FunId`s of `suspend fun`s, tagged by fir_lower. The coroutine pass (`jvm::suspend`) owns the
     /// whole transform: it rewrites each to the continuation-passing-style ABI (an extra
     /// `kotlin.coroutines.Continuation` parameter, return type erased to `Object`) and, for a function
-    /// with suspension points, builds the state machine + continuation class. ir_lower itself lowers a
+    /// with suspension points, builds the state machine + continuation class. fir_lower itself lowers a
     /// `suspend fun` as a plain function (mirroring how value classes stay plain until their pass).
     pub suspend_funs: Vec<u32>,
     /// Methods the source declares WITHOUT `override` — a fresh declaration rather than an override of a
@@ -2786,7 +2786,7 @@ pub struct IrFile {
     /// suspension call expression.
     pub value_class_suspend_calls: std::collections::HashMap<ExprId, IrValueClassSuspendResult>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
-    /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
+    /// return, before CPS erasure to `Object`). Recorded by fir_lower from the resolver
     /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath
     /// dependency — whose `FunId` is absent from this file's `suspend_funs`. Same-file/member suspend
     /// calls are caught by `suspend_funs`; this is the cross-unit complement.
@@ -2803,8 +2803,8 @@ pub struct IrFile {
     /// a state machine with the lambda instance itself as the continuation — `(invokeSuspend FunId,
     /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
     /// (after its captures/parameters), where the coroutine pass appends the `result`/`label`/spilled
-    /// fields. ir_lower builds `invokeSuspend` with the plain body (suspend calls un-threaded); the pass
-    /// flattens it. (Single-suspension lambdas are handled inline by ir_lower instead.) `field_base` is
+    /// fields. fir_lower builds `invokeSuspend` with the plain body (suspend calls un-threaded); the pass
+    /// flattens it. (Single-suspension lambdas are handled inline by fir_lower instead.) `field_base` is
     /// the number of leading capture/parameter fields — the pass reloads them into locals `2..` at each
     /// `invokeSuspend` entry (so a captured/parameter value survives a re-entry), excludes them from
     /// spilling, and places the result/label/spilled fields after them.
@@ -2877,7 +2877,7 @@ pub struct IrFile {
     field_signatures: std::collections::HashMap<TypeName, Vec<(String, String)>>,
     /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
     /// this file. The JVM value-class pass merges these into its erasure map so a dependency value class
-    /// unboxes exactly like a same-file declaration. Populated by ir_lower (which has the classpath);
+    /// unboxes exactly like a same-file declaration. Populated by fir_lower (which has the classpath);
     /// native unsigned builtins keep their dedicated `Ty`/runtime handling and are not recorded here.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
     /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
@@ -2897,7 +2897,7 @@ pub struct IrFile {
     /// concrete type is a backend-agnostic `Ty`; the JVM splicer maps it to an internal name.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
     /// Extension-call `ExprId` → the extension's DECLARED (un-erased) receiver source type, forwarded
-    /// verbatim from the resolved callable's `source_receiver`. `ir_lower` records it with NO value-class
+    /// verbatim from the resolved callable's `source_receiver`. `fir_lower` records it with NO value-class
     /// reasoning of its own; the value-class pass reads it to decide box/unbox at the receiver. The signal
     /// distinguishes `fun Result<T>.getOrThrow()` (receiver `kotlin/Result` — a value class whose facade
     /// method takes the UNBOXED underlying, so a `Boxed` receiver unboxes) from a generic `fun <T> T.foo()`
@@ -2906,7 +2906,7 @@ pub struct IrFile {
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
     /// Call `ExprId` → the callee's DECLARED (un-erased, pre-substitution) return type, forwarded
-    /// verbatim from the resolved library member's `declared_ret`. `ir_lower` records it with NO
+    /// verbatim from the resolved library member's `declared_ret`. `fir_lower` records it with NO
     /// value-class reasoning of its own; the value-class pass reads it to decide the RESULT's
     /// representation, exactly as `ext_call_source_receiver` does for the receiver.
     ///

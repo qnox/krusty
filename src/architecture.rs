@@ -49,10 +49,7 @@ mod tests {
     }
 
     #[test]
-    fn dump_assembly_is_the_only_dump_layer_that_drives_lowering() {
-        // The flat printers are pure presentation. The assembly facade is the deliberate boundary
-        // that may combine checked frontend data with common IR lowering; keeping the allowance
-        // here prevents future editor-specific code or backend emission from leaking into dumps.
+    fn dump_assembly_only_combines_existing_data_contracts() {
         assert_allowed_crate_modules(
             "src/dump.rs",
             &[
@@ -61,31 +58,21 @@ mod tests {
                 "diag",
                 "frontend",
                 "ir",
-                "ir_lower",
                 "ir_print",
                 "name_tree",
-                "runtime",
             ],
         );
     }
 
     #[test]
     fn backend_contract_uses_only_frontend_handoff_dependencies() {
-        // The streaming handoff owns one common-IR unit plus a classifier-only semantic view. The
-        // legacy `lower_file` method still names `CheckedFile`; production `CheckedIrFile` cannot
-        // expose parser arenas, source maps, resolver entry points, or the frontend symbol table.
-        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "frontend", "ir"]);
+        // The streaming handoff owns one common-IR unit plus a classifier-only semantic view. It
+        // cannot expose parser arenas, source maps, resolver entry points, or the frontend symbol
+        // table.
+        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "ir"]);
         assert_allowed_crate_modules_in_tree(
             "src/backend",
-            &[
-                "diag",
-                "fir",
-                "frontend",
-                "ir",
-                "libraries",
-                "symbol_source",
-                "types",
-            ],
+            &["diag", "fir", "ir", "libraries", "symbol_source", "types"],
         );
     }
 
@@ -237,7 +224,6 @@ mod tests {
             "fir",
             "frontend",
             "ir",
-            "ir_lower",
             "jvm",
             "kt_string",
             "libraries",
@@ -278,7 +264,6 @@ mod tests {
                 "diag",
                 "frontend",
                 "ir",
-                "ir_lower",
                 "jvm",
                 "metadata",
                 "module_symbols",
@@ -317,48 +302,20 @@ mod tests {
     fn js_backend_adapter_uses_only_common_backend_dependencies() {
         assert_allowed_crate_modules(
             "src/js/backend.rs",
-            &["backend", "diag", "frontend", "ir_lower", "runtime"],
-        );
-    }
-
-    #[test]
-    fn ir_lower_uses_only_common_lowering_dependencies() {
-        assert_allowed_crate_modules(
-            "src/ir_lower.rs",
             &[
-                "ast",
+                "backend",
+                "diag",
+                "features",
                 "frontend",
-                "ir",
-                "kt_string",
                 "libraries",
-                "names",
-                "runtime",
-                "symbol_resolver",
-                "synthetics",
-                "trace_compiler",
-                "types",
-                "wide_stack",
+                "source",
             ],
         );
     }
 
     #[test]
-    fn ir_lower_has_no_symbol_selection_entry_points() {
-        let lowerer = fs::read_to_string("src/ir_lower.rs").expect("read IR lowerer");
-        for forbidden in [
-            "ModuleSymbols",
-            "SymbolResolver",
-            "fn resolve_",
-            ".resolve_",
-            ".prop_of(",
-            ".method_of_name(",
-            ".fun_by_params(",
-        ] {
-            assert!(
-                !lowerer.contains(forbidden),
-                "IR lowering must consume checker selections, not use '{forbidden}'"
-            );
-        }
+    fn fir_lower_facade_uses_only_common_lowering_dependencies() {
+        assert_allowed_crate_modules("src/fir_lower/mod.rs", &["fir", "ir", "types"]);
     }
 
     #[test]
@@ -483,27 +440,8 @@ mod tests {
             &["conformance", "diag", "frontend", "lexer", "parser"],
         );
         assert_allowed_crate_modules(
-            "src/bin/irbail.rs",
-            &[
-                "diag",
-                "frontend",
-                "ir_lower",
-                "lexer",
-                "libraries",
-                "parser",
-            ],
-        );
-        assert_allowed_crate_modules(
             "src/bin/bytediff.rs",
-            &[
-                "conformance",
-                "diag",
-                "frontend",
-                "ir_lower",
-                "jvm",
-                "lexer",
-                "parser",
-            ],
+            &["conformance", "diag", "frontend", "jvm", "lexer", "parser"],
         );
         assert_allowed_crate_modules(
             "src/bin/survey.rs",
@@ -519,7 +457,6 @@ mod tests {
                 "features",
                 "frontend",
                 "ir",
-                "ir_lower",
                 "jvm",
                 "lexer",
                 "parser",
@@ -544,7 +481,6 @@ mod tests {
                 "features",
                 "frontend",
                 "ir",
-                "ir_lower",
                 "js",
                 "jvm",
                 "lexer",

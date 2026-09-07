@@ -622,7 +622,7 @@ fn cross_file_ref_to_emitted_fns_stays_clean() {
     assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
 }
 
-/// A checker-only pipeline (the LSP path — no `prepare_module_symbols` registration) still resolves
+/// A checker-only pipeline (the LSP path — no backend preparation) still resolves
 /// the source declaration exactly. It does not need a JVM facade until lowering, so absence of backend
 /// registration is not a source diagnostic.
 #[test]

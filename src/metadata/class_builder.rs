@@ -228,7 +228,8 @@ pub(crate) fn append_param_annotations(
 /// with its arguments dropped would describe `@Named()` — a different annotation from the source's
 /// `@Named("hi", 7)`. Omitting it leaves the metadata incomplete but never wrong; the classfile
 /// `Runtime*ParameterAnnotations` attribute carries the full form either way. Same policy as
-/// `ir_lower::eval_anno_value`, which drops a whole annotation rather than emit a partial value set.
+/// the checked declaration-metadata handoff, which drops a whole annotation rather than emit a
+/// partial value set.
 ///
 /// The encoding to fill in, measured from kotlinc 2.4.10 for `fun f(@Named("hi", 7) a: Int)` with
 /// `annotation class Named(val v: String, val n: Int)`:

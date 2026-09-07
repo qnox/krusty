@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::{Artifact, CheckedIrFile};
 use crate::features::LangFeatures;
-use crate::frontend::{analyze_source_set_with_features_and_prepare, CheckedFile};
+use crate::frontend::analyze_source_set_with_features;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 use crate::types::Ty;
@@ -12,16 +12,6 @@ struct PackageDeclarationBackend;
 
 impl Backend for SharedClassCaptureBackend {
     type State = u8;
-
-    fn lower_file(
-        &self,
-        _checked: CheckedFile<'_>,
-        _stem: &str,
-        _state: &mut Self::State,
-        _diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        panic!("production streaming emission must not invoke legacy syntax lowering")
-    }
 
     fn lower_ir_file(
         &self,
@@ -72,16 +62,6 @@ impl Backend for SharedClassCaptureBackend {
 
 impl Backend for PackageDeclarationBackend {
     type State = u8;
-
-    fn lower_file(
-        &self,
-        _checked: CheckedFile<'_>,
-        _stem: &str,
-        _state: &mut Self::State,
-        _diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        panic!("production streaming emission must not invoke legacy syntax lowering")
-    }
 
     fn lower_ir_file(
         &self,
@@ -148,11 +128,10 @@ fn pass_two_publishes_backend_neutral_shared_anonymous_class_capture() {
     .with_file_stem("SharedAnonymousCapture")];
     let stems = ["SharedAnonymousCapture".to_string()];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(analysis.files.is_empty());
@@ -160,7 +139,7 @@ fn pass_two_publishes_backend_neutral_shared_anonymous_class_capture() {
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 
     let artifacts = emit_analyzed(
-        analysis,
+        analysis.into(),
         &stems,
         &SharedClassCaptureBackend,
         "main",
@@ -181,11 +160,10 @@ fn pass_two_publishes_complete_package_declarations_into_common_ir() {
     .with_file_stem("PackageDeclarations")];
     let stems = ["PackageDeclarations".to_string()];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(analysis.files.is_empty());
@@ -193,7 +171,7 @@ fn pass_two_publishes_complete_package_declarations_into_common_ir() {
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 
     let artifacts = emit_analyzed(
-        analysis,
+        analysis.into(),
         &stems,
         &PackageDeclarationBackend,
         "main",
@@ -215,11 +193,10 @@ fn pass_two_preserves_definitely_non_null_generic_parameter_shape() {
                 .with_file_stem("DefinitelyNonNullSignature"),
         ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
@@ -313,16 +290,15 @@ fn postponed_builder_receiver_is_read_through_the_anonymous_capture_identity() {
     .with_file_stem("PostponedBuilderCapture")];
     let stems = ["PostponedBuilderCapture".to_string()];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 
-    lower_analyzed_to_common_ir(analysis, &stems, "main", &mut diagnostics);
+    lower_analyzed_to_common_ir(analysis.into(), &stems, "main", &mut diagnostics);
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 }
@@ -337,16 +313,15 @@ fn generic_context_property_header_uses_its_stable_type_parameter() {
     let inputs = [SourceInput::kotlin(source).with_file_stem("GenericContextProperty")];
     let stems = ["GenericContextProperty".to_string()];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(source),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 
-    lower_analyzed_to_common_ir(analysis, &stems, "main", &mut diagnostics);
+    lower_analyzed_to_common_ir(analysis.into(), &stems, "main", &mut diagnostics);
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 }
@@ -360,16 +335,15 @@ fn typealiased_fun_interface_constructor_reference_uses_stable_expansion() {
     let inputs = [SourceInput::kotlin(source).with_file_stem("AliasedFunInterfaceReference")];
     let stems = ["AliasedFunInterfaceReference".to_string()];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 
-    lower_analyzed_to_common_ir(analysis, &stems, "main", &mut diagnostics);
+    lower_analyzed_to_common_ir(analysis.into(), &stems, "main", &mut diagnostics);
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 }
@@ -386,16 +360,15 @@ fn pass_two_publishes_deferred_generic_local_classifier_before_common_lowering()
     let inputs = [SourceInput::kotlin(source).with_file_stem("LocalTypeAlias")];
     let stems = ["LocalTypeAlias".to_string()];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::from_source(source),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 
-    lower_analyzed_to_common_ir(analysis, &stems, "main", &mut diagnostics);
+    lower_analyzed_to_common_ir(analysis.into(), &stems, "main", &mut diagnostics);
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 }
@@ -420,16 +393,15 @@ fn deeply_nested_enum_entry_inner_receiver_reaches_common_lowering() {
     let inputs = [SourceInput::kotlin(source).with_file_stem("DeepEnumEntryInner")];
     let stems = ["DeepEnumEntryInner".to_string()];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 
-    lower_analyzed_to_common_ir(analysis, &stems, "main", &mut diagnostics);
+    lower_analyzed_to_common_ir(analysis.into(), &stems, "main", &mut diagnostics);
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
 }

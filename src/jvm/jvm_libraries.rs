@@ -1,6 +1,6 @@
 //! The JVM implementation of the [`SymbolSource`] abstraction: resolves symbols from a `.class`-jar
 //! classpath (the bytecode target). All classpath reads, JVM method-descriptor parsing, and
-//! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
+//! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `fir_lower`) sees
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 use super::classpath::{

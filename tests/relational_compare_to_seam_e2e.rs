@@ -1,6 +1,6 @@
 //! The relational (`<`, `<=`, `>`, `>=`) lowering seam: every non-builtin relation is emitted from
 //! the ONE `compareTo` target the checker recorded in `resolved_operator_calls`, which is the only
-//! map `ir_lower`'s relational arm reads. A target recorded anywhere else types the comparison
+//! map `fir_lower`'s relational arm reads. A target recorded anywhere else types the comparison
 //! `Boolean` while lowering finds nothing and falls through to the primitive `if_icmp*` — a class
 //! file that compiles and then fails to load with `VerifyError: Bad type on operand stack`.
 //!

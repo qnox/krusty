@@ -1807,14 +1807,13 @@ fn frontend_keeps_nullability_distinct_overloads_after_actualization() {
         .with_file_stem("Platform"),
     ];
     let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
+    let analysis = analyze_source_set_with_features(
         &inputs,
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
-        |_, _| {},
         &mut diagnostics,
     );
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let census = crate::compiler::check_frontend_only(analysis.into(), &mut diagnostics);
 
     assert!(census.failures.is_empty(), "{:?}", census.failures);
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);

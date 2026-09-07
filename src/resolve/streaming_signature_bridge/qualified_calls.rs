@@ -75,20 +75,19 @@ impl ProductionSignatureSemantics<'_> {
                 &type_arguments,
             )
             .ok_or_else(Self::failure)?;
-        if let Some(source) = selected.source_key {
-            if let Some(signature) =
-                self.demanded_source_signature(None, selected.stable_declaration, demand)?
-            {
-                return self.apply_demanded_source_callable(
-                    source,
-                    None,
-                    &signature,
-                    &selected_argument_types,
-                    None,
-                    &type_arguments,
-                    None,
-                );
-            }
+        if let Some(signature) =
+            self.demanded_source_signature(None, selected.stable_declaration, demand)?
+        {
+            return self.apply_demanded_source_callable(
+                selected.source_key,
+                selected.stable_declaration,
+                None,
+                &signature,
+                &selected_argument_types,
+                None,
+                &type_arguments,
+                None,
+            );
         }
         crate::trace_compiler!(
             "signature",

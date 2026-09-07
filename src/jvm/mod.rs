@@ -37,7 +37,7 @@ mod top_level_properties;
 mod value_class_declarations;
 pub mod value_classes;
 
-pub use backend::{prepare_module_symbols, JvmBackend};
+pub use backend::JvmBackend;
 
 /// Kotlin distribution artifacts used by JVM command-line defaults.
 pub fn kotlin_stdlib_jar() -> Option<std::path::PathBuf> {
