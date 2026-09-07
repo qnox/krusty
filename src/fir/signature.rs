@@ -8,9 +8,9 @@ use super::header::{
     next_id, CallableId, DeclarationFlags, DeclarationId, DeclarationIds, DeclarationKind,
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
     DeferredValueSelectionId, DiagnosticId, ExternalCallableId, HeaderDeclaration,
-    HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, HeaderTypeKind,
-    LookupNames, OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId,
-    SourceMap, StableDeclarationAnchor, TypeParameterId,
+    HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames,
+    OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap,
+    StableDeclarationAnchor, TypeParameterId,
 };
 
 /// A half-open slice in the signature graph's shared operand arena.
@@ -352,31 +352,13 @@ impl SignatureGraph {
         self.type_syntax.add_type(ty, &mut self.type_names)
     }
 
+    #[cfg(test)]
     pub fn transient_type_ref(&self, id: HeaderTypeId) -> Option<crate::ast::TypeRef> {
         self.type_syntax.transient_type_ref(id, &self.type_names)
     }
 
-    /// Return the bare classifier spelling accepted by context-sensitive type resolution.
-    /// Qualified, applied, function, and abbreviated forms require ordinary type resolution and
-    /// must not be reinterpreted from the expected type after that lookup fails.
-    pub fn contextual_classifier_spelling(&self, id: HeaderTypeId) -> Option<(&str, bool)> {
-        let ty = self.type_syntax.ty(id)?;
-        let HeaderTypeKind::Classifier {
-            detail,
-            abbreviated_argument: None,
-        } = ty.kind
-        else {
-            return None;
-        };
-        let detail = self.type_syntax.classifier_type(detail)?;
-        if !self.type_syntax.type_operands(detail.arguments).is_empty() {
-            return None;
-        }
-        let [name] = self.type_syntax.type_path(detail.path) else {
-            return None;
-        };
-        let name = self.type_names.get(*name)?;
-        (!name.contains(['.', '/', '$'])).then_some((name, ty.flags.nullable()))
+    pub(crate) fn compact_type_storage(&self) -> (&HeaderSyntaxArena, &LookupNames) {
+        (&self.type_syntax, &self.type_names)
     }
 
     pub fn add_expr(&mut self, expression: SigExpr) -> SigExprId {

@@ -564,12 +564,10 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         syntax: crate::fir::HeaderTypeId,
     ) -> Option<Ty> {
-        let reference = self
-            .headers
-            .syntax
-            .transient_type_ref(syntax, &self.headers.lookup_names)?;
+        let reference =
+            SignatureTypeSyntax::compact(&self.headers.syntax, &self.headers.lookup_names, syntax);
         self.with_signature_type_scope(scope, |lexical| {
-            self.classifier_header_type_ref(scope, lexical, &reference)
+            self.signature_type_syntax_at(scope, lexical, reference, false)
         })
         .ok()
         .flatten()
@@ -586,85 +584,13 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         syntax: crate::fir::HeaderTypeId,
     ) -> Result<Ty, crate::fir::DiagnosticId> {
-        let reference = self
-            .headers
-            .syntax
-            .transient_type_ref(syntax, &self.headers.lookup_names)
-            .ok_or_else(Self::failure)?;
+        let reference =
+            SignatureTypeSyntax::compact(&self.headers.syntax, &self.headers.lookup_names, syntax);
         // Primary-constructor parameters use their own stable declaration for diagnostics and type
         // parameter ownership. Their owning classifier is derived by the lookup only to add its
         // inherited-classifier fallback rung; declarations nested in that classifier remain an
         // ordinary nearer lexical binding.
-        self.resolve_signature_type_reference_at(scope, scope, &reference, true)
-    }
-
-    pub(super) fn resolve_signature_type_reference(
-        &self,
-        scope: crate::fir::SignatureScope,
-        reference: &TypeRef,
-    ) -> Result<Ty, crate::fir::DiagnosticId> {
-        self.resolve_signature_type_reference_at(scope, scope, reference, true)
-    }
-
-    fn resolve_signature_type_reference_at(
-        &self,
-        diagnostic_scope: crate::fir::SignatureScope,
-        lookup_scope: crate::fir::SignatureScope,
-        reference: &TypeRef,
-        include_scope_owner_body: bool,
-    ) -> Result<Ty, crate::fir::DiagnosticId> {
-        let resolved = self.with_signature_type_scope(lookup_scope, |lexical| {
-            self.signature_type_ref_at(lookup_scope, lexical, reference, include_scope_owner_body)
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    let failed = self.unresolved_signature_type_ref(
-                        lookup_scope,
-                        lexical,
-                        reference,
-                        include_scope_owner_body,
-                    );
-                    let spelling = self
-                        .qualified_classifier_binding(lookup_scope, &failed.name)
-                        .1
-                        .unwrap_or_else(|| failed.name.clone());
-                    Err(self.record_unresolved_reference_at(
-                        diagnostic_scope.owner,
-                        diagnostic_scope.source,
-                        failed.span,
-                        &spelling,
-                    ))
-                })
-        })?;
-        let ty = resolved?;
-        if !ty.mentions_error() {
-            return Ok(ty);
-        }
-        if let Some(diagnostic) = self.recorded_type_diagnostic(
-            diagnostic_scope.owner,
-            diagnostic_scope.source,
-            reference,
-        ) {
-            return Err(diagnostic);
-        }
-        let failed = self.with_signature_type_scope(lookup_scope, |lexical| {
-            self.unresolved_signature_type_ref(
-                lookup_scope,
-                lexical,
-                reference,
-                include_scope_owner_body,
-            )
-            .clone()
-        })?;
-        let spelling = self
-            .qualified_classifier_binding(lookup_scope, &failed.name)
-            .1
-            .unwrap_or_else(|| failed.name.clone());
-        Err(self.record_unresolved_reference_at(
-            diagnostic_scope.owner,
-            diagnostic_scope.source,
-            failed.span,
-            &spelling,
-        ))
+        self.resolve_signature_type_syntax_at(scope, scope, reference, true)
     }
 
     /// Resolve the restricted compact type-expression subset used by explicit body-local headers.
@@ -1436,11 +1362,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         syntax: crate::fir::HeaderTypeId,
         graph: &crate::fir::SignatureGraph,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let reference = graph.transient_type_ref(syntax).ok_or_else(Self::failure)?;
+        let (arena, names) = graph.compact_type_storage();
+        let reference = SignatureTypeSyntax::compact(arena, names, syntax);
         // Signature-native type resolution: a type reference in a compact header is a type
         // parameter of the owning declaration chain, a scoped alias/classifier, or a leaf shape.
         // None of those needs a body checker, and Pass 1 has no body to check.
-        let ty = self.resolve_signature_type_reference(scope, &reference)?;
+        let ty = self.resolve_signature_type_syntax_at(scope, scope, reference, true)?;
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
     }
 
@@ -1455,8 +1382,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         if let Ok(resolved) = self.resolve_type(scope, origin, syntax, graph) {
             return Ok(resolved);
         }
-        let (spelling, nullable) = graph
-            .contextual_classifier_spelling(syntax)
+        let (arena, names) = graph.compact_type_storage();
+        let reference = SignatureTypeSyntax::compact(arena, names, syntax);
+        let (spelling, nullable) = reference
+            .contextual_classifier_spelling()
             .ok_or_else(Self::failure)?;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = crate::symbol_source::CompositeSource::new(vec![
@@ -1467,7 +1396,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             super::super::context_sensitive_resolution::expected_nested_classifier(
                 &source,
                 expected.get(),
-                spelling,
+                &spelling,
             )
         else {
             return Err(Self::failure());

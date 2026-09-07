@@ -92,30 +92,25 @@ impl ProductionSignatureSemantics<'_> {
         lexical: &super::super::CheckerScope<'_>,
         reference: &TypeRef,
     ) -> Option<Ty> {
-        self.signature_type_ref_at(scope, lexical, reference, true)
+        self.signature_type_syntax_at(scope, lexical, SignatureTypeSyntax::parser(reference), true)
     }
 
     /// Locate the first declaration type component whose compact lookup fails. The packed header
     /// owns every component span, so Pass 1 can diagnose `Outer<Missing>` at `Missing` without
     /// retaining source text or blaming the otherwise valid outer classifier.
-    pub(super) fn unresolved_signature_type_ref<'a>(
+    pub(super) fn unresolved_signature_type_syntax<'a>(
         &self,
         scope: crate::fir::SignatureScope,
         lexical: &super::super::CheckerScope<'_>,
-        reference: &'a TypeRef,
+        reference: SignatureTypeSyntax<'a>,
         include_scope_owner_body: bool,
-    ) -> &'a TypeRef {
-        let nested = reference
-            .fun_params
-            .iter()
-            .chain(reference.arg.iter().map(|argument| &**argument))
-            .chain(reference.targs.iter());
-        for component in nested {
+    ) -> SignatureTypeSyntax<'a> {
+        for component in reference.nested().unwrap_or_default() {
             if self
-                .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
+                .signature_type_syntax_at(scope, lexical, component, include_scope_owner_body)
                 .is_none()
             {
-                return self.unresolved_signature_type_ref(
+                return self.unresolved_signature_type_syntax(
                     scope,
                     lexical,
                     component,
@@ -126,33 +121,27 @@ impl ProductionSignatureSemantics<'_> {
         reference
     }
 
-    /// Resolve a classifier header type in the lexical scope immediately outside the classifier
-    /// body. The classifier's own type parameters remain in `lexical`, but nested declarations from
-    /// its body are not visible in its supertype list (`class C : Base { interface Base }`).
-    pub(super) fn classifier_header_type_ref(
+    pub(super) fn signature_type_syntax_at<'a>(
         &self,
         scope: crate::fir::SignatureScope,
         lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
-    ) -> Option<Ty> {
-        self.signature_type_ref_at(scope, lexical, reference, false)
-    }
-
-    pub(super) fn signature_type_ref_at(
-        &self,
-        scope: crate::fir::SignatureScope,
-        lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
+        reference: SignatureTypeSyntax<'a>,
         include_scope_owner_body: bool,
     ) -> Option<Ty> {
-        if reference.name.is_empty() {
+        let name = reference.spelling()?;
+        let name = name.as_ref();
+        let span = reference.span()?;
+        let nullable = reference.nullable()?;
+        let definitely_non_null = reference.definitely_non_null()?;
+        let type_arguments = reference.arguments()?;
+        if name.is_empty() {
             return None;
         }
-        if lexical.tparam_contains(&reference.name) {
-            let bound = lexical.tparam_bound(&reference.name);
-            return Some(if reference.definitely_non_null() {
+        if lexical.tparam_contains(name) {
+            let bound = lexical.tparam_bound(name);
+            return Some(if definitely_non_null {
                 super::super::definitely_non_null_ty(bound)
-            } else if reference.nullable() {
+            } else if nullable {
                 Ty::nullable(bound)
             } else {
                 bound
@@ -174,18 +163,16 @@ impl ProductionSignatureSemantics<'_> {
                     | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
                 })
                 .and_then(|receiver| self.headers.syntax.ty(receiver))
-                .is_some_and(|receiver| receiver.span == reference.span);
-        if associated_receiver && reference.targs.is_empty() {
-            if let Some((_, _, expansion)) =
-                self.signature_source_alias_expansion(scope, &reference.name)
-            {
+                .is_some_and(|receiver| receiver.span == span);
+        if associated_receiver && type_arguments.is_empty() {
+            if let Some((_, _, expansion)) = self.signature_source_alias_expansion(scope, name) {
                 if let Some(classifier) = expansion.non_null().obj_internal() {
                     return Some(Ty::obj_name(classifier));
                 }
             }
         }
         let lexical_classifier =
-            self.lexically_nested_classifier_at(scope, &reference.name, include_scope_owner_body);
+            self.lexically_nested_classifier_at(scope, name, include_scope_owner_body);
         // An alias is a declaration in the classifier namespace, but lexical nested classifiers
         // occupy a nearer scope-tower rung than imports. Only consult alias expansion when that
         // lexical rung did not answer; otherwise `Outer.Box` can accidentally inherit an imported
@@ -194,7 +181,7 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(ty) =
                 self.signature_source_alias(scope, lexical, reference, include_scope_owner_body)
             {
-                return Some(if reference.nullable() && ty != Ty::Error {
+                return Some(if nullable && ty != Ty::Error {
                     Ty::nullable(ty)
                 } else {
                     ty
@@ -204,11 +191,11 @@ impl ProductionSignatureSemantics<'_> {
         // Classifier before leaf, matching `Checker::type_ref_ty`: a declared classifier outranks a
         // builtin spelling of the same name.
         if let Some(internal) = lexical_classifier
-            .or_else(|| self.qualified_classifier(scope, &reference.name))
+            .or_else(|| self.qualified_classifier(scope, name))
             .or_else(|| {
                 self.classifier_header_scope_owner(scope.owner)
                     .and_then(|owner| {
-                        self.classifier_header_inherited_classifier(scope, owner, &reference.name)
+                        self.classifier_header_inherited_classifier(scope, owner, name)
                     })
             })
         {
@@ -223,16 +210,16 @@ impl ProductionSignatureSemantics<'_> {
                     "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
                     scope.owner,
                     scope.source,
-                    reference.name,
+                    name,
                     internal,
                 );
                 if let Some(access) = access {
                     self.record_classifier_access_diagnostic_at(
                         scope.owner,
                         scope.source,
-                        reference.span,
+                        span,
                         internal,
-                        super::super::inaccessible_classifier_message(&reference.name, access),
+                        super::super::inaccessible_classifier_message(name, access),
                     );
                 }
             }
@@ -245,17 +232,17 @@ impl ProductionSignatureSemantics<'_> {
                 .ok()
                 .unwrap_or_default();
             if let Some(argument) =
-                reference
-                    .targs
+                type_arguments
                     .iter()
+                    .copied()
                     .enumerate()
                     .find_map(|(index, argument)| {
                         let variance = type_param_variances.get(index).copied().unwrap_or_default();
                         matches!(
                             (
                                 variance,
-                                argument.in_projection(),
-                                argument.out_projection()
+                                argument.in_projection()?,
+                                argument.out_projection()?
                             ),
                             (crate::types::TypeVariance::Out, true, _)
                                 | (crate::types::TypeVariance::In, _, true)
@@ -263,6 +250,7 @@ impl ProductionSignatureSemantics<'_> {
                         .then_some(argument)
                     })
             {
+                let diagnostic = reference.diagnostic_type_ref()?;
                 let mut display = super::super::BoundedSourceDisplay::new(usize::MAX);
                 use std::fmt::Write as _;
                 display
@@ -271,18 +259,19 @@ impl ProductionSignatureSemantics<'_> {
                 display.write_str("<").expect("unbounded type display");
                 super::super::write_source_type_list_with(
                     &mut display,
-                    &reference.targs,
+                    &diagnostic.targs,
                     &mut super::super::write_source_type_leaf,
                 )
                 .expect("unbounded type display");
                 display.write_str(">").expect("unbounded type display");
-                let projection_prefix = if argument.in_projection() { 3 } else { 4 };
+                let projection_prefix = if argument.in_projection()? { 3 } else { 4 };
+                let argument_span = argument.span()?;
                 self.record_source_diagnostic_at(
                     scope.owner,
                     scope.source,
                     Span::new(
-                        argument.span.lo.saturating_sub(projection_prefix),
-                        argument.span.hi,
+                        argument_span.lo.saturating_sub(projection_prefix),
+                        argument_span.hi,
                     ),
                     format!(
                         "projection conflicts with variance of the corresponding type parameter of '{}'. Remove the projection or replace it with '*'.",
@@ -296,23 +285,19 @@ impl ProductionSignatureSemantics<'_> {
             let captured_count = classifier.map_or(0, |classifier| {
                 classifier.captured_type_parameters.type_params.len()
             });
-            let mut arguments = Vec::with_capacity(reference.targs.len() + captured_count);
-            let mut parsed = Vec::with_capacity(reference.targs.len());
-            for argument in &reference.targs {
-                parsed.push(if argument.is_star_projection() {
+            let mut arguments = Vec::with_capacity(type_arguments.len() + captured_count);
+            let mut parsed = Vec::with_capacity(type_arguments.len());
+            for argument in type_arguments.iter().copied() {
+                parsed.push(if argument.star_projection()? {
                     None
                 } else {
-                    let resolved = self.signature_type_ref_at(
+                    let resolved = self.signature_type_syntax_at(
                         scope,
                         lexical,
                         argument,
                         include_scope_owner_body,
                     )?;
-                    Some(super::super::projected_typeref_argument(
-                        argument,
-                        resolved,
-                        fallback_star_bound,
-                    ))
+                    Some(argument.projected(resolved, fallback_star_bound)?)
                 });
             }
             let bindings =
@@ -322,7 +307,9 @@ impl ProductionSignatureSemantics<'_> {
                         &parsed,
                     )
                 });
-            for (index, (syntax, resolved)) in reference.targs.iter().zip(parsed).enumerate() {
+            for (index, (syntax, resolved)) in
+                type_arguments.iter().copied().zip(parsed).enumerate()
+            {
                 arguments.push(match resolved {
                     Some(resolved) => resolved,
                     None => {
@@ -333,7 +320,7 @@ impl ProductionSignatureSemantics<'_> {
                                 crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
                             })
                             .unwrap_or(fallback_star_bound);
-                        super::super::projected_typeref_argument(syntax, Ty::Error, upper_bound)
+                        syntax.projected(Ty::Error, upper_bound)?
                     }
                 });
             }
@@ -379,32 +366,135 @@ impl ProductionSignatureSemantics<'_> {
                 );
             }
             let base = Ty::obj_args_name(internal, &arguments);
-            return Some(if reference.nullable() {
-                Ty::nullable(base)
-            } else {
-                base
-            });
+            return Some(if nullable { Ty::nullable(base) } else { base });
         }
         // Function types (`(A) -> B`, including suspend/receiver/context shapes), builtin spellings
         // and primitive arrays. `typeref_leaf` is the same free function the checker uses; only the
         // component recursion differs, so a component this path cannot resolve refuses the whole
         // reference instead of silently publishing `Ty::Error`.
-        let mut unresolved = false;
-        let leaf = super::super::typeref_leaf(reference, &mut |component| match self
-            .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
-        {
-            Some(ty) => ty,
-            None => {
-                unresolved = true;
-                Ty::Error
+        let leaf = if let Some(function) = reference.function_shape()? {
+            let context_count = function.context_count.min(function.parameters.len());
+            let mut parameters = Vec::with_capacity(function.parameters.len());
+            for parameter in function.parameters {
+                parameters.push(if parameter.star_projection()? {
+                    Ty::nullable(Ty::obj("kotlin/Any"))
+                } else {
+                    self.signature_type_syntax_at(
+                        scope,
+                        lexical,
+                        parameter,
+                        include_scope_owner_body,
+                    )?
+                });
             }
-        });
-        let leaf = leaf.filter(|_| !unresolved)?;
-        Some(if reference.nullable() {
-            Ty::nullable(leaf)
+            let result = match function.result {
+                Some(result) if result.star_projection()? => Ty::nullable(Ty::obj("kotlin/Any")),
+                Some(result) => {
+                    self.signature_type_syntax_at(scope, lexical, result, include_scope_owner_body)?
+                }
+                None => Ty::Unit,
+            };
+            Some(Ty::fun_with_shape(
+                parameters,
+                result,
+                context_count,
+                function.has_receiver,
+                function.suspend,
+            ))
         } else {
-            leaf
-        })
+            Ty::from_name(name).or_else(|| Ty::primitive_array_element(name).map(Ty::array))
+        }?;
+        Some(if nullable { Ty::nullable(leaf) } else { leaf })
+    }
+
+    pub(super) fn resolve_signature_type_reference(
+        &self,
+        scope: crate::fir::SignatureScope,
+        reference: &TypeRef,
+    ) -> Result<Ty, crate::fir::DiagnosticId> {
+        self.resolve_signature_type_syntax_at(
+            scope,
+            scope,
+            SignatureTypeSyntax::parser(reference),
+            true,
+        )
+    }
+
+    pub(super) fn resolve_signature_type_syntax_at(
+        &self,
+        diagnostic_scope: crate::fir::SignatureScope,
+        lookup_scope: crate::fir::SignatureScope,
+        reference: SignatureTypeSyntax<'_>,
+        include_scope_owner_body: bool,
+    ) -> Result<Ty, crate::fir::DiagnosticId> {
+        let resolved = self.with_signature_type_scope(lookup_scope, |lexical| {
+            self.signature_type_syntax_at(
+                lookup_scope,
+                lexical,
+                reference,
+                include_scope_owner_body,
+            )
+            .map(Ok)
+            .unwrap_or_else(|| {
+                let failed = self.unresolved_signature_type_syntax(
+                    lookup_scope,
+                    lexical,
+                    reference,
+                    include_scope_owner_body,
+                );
+                let failed_spelling = failed
+                    .spelling()
+                    .expect("inventoried type syntax must retain its spelling");
+                let spelling = self
+                    .qualified_classifier_binding(lookup_scope, &failed_spelling)
+                    .1
+                    .unwrap_or_else(|| failed_spelling.into_owned());
+                Err(self.record_unresolved_reference_at(
+                    diagnostic_scope.owner,
+                    diagnostic_scope.source,
+                    failed
+                        .span()
+                        .expect("inventoried type syntax must retain its span"),
+                    &spelling,
+                ))
+            })
+        })?;
+        let ty = resolved?;
+        if !ty.mentions_error() {
+            return Ok(ty);
+        }
+        if let Some(diagnostic_reference) = reference.diagnostic_type_ref() {
+            if let Some(diagnostic) = self.recorded_type_diagnostic(
+                diagnostic_scope.owner,
+                diagnostic_scope.source,
+                &diagnostic_reference,
+            ) {
+                return Err(diagnostic);
+            }
+        }
+        let failed = self.with_signature_type_scope(lookup_scope, |lexical| {
+            self.unresolved_signature_type_syntax(
+                lookup_scope,
+                lexical,
+                reference,
+                include_scope_owner_body,
+            )
+        })?;
+        let failed_spelling = failed
+            .spelling()
+            .expect("inventoried type syntax must retain its spelling");
+        let spelling = self
+            .qualified_classifier_binding(lookup_scope, &failed_spelling)
+            .1
+            .unwrap_or_else(|| failed_spelling.into_owned());
+        Err(self.record_unresolved_reference_at(
+            diagnostic_scope.owner,
+            diagnostic_scope.source,
+            failed
+                .span()
+                .expect("inventoried type syntax must retain its span"),
+            &spelling,
+        ))
     }
 
     /// A source `typealias` reachable from this file, expanded with the exact use-site arguments.
@@ -414,12 +504,15 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
+        reference: SignatureTypeSyntax<'_>,
         include_scope_owner_body: bool,
     ) -> Option<Ty> {
-        let (identity, formals, expansion) =
-            self.signature_source_alias_expansion(scope, &reference.name)?;
-        let selected_classifier = self.qualified_classifier(scope, &reference.name);
+        let name = reference.spelling()?;
+        let name = name.as_ref();
+        let span = reference.span()?;
+        let type_arguments = reference.arguments()?;
+        let (identity, formals, expansion) = self.signature_source_alias_expansion(scope, name)?;
+        let selected_classifier = self.qualified_classifier(scope, name);
         // Compare with the declaration-owned alias target, not with the storage variant of its
         // expansion. A structural function expansion is `Ty::Fun`, while dependency metadata
         // correctly records its classifier target; deriving the head from `Ty::Obj` would reject
@@ -446,18 +539,18 @@ impl ProductionSignatureSemantics<'_> {
         crate::trace_compiler!(
             "signature",
             "compact typealias use spelling={} formals={formals:?} template={expansion:?}",
-            reference.name,
+            name,
         );
-        if formals.len() != reference.targs.len() {
+        if formals.len() != type_arguments.len() {
             self.record_source_diagnostic_at(
                 scope.owner,
                 scope.source,
-                reference.span,
+                span,
                 format!(
                     "wrong number of type arguments for type alias '{}': expected {}, found {}.",
-                    reference.name,
+                    name,
                     formals.len(),
-                    reference.targs.len()
+                    type_arguments.len()
                 ),
             );
             return Some(Ty::Error);
@@ -466,20 +559,20 @@ impl ProductionSignatureSemantics<'_> {
             return Some(expansion);
         }
         let fallback_star_bound = Ty::nullable(Ty::obj("kotlin/Any"));
-        let arguments = reference
-            .targs
-            .iter()
+        let arguments = type_arguments
+            .into_iter()
             .map(|argument| {
-                let resolved = if argument.is_star_projection() {
+                let resolved = if argument.star_projection()? {
                     Ty::Error
                 } else {
-                    self.signature_type_ref_at(scope, lexical, argument, include_scope_owner_body)?
+                    self.signature_type_syntax_at(
+                        scope,
+                        lexical,
+                        argument,
+                        include_scope_owner_body,
+                    )?
                 };
-                Some(super::super::projected_typeref_argument(
-                    argument,
-                    resolved,
-                    fallback_star_bound,
-                ))
+                argument.projected(resolved, fallback_star_bound)
             })
             .collect::<Option<Vec<_>>>()?;
         let bindings = formals
