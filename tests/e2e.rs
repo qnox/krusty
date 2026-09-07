@@ -976,6 +976,8 @@ mod no_assertions_flags_e2e;
 mod no_jdk_builtin_emit_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
 mod non_field_ctor_metadata_e2e;
+#[path = "non_generic_overload_wins_e2e.rs"]
+mod non_generic_overload_wins_e2e;
 #[path = "not_null_assert_e2e.rs"]
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]

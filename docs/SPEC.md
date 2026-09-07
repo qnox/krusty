@@ -1879,6 +1879,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the parameter at that slot (and it mentions no open formal), that parameter is the argument's
   expectation and the call is re-evaluated under it before selection. Test:
   `streaming_signature_tests::a_member_call_hands_its_parameter_to_a_nested_generic_call_in_pass_one`.
+- **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
+  (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
+  `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
+  through a SAM conversion at the same rank; krusty reported `overload resolution ambiguity` (eleven
+  times in one real test file) where kotlinc selects the non-generic overload. The tie among
+  maximal candidates now resolves to the single candidate without type parameters when there is
+  exactly one; any other tie stays ambiguous. The selected call site is byte-identical to kotlinc
+  (`invokedynamic` + `invokestatic` of the `Executable` overload); the synthesized lambda body
+  still returns `Unit` (`getstatic Unit.INSTANCE; areturn`) where kotlinc's is `void` for a void
+  SAM method — an open backend residue beside it. Test: `tests/non_generic_overload_wins_e2e.rs`.
 - **A signature-pass block applies a call's `returns() implies (x != null)` contract.** An
   expression-bodied function whose result is a block-ish lambda (`fun t() = runBlocking { … }`,
   `= runTest { … }`, `= run { … }` — the shape of most test functions) gets its return type from
