@@ -42648,8 +42648,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a selected current-module constant carries Kotlin's compiler-known unsigned
-    /// integer-coercion marker. Both pieces are stable declaration-header facts. `None` means this
-    /// checker has no finalized index and is reserved for legacy same-parse entry points.
+    /// integer-coercion marker. Both pieces are stable declaration-header facts; `None` means the
+    /// selected expression has no stable declaration identity.
     fn stable_const_has_implicit_integer_coercion(
         &self,
         declaration: Option<crate::fir::DeclarationId>,
@@ -63118,11 +63118,10 @@ impl<'a> Checker<'a> {
                 property.stable_declaration,
             ));
         }
-        // Query the normalized module∪dependency classifier model. In production this reaches the
-        // finalized stable-index provider; legacy analysis reaches the compatibility provider
-        // through the same operation. The selected declaration already owns its applied type,
-        // mutability, accessor visibility, and exact declaring owner, so no source `ClassSig`
-        // hierarchy or flattened backing-field cache is consulted here.
+        // Query the normalized module∪dependency classifier model. The finalized stable-index
+        // provider returns a declaration that already owns its applied type, mutability, accessor
+        // visibility, and exact declaring owner, so no source `ClassSig` hierarchy or flattened
+        // backing-field cache is consulted here.
         let selected = self
             .resolver()
             .select_member_property_where(receiver.non_null(), name)?;
