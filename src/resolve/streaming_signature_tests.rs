@@ -5651,3 +5651,54 @@ fun destructured(line: String) = run {
         ],
     );
 }
+
+#[test]
+fn a_generic_call_omitting_a_defaulted_trailing_parameter_selects_in_pass_one() {
+    // ktor's `HttpClient(CIO)`: `fun <T : Config> client(factory: Factory<T>, block: T.() -> Unit
+    // = {})` called with the defaulted lambda omitted, `T` inferred from the object's supertype.
+    // The top-level picker admitted the omitted shape as applicable but never picked it, so the
+    // property's inferred type declined and every use of the client cascaded.
+    let source = r#"// WITH_STDLIB
+open class Config
+class CioConfig : Config()
+interface Factory<T : Config>
+object CIO : Factory<CioConfig>
+class Client(val name: String)
+fun <T : Config> client(factory: Factory<T>, block: T.() -> Unit = {}): Client = Client("c")
+fun <T : Config> both(factory: Factory<T>, name: String = "n", block: T.() -> Unit = {}): Client = Client(name)
+class Holder {
+    val plain = client(CIO)
+    val named = both(CIO, name = "x")
+    val configured = client(CIO) { }
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("OmittedDefaultedTrailingParameter")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("omitted defaulted parameter regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    for name in ["plain", "named", "configured"] {
+        let ty = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find(|declaration| index.declaration_name(*declaration) == Some(name))
+            .and_then(|declaration| index.signature(declaration))
+            .map(|signature| signature.result.get());
+        assert_eq!(ty, Some(Ty::obj("Client")), "{name}");
+    }
+}

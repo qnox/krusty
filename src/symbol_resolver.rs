@@ -4931,12 +4931,24 @@ impl<'a> SymbolResolver<'a> {
             return Some((selected, callable));
         }
         // A default bridge is a provider-owned physical callable rather than one of the projected
-        // source candidates above. Preserve coordinate matching only for that legacy shape. An
-        // ordinary selection carries its exact candidate identity out of the overload engine.
+        // source candidates above: it carries its realization's coordinates (`HttpClient$default`
+        // and the bridge descriptor), so pair it back to the base declaration whose realization it
+        // is. An ordinary selection carries its exact candidate identity out of the overload
+        // engine and still matches by its own coordinates.
         let selected = functions.top_level().find(|candidate| {
             candidate.callable.owner == callable.owner
                 && candidate.callable.name == callable.name
                 && candidate.callable.descriptor == callable.descriptor
+                || (callable.default_call
+                    && candidate
+                        .callable
+                        .default_realization
+                        .as_deref()
+                        .is_some_and(|realization| {
+                            realization.owner == callable.owner
+                                && realization.name == callable.name
+                                && realization.descriptor == callable.descriptor
+                        }))
         })?;
         Some((selected.clone(), callable))
     }

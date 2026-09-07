@@ -1030,6 +1030,8 @@ mod object_method_ref_e2e;
 mod object_receiver_lambda_e2e;
 #[path = "object_value_inference_e2e.rs"]
 mod object_value_inference_e2e;
+#[path = "omitted_default_generic_overload_e2e.rs"]
+mod omitted_default_generic_overload_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
