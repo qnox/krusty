@@ -5562,3 +5562,92 @@ fun sourceContract(runtime: Runtime?) = run {
         assert_eq!(ret, Some(Ty::obj("kotlin/String")), "{name}");
     }
 }
+
+#[test]
+fn a_failed_local_read_twice_in_a_block_does_not_trip_the_cycle_guard() {
+    // The initializer fails; the failed node is read by a statement (dropped as a non-fatal
+    // effect) and again by a later one. The evaluator's acyclicity guard must not mistake the
+    // second read for a cycle: a member call that fails at selection leaves its arm through `?`,
+    // and `val (k, v) = it.split("=", limit = 2)` read twice was a worker panic on a real project.
+    let source = r#"// WITH_STDLIB
+fun use(value: Any) {}
+fun twice() = run {
+    val v = undefinedCall()
+    use(v)
+    v
+}
+fun destructured(line: String) = run {
+    val (first, second) = line.undefinedMember(limit = 2)
+    use(first)
+    use(second)
+    1
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("FailedLocalReadTwice")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("failed local read regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let _ = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| (
+                diagnostic.file,
+                diagnostic.span,
+                diagnostic.editor_span,
+                diagnostic.severity,
+                diagnostic.kind,
+                diagnostic.msg.as_str(),
+                diagnostic.identity,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                crate::diag::Span::new(70, 83),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "unresolved reference 'undefinedCall'.",
+                None,
+            ),
+            (
+                0,
+                crate::diag::Span::new(175, 190),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "unresolved reference 'undefinedMember'.",
+                None,
+            ),
+            (
+                0,
+                crate::diag::Span::new(148, 201),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "krusty: cannot destructure this type (no operator 'component1')",
+                None,
+            ),
+            (
+                0,
+                crate::diag::Span::new(148, 201),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "krusty: cannot destructure this type (no operator 'component2')",
+                None,
+            ),
+        ],
+    );
+}

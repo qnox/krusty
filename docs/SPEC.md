@@ -1958,6 +1958,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (a bridge method's debug tables, constant-pool order) predate it. Test:
   `tests/star_projection_wildcard_e2e.rs` (a Java fixture with a wildcard result and parameter,
   declared, stubbed, and passed, run on the JVM).
+- **The signature evaluator's acyclicity guard clears on every exit, not only on success.** The
+  solver guards against a cyclic compact graph by marking each expression while it is being
+  evaluated. Inside the evaluation arms every `?` returned early WITHOUT unmarking, so a node that
+  failed stayed marked. That was invisible while any failure aborted the whole declaration; once a
+  failed statement effect is dropped and evaluation continues (the rule above), a later reader of
+  the same node — `val (k, v) = it.split("=", limit = 2)` inside `= runBlocking { … }`, where the
+  member call declines in Pass 1 and both destructured components read it — tripped the guard as a
+  cycle and PANICKED the analysis worker (`exit status: 101`, five source sets of a real project).
+  The arms now run inside one block whose result is judged after the guard is cleared, so a failed
+  node is simply re-evaluated (and fails again) on a second read. Test:
+  `streaming_signature_tests::a_failed_local_read_twice_in_a_block_does_not_trip_the_cycle_guard`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
