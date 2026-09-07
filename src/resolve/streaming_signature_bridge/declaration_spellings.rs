@@ -5,7 +5,7 @@
 //! production signature collection never reopens `File::alias_spellings` or walks declarations by
 //! parser coordinates.
 
-use super::super::{spelling_of_ref_with, spelling_scope, ClassNames, SymbolTable, TParams};
+use super::super::{expansion_arg_spellings, spelling_scope, ClassNames, SymbolTable, TParams};
 use crate::fir::{
     DeclarationId, DeclarationKind, HeaderDeclarationKind, HeaderTypeBoundRange, HeaderTypeId,
     HeaderTypeParameterRange, StreamedHeaderModule,
@@ -88,29 +88,134 @@ fn spelling(
         (Spelled, Vec<String>, crate::types::Ty),
     >,
 ) -> Option<Spelled> {
-    let materialized = headers
+    let expanded = headers.syntax.ty(ty)?;
+    let spelled_id = headers.syntax.source_spelling(ty).unwrap_or(ty);
+    let spelled = headers.syntax.ty(spelled_id)?;
+    let spelled_name = headers
         .syntax
-        .transient_type_ref(ty, &headers.lookup_names)?;
-    let source_spellings = headers
+        .classifier_spelling(spelled_id, &headers.lookup_names);
+    if spelled_name
+        .as_deref()
+        .is_some_and(|name| scope.contains(name))
+    {
+        return Some(Spelled {
+            definitely_non_null: spelled.flags.definitely_non_null(),
+            ..Spelled::default()
+        });
+    }
+
+    if let crate::fir::HeaderTypeKind::Function {
+        parameters, result, ..
+    } = spelled.kind
+    {
+        let mut args = headers
+            .syntax
+            .type_operands(parameters)
+            .iter()
+            .map(|parameter| {
+                spelling(
+                    headers,
+                    semantics,
+                    scope_owner,
+                    *parameter,
+                    classes,
+                    scope,
+                    expansions,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if !spelled.flags.suspend_function() {
+            args.push(match result {
+                Some(result) => spelling(
+                    headers,
+                    semantics,
+                    scope_owner,
+                    result,
+                    classes,
+                    scope,
+                    expansions,
+                )?,
+                None => Spelled::default(),
+            });
+        }
+        return Some(Spelled {
+            definitely_non_null: spelled.flags.definitely_non_null(),
+            alias: None,
+            alias_args: Vec::new(),
+            args,
+        });
+    }
+
+    let spelled_name = spelled_name?;
+    let crate::fir::HeaderTypeKind::Classifier { detail, .. } = spelled.kind else {
+        return None;
+    };
+    let arguments = headers
         .syntax
-        .transient_source_spellings(ty, &headers.lookup_names)?;
+        .classifier_type(detail)
+        .map(|detail| headers.syntax.type_operands(detail.arguments))?;
+    let argument_spellings = arguments
+        .iter()
+        .map(|argument| {
+            spelling(
+                headers,
+                semantics,
+                scope_owner,
+                *argument,
+                classes,
+                scope,
+                expansions,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let alias = (!expanded.flags.is_import())
+        .then(|| classes.alias_identity(&spelled_name))
+        .flatten();
+    let Some(alias) = alias else {
+        return Some(Spelled {
+            definitely_non_null: spelled.flags.definitely_non_null(),
+            alias: None,
+            alias_args: Vec::new(),
+            args: argument_spellings,
+        });
+    };
     let signature_scope = crate::fir::SignatureScope {
         owner: scope_owner,
         source: headers.declarations.anchor(scope_owner)?.source,
     };
-    let mut resolve_argument = |argument: &crate::ast::TypeRef| {
-        semantics
-            .resolve_signature_type_reference(signature_scope, argument)
-            .unwrap_or(crate::types::Ty::Error)
-    };
-    Some(spelling_of_ref_with(
-        &materialized,
-        classes,
-        scope,
-        expansions,
-        &source_spellings,
-        &mut resolve_argument,
-    ))
+    let alias_args = arguments
+        .iter()
+        .zip(argument_spellings)
+        .map(|(argument, spelling)| {
+            (
+                semantics
+                    .resolve_explicit_header_type(signature_scope, *argument)
+                    .unwrap_or(crate::types::Ty::Error),
+                spelling,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expansion_args = expansion_arg_spellings(
+        expansions
+            .get(&alias)
+            .map(|(rhs, formals, expansion)| (rhs, formals.as_slice(), *expansion))
+            .or_else(|| {
+                classes.alias_expansion(&spelled_name).map(|classpath| {
+                    (
+                        &classpath.expansion_spelling,
+                        classpath.formals.as_slice(),
+                        classpath.expansion,
+                    )
+                })
+            }),
+        &alias_args,
+    );
+    Some(Spelled {
+        definitely_non_null: spelled.flags.definitely_non_null(),
+        alias: Some(alias),
+        alias_args,
+        args: expansion_args,
+    })
 }
 
 fn bound_spellings(

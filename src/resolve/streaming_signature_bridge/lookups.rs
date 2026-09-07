@@ -407,19 +407,6 @@ impl ProductionSignatureSemantics<'_> {
         Some(if nullable { Ty::nullable(leaf) } else { leaf })
     }
 
-    pub(super) fn resolve_signature_type_reference(
-        &self,
-        scope: crate::fir::SignatureScope,
-        reference: &TypeRef,
-    ) -> Result<Ty, crate::fir::DiagnosticId> {
-        self.resolve_signature_type_syntax_at(
-            scope,
-            scope,
-            SignatureTypeSyntax::parser(reference),
-            true,
-        )
-    }
-
     pub(super) fn resolve_signature_type_syntax_at(
         &self,
         diagnostic_scope: crate::fir::SignatureScope,

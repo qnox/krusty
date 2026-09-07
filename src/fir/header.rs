@@ -1314,60 +1314,6 @@ impl HeaderSyntaxArena {
         })
     }
 
-    /// Reconstruct only the source-spelling substitutions reachable from one compact type root.
-    /// This is a short-lived adapter for metadata publication during Pass 1; the returned map is
-    /// dropped with the materialized `TypeRef` and never crosses into checked FIR.
-    pub(crate) fn transient_source_spellings(
-        &self,
-        root: HeaderTypeId,
-        names: &LookupNames,
-    ) -> Option<std::collections::HashMap<Span, TypeRef>> {
-        fn visit(
-            arena: &HeaderSyntaxArena,
-            id: HeaderTypeId,
-            names: &LookupNames,
-            out: &mut std::collections::HashMap<Span, TypeRef>,
-        ) -> Option<()> {
-            let ty = arena.ty(id)?;
-            if let Some(spelling) = arena.source_spellings.get(&id).copied() {
-                out.insert(ty.span, arena.transient_type_ref(spelling, names)?);
-                // Source spelling trees can themselves contain parser-expanded aliases. They are
-                // compactly linked by identity during header capture, so include those nested
-                // substitutions as well as substitutions in the semantic expansion tree.
-                visit(arena, spelling, names, out)?;
-            }
-            match ty.kind {
-                HeaderTypeKind::Classifier {
-                    detail,
-                    abbreviated_argument,
-                } => {
-                    let detail = arena.classifier_type(detail)?;
-                    for argument in arena.type_operands(detail.arguments) {
-                        visit(arena, *argument, names, out)?;
-                    }
-                    if let Some(argument) = abbreviated_argument {
-                        visit(arena, argument, names, out)?;
-                    }
-                }
-                HeaderTypeKind::Function {
-                    parameters, result, ..
-                } => {
-                    for parameter in arena.type_operands(parameters) {
-                        visit(arena, *parameter, names, out)?;
-                    }
-                    if let Some(result) = result {
-                        visit(arena, result, names, out)?;
-                    }
-                }
-            }
-            Some(())
-        }
-
-        let mut spellings = std::collections::HashMap::new();
-        visit(self, root, names, &mut spellings)?;
-        Some(spellings)
-    }
-
     pub fn classifier_type(&self, id: HeaderClassifierTypeId) -> Option<HeaderClassifierType> {
         self.classifier_types.get(id.raw() as usize).copied()
     }

@@ -420,8 +420,7 @@ fn streamed_headers_preserve_compact_package_and_import_scopes() {
     );
     let detached = module
         .detached_type_roots(SourceFileId::from_raw(0))
-        .filter_map(|ty| module.syntax.transient_type_ref(ty, &module.lookup_names))
-        .map(|ty| ty.name)
+        .filter_map(|ty| module.syntax.classifier_spelling(ty, &module.lookup_names))
         .collect::<Vec<_>>();
     assert!(
         detached.iter().any(|name| name == "Marker"),
@@ -463,17 +462,22 @@ fn compact_header_types_own_same_file_alias_source_spellings_by_type_identity() 
     };
     let parameter = module.syntax.parameters(parameters)[0].ty;
     for ty in [parameter, result] {
-        let expanded = module
-            .syntax
-            .transient_type_ref(ty, &module.lookup_names)
-            .expect("expanded compact type");
-        assert_eq!(expanded.name, "Payload");
-        let spellings = module
-            .syntax
-            .transient_source_spellings(ty, &module.lookup_names)
-            .expect("source spelling projection");
         assert_eq!(
-            spellings.get(&expanded.span).map(|ty| ty.name.as_str()),
+            module
+                .syntax
+                .classifier_spelling(ty, &module.lookup_names)
+                .as_deref(),
+            Some("Payload")
+        );
+        let spelling = module
+            .syntax
+            .source_spelling(ty)
+            .expect("compact source spelling");
+        assert_eq!(
+            module
+                .syntax
+                .classifier_spelling(spelling, &module.lookup_names)
+                .as_deref(),
             Some("Cargo")
         );
     }
@@ -537,14 +541,6 @@ class Box<out V : Number>(val value: V, plain: Int = 1) : Base<V>()
     let callback = module.syntax.ty(parameters[0].ty).unwrap();
     assert!(callback.flags.suspend_function());
     assert!(callback.flags.function_receiver());
-    let transient = module
-        .syntax
-        .transient_type_ref(parameters[0].ty, &module.lookup_names)
-        .unwrap();
-    assert_eq!(transient.name, "<fun>");
-    assert!(transient.fun_suspend());
-    assert!(transient.fun_has_receiver());
-    assert_eq!(transient.fun_context_count, 1);
     let HeaderTypeKind::Function {
         parameters,
         result: Some(result),
@@ -1218,9 +1214,8 @@ fn streamed_callable_headers_own_declaration_and_parameter_annotation_references
     let spelling = |ty| {
         headers
             .syntax
-            .transient_type_ref(ty, &headers.lookup_names)
+            .classifier_spelling(ty, &headers.lookup_names)
             .unwrap()
-            .name
     };
     assert_eq!(
         headers
@@ -2156,10 +2151,11 @@ impl SignatureSemantics for TestSignatureSemantics {
         graph: &SignatureGraph,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations.borrow_mut().push("type".into());
-        let reference = graph
-            .transient_type_ref(syntax)
+        let (types, names) = graph.compact_type_storage();
+        let spelling = types
+            .classifier_spelling(syntax, names)
             .ok_or_else(|| DiagnosticId::from_raw(2_004))?;
-        ResolvedTy::new(Ty::from_name(&reference.name).unwrap_or(Ty::String))
+        ResolvedTy::new(Ty::from_name(&spelling).unwrap_or(Ty::String))
             .map_err(|_| DiagnosticId::from_raw(2_004))
     }
 

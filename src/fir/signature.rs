@@ -352,11 +352,6 @@ impl SignatureGraph {
         self.type_syntax.add_type(ty, &mut self.type_names)
     }
 
-    #[cfg(test)]
-    pub fn transient_type_ref(&self, id: HeaderTypeId) -> Option<crate::ast::TypeRef> {
-        self.type_syntax.transient_type_ref(id, &self.type_names)
-    }
-
     pub(crate) fn compact_type_storage(&self) -> (&HeaderSyntaxArena, &LookupNames) {
         (&self.type_syntax, &self.type_names)
     }
