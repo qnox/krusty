@@ -79644,7 +79644,16 @@ impl<'a> Checker<'a> {
             self.implicit_receiver_types(scope),
             self.actual_this_narrow(scope),
         );
-        if lookup.is_some() {
+        // A lexical local or parameter always wins over an implicit receiver's member of the
+        // same name, even a receiver introduced inside its scope (`val headers = …; get(url) {
+        // headers.forEach … }` reads the map, not `HttpRequestBuilder.headers`); only a
+        // receiver-derived binding — an outer class's own property — yields to an inner receiver.
+        if lookup.is_some_and(|binding| {
+            !matches!(
+                binding.origin,
+                ReceiverFnValueOrigin::Local | ReceiverFnValueOrigin::ClassStorage(_)
+            )
+        }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))

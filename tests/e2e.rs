@@ -850,6 +850,8 @@ mod local_fun_default_args_e2e;
 mod local_fun_overload_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "local_shadows_receiver_member_e2e.rs"]
+mod local_shadows_receiver_member_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
 mod lower_bail_reason_e2e;
 #[path = "lvt_parity_e2e.rs"]
