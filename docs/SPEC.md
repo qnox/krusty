@@ -1859,6 +1859,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A classpath entry that cannot be opened is reported, in kotlinc's words.** The classpath reader
+  drops a `-cp` entry it cannot open without a message, so a missing, truncated or unreadable jar
+  surfaced only as `unresolved reference` on every import from it — a harness run under load
+  produced exactly that for two serialization tests and nothing tied it to the jar. kotlinc 2.4.10
+  warns and continues in both cases: `warning: classpath entry points to a non-existent location:
+  <path>` for a missing entry, and `WARN: Error while reading zip file: <path>` (with a stack trace)
+  for an archive that does not open; a truncated but structurally valid archive it reads silently.
+  krusty prints the first message verbatim and `warning: cannot read classpath entry <path>: <why>`
+  for an existing entry that cannot be read or, for a `.jar`/`.zip`, does not open as an archive;
+  a directory only has to be listable and any other file (a `lib/modules` jimage) only has to open.
+  Compilation continues, as in kotlinc, so a stray unusable jar never changes the output of a module
+  that does not need it. Checked before analysis on the user's `-cp` entries only
+  (`cli::classpath_entry_problems`). Tests: `tests/classpath_entry_warning_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
