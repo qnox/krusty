@@ -1859,6 +1859,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A signature-pass block statement never fails the block's result on its own.** The solver
+  evaluates a block's statements for the constraints they contribute (an anonymous object's
+  member selection, a scoped generic binding) and then its result expression. A statement that
+  failed used to fail the whole signature: `fun t() = runTest { every { … } returns emptyList() }`
+  lost its (fixed, `TestResult`) return type to a member selection inside the body, and every use
+  of the test then cascaded. kotlinc infers `fun f() = run { broken(); 1 }` as `Int` and reports
+  `broken()` from the body check; the solver now does the same — a failed effect is dropped, a
+  later expression that reads it fails on its own, and the effect's Pass-1 diagnostic is not
+  reported because the declaration did not fail (Pass 2 reports the body). Test:
+  `streaming_signature_tests::a_failing_statement_does_not_fail_the_inferred_result_of_its_block`.
+- **A signature-pass member call hands its parameter to a nested generic call.** A nested call
+  argument (`emptyList()`, `mapOf()`) is probed with its formals defaulted (`List<Any>`) and is
+  marked `contextual_call`; the top-level path re-selects it under the selected parameter, but
+  the member path declared every typed argument final and selected `returns(value: List<String>)`
+  against `List<Any>` — `none of the following candidates is applicable` on every mockk
+  `every { … } returns emptyList()` inside a `= runTest { … }` body. The member expectation phase
+  now treats a contextual call like a postponed lambda: when every applicable overload agrees on
+  the parameter at that slot (and it mentions no open formal), that parameter is the argument's
+  expectation and the call is re-evaluated under it before selection. Test:
+  `streaming_signature_tests::a_member_call_hands_its_parameter_to_a_nested_generic_call_in_pass_one`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is

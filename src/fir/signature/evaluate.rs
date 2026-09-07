@@ -1110,8 +1110,13 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         graph.operands(effects),
                         graph.expr(result),
                     );
+                    // An effect is evaluated for the constraints it contributes, not for its
+                    // own success: kotlinc infers `fun f() = run { broken(); 1 }` as `Int` and
+                    // reports `broken()` from the body check. A later expression that depends
+                    // on a failed effect fails on its own read of it.
                     for effect in graph.operands(effects).iter().copied() {
-                        evaluate_expression(semantics, effect, graph, demand, memo, computing)?;
+                        let _ =
+                            evaluate_expression(semantics, effect, graph, demand, memo, computing);
                     }
                     evaluate_expression(semantics, result, graph, demand, memo, computing)
                 }

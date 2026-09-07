@@ -5146,10 +5146,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return Ok(expectations);
             }
         }
-        if arguments
-            .iter()
-            .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)))
-        {
+        // A nested generic call (`s returns emptyList()`) is typed by its probe with its
+        // formals defaulted (`List<Any>`); only the selected parameter can specialize it, so it
+        // is postponed like a lambda rather than counted as already typed.
+        if arguments.iter().all(|argument| {
+            matches!(
+                argument,
+                crate::fir::SigCallArgumentProbe::Typed(argument) if !argument.contextual_call
+            )
+        }) {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         }
         let type_arguments = type_arguments
