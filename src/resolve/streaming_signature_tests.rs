@@ -5597,12 +5597,57 @@ fun destructured(line: String) = run {
         &LangFeatures::new(),
         &mut diagnostics,
     );
-    assert!(
+    assert_eq!(
         diagnostics
             .diags
             .iter()
-            .any(|diagnostic| diagnostic.msg.contains("undefinedCall")),
-        "{:?}",
-        diagnostics.diags
+            .map(|diagnostic| (
+                diagnostic.file,
+                diagnostic.span,
+                diagnostic.editor_span,
+                diagnostic.severity,
+                diagnostic.kind,
+                diagnostic.msg.as_str(),
+                diagnostic.identity,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                crate::diag::Span::new(70, 83),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "unresolved reference 'undefinedCall'.",
+                None,
+            ),
+            (
+                0,
+                crate::diag::Span::new(175, 190),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "unresolved reference 'undefinedMember'.",
+                None,
+            ),
+            (
+                0,
+                crate::diag::Span::new(148, 201),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "krusty: cannot destructure this type (no operator 'component1')",
+                None,
+            ),
+            (
+                0,
+                crate::diag::Span::new(148, 201),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "krusty: cannot destructure this type (no operator 'component2')",
+                None,
+            ),
+        ],
     );
 }
