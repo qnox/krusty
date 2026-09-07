@@ -83,11 +83,8 @@ fun f(k: KAttrs) { every { k.attributes } returns emptyMap() }\n";
     let jdk = common::jdk_modules();
     let diagnostics =
         common::front_end_diagnostics(src, &[common::stdlib_jar()], Some(jdk.as_path()));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("type mismatch")
-                || diagnostic.contains("none of the following candidates")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["argument type mismatch: actual type is 'Map<K, V>', but 'MutableMap<String, Any>' was expected."]
     );
 }
