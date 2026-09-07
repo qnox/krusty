@@ -6122,37 +6122,6 @@ fn normalize_referenced_library_annotations(
     }
 }
 
-enum SignatureCollectionDeclaration<'a> {
-    Function(&'a crate::fir::DeclarationStub),
-    Classifier(&'a crate::fir::DeclarationStub),
-    Property(&'a crate::fir::DeclarationStub),
-}
-
-fn signature_collection_declarations(
-    source: crate::fir::SourceFileId,
-    headers: &crate::fir::StreamedHeaderModule,
-) -> Vec<SignatureCollectionDeclaration<'_>> {
-    headers
-        .source_declarations(source)
-        .iter()
-        .filter_map(|declaration| {
-            let compact = headers.stub(*declaration)?;
-            match compact.kind {
-                crate::fir::DeclarationKind::Function => {
-                    Some(SignatureCollectionDeclaration::Function(compact))
-                }
-                crate::fir::DeclarationKind::Classifier => {
-                    Some(SignatureCollectionDeclaration::Classifier(compact))
-                }
-                crate::fir::DeclarationKind::Property => {
-                    Some(SignatureCollectionDeclaration::Property(compact))
-                }
-                _ => None,
-            }
-        })
-        .collect()
-}
-
 pub(crate) struct CollectedStreamedSignatures {
     pub(crate) symbols: SymbolTable,
     pub(crate) declaration_spellings:
@@ -6710,11 +6679,14 @@ fn collect_signatures_with_cp_impl(
     for i in 0..source_packages.len() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
-        for declaration in
-            signature_collection_declarations(crate::fir::SourceFileId::from_raw(i as u32), headers)
-        {
-            match declaration {
-                SignatureCollectionDeclaration::Function(compact_function) => {
+        let source = crate::fir::SourceFileId::from_raw(i as u32);
+        for declaration in headers.source_declarations(source) {
+            let Some(compact) = headers.stub(*declaration) else {
+                continue;
+            };
+            match compact.kind {
+                crate::fir::DeclarationKind::Function => {
+                    let compact_function = compact;
                     let callable_header =
                         streamed_callable_header_by_declaration(headers, compact_function.id)
                             .expect("a production top-level function must have a compact header");
@@ -7001,7 +6973,8 @@ fn collect_signatures_with_cp_impl(
                         }
                     }
                 }
-                SignatureCollectionDeclaration::Classifier(compact_classifier) => {
+                crate::fir::DeclarationKind::Classifier => {
+                    let compact_classifier = compact;
                     let classifier_header =
                         streamed_classifier_header_by_declaration(headers, compact_classifier.id)
                             .expect("a production classifier must have a compact header");
@@ -8982,7 +8955,8 @@ fn collect_signatures_with_cp_impl(
                         }
                     }
                 }
-                SignatureCollectionDeclaration::Property(compact_property) => {
+                crate::fir::DeclarationKind::Property => {
+                    let compact_property = compact;
                     let property_header =
                         streamed_property_header_by_declaration(headers, compact_property.id)
                             .expect("a production top-level property must have a compact header");
@@ -9345,6 +9319,12 @@ fn collect_signatures_with_cp_impl(
                         table.context_prop_names.insert(property_name);
                     }
                 }
+                crate::fir::DeclarationKind::Constructor
+                | crate::fir::DeclarationKind::EnumEntry
+                | crate::fir::DeclarationKind::TypeAlias
+                | crate::fir::DeclarationKind::Accessor
+                | crate::fir::DeclarationKind::Initializer
+                | crate::fir::DeclarationKind::Script => {}
             }
         }
     }
