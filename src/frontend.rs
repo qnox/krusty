@@ -914,7 +914,6 @@ fn analyze_source_set_impl(
         // consumed; retain only the folded payload before the signature graph and arenas die.
         crate::resolve::publish_checked_compile_time_constants(
             &files[..inferred_end],
-            &pass1_headers,
             &mut index,
             &mut symbols,
         );

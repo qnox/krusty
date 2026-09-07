@@ -228,14 +228,8 @@ fn streamed_header_inventory_returns_no_whole_module_ast() {
     assert_eq!(visited[1].0, SourceFileId::from_raw(1));
     assert_eq!(module.sources.len(), 2);
     assert_eq!(module.stubs.len(), 2);
-    assert_eq!(
-        module.source_declarations(SourceFileId::from_raw(0)).len(),
-        1
-    );
-    assert_eq!(
-        module.source_declarations(SourceFileId::from_raw(1)).len(),
-        1
-    );
+    assert_eq!(module.signature_roots(SourceFileId::from_raw(0)).count(), 1);
+    assert_eq!(module.signature_roots(SourceFileId::from_raw(1)).count(), 1);
     assert_eq!(
         module.lookup_names.len(),
         3,
@@ -315,7 +309,7 @@ fn actualization_excludes_the_compact_expect_subtree_before_signatures() {
 }
 
 #[test]
-fn actualization_preserves_later_source_declaration_positions() {
+fn actualization_preserves_later_source_declaration_identity() {
     let sources = [
         SourceInput::kotlin(
             "// LANGUAGE: +MultiPlatformProjects\n\
@@ -339,13 +333,16 @@ fn actualization_preserves_later_source_declaration_positions() {
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 
     let common = SourceFileId::from_raw(0);
-    let before = module.source_declarations(common).to_vec();
+    let before = module
+        .signature_roots(common)
+        .filter(|stub| stub.kind == DeclarationKind::Classifier)
+        .map(|stub| stub.id)
+        .collect::<Vec<_>>();
     assert_eq!(before.len(), 2);
     let kept = before[1];
     let matched = matched_expect_declarations(&module);
     module.exclude_declaration_subtrees(&matched);
 
-    assert_eq!(module.source_declarations(common), before.as_slice());
     assert!(module.stubs.iter().any(|stub| stub.id == kept));
     assert!(module.stubs.iter().all(|stub| !matched.contains(&stub.id)));
 }

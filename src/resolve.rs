@@ -10448,10 +10448,21 @@ const EXPLICIT_PROPERTY_TYPE_MESSAGE: &str =
 
 pub(crate) fn publish_checked_compile_time_constants(
     files: &[File],
-    headers: &crate::fir::StreamedHeaderModule,
     index: &mut crate::fir::ResolvedModuleIndex,
     table: &SymbolTable,
 ) {
+    let active_sources = files
+        .iter()
+        .enumerate()
+        .map(|(file_index, file)| {
+            crate::fir::ActiveSourceDeclarations::bind_complete_source(
+                file,
+                crate::fir::SourceFileId::from_raw(file_index as u32),
+                index,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("constant syntax must bind to the stable declaration inventory");
     // Explicitly typed and already-inferred singleton constants do not necessarily pass through
     // the deferred-property publication loop. Publish their literal payloads unconditionally from
     // the bounded declaration fragment before stable metadata is projected. This stores only the
@@ -10459,20 +10470,18 @@ pub(crate) fn publish_checked_compile_time_constants(
     let member_literals = files
         .iter()
         .enumerate()
-        .flat_map(|(file_index, file)| {
-            file.decls
-                .iter()
-                .copied()
-                .zip(
-                    headers
-                        .source_declarations(crate::fir::SourceFileId::from_raw(file_index as u32)),
-                )
-                .filter_map(move |(declaration, stable)| {
-                    let Decl::Class(class) = file.decl(declaration) else {
-                        return None;
-                    };
-                    Some((file_index as u32, *stable, class))
-                })
+        .zip(&active_sources)
+        .flat_map(|((file_index, file), active)| {
+            file.decls.iter().copied().filter_map(move |declaration| {
+                let Decl::Class(class) = file.decl(declaration) else {
+                    return None;
+                };
+                Some((
+                    file_index as u32,
+                    active.file_declaration(file, declaration)?,
+                    class,
+                ))
+            })
         })
         .flat_map(|(file_index, declaration, class)| {
             let owner = table.classes.values().find_map(|signature| {
@@ -10511,25 +10520,19 @@ pub(crate) fn publish_checked_compile_time_constants(
     let declarations = files
         .iter()
         .enumerate()
-        .flat_map(|(file_index, file)| {
-            file.decls
-                .iter()
-                .copied()
-                .zip(
-                    headers
-                        .source_declarations(crate::fir::SourceFileId::from_raw(file_index as u32)),
-                )
-                .filter_map(move |(declaration, stable)| {
-                    let Decl::Property(property) = file.decl(declaration) else {
-                        return None;
-                    };
-                    (property.is_const && property.receiver.is_none()).then_some((
-                        file_index as u32,
-                        declaration,
-                        *stable,
-                        property.init?,
-                    ))
-                })
+        .zip(&active_sources)
+        .flat_map(|((file_index, file), active)| {
+            file.decls.iter().copied().filter_map(move |declaration| {
+                let Decl::Property(property) = file.decl(declaration) else {
+                    return None;
+                };
+                (property.is_const && property.receiver.is_none()).then_some((
+                    file_index as u32,
+                    declaration,
+                    active.top_level_property_declaration(declaration)?,
+                    property.init?,
+                ))
+            })
         })
         .collect::<Vec<_>>();
     // A later constant may depend on a payload published earlier in this fixpoint. Disable the
@@ -10547,19 +10550,13 @@ pub(crate) fn publish_checked_compile_time_constants(
                     continue;
                 };
                 let mut diagnostics = DiagSink::new();
-                let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(
-                    file,
-                    crate::fir::SourceFileId::from_raw(file_index),
-                    index,
-                )
-                .expect("constant syntax must bind to the stable declaration inventory");
                 let environment = CheckerExternalEnvironment::from(&*table);
                 let mut checker = make_checker_with_index(
                     file,
                     file_index,
                     &environment,
                     index,
-                    &active,
+                    &active_sources[file_index as usize],
                     None,
                     &mut diagnostics,
                 );

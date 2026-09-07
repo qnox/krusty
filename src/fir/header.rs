@@ -1401,12 +1401,6 @@ impl HeaderSyntaxArena {
     }
 }
 
-struct ExtractedFileStubs {
-    stubs: Vec<DeclarationStub>,
-    /// Stable identity parallel to every entry of the transient parser's `File::decls` array.
-    source_declarations: Vec<DeclarationId>,
-}
-
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
 /// stubs contain no parser arena ids or owned spellings; an optional temporary lookup-name id is not
 /// semantic identity. Stubs remain valid after `file` is dropped. This is the stable-identity portion
@@ -1416,7 +1410,7 @@ fn extract_file_stub_inventory(
     source: SourceFileId,
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
-) -> ExtractedFileStubs {
+) -> Vec<DeclarationStub> {
     fn body_range(file: &File, body: &FunBody) -> Option<TextRange> {
         let expression = match body {
             FunBody::Expr(expression) | FunBody::Block(expression) => *expression,
@@ -2068,7 +2062,6 @@ fn extract_file_stub_inventory(
     let nested_owners = nested_classifier_owners(file, source, ids);
     let companion_declarations = companion_declarations(file);
     let mut stubs = Vec::new();
-    let mut source_declarations = vec![None; file.decls.len()];
     let mut declaration_blocks = Vec::new();
     for (index, declaration) in file.decls.iter().enumerate() {
         if companion_declarations.contains(declaration) {
@@ -2108,7 +2101,6 @@ fn extract_file_stub_inventory(
                 &mut stubs,
             ),
         }
-        source_declarations[index] = Some(stubs[first_stub].id);
         if file.is_local_declaration(*declaration) {
             for stub in &mut stubs[first_stub..] {
                 stub.flags = stub.flags.with(DeclarationFlags::LOCAL_CLASS, true);
@@ -2130,14 +2122,6 @@ fn extract_file_stub_inventory(
             stubs[first_stub].flags = stubs[first_stub].flags.with(DeclarationFlags::EXPECT, true);
         }
         declaration_blocks.push((*declaration, first_stub..stubs.len()));
-    }
-    // A companion classifier is emitted recursively with its owning class rather than as a second
-    // file-root block. Its stable anchor is nevertheless exact and occupies its parser declaration
-    // slot, so later signature publication does not need to rediscover it from names or ranges.
-    for (index, declaration) in file.decls.iter().copied().enumerate() {
-        if companion_declarations.contains(&declaration) {
-            source_declarations[index] = classifier_identity(file, source, ids, declaration);
-        }
     }
     if !file.local_class_enclosing_declarations.is_empty() {
         let blocks = declaration_blocks
@@ -2252,15 +2236,7 @@ fn extract_file_stub_inventory(
             break;
         }
     }
-    ExtractedFileStubs {
-        stubs,
-        source_declarations: source_declarations
-            .into_iter()
-            .map(|declaration| {
-                declaration.expect("every parser declaration has a stable header identity")
-            })
-            .collect(),
-    }
+    stubs
 }
 
 pub fn extract_file_stubs(
@@ -2269,7 +2245,7 @@ pub fn extract_file_stubs(
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
 ) -> Vec<DeclarationStub> {
-    extract_file_stub_inventory(file, source, ids, names).stubs
+    extract_file_stub_inventory(file, source, ids, names)
 }
 
 /// Put one file's declarations into the stable stream shared by Pass 1 and a fresh Pass-2 parse.
@@ -3034,10 +3010,6 @@ pub struct StreamedHeaderModule {
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
-    /// File-declaration roots in parser order, partitioned by source. Members/accessors remain
-    /// reachable through their stable owner edges and therefore do not appear here. Signature
-    /// publication iterates this structure instead of retaining `File::decls` as scaffolding.
-    source_declarations: Vec<Vec<DeclarationId>>,
     /// Pass-1-only semantic containment for parser-hoisted local classifiers. Both sides are stable
     /// declaration identities derived while the AST is live; no source coordinate or parser arena
     /// identity is retained. Inline/default preparation consumes this before Pass 2.
@@ -3145,14 +3117,6 @@ impl StreamedHeaderModule {
         })
     }
 
-    /// Stable file-declaration roots for one source, in source order.
-    pub(crate) fn source_declarations(&self, source: SourceFileId) -> &[DeclarationId] {
-        self.source_declarations
-            .get(source.raw() as usize)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
     /// Whether `source` contributed compact declaration headers. Semantic consumers that iterate a
     /// whole parsed source set must consult this before requiring a compact header: an unparsable
     /// file still owns a `SourceFileId` and still has recovered AST declarations.
@@ -3243,10 +3207,6 @@ impl StreamedHeaderModule {
         self.excluded.extend(excluded);
         self.stubs.retain(|stub| !self.excluded.contains(&stub.id));
         self.reindex_stubs();
-        // `source_declarations` is positional with the transient parser's `File::decls` array.
-        // Keep excluded identities in that positional map; consumers cross-check `stubs`, where
-        // exclusion is authoritative. Removing an element here would shift every later source
-        // declaration onto the preceding parser sibling during compact signature publication.
     }
 
     /// Persistent payload controlled by this header inventory. Source text and transient AST arenas
@@ -3266,11 +3226,6 @@ impl StreamedHeaderModule {
             + self.stub_positions.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<usize>())
             + self.inventory.len() * std::mem::size_of::<DeclarationId>()
-            + self
-                .source_declarations
-                .iter()
-                .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
-                .sum::<usize>()
             + self.excluded.len() * std::mem::size_of::<DeclarationId>()
     }
 
@@ -3726,7 +3681,6 @@ pub struct HeaderInventoryBuilder {
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
-    source_declarations: Vec<Vec<DeclarationId>>,
     local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
 }
@@ -3758,9 +3712,6 @@ impl HeaderInventoryBuilder {
         if self.inventoried.len() <= raw {
             self.inventoried.resize(raw + 1, false);
         }
-        if self.source_declarations.len() <= raw {
-            self.source_declarations.resize_with(raw + 1, Vec::new);
-        }
         if source.kind == SourceKind::Java {
             assert!(file.is_none(), "Java input has no Kotlin AST header");
             return None;
@@ -3784,15 +3735,13 @@ impl HeaderInventoryBuilder {
             let ty = self.syntax.add_type(ty, &mut self.lookup_names);
             self.detached_types.push((source, ty));
         }
-        let extracted = extract_file_stub_inventory(
+        let mut stubs = extract_file_stub_inventory(
             file,
             source,
             &mut self.declarations,
             &mut self.lookup_names,
         );
-        let mut stubs = extracted.stubs;
         order_file_stubs(&mut stubs, &self.declarations);
-        self.source_declarations[source.raw() as usize] = extracted.source_declarations;
         self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
@@ -3907,7 +3856,6 @@ impl HeaderInventoryBuilder {
             visibility_suppressions: self.visibility_suppressions,
             stubs: self.stubs,
             inventory: self.inventory,
-            source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,
             inventoried: self.inventoried,
             excluded: std::collections::HashSet::new(),
