@@ -1859,6 +1859,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
+  (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
+  `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
+  through a SAM conversion at the same rank; krusty reported `overload resolution ambiguity` (eleven
+  times in one real test file) where kotlinc selects the non-generic overload. The tie among
+  maximal candidates now resolves to the single candidate without type parameters when there is
+  exactly one; any other tie stays ambiguous. The selected call site is byte-identical to kotlinc
+  (`invokedynamic` + `invokestatic` of the `Executable` overload); the synthesized lambda body
+  still returns `Unit` (`getstatic Unit.INSTANCE; areturn`) where kotlinc's is `void` for a void
+  SAM method — an open backend residue beside it. Test: `tests/non_generic_overload_wins_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
