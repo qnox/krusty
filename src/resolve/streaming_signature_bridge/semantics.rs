@@ -305,36 +305,32 @@ impl ProductionSignatureSemantics<'_> {
 
     fn source_parameters_specialized_by_receiver(
         &self,
-        source: Option<(u32, u32)>,
         stable_declaration: Option<crate::fir::DeclarationId>,
         receiver: Ty,
         signature: &crate::fir::ResolvedSignature,
     ) -> Option<Vec<Ty>> {
-        let callable = self
-            .table
-            .ext_funs
-            .values()
-            .flat_map(HashMap::values)
-            .flatten()
-            .find(|callable| {
-                stable_declaration.map_or_else(
-                    || {
-                        source.is_some_and(|(file, declaration)| {
-                            callable.source_file == Some(file)
-                                && callable.source_decl == Some(DeclId(declaration))
-                        })
-                    },
-                    |declaration| callable.stable_declaration == Some(declaration),
-                )
-            })?;
+        let declaration = stable_declaration?;
+        let stub = self.headers.stub(declaration)?;
+        let header = self.headers.syntax.declaration(declaration)?;
+        let crate::fir::HeaderDeclarationKind::Callable {
+            receiver: declared_receiver,
+            context_count,
+            ..
+        } = header.kind
+        else {
+            return None;
+        };
+        let declared_receiver = self.resolve_compact_header_type(
+            crate::fir::SignatureScope {
+                owner: declaration,
+                source: stub.source,
+            },
+            declared_receiver?,
+        )?;
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        crate::symbol_resolver::unify_inferred_ty(
-            callable.source_receiver?,
-            receiver,
-            &mut bindings,
-        );
+        crate::symbol_resolver::unify_inferred_ty(declared_receiver, receiver, &mut bindings);
         Some(
-            signature.parameters[callable.context_count.min(signature.parameters.len())..]
+            signature.parameters[(context_count as usize).min(signature.parameters.len())..]
                 .iter()
                 .map(|parameter| {
                     crate::symbol_resolver::ty_subst_keep_unbound(parameter.get(), &bindings)
@@ -2300,7 +2296,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     // receiver's type arguments instead of approximating both to a common
                     // bound.
                     if let Some(parameters) = self.source_parameters_specialized_by_receiver(
-                        source,
                         declaration,
                         receiver,
                         &signature,
