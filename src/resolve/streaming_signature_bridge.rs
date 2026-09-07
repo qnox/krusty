@@ -4180,13 +4180,13 @@ pub(crate) fn finalized_streamed_signature_index(
             failure.declaration
         })
         .collect::<Vec<_>>();
-    let classifier_types = table
-        .classes
-        .values()
-        .filter_map(|signature| {
-            signature
-                .stable_declaration
-                .map(|declaration| (declaration, signature.internal))
+    let classifier_types = headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+        .filter_map(|stub| {
+            super::compact_classifier_identity(headers, stub)
+                .map(|(_, classifier)| (stub.id, classifier))
         })
         .collect::<HashMap<_, _>>();
     let suppressed_generated_callables = headers
