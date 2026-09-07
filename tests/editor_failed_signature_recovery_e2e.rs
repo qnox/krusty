@@ -77,3 +77,32 @@ object Holder {
         "a failed member signature must not erase the sibling inferred property"
     );
 }
+
+/// A half-typed supertype is the everyday state of a file in an editor. The failure branch now
+/// projects the finalized signatures (so the rest of the module keeps its types), and the
+/// projection must treat a parent that never resolved as absent rather than as an invariant
+/// violation: the analysis worker died with a panic (exit 101) on every such file.
+#[test]
+fn an_unresolved_supertype_keeps_the_editor_analysis_alive() {
+    let source = r#"
+package sample
+
+class Child : Missing()
+interface Marker : AlsoMissing
+class Both : Missing(), AlsoMissing
+
+private val text = lazy { "x" }
+fun useText(): Int = text.value.length
+"#;
+    let d = editor_diagnostics(source);
+    assert!(
+        d.iter()
+            .any(|m| m.contains("unresolved reference 'Missing'")),
+        "the unresolved supertype must be reported, got: {d:?}"
+    );
+    assert!(
+        !d.iter()
+            .any(|m| m.contains("'value'") || m.contains("'length'")),
+        "the other declarations must keep their types, got: {d:?}"
+    );
+}

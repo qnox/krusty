@@ -1859,6 +1859,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A selected call re-enters an argument only when the expectation can change it.** After a
+  callable is selected, each argument is re-checked under the selected parameter type so the
+  expectation can reach a nested generic call's result variables (`"OK" to emptySet()` under
+  `Pair<Any, Set<Any>>`), and a nested generic call whose probe was only an erased bound is finished
+  from its own arguments. Both re-entries happened unconditionally, so every level of
+  `mapOf("k" to mapOf("k" to …))` redid its whole subtree twice — once for `to`, once for `mapOf` —
+  exponential in the nesting: six levels took 70 s in a release build and a 230-line test file with
+  such literals stalled the editor's analysis worker for the better part of an hour. Three rules now
+  bound it, all idempotence arguments rather than new inference: (1) an argument whose recorded type
+  already EQUALS the selected expectation is committed as that type without re-entry (the recorded
+  type, not the probe's older encoding of the same shape, is what a re-entry used to replace);
+  (2) an expectation of `Any`/`Any?` constrains no result variable (a literal declared
+  `Map<String, Any?>` hands `Any?` to every nested value); (3) a nested generic call whose probe is
+  concrete — no formal, no error slot, not the top type — was already typed from its own arguments
+  and is not finished again. Nine levels: 21.7 s CPU → under a second, and the depth curve is flat.
+  Tests: `tests/nested_generic_call_expectation_e2e.rs` (a depth-9 time bound, and the `emptySet()`
+  case that must still be re-entered).
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
