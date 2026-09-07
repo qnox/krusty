@@ -956,6 +956,28 @@ impl<'a> StreamedModuleSymbols<'a> {
             .find(|function| function.stable_declaration == Some(declaration))
     }
 
+    /// Project one top-level source function by stable declaration identity. Pass-1 finalization
+    /// uses this to classify declaration conflicts without copying finalized signatures back into
+    /// the temporary source symbol table.
+    pub(crate) fn top_level_function_for_declaration(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<FunctionInfo> {
+        let header = self.index.declaration_header(declaration)?;
+        if header.kind != DeclarationKind::Function || header.owner.is_some() {
+            return None;
+        }
+        let anchor = self.index.declaration_anchor(declaration)?;
+        let package = self
+            .index
+            .source_package(anchor.source)
+            .unwrap_or(TypeName::ROOT);
+        let name = self.index.declaration_name(declaration)?;
+        self.top_level_functions(SymbolNamespace::Package(package), name)
+            .into_iter()
+            .find(|function| function.stable_declaration == Some(declaration))
+    }
+
     fn member_properties(
         &self,
         owner: DeclarationId,

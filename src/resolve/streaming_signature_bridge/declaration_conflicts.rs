@@ -8,15 +8,16 @@ use super::super::*;
 /// for Pass 2.
 pub(crate) fn finalize_streamed_top_level_conflicts(
     headers: &crate::fir::StreamedHeaderModule,
-    table: &SymbolTable,
+    index: &crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
 ) {
     #[derive(Clone)]
     struct Entry {
         declaration: crate::fir::DeclarationId,
         source: u32,
+        package: TypeName,
         name: String,
-        signature: Signature,
+        function: crate::libraries::FunctionInfo,
         entry_point: bool,
     }
 
@@ -34,39 +35,28 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         else {
             continue;
         };
-        let signature = table
-            .funs
-            .get(name)
-            .into_iter()
-            .flatten()
-            .chain(
-                table
-                    .ext_funs
-                    .get(name)
-                    .into_iter()
-                    .flat_map(HashMap::values)
-                    .flatten(),
-            )
-            .find(|signature| signature.stable_declaration == Some(stub.id))
-            .cloned();
-        let Some(signature) = signature else {
+        let source = stub.source.raw();
+        let symbols = crate::fir::StreamedModuleSymbols::for_file(index, source);
+        let Some(function) = symbols.top_level_function_for_declaration(stub.id) else {
             continue;
         };
         let header = streamed_callable_header_by_declaration(headers, stub.id)
             .expect("a top-level function must retain its compact callable header");
+        let params = function.semantic_params();
         let entry_point = is_kotlin_main_entry_point_shape(
             name,
             header.receiver.is_some(),
             header.type_parameters.len(),
             header.context_count,
-            &signature.params,
-            signature.ret,
+            &params,
+            function.ret.apply(function.callable.ret),
         );
         entries.push(Entry {
             declaration: stub.id,
-            source: stub.source.raw(),
+            source,
+            package: index.source_package(stub.source).unwrap_or(TypeName::ROOT),
             name: name.to_string(),
-            signature,
+            function,
             entry_point,
         });
     }
@@ -76,9 +66,11 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
     let mut reserved_diagnostic_bytes = 0usize;
     let mut retained_display_bytes = 0usize;
     for entry in &entries {
-        let Some(key) =
-            TopLevelFunctionConflictKey::from_signature(&entry.signature, entry.name.clone())
-        else {
+        let Some(key) = TopLevelFunctionConflictKey::from_function(
+            &entry.function,
+            entry.package,
+            entry.name.clone(),
+        ) else {
             continue;
         };
         register_top_level_function_conflict(
@@ -92,7 +84,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
                     diagnostic_span: streamed_callable_signature_span(headers, entry.declaration)
                         .expect("a top-level callable must retain its signature origin"),
                 },
-                private: entry.signature.visibility.is_private(),
+                private: entry.function.visibility.is_private(),
                 entry_point: entry.entry_point,
             },
             &mut pending,

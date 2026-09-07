@@ -241,18 +241,6 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
     // declarations in place, so invalidate that cache as one atomic module mutation before any
     // Pass-2 checker can observe it.
     table.begin_module_mutation();
-    for signature in table.funs.values_mut().flatten() {
-        project_callable(index, signature);
-    }
-    for signature in table
-        .ext_funs
-        .values_mut()
-        .flat_map(std::collections::HashMap::values_mut)
-        .flatten()
-    {
-        project_callable(index, signature);
-    }
-
     for property in table.source_props.values_mut() {
         let Some(signature) = property
             .stable_declaration

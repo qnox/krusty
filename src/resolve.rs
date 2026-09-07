@@ -157,7 +157,7 @@ fn resolved_compact_jvm_name(
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TopLevelFunctionConflictKey {
-    package: String,
+    package: TypeName,
     receiver: Option<Ty>,
     name: String,
     params: Vec<Ty>,
@@ -165,17 +165,17 @@ struct TopLevelFunctionConflictKey {
 }
 
 impl TopLevelFunctionConflictKey {
-    fn from_signature(signature: &Signature, name: String) -> Option<Self> {
-        let formals = signature
+    fn from_function(
+        function: &crate::libraries::FunctionInfo,
+        package: TypeName,
+        name: String,
+    ) -> Option<Self> {
+        let formals = function
             .generic_sig
             .as_ref()
             .map(|generic| generic.formals.as_slice())
             .unwrap_or_default();
-        let params = signature
-            .generic_sig
-            .as_ref()
-            .map(|generic| generic.params.as_slice())
-            .unwrap_or(&signature.params);
+        let params = function.semantic_params();
         if params.iter().any(|parameter| parameter.contains_error()) {
             return None;
         }
@@ -185,12 +185,8 @@ impl TopLevelFunctionConflictKey {
         // signature. Canonicalize only declaration-owned type-parameter names so alpha-equivalent
         // declarations still conflict.
         let normalize = |ty| crate::types::ty_canonicalize_params(ty, formals);
-        let declared_receiver = signature
-            .generic_sig
-            .as_ref()
-            .and_then(|generic| generic.receiver)
-            .or(signature.source_receiver);
-        let formal_bounds = signature
+        let declared_receiver = function.semantic_receiver();
+        let formal_bounds = function
             .generic_sig
             .as_ref()
             .map(|generic| {
@@ -221,7 +217,7 @@ impl TopLevelFunctionConflictKey {
             None => None,
         };
         Some(Self {
-            package: signature.package.clone(),
+            package,
             receiver,
             name,
             params: params.iter().copied().map(normalize).collect(),
