@@ -11,7 +11,7 @@ use super::model::{
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::{Command, CommandRunner, GRADLE};
 
-const PROBE_VERSION: &str = "5";
+const PROBE_VERSION: &str = "6";
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
 const MAX_FAILURE_DETAILS: usize = 8;
@@ -45,12 +45,27 @@ allprojects { project ->
                     compilerArgs = compileTask?.compilerOptions?.freeCompilerArgs?.getOrElse([]) ?: []
                 } catch (ignored) {
                 }
+                // The source set's OWN project dependencies, through its compile-classpath
+                // configuration hierarchy: `testImplementation(project(":support"))` reaches the
+                // test set and only the test set. The project-level list below sees only
+                // `implementation`/`api`, which left a test module without an edge and dependent on
+                // whatever jar was on its classpath.
+                def projectDeps = []
+                try {
+                    def compileConfiguration = project.configurations.findByName(set.compileClasspathConfigurationName)
+                    projectDeps = (compileConfiguration?.allDependencies ?: [])
+                        .findAll { it instanceof org.gradle.api.artifacts.ProjectDependency }
+                        .collect { it.path ?: it.dependencyProject.path }
+                        .unique()
+                } catch (ignored) {
+                }
                 sourceSets << [
                     name      : set.name,
                     roots     : roots.toList().sort(),
                     classpath : lenient(project.configurations.findByName(set.compileClasspathConfigurationName)),
                     output    : set.output?.classesDirs?.files?.collect { it.absolutePath } ?: [],
                     kotlincArgs: compilerArgs.collect { it.toString() },
+                    projectDeps: projectDeps,
                 ]
             }
 
@@ -205,6 +220,10 @@ struct GradleSourceSet {
     output: Vec<String>,
     #[serde(default)]
     kotlinc_args: Vec<String>,
+    /// Project dependencies of THIS source set's compile classpath. Absent from an older probe's
+    /// output, in which case the project-level list stands in.
+    #[serde(default)]
+    project_deps: Vec<String>,
 }
 
 /// One Kotlin Multiplatform compilation, e.g. the `main` compilation of the `jvm` target.
@@ -428,8 +447,14 @@ fn module_of(project: &GradleProject, source_set: &GradleSourceSet) -> Module {
         .collect();
     module.jvm_target = project.jvm_target.clone();
     module.kotlinc_args = merged_kotlinc_args(&project.kotlinc_args, &source_set.kotlinc_args);
-    module.depends_on = project
-        .project_deps
+    // The source set's own project dependencies are exact; the project-level list only knows
+    // `implementation`/`api` and stands in for a probe that recorded nothing per source set.
+    let project_deps = if source_set.project_deps.is_empty() {
+        &project.project_deps
+    } else {
+        &source_set.project_deps
+    };
+    module.depends_on = project_deps
         .iter()
         .map(|path| ModuleId::new(path, "main"))
         .collect();
@@ -731,6 +756,28 @@ Execution failed for task ':app:krustyModel'.
             vec![PathBuf::from("/p/app/build/classes/kotlin/main")]
         );
         assert!(test.depends_on.contains(&ModuleId::new(":app", "main")));
+    }
+
+    /// `testImplementation(project(":testsupport"))` is a dependency of the TEST source set only.
+    /// The project-level list carries `implementation`/`api`, so the test module used to get no
+    /// edge at all and relied on whatever jar sat on its classpath — stale, or absent for an
+    /// unbuilt module — while its main module must not inherit the test-only edge.
+    #[test]
+    fn a_source_sets_own_project_dependencies_become_its_edges() {
+        let support = r#"{"path":":testsupport","name":"testsupport","projectDir":"/p/testsupport","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[{"name":"main","roots":["/p/testsupport/src/main/kotlin"],"classpath":[],"output":["/p/testsupport/build/classes/kotlin/main"],"projectDeps":[]}],"projectDeps":[]}"#;
+        let app = r#"{"path":":app","name":"app","projectDir":"/p/app","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[{"name":"main","roots":["/p/app/src/main/kotlin"],"classpath":["/m2/kotlin-stdlib.jar"],"output":["/p/app/build/classes/kotlin/main"],"projectDeps":[":core"]},{"name":"test","roots":["/p/app/src/test/kotlin"],"classpath":["/m2/junit.jar","/p/testsupport/build/libs/testsupport.jar"],"output":["/p/app/build/classes/kotlin/test"],"projectDeps":[":core",":testsupport"]}],"projectDeps":[":core"]}"#;
+        let output = format!("{SENTINEL}{support}\n{SENTINEL}{app}\nBUILD SUCCESSFUL\n");
+        let model = parse_model(Path::new("/p"), &output).unwrap();
+        let test = model.module(&ModuleId::new(":app", "test")).unwrap();
+        assert!(
+            test.depends_on
+                .contains(&ModuleId::new(":testsupport", "main")),
+            "{:?}",
+            test.depends_on
+        );
+        assert!(test.depends_on.contains(&ModuleId::new(":core", "main")));
+        let main = model.module(&ModuleId::new(":app", "main")).unwrap();
+        assert_eq!(main.depends_on, vec![ModuleId::new(":core", "main")]);
     }
 
     #[test]
