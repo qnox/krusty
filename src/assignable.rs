@@ -383,6 +383,13 @@ fn same_type_argument(left: Ty, right: Ty) -> bool {
         | (Ty::InProjection(a), Ty::InProjection(b))
         | (Ty::OutProjection(a), Ty::OutProjection(b))
         | (Ty::StarProjection(a), Ty::StarProjection(b)) => same_flexible_type(*a, *b),
+        // A star projection is the `out` projection of its readable bound: `Resp<*>` is
+        // `Resp<out Any?>`, and a Java wildcard `Resp<?>` arrives as `Resp<out Any!>`. Inside an
+        // invariant argument the two spellings are one type.
+        (Ty::StarProjection(bound), Ty::OutProjection(other))
+        | (Ty::OutProjection(other), Ty::StarProjection(bound)) => {
+            same_flexible_type(*bound, *other)
+        }
         (Ty::Fun(a), Ty::Fun(b)) => {
             a.context_count == b.context_count
                 && a.has_receiver == b.has_receiver
