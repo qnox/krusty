@@ -10651,17 +10651,32 @@ pub(crate) fn publish_checked_compile_time_constants(
         .iter()
         .enumerate()
         .map(|(file_index, file)| {
-            file.map(|file| {
-                crate::fir::ActiveSourceDeclarations::bind_complete_source(
-                    file,
-                    crate::fir::SourceFileId::from_raw(file_index as u32),
-                    index,
-                )
-            })
-            .transpose()
+            let source = crate::fir::SourceFileId::from_raw(file_index as u32);
+            let constants = index
+                .source_inventory(source)
+                .iter()
+                .copied()
+                .filter(|declaration| {
+                    index
+                        .declaration_header(*declaration)
+                        .is_some_and(|header| {
+                            header.kind == crate::fir::DeclarationKind::Property
+                                && header.flags.has(crate::fir::DeclarationFlags::CONST)
+                        })
+                })
+                .collect::<std::collections::HashSet<_>>();
+            match *file {
+                Some(file) if !constants.is_empty() => {
+                    crate::fir::ActiveSourceDeclarations::bind_retained_fragments(
+                        file, source, index, &constants, &constants,
+                    )
+                    .map(Some)
+                }
+                Some(_) | None => Ok(None),
+            }
         })
         .collect::<Result<Vec<_>, _>>()
-        .expect("constant syntax must bind to the stable declaration inventory");
+        .expect("retained constant syntax must bind to the stable declaration inventory");
     // Explicitly typed and already-inferred singleton constants do not necessarily pass through
     // the deferred-property publication loop. Publish their literal payloads unconditionally from
     // the bounded declaration fragment before stable metadata is projected. This stores only the
@@ -10676,29 +10691,21 @@ pub(crate) fn publish_checked_compile_time_constants(
                 let Decl::Class(class) = file.decl(declaration) else {
                     return None;
                 };
-                Some((
-                    file_index as u32,
-                    active.file_declaration(file, declaration)?,
-                    class,
-                ))
+                active.file_declaration(file, declaration)?;
+                Some((file_index as u32, active, declaration, class))
             })
         })
-        .flat_map(|(file_index, declaration, class)| {
-            let owner = table.classes.values().find_map(|signature| {
-                (signature.stable_declaration == Some(declaration) && signature.is_object())
-                    .then_some(signature.internal)
-            });
+        .flat_map(|(file_index, active, declaration, class)| {
             class
                 .body_props
                 .iter()
-                .filter(|property| property.is_const)
-                .filter_map(move |property| {
-                    let owner = owner?;
-                    let stable = table
-                        .class_by_type_name(owner)?
-                        .declared_props
-                        .get(&property.name)?
-                        .stable_declaration?;
+                .enumerate()
+                .filter(|(_, property)| property.is_const)
+                .filter_map(move |(property_index, property)| {
+                    let stable = active.class_body_property_declaration(
+                        declaration,
+                        u32::try_from(property_index).expect("too many class body properties"),
+                    )?;
                     Some((file_index, stable, property))
                 })
         })
