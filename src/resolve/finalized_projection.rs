@@ -139,103 +139,10 @@ fn project_classifier_parents(
 /// lookup or inference behavior. The compact solver has already made every semantic decision.
 pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &mut SymbolTable) {
     // Signature collection may already have populated the derived ModuleSymbols cache with the
-    // provisional `Pending` shapes needed by demand-driven solving. Projection changes those
-    // declarations in place, so invalidate that cache as one atomic module mutation before any
-    // Pass-2 checker can observe it.
+    // provisional class shapes needed by demand-driven solving. Projection changes those classes
+    // in place, so invalidate that cache as one atomic module mutation before a bounded retained
+    // body check can observe it. Top-level declarations are read directly from the stable index.
     table.begin_module_mutation();
-    for property in table.source_props.values_mut() {
-        let Some(signature) = property
-            .stable_declaration
-            .and_then(|declaration| index.signature(declaration))
-        else {
-            continue;
-        };
-        crate::trace_compiler!(
-            "signature",
-            "project top-level property name={} declaration={:?} prior={:?} resolved={:?}",
-            property.name,
-            property.stable_declaration,
-            property.ty,
-            signature.result.get(),
-        );
-        property.ty = signature.result.get();
-        property.storage_ty = index
-            .property_for_declaration(property.stable_declaration.expect("checked above"))
-            .and_then(|property| index.property(property))
-            .and_then(|property| property.storage_type)
-            .map(|storage| storage.get())
-            .or(property
-                .storage_ty
-                .filter(|storage| *storage != crate::types::Ty::Pending));
-        property.context_params = signature
-            .parameters
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect();
-        // `source_props` is the stable declaration-backed provider view. The legacy Pass-2
-        // checker still has one top-level value cache keyed by spelling; keep that migration view
-        // synchronized after the compact solver has made the semantic decision. This is a pure
-        // projection of the already-selected declaration result, not a second inference path.
-        // Contextual properties do not inhabit this cache, matching signature collection.
-        if property.context_params.is_empty() {
-            if let Some((legacy, _, _)) = table.props.get_mut(&property.name) {
-                *legacy = signature.result.get();
-            }
-        }
-    }
-    let mut stable_property_updates = Vec::new();
-    for property in table.stable_source_props.values_mut() {
-        let Some(declaration) = property.stable_declaration else {
-            continue;
-        };
-        let Some(signature) = index.signature(declaration) else {
-            continue;
-        };
-        property.ty = signature.result.get();
-        property.storage_ty = index
-            .property_for_declaration(declaration)
-            .and_then(|property| index.property(property))
-            .and_then(|property| property.storage_type)
-            .map(|storage| storage.get())
-            .or(property
-                .storage_ty
-                .filter(|storage| *storage != crate::types::Ty::Pending));
-        property.context_params = signature
-            .parameters
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect();
-        if property.context_params.is_empty() {
-            stable_property_updates.push((property.name.clone(), signature.result.get()));
-        }
-    }
-    for (name, ty) in stable_property_updates {
-        if let Some((legacy, _, _)) = table.props.get_mut(&name) {
-            *legacy = ty;
-        }
-    }
-    for property in table.ext_props.values_mut().flatten() {
-        let Some(declaration) = property.stable_declaration else {
-            continue;
-        };
-        let Some(signature) = index.signature(declaration) else {
-            continue;
-        };
-        property.ty = signature.result.get();
-        property.context_params = signature
-            .parameters
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect();
-        if let Some(receiver) = index
-            .property_for_declaration(declaration)
-            .and_then(|property| index.property(property))
-            .and_then(|property| property.extension_receiver)
-        {
-            property.receiver = receiver.get();
-        }
-    }
-
     for class in table.classes.values_mut() {
         let anonymous = class
             .stable_declaration
