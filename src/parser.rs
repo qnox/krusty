@@ -2987,6 +2987,25 @@ impl<'a> Parser<'a> {
                     if !self.at(TokenKind::Ident) {
                         break;
                     }
+                    // An entry name is followed by its arguments, its body, the next entry, the
+                    // separator, or the closing brace. After a trailing comma the `;` that ends the
+                    // entry list is lexed as a newline, so the first MEMBER can arrive here:
+                    // `companion object { … }` read `companion` as an entry and then failed on
+                    // `object`, dropping the enum — and every file that named it — from a real
+                    // module.
+                    if !matches!(
+                        self.t.get(self.i + 1).map(|token| token.kind),
+                        None | Some(
+                            TokenKind::LParen
+                                | TokenKind::LBrace
+                                | TokenKind::Comma
+                                | TokenKind::Newline
+                                | TokenKind::RBrace
+                                | TokenKind::Eof
+                        )
+                    ) {
+                        break;
+                    }
                     let entry_span = self.tok().span;
                     let entry_name = self.text().to_string();
                     self.bump();
@@ -6776,7 +6795,12 @@ impl<'a> Parser<'a> {
                                 target_span,
                             );
                         }
-                        Expr::Call { .. } => {
+                        // Any other target is not assignable, and `target op= value` on it is
+                        // Kotlin's operator-call form (`m[k]!! += x` is `plusAssign` on the
+                        // value, as is `(m[k]!!) += x`); the checker decides whether the value's
+                        // type offers that operator. Rejecting the syntax here dropped the whole
+                        // declaring file from a real project's test source set.
+                        _ => {
                             self.bump();
                             self.skip_newlines();
                             let value = self.parse_expr();
@@ -6791,9 +6815,6 @@ impl<'a> Parser<'a> {
                                 target_span,
                             );
                         }
-                        _ => self
-                            .diags
-                            .error(self.tok().span, "invalid assignment target"),
                     }
                 }
                 self.finish_stmt(Stmt::Expr(e), start)
