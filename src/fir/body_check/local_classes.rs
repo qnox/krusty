@@ -303,17 +303,11 @@ impl BodyFirChecker<'_> {
         self.class_receivers.get(ordinal as usize).copied()
     }
 
-    fn stable_classifier_for_parser(
-        &self,
-        transient: crate::ast::DeclId,
-        span: Span,
-    ) -> Option<DeclarationId> {
-        match self.session.active_source.as_ref() {
-            Some(active) => active.canonical_classifier_declaration(transient, self.index),
-            None => self
-                .index
-                .declaration_at(self.source, span, DeclarationKind::Classifier),
-        }
+    fn stable_classifier_for_parser(&self, transient: crate::ast::DeclId) -> Option<DeclarationId> {
+        self.session
+            .active_source
+            .as_ref()?
+            .canonical_classifier_declaration(transient, self.index)
     }
 
     pub(super) fn nested_class_values(
@@ -981,7 +975,7 @@ impl BodyFirChecker<'_> {
         };
         let span = class.span;
         let declaration = self
-            .stable_classifier_for_parser(transient, span)
+            .stable_classifier_for_parser(transient)
             .ok_or_else(|| {
                 self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
             })?;
@@ -1102,26 +1096,11 @@ impl BodyFirChecker<'_> {
         if !header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS) {
             return Ok(None);
         }
-        let transient = match self.session.active_source.as_ref() {
-            Some(active) => active
+        let transient = self.session.active_source.as_ref().and_then(|active| {
+            active
                 .class(self.file, classifier.declaration)
-                .map(|(declaration, _)| declaration),
-            None => {
-                let Some(range) = self.index.declaration_range(classifier.declaration) else {
-                    return Ok(None);
-                };
-                self.file
-                    .local_class_decls
-                    .values()
-                    .copied()
-                    .find(|declaration| {
-                        matches!(
-                            self.file.decl(*declaration),
-                            crate::ast::Decl::Class(class) if class.span == range
-                        )
-                    })
-            }
-        };
+                .map(|(declaration, _)| declaration)
+        });
         let Some(captures) = transient
             .and_then(|declaration| self.info.local_class_captures_by_class.get(&declaration))
         else {
@@ -1189,7 +1168,7 @@ impl BodyFirChecker<'_> {
                 )
             })?;
         let declaration = self
-            .stable_classifier_for_parser(transient, class.span)
+            .stable_classifier_for_parser(transient)
             .ok_or_else(|| {
                 self.failure(
                     Some(class.span),

@@ -1,7 +1,7 @@
 //! Checked constructor applications and constructor body units with final semantic targets.
 
 use super::*;
-use crate::ast::{ClassDecl, CtorDelegation, Decl, DeclId, SecondaryCtor};
+use crate::ast::{CtorDelegation, SecondaryCtor};
 use crate::libraries::LibraryMember;
 use crate::resolve::{
     ResolvedAnnotationConstruction, ResolvedConstructor, ResolvedContextArgument,
@@ -718,18 +718,6 @@ impl BodyFirChecker<'_> {
     }
 }
 
-fn class_at_stable_anchor<'a>(file: &'a File, range: Span) -> Option<(DeclId, &'a ClassDecl)> {
-    file.decl_arena
-        .iter()
-        .enumerate()
-        .find_map(|(raw, declaration)| match declaration {
-            Decl::Class(class) if class.span == range => {
-                Some((DeclId(u32::try_from(raw).ok()?), class))
-            }
-            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-        })
-}
-
 fn stable_constructor_callable(
     owner: DeclarationId,
     sibling: u32,
@@ -1029,7 +1017,7 @@ pub(super) fn check_and_dispatch_constructor_body(
     origins: &mut OriginStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
 ) -> Result<(), CheckedBodyDriverFailure> {
     let anchor = index
         .declaration_anchor(work.declaration)
@@ -1040,22 +1028,9 @@ pub(super) fn check_and_dispatch_constructor_body(
     let class_declaration = anchor
         .owner
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
-    let (transient_class, class, active_secondary) = match active {
-        Some(active) => active
-            .constructor(file, work.declaration)
-            .ok_or(CheckedBodyDriverFailure::MissingBody)?,
-        None => {
-            index
-                .declaration_anchor(class_declaration)
-                .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
-            let range = index
-                .declaration_range(class_declaration)
-                .ok_or(CheckedBodyDriverFailure::MissingBody)?;
-            let (transient_class, class) =
-                class_at_stable_anchor(file, range).ok_or(CheckedBodyDriverFailure::MissingBody)?;
-            (transient_class, class, None)
-        }
-    };
+    let (transient_class, class, active_secondary) = active
+        .constructor(file, work.declaration)
+        .ok_or(CheckedBodyDriverFailure::MissingBody)?;
     if anchor.sibling == 0 {
         let signature = index
             .signature(work.declaration)
@@ -1159,9 +1134,6 @@ pub(super) fn check_and_dispatch_constructor_body(
     let constructor = active_secondary
         .or_else(|| class.secondary_ctors.get(secondary_index))
         .ok_or(CheckedBodyDriverFailure::MissingBody)?;
-    if active.is_none() && Some(constructor.span) != index.declaration_range(work.declaration) {
-        return Err(CheckedBodyDriverFailure::BodyRangeMismatch);
-    }
     let signature = index
         .signature(work.declaration)
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;

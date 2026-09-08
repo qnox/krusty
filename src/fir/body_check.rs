@@ -60,12 +60,10 @@ mod type_materialization;
 mod type_operation_tests;
 
 pub(crate) use driver::check_and_dispatch_active_body_in_session;
+#[cfg(test)]
+pub(crate) use driver::check_and_dispatch_body;
+pub use driver::check_and_dispatch_body_in_session;
 pub(crate) use driver::check_and_dispatch_signature_defaults_in_session;
-pub use driver::{
-    check_and_dispatch_body, check_and_dispatch_body_in_session,
-    check_and_dispatch_scheduled_function_body,
-    check_and_dispatch_scheduled_function_body_in_session,
-};
 
 use std::collections::HashMap;
 
@@ -210,45 +208,15 @@ pub enum CheckedBodyDriverFailure {
     SourceMismatch,
     MissingCallable,
     MissingBody,
-    BodyRangeMismatch,
     ParameterShapeMismatch,
     UnsupportedBodyKind(BodyKind),
     Check(BodyCheckFailure),
 }
 
-/// Check and route one scheduled expression body. A declaration/body-range parser supplies the
-/// transient `File` and root expression; this function validates the stable work identity, creates
-/// checked FIR, and moves it directly across the inline-or-consuming sink boundary.
-#[allow(clippy::too_many_arguments)]
-pub fn check_and_dispatch_expression_body(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
-    work: BodyWorkItem,
-    root: ExprId,
-    index: &ResolvedModuleIndex,
-    origins: &mut OriginStore,
-    inline_bodies: &mut InlineBodyStore,
-    ordinary_sink: &mut impl CheckedBodySink,
-) -> Result<(), CheckedBodyDriverFailure> {
-    if index
-        .declaration_anchor(work.declaration)
-        .is_none_or(|anchor| anchor.source != source)
-    {
-        return Err(CheckedBodyDriverFailure::SourceMismatch);
-    }
-    let callable = index
-        .callable_for_declaration(work.declaration)
-        .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
-    let body = check_expression_body(file, info, source, work.owner, root, index, origins)
-        .map_err(CheckedBodyDriverFailure::Check)?;
-    dispatch_checked_body(callable, work, body, inline_bodies, ordinary_sink);
-    Ok(())
-}
-
 /// Build one checked FIR body from a transient, already-checked AST expression. The result owns no
 /// parser ids or source spellings. Callers consume it immediately or retain it only for inline code.
-pub fn check_expression_body(
+#[cfg(test)]
+pub(super) fn check_expression_body(
     file: &File,
     info: &TypeInfo,
     source: SourceFileId,
@@ -258,6 +226,8 @@ pub fn check_expression_body(
     origins: &mut OriginStore,
 ) -> Result<FirBody, BodyCheckFailure> {
     let mut session = BodyCheckSession::default();
+    let active = driver::bind_complete_source(file, source, index);
+    session.install_active_source(&active);
     check_expression_body_with_parameters_in_session(
         file,
         info,
@@ -272,7 +242,8 @@ pub fn check_expression_body(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn check_expression_body_with_parameters(
+#[cfg(test)]
+pub(super) fn check_expression_body_with_parameters(
     file: &File,
     info: &TypeInfo,
     source: SourceFileId,
@@ -283,6 +254,8 @@ pub fn check_expression_body_with_parameters(
     origins: &mut OriginStore,
 ) -> Result<FirBody, BodyCheckFailure> {
     let mut session = BodyCheckSession::default();
+    let active = driver::bind_complete_source(file, source, index);
+    session.install_active_source(&active);
     check_expression_body_with_parameters_in_session(
         file,
         info,
@@ -831,25 +804,11 @@ impl BodyFirChecker<'_> {
             })
             .and_then(|_| enclosing_classifier)
             .map(|classifier| {
-                let transient = session
-                    .active_source
-                    .as_ref()
-                    .and_then(|active| {
-                        active
-                            .class(file, classifier.declaration)
-                            .map(|(declaration, _)| declaration)
-                    })
-                    .or_else(|| {
-                        let range = index.declaration_range(classifier.declaration)?;
-                        file.decl_arena.iter().enumerate().find_map(|(raw, declaration)| {
-                            if matches!(declaration, crate::ast::Decl::Class(class) if class.span == range)
-                            {
-                                Some(crate::ast::DeclId(u32::try_from(raw).ok()?))
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                let transient = session.active_source.as_ref().and_then(|active| {
+                    active
+                        .class(file, classifier.declaration)
+                        .map(|(declaration, _)| declaration)
+                });
                 let captures = transient
                     .and_then(|declaration| {
                         info.local_class_captures_by_class

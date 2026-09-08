@@ -4,9 +4,7 @@ use super::constructors::{
     check_and_dispatch_constructor_body, check_and_dispatch_signature_constructor_defaults,
 };
 use super::*;
-use crate::ast::{
-    setter_param_or_value, AstEnumEntry, ClassDecl, Decl, FunBody, FunDecl, PropDecl,
-};
+use crate::ast::{setter_param_or_value, AstEnumEntry, ClassDecl, FunBody, PropDecl};
 use crate::resolve::ResolvedConstructor;
 
 /// The receiver on a companion-block declaration is an associated-classifier lookup coordinate,
@@ -27,58 +25,11 @@ pub(super) fn body_extension_receiver(
     }
 }
 
-fn function_at_anchor<'a>(file: &'a File, range: Span) -> Option<&'a FunDecl> {
-    file.decl_arena
-        .iter()
-        .find_map(|declaration| match declaration {
-            Decl::Fun(function) if function.span == range => Some(function),
-            Decl::Class(class) => class
-                .methods
-                .iter()
-                .chain(
-                    class
-                        .enum_entries
-                        .iter()
-                        .flat_map(|entry| entry.methods.iter()),
-                )
-                .find(|function| function.span == range),
-            Decl::Fun(_) | Decl::Property(_) => None,
-        })
-}
-
-fn property_at_anchor(file: &File, range: Span) -> Option<&PropDecl> {
-    file.decl_arena
-        .iter()
-        .find_map(|declaration| match declaration {
-            Decl::Property(property) if property.span == range => Some(property),
-            Decl::Class(class) => class
-                .body_props
-                .iter()
-                .chain(
-                    class
-                        .enum_entries
-                        .iter()
-                        .flat_map(|entry| entry.props.iter()),
-                )
-                .find(|property| property.span == range),
-            Decl::Fun(_) | Decl::Property(_) => None,
-        })
-}
-
-pub(super) fn class_at_anchor(file: &File, range: Span) -> Option<&ClassDecl> {
-    file.decl_arena
-        .iter()
-        .find_map(|declaration| match declaration {
-            Decl::Class(class) if class.span == range => Some(class),
-            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-        })
-}
-
 fn property_for_work<'a>(
     file: &'a File,
     work: BodyWorkItem,
     index: &ResolvedModuleIndex,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
 ) -> Option<(DeclarationId, &'a PropDecl)> {
     let declaration = match work.kind {
         BodyKind::Initializer | BodyKind::Delegate => work.declaration,
@@ -87,13 +38,7 @@ fn property_for_work<'a>(
             return None
         }
     };
-    let property = match active {
-        Some(active) => active.property(file, declaration)?,
-        None => {
-            let range = index.declaration_range(declaration)?;
-            property_at_anchor(file, range)?
-        }
-    };
+    let property = active.property(file, declaration)?;
     Some((declaration, property))
 }
 
@@ -118,13 +63,6 @@ fn fun_body_root(body: &FunBody) -> Option<crate::ast::ExprId> {
     }
 }
 
-fn expression_at_range(file: &File, range: Span) -> Option<crate::ast::ExprId> {
-    file.expr_spans
-        .iter()
-        .position(|span| *span == range)
-        .map(|index| crate::ast::ExprId(index as u32))
-}
-
 fn enclosing_classifier_declaration(
     index: &ResolvedModuleIndex,
     mut declaration: DeclarationId,
@@ -145,20 +83,12 @@ fn class_initialization_parameters<'a>(
     file: &'a File,
     info: &TypeInfo,
     class_declaration: DeclarationId,
-    index: &ResolvedModuleIndex,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
 ) -> Result<Vec<CheckedBodyParameter<'a>>, CheckedBodyDriverFailure> {
-    let class = match active {
-        Some(active) => active
-            .class(file, class_declaration)
-            .map(|(_, class)| class),
-        None => index
-            .declaration_anchor(class_declaration)
-            .filter(|anchor| anchor.kind == DeclarationKind::Classifier)
-            .and_then(|_| index.declaration_range(class_declaration))
-            .and_then(|range| class_at_anchor(file, range)),
-    }
-    .ok_or(CheckedBodyDriverFailure::MissingBody)?;
+    let class = active
+        .class(file, class_declaration)
+        .map(|(_, class)| class)
+        .ok_or(CheckedBodyDriverFailure::MissingBody)?;
     class
         .props
         .iter()
@@ -181,10 +111,27 @@ fn class_initialization_parameters<'a>(
         .collect()
 }
 
+pub(super) fn bind_complete_source(
+    file: &File,
+    source: SourceFileId,
+    index: &ResolvedModuleIndex,
+) -> ActiveSourceDeclarations {
+    let mut cursor = crate::fir::ActiveSourceCursor::new(source, index);
+    let active = cursor
+        .bind_next(file, source, index)
+        .expect("focused FIR body checking must bind the live parser arena");
+    assert!(
+        cursor.is_finished(),
+        "focused FIR body checking must bind the complete live parser arena"
+    );
+    active
+}
+
 /// Check and route any body-unit shape currently representable by checked FIR. The match is
 /// exhaustive so adding a parser/header body kind cannot silently bypass FIR construction.
 #[allow(clippy::too_many_arguments)]
-pub fn check_and_dispatch_body(
+#[cfg(test)]
+pub(crate) fn check_and_dispatch_body(
     file: &File,
     info: &TypeInfo,
     source: SourceFileId,
@@ -194,18 +141,9 @@ pub fn check_and_dispatch_body(
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
 ) -> Result<(), CheckedBodyDriverFailure> {
-    let mut cursor = crate::fir::ActiveSourceCursor::new(source, index);
-    let active = cursor
-        .bind_next(file, source, index)
-        .expect("focused FIR body checking must bind the live parser arena");
-    assert!(
-        cursor.is_finished(),
-        "focused FIR body checking must bind the complete live parser arena"
-    );
     let mut session = BodyCheckSession::default();
-    check_and_dispatch_active_body_in_session(
+    check_and_dispatch_body_in_session(
         file,
-        &active,
         info,
         source,
         work,
@@ -214,41 +152,6 @@ pub fn check_and_dispatch_body(
         inline_bodies,
         ordinary_sink,
         &mut session,
-    )
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn check_and_dispatch_bound_body_in_session(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
-    work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
-    origins: &mut OriginStore,
-    inline_bodies: &mut InlineBodyStore,
-    ordinary_sink: &mut impl CheckedBodySink,
-    session: &mut BodyCheckSession,
-) -> Result<(), CheckedBodyDriverFailure> {
-    let mut cursor = crate::fir::ActiveSourceCursor::new(source, index);
-    let active = cursor
-        .bind_next(file, source, index)
-        .expect("focused FIR body checking must bind the live parser arena");
-    assert!(
-        cursor.is_finished(),
-        "focused FIR body checking must bind the complete live parser arena"
-    );
-    check_and_dispatch_active_body_in_session(
-        file,
-        &active,
-        info,
-        source,
-        work,
-        index,
-        origins,
-        inline_bodies,
-        ordinary_sink,
-        session,
     )
 }
 
@@ -264,9 +167,10 @@ pub fn check_and_dispatch_body_in_session(
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
-    check_and_dispatch_body_in_session_with_source(
+    let active = bind_complete_source(file, source, index);
+    check_and_dispatch_active_body_in_session(
         file,
-        None,
+        &active,
         info,
         source,
         work,
@@ -294,9 +198,9 @@ pub(crate) fn check_and_dispatch_active_body_in_session(
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
     session.install_active_source(active);
-    check_and_dispatch_body_in_session_with_source(
+    check_and_dispatch_body_in_session_from_active_source(
         file,
-        Some(active),
+        active,
         info,
         source,
         work,
@@ -309,9 +213,9 @@ pub(crate) fn check_and_dispatch_active_body_in_session(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn check_and_dispatch_body_in_session_with_source(
+fn check_and_dispatch_body_in_session_from_active_source(
     file: &File,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
     info: &TypeInfo,
     source: SourceFileId,
     work: BodyWorkItem,
@@ -330,7 +234,7 @@ fn check_and_dispatch_body_in_session_with_source(
         index.declaration_anchor(work.declaration),
     );
     let result = match work.kind {
-        BodyKind::Function => check_and_dispatch_scheduled_function_body_in_session_with_source(
+        BodyKind::Function => check_and_dispatch_scheduled_function_body_in_session(
             file,
             active,
             info,
@@ -344,18 +248,14 @@ fn check_and_dispatch_body_in_session_with_source(
         ),
         BodyKind::Initializer => match index.declaration_anchor(work.declaration) {
             Some(anchor) if anchor.kind == DeclarationKind::Initializer => {
-                let root = match active {
-                    Some(active) => active.expression(file, work.declaration),
-                    None => index
-                        .declaration_range(work.declaration)
-                        .and_then(|range| expression_at_range(file, range)),
-                }
-                .ok_or(CheckedBodyDriverFailure::MissingBody)?;
+                let root = active
+                    .expression(file, work.declaration)
+                    .ok_or(CheckedBodyDriverFailure::MissingBody)?;
                 let class = anchor
                     .owner
                     .and_then(|owner| enclosing_classifier_declaration(index, owner))
                     .ok_or(CheckedBodyDriverFailure::MissingBody)?;
-                let parameters = class_initialization_parameters(file, info, class, index, active)?;
+                let parameters = class_initialization_parameters(file, info, class, active)?;
                 let body = check_expression_body_with_parameters_in_session(
                     file,
                     info,
@@ -456,25 +356,12 @@ fn enum_entry_for_work<'a>(
     file: &'a File,
     work: BodyWorkItem,
     index: &ResolvedModuleIndex,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
 ) -> Option<(DeclarationId, &'a ClassDecl, &'a AstEnumEntry)> {
     let entry_anchor = index.declaration_anchor(work.declaration)?;
     let class_declaration = entry_anchor.owner?;
-    let (class, entry) = match active {
-        Some(active) => (
-            active.class(file, class_declaration)?.1,
-            active.enum_entry(file, work.declaration)?,
-        ),
-        None => {
-            index.declaration_anchor(class_declaration)?;
-            let class = class_at_anchor(file, index.declaration_range(class_declaration)?)?;
-            let entry = class
-                .enum_entries
-                .iter()
-                .find(|entry| index.declaration_range(work.declaration) == Some(entry.span))?;
-            (class, entry)
-        }
-    };
+    let class = active.class(file, class_declaration)?.1;
+    let entry = active.enum_entry(file, work.declaration)?;
     Some((class_declaration, class, entry))
 }
 
@@ -488,7 +375,7 @@ fn check_and_dispatch_enum_entry(
     origins: &mut OriginStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
 ) -> Result<(), CheckedBodyDriverFailure> {
     let anchor = index
         .declaration_anchor(work.declaration)
@@ -581,7 +468,7 @@ fn check_and_dispatch_property_body(
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
 ) -> Result<(), CheckedBodyDriverFailure> {
     let anchor = index
         .declaration_anchor(work.declaration)
@@ -658,9 +545,7 @@ fn check_and_dispatch_property_body(
                     .is_some_and(|anchor| anchor.kind == DeclarationKind::Classifier)
             })
         {
-            parameters.extend(class_initialization_parameters(
-                file, info, class, index, active,
-            )?);
+            parameters.extend(class_initialization_parameters(file, info, class, active)?);
         }
     }
     if let Some(name) = setter_name.as_deref() {
@@ -768,63 +653,10 @@ fn check_and_dispatch_property_body(
     Ok(())
 }
 
-/// Same-parse adapter for checking one function selected by its stable declaration identity.
-/// Production Pass 2 uses `ActiveSourceDeclarations` instead of searching by this diagnostic span.
 #[allow(clippy::too_many_arguments)]
-pub fn check_and_dispatch_scheduled_function_body(
+fn check_and_dispatch_scheduled_function_body_in_session(
     file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
-    work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
-    origins: &mut OriginStore,
-    inline_bodies: &mut InlineBodyStore,
-    ordinary_sink: &mut impl CheckedBodySink,
-) -> Result<(), CheckedBodyDriverFailure> {
-    let mut session = BodyCheckSession::default();
-    check_and_dispatch_scheduled_function_body_in_session(
-        file,
-        info,
-        source,
-        work,
-        index,
-        origins,
-        inline_bodies,
-        ordinary_sink,
-        &mut session,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn check_and_dispatch_scheduled_function_body_in_session(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
-    work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
-    origins: &mut OriginStore,
-    inline_bodies: &mut InlineBodyStore,
-    ordinary_sink: &mut impl CheckedBodySink,
-    session: &mut BodyCheckSession,
-) -> Result<(), CheckedBodyDriverFailure> {
-    check_and_dispatch_scheduled_function_body_in_session_with_source(
-        file,
-        None,
-        info,
-        source,
-        work,
-        index,
-        origins,
-        inline_bodies,
-        ordinary_sink,
-        session,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn check_and_dispatch_scheduled_function_body_in_session_with_source(
-    file: &File,
-    active: Option<&ActiveSourceDeclarations>,
+    active: &ActiveSourceDeclarations,
     info: &TypeInfo,
     source: SourceFileId,
     work: BodyWorkItem,
@@ -840,13 +672,9 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
     if anchor.source != source {
         return Err(CheckedBodyDriverFailure::SourceMismatch);
     }
-    let function = match active {
-        Some(active) => active.function(file, work.declaration),
-        None => index
-            .declaration_range(work.declaration)
-            .and_then(|range| function_at_anchor(file, range)),
-    }
-    .ok_or(CheckedBodyDriverFailure::MissingBody)?;
+    let function = active
+        .function(file, work.declaration)
+        .ok_or(CheckedBodyDriverFailure::MissingBody)?;
     let root = fun_body_root(&function.body);
     if root.is_none()
         && function
@@ -855,13 +683,6 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
             .all(|parameter| parameter.default.is_none())
     {
         return Err(CheckedBodyDriverFailure::MissingBody);
-    }
-    // A function work item identifies the complete declaration, not just its body expression:
-    // default arguments live in the header and must be present when the callable body is checked.
-    // Pass-1-only callers still validate their same-pass anchor. Pass 2 has already structurally
-    // rebound this declaration through `ActiveSourceDeclarations` and never consults the range.
-    if active.is_none() && Some(function.span) != index.declaration_range(work.declaration) {
-        return Err(CheckedBodyDriverFailure::BodyRangeMismatch);
     }
     let signature = index.signature(work.declaration).ok_or_else(|| {
         crate::trace_compiler!(

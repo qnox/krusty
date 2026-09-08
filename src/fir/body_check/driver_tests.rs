@@ -4,7 +4,6 @@ use crate::fir::DeclarationFlags;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 
-use super::driver::check_and_dispatch_bound_body_in_session;
 use super::test_support::root_expression;
 use super::*;
 
@@ -102,7 +101,7 @@ fn anonymous_property_initializer_reads_same_named_lexical_capture() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -508,7 +507,7 @@ fn local_class_init_captures_the_nearer_constructor_parameter_value() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -574,7 +573,7 @@ fn sibling_local_function_supplies_the_local_class_shared_capture_operand() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -672,7 +671,7 @@ fn local_class_recaptures_the_selected_local_constructor_closure() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -902,7 +901,7 @@ fn anonymous_class_mutable_capture_is_a_shared_cell_in_checked_fir() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -972,7 +971,7 @@ fn anonymous_class_inferred_property_increment_keeps_outer_capture_mutable() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -1072,7 +1071,7 @@ fn nested_anonymous_class_forwards_a_mutable_destructure_capture() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -1157,7 +1156,7 @@ fn inner_local_class_super_lambda_reads_the_enclosing_class_capture() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -1227,7 +1226,7 @@ fn local_class_inside_setter_keeps_enclosing_backing_field_identity() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -1293,7 +1292,7 @@ fn nested_anonymous_super_argument_retains_its_enclosing_instance_receiver() {
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             info,
             SourceFileId::from_raw(0),
@@ -3158,7 +3157,7 @@ fn anonymous_inner_super_delegation_reads_checked_constructor_capture_parameters
     let mut sink = RecordingSink::default();
     let mut session = BodyCheckSession::default();
     for work in ordinary {
-        check_and_dispatch_bound_body_in_session(
+        check_and_dispatch_body_in_session(
             &analysis.files[0],
             analysis.types[0].as_ref().expect("checked source"),
             SourceFileId::from_raw(0),
