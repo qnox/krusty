@@ -59790,31 +59790,29 @@ impl<'a> Checker<'a> {
                     // subclass is an emission detail and must not leak into source typing.
                     let entry_scope = scope.child(ScopeKind::Block);
                     let entry_scope = &entry_scope;
-                    let nested_prefix = format!("{}.{}.", cl.name, entry.name);
-                    for &declaration in &self.file.decls {
+                    for &declaration in &entry.nested_classifiers {
+                        if self.file.is_anonymous_object_class(declaration) {
+                            continue;
+                        }
                         let Decl::Class(nested) = self.file.decl(declaration) else {
                             continue;
                         };
-                        let Some(simple) = nested.name.strip_prefix(&nested_prefix) else {
-                            continue;
-                        };
-                        if !simple.contains('.') {
-                            crate::trace_compiler!(
-                                "resolve",
-                                "entry nested classifier entry={} source={} simple={}",
-                                entry.name,
-                                nested.name,
-                                simple,
-                            );
-                            entry_scope.rebind(
-                                simple,
-                                Ns::Classifier,
-                                ScopeBinding::LocalClass(type_name(&class_internal(
-                                    self.file,
-                                    &nested.name,
-                                ))),
-                            );
-                        }
+                        let source_name = class_declaration_label(&nested.name);
+                        crate::trace_compiler!(
+                            "resolve",
+                            "entry nested classifier entry={} source={} label={}",
+                            entry.name,
+                            nested.name,
+                            source_name,
+                        );
+                        entry_scope.rebind(
+                            source_name,
+                            Ns::Classifier,
+                            ScopeBinding::LocalClass(type_name(&class_internal(
+                                self.file,
+                                &nested.name,
+                            ))),
+                        );
                     }
                     for property in &props {
                         self.declare_scoped_property(entry_scope, property, false);
