@@ -52,15 +52,16 @@ fn a_compound_assignment_on_a_non_assignable_expression_is_an_operator_call() {
 /// parameter is defaulted (`Instant.fromEpochSeconds(0)`).
 #[test]
 fn an_int_literal_selects_a_long_parameter_beside_a_defaulted_one() {
-    // As in the real site: the call is a NAMED constructor argument, so it is checked under the
-    // parameter's expected type.
+    // As in the real site the call sits in SIGNATURE position — the initializer of a function with
+    // an inferred return type — so the Pass-1 signature solver selects it, not the body checker.
+    // Two overloads exist, `(Long, Int = 0)` and `(Long, Long)` without a default; only the first
+    // applies to one argument.
     let src = "import kotlin.time.Instant\n\
                data class Stamp(val name: String, val createdAt: Instant)\n\
-               fun box(): String {\n\
-                   val at = Stamp(name = \"x\", createdAt = Instant.fromEpochSeconds(0))\n\
-                   val later = Instant.fromEpochSeconds(1_700_000_000)\n\
-                   return if (at.createdAt.epochSeconds == 0L && later.epochSeconds == 1_700_000_000L) \"OK\" else \"FAIL\"\n\
-               }\n";
+               private fun stamp() = Stamp(name = \"x\", createdAt = Instant.fromEpochSeconds(0))\n\
+               private fun later() = Instant.fromEpochSeconds(1_700_000_000)\n\
+               fun box(): String =\n\
+                   if (stamp().createdAt.epochSeconds == 0L && later().epochSeconds == 1_700_000_000L) \"OK\" else \"FAIL\"\n";
     assert_eq!(diagnostics(src), Vec::<String>::new());
     assert_eq!(run(src).as_deref(), Some("OK"));
 }
