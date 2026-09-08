@@ -320,10 +320,10 @@ fn nested_classifier_owners(
         depth
     };
     let mut local_declarations = file
-        .local_class_decls
-        .values()
+        .decls
+        .iter()
         .copied()
-        .chain(file.local_class_nested.values().flatten().copied())
+        .filter(|declaration| file.is_local_declaration(*declaration))
         .collect::<Vec<_>>();
     local_declarations.sort_unstable_by_key(|declaration| structural_depth(*declaration));
     local_declarations.dedup();

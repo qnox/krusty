@@ -418,13 +418,15 @@ pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(Str
                 type_name(&class_internal(file, &hoisted.name)),
             ));
             declarations.push(declaration);
-            declarations.extend(
-                file.local_class_nested
-                    .get(&statement)
-                    .into_iter()
-                    .flatten()
-                    .copied(),
-            );
+            let mut nested = hoisted.nested_classifiers.clone();
+            let mut next = 0;
+            while let Some(declaration) = nested.get(next).copied() {
+                if let Decl::Class(class) = file.decl(declaration) {
+                    nested.extend(class.nested_classifiers.iter().copied());
+                }
+                next += 1;
+            }
+            declarations.extend(nested);
         }
         for expression in expressions {
             if let Some(&declaration) = file.anonymous_object_classes.get(&expression) {

@@ -719,9 +719,15 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
             .get(&stmt)
             .and_then(|(_, classifier_scope, _)| classifier_scope.clone());
         let enclosing = owner_of.get(&stmt).and_then(|(_, _, enclosing)| *enclosing);
-        if let (Some(qualifier), Some(nested)) =
-            (qualifier, file.local_class_nested.get(&stmt).cloned())
-        {
+        if let Some(qualifier) = qualifier {
+            let mut nested = c.nested_classifiers.clone();
+            let mut next = 0;
+            while let Some(declaration) = nested.get(next).copied() {
+                if let Decl::Class(class) = file.decl(declaration) {
+                    nested.extend(class.nested_classifiers.iter().copied());
+                }
+                next += 1;
+            }
             let source = c.name.clone();
             for did in nested {
                 if let Decl::Class(nc) = file.decl_mut(did) {
@@ -6617,18 +6623,13 @@ impl<'a> Parser<'a> {
                 // later qualifies the local class itself, and these have to move with it — so record
                 // exactly which declarations belong to it rather than guessing from a name prefix.
                 let lexical_type_parameter_captures = self.current_lexical_type_params();
-                let nested_start = self.file.decls.len();
                 let mut d = self.parse_nested_type_decl();
                 d.lexical_type_parameter_captures = lexical_type_parameter_captures;
                 // Preserves the prior behavior: this path applied open/abstract but left `is_sealed`
                 // at its default `false` (so a local `sealed` class never reported `is_sealed`).
                 d.modality = modality_of(is_open, is_abstract, false);
-                let nested: Vec<crate::ast::DeclId> = self.file.decls[nested_start..].to_vec();
                 let classifier = d.name.clone();
                 let stmt = self.finish_stmt(Stmt::LocalClass(d), start);
-                if !nested.is_empty() {
-                    self.file.local_class_nested.insert(stmt, nested);
-                }
                 self.lexical_type_parameters
                     .shadow_with_classifier(classifier);
                 stmt

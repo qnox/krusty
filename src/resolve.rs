@@ -41099,63 +41099,55 @@ impl<'a> Checker<'a> {
         // `value` through its captured outer instance. Scan the parser's explicit ownership edge,
         // never internal-name prefixes, so sibling local classes cannot leak captures into one
         // another.
-        let local_statement =
-            self.file
-                .local_class_decls
+        let mut nested_declarations = cl.nested_classifiers.clone();
+        let mut next_nested = 0;
+        while let Some(declaration) = nested_declarations.get(next_nested).copied() {
+            next_nested += 1;
+            let Decl::Class(nested) = self.file.decl(declaration) else {
+                continue;
+            };
+            nested_declarations.extend(nested.nested_classifiers.iter().copied());
+            let bodies = nested
+                .base_args
                 .iter()
-                .find_map(
-                    |(statement, declaration)| match self.file.decl(*declaration) {
-                        Decl::Class(candidate) if candidate.span == cl.span => Some(*statement),
-                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-                    },
-                );
-        if let Some(nested) =
-            local_statement.and_then(|statement| self.file.local_class_nested.get(&statement))
-        {
-            for declaration in nested {
-                let Decl::Class(nested) = self.file.decl(*declaration) else {
-                    continue;
-                };
-                let bodies =
+                .copied()
+                .chain(
                     nested
-                        .base_args
+                        .interface_delegations
                         .iter()
-                        .copied()
-                        .chain(
-                            nested
-                                .interface_delegations
-                                .iter()
-                                .map(|delegation| delegation.value),
-                        )
-                        .chain(nested.props.iter().filter_map(|property| property.default))
-                        .chain(
-                            nested
-                                .methods
-                                .iter()
-                                .filter_map(|method| match method.body {
-                                    FunBody::Expr(body) | FunBody::Block(body) => Some(body),
-                                    FunBody::None => None,
-                                }),
-                        )
-                        .chain(
-                            nested
-                                .body_props
-                                .iter()
-                                .filter_map(|property| property.init),
-                        )
-                        .chain(nested.body_props.iter().filter_map(
-                            |property| match property.getter {
-                                Some(FunBody::Expr(body) | FunBody::Block(body)) => Some(body),
-                                Some(FunBody::None) | None => None,
-                            },
-                        ))
-                        .chain(nested.init_order.iter().filter_map(|step| match step {
-                            ClassInit::Block(body) => Some(*body),
-                            ClassInit::PropInit(_) => None,
-                        }));
-                for body in bodies {
-                    record_construction_uses(body, &everything);
-                }
+                        .map(|delegation| delegation.value),
+                )
+                .chain(nested.props.iter().filter_map(|property| property.default))
+                .chain(
+                    nested
+                        .methods
+                        .iter()
+                        .filter_map(|method| match method.body {
+                            FunBody::Expr(body) | FunBody::Block(body) => Some(body),
+                            FunBody::None => None,
+                        }),
+                )
+                .chain(
+                    nested
+                        .body_props
+                        .iter()
+                        .filter_map(|property| property.init),
+                )
+                .chain(
+                    nested
+                        .body_props
+                        .iter()
+                        .filter_map(|property| match property.getter {
+                            Some(FunBody::Expr(body) | FunBody::Block(body)) => Some(body),
+                            Some(FunBody::None) | None => None,
+                        }),
+                )
+                .chain(nested.init_order.iter().filter_map(|step| match step {
+                    ClassInit::Block(body) => Some(*body),
+                    ClassInit::PropInit(_) => None,
+                }));
+            for body in bodies {
+                record_construction_uses(body, &everything);
             }
         }
         // A mutable enclosing local written from any parser-hoisted class body is shared storage,

@@ -105,11 +105,6 @@ impl Reachable {
             Stmt::LocalClass(_) => {
                 if let Some(&declaration) = file.local_class_decls.get(&statement) {
                     self.declaration(file, declaration);
-                    if let Some(nested) = file.local_class_nested.get(&statement) {
-                        for &declaration in nested {
-                            self.declaration(file, declaration);
-                        }
-                    }
                 }
             }
             _ => {}
@@ -138,16 +133,10 @@ impl Reachable {
             false
         });
         self.roots(file, roots);
-        let Decl::Class(_) = file.decl(declaration) else {
+        let Decl::Class(class) = file.decl(declaration) else {
             return;
         };
-        let nested = file
-            .decls
-            .iter()
-            .copied()
-            .filter(|candidate| *candidate != declaration)
-            .filter(|candidate| direct_enclosing_declaration(file, *candidate) == Some(declaration))
-            .collect::<Vec<_>>();
+        let nested = class.nested_classifiers.clone();
         for nested in nested {
             self.declaration(file, nested);
         }
@@ -924,10 +913,6 @@ pub(super) fn compact(file: &mut File) {
         .filter_map(|(old, declaration)| {
             statements.get(&old).copied().map(|new| (new, declaration))
         })
-        .collect();
-    file.local_class_nested = std::mem::take(&mut file.local_class_nested)
-        .into_iter()
-        .filter_map(|(old, nested)| statements.get(&old).copied().map(|new| (new, nested)))
         .collect();
     file.statement_suppressions = std::mem::take(&mut file.statement_suppressions)
         .into_iter()

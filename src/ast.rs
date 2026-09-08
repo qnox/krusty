@@ -1608,9 +1608,6 @@ pub struct File {
     /// Enum entries have anonymous subclass scope (`Enum.ENTRY`) but no standalone `Decl`; retaining
     /// that parser-known owner lets signature resolution include entry-local nested classifiers.
     pub local_class_lexical_classifier_owners: std::collections::HashMap<DeclId, String>,
-    /// Nested types hoisted out of a local class during its parse, named by the path from that
-    /// class (`Local.Inner`). They are requalified with it when it is given its final name.
-    pub local_class_nested: std::collections::HashMap<StmtId, Vec<DeclId>>,
     /// Explicit parameter type annotations on a lambda literal (`{ x: Int, y -> … }`), keyed by the
     /// lambda's `ExprId`, parallel to its `params`. `None` for an unannotated parameter. Lets the
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
@@ -1838,7 +1835,6 @@ impl File {
         self.local_class_decls = Default::default();
         self.local_class_enclosing_declarations = Default::default();
         self.local_class_lexical_classifier_owners = Default::default();
-        self.local_class_nested = Default::default();
         self.lambda_param_types = Default::default();
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
