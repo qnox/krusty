@@ -2048,6 +2048,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   common inference contains no collection-name table. A Kotlin-declared `MutableMap<String, Any>`
   carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. Tests:
   `tests/java_flexible_collection_e2e.rs`.
+- **A lambda whose input is still an open callee formal is a postponed probe.** A generic call
+  whose lambda parameter's INPUT is one of the callee's own formals (`fun <T : Any> matching(f:
+  (T) -> Boolean): T`, mockk's `match { it.contains(x) }`) can only shape that lambda once `T` is
+  known. In argument position the enclosing call supplies `T` after it selects, and krusty already
+  re-checks the nested call under that expectation — but the first applicability probe checked the
+  body against the open `T` and REPORTED what it found (`unresolved reference 'contains'` on `it`,
+  once per matcher in a real project's `verify { … }` blocks). kotlinc postpones such a lambda. The
+  shared lambda entry point (`check_lambda_with_implicit_receivers_and_return_labeled`) now moves
+  the body diagnostics of a lambda whose inputs are not lexically fixed into an ordered postponed
+  buffer, outside the shared diagnostic sink. A closed recheck discards that expression's buffered
+  probe; statement completion publishes any probe nothing superseded. The top-level path's
+  `deferred_member_errors` follows the same ownership rule. A statement call whose result still
+  has a result formal without a retained binding is now diagnosed from its `GenericSig`, resolved
+  type arguments, and unsolved PCLA inputs for every callable origin, replacing the
+  classifier-value-only tracking set; `scope.m { it.foo() }`
+  therefore reports both the uninferable `T` and the unresolved body member. Test:
+  `tests/postponed_lambda_probe_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is

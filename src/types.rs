@@ -1280,6 +1280,27 @@ impl Ty {
         }
     }
 
+    /// The upper bound carried by an occurrence of the type parameter identified by `name`.
+    pub(crate) fn type_parameter_occurrence_bound(self, name: &str) -> Option<Ty> {
+        match self {
+            Ty::TyParam(candidate, bound) => (candidate == name).then_some(*bound),
+            Ty::Nullable(inner)
+            | Ty::PlatformNullable(inner)
+            | Ty::InProjection(inner)
+            | Ty::OutProjection(inner)
+            | Ty::StarProjection(inner) => inner.type_parameter_occurrence_bound(name),
+            Ty::Obj(_, arguments) => arguments
+                .iter()
+                .find_map(|argument| argument.type_parameter_occurrence_bound(name)),
+            Ty::Fun(signature) => signature
+                .params
+                .iter()
+                .chain(std::iter::once(&signature.ret))
+                .find_map(|component| component.type_parameter_occurrence_bound(name)),
+            _ => None,
+        }
+    }
+
     /// The unboxed primitive of a nullable primitive (`Int?` → `Int`), else `None`. Replaces the old
     /// "is this a boxed-wrapper `Obj`?" probe (`t.obj_internal().and_then(prim_of_wrapper)`).
     pub fn nullable_primitive(self) -> Option<Ty> {
@@ -2596,6 +2617,15 @@ mod tests {
         assert!(t.is_ty_param());
         assert_eq!(t.ty_param_name(), Some("T"));
         assert_eq!(t.ty_param_bound(), Some(Ty::obj("kotlin/CharSequence")));
+    }
+
+    #[test]
+    fn nested_type_parameter_occurrence_retains_its_semantic_bound() {
+        let bound = Ty::ty_param("Outer", Ty::obj("example/Recursive"));
+        let nested = Ty::obj_args("kotlin/collections/List", &[Ty::ty_param("T", bound)]);
+
+        assert_eq!(nested.type_parameter_occurrence_bound("T"), Some(bound));
+        assert_eq!(nested.type_parameter_occurrence_bound("Outer"), None);
     }
 
     #[test]
