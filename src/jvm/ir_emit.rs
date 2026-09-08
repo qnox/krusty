@@ -21,6 +21,8 @@ use crate::kt_string::{KtString, KtStringBuf};
 use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod vararg;
+
 struct InlineStaticTarget<'a> {
     owner: &'a str,
     name: &'a str,
@@ -18253,34 +18255,7 @@ impl<'a> Emitter<'a> {
                     }
                     return;
                 }
-                code.push_int(elements.len() as i32, self.cw);
-                let reference_array = array_type.is_reference_array();
-                if et.is_jvm_scalar() && !reference_array {
-                    code.newarray(prim_newarray_atype(et));
-                } else {
-                    // Nullability does not change the reference array class.
-                    let ci = self.cw.class_ref(&ref_internal(et.non_null()));
-                    code.anewarray(ci);
-                }
-                let (op, w) = array_store_op(et, reference_array);
-                // A boxed-primitive element array (`arrayOf(1,2,3)` → `Integer[]`): box each primitive
-                // value before the `aastore` (mirrors `kotlin/Array.set`).
-                let box_elem = reference_array
-                    .then(|| reference_array_scalar_adapter(et))
-                    .flatten();
-                // `[array, array, index]` stays live across each element — a branchy one must frame
-                // them (see `emit_value_over`).
-                let array_v = self.verif_single(ir_ty_to_jvm(array_type));
-                let held = [array_v.clone(), array_v, VerifType::Integer];
-                for (i, &el) in elements.iter().enumerate() {
-                    code.dup();
-                    code.push_int(i as i32, self.cw);
-                    self.emit_value_over(el, &held, code);
-                    if let Some(p) = box_elem {
-                        box_prim_free(self.cw, code, p);
-                    }
-                    code.array_store(op, w);
-                }
+                vararg::emit_packed_array(self, array_type, &elements, code);
             }
             IrExpr::NewArray { array_type, size } => {
                 let et = array_jvm_element(array_type);
