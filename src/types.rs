@@ -2256,18 +2256,6 @@ impl Visibility {
         }
     }
 
-    /// Coarse map from a legacy `is_public` bool, for synthetic/top-level callables that never carry a
-    /// finer visibility (a top-level or extension can be `public`/`internal`/`private` but NEVER
-    /// `protected`, so no protected information is lost here). `internal` top-levels still read back as
-    /// `Private` until the finer decode reaches those arms — a deliberate interim under-approximation.
-    pub fn from_public(is_public: bool) -> Visibility {
-        if is_public {
-            Visibility::Public
-        } else {
-            Visibility::Private
-        }
-    }
-
     /// Whether this is the `public` visibility — the exact predicate the pre-context resolver used
     /// (`is_public`). Kept so the current public-only filter is expressible verbatim while the
     /// context-aware `accessible(...)` gate is introduced separately.

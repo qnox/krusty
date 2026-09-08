@@ -3573,9 +3573,6 @@ mod tests {
         assert!(!Visibility::Internal.is_public());
         assert!(!Visibility::Protected.is_public());
         assert!(!Visibility::Private.is_public());
-        // `from_public` round-trips the coarse bool (protected can't occur on its callers).
-        assert!(Visibility::from_public(true).is_public());
-        assert!(!Visibility::from_public(false).is_public());
     }
 
     #[test]

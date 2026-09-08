@@ -837,9 +837,11 @@ impl JvmLibraries {
             };
             overloads.push(FunctionInfo {
                 ret: ret_metadata,
-                visibility: meta
-                    .visibility
-                    .unwrap_or_else(|| Visibility::from_public(c.public)),
+                visibility: meta.visibility.unwrap_or(if c.public {
+                    Visibility::Public
+                } else {
+                    Visibility::Private
+                }),
                 overload_rank: descriptor_narrowing(&c.descriptor) as u32,
                 generic_sig,
                 call_sig,
