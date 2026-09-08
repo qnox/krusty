@@ -3304,7 +3304,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kinds were affected identically — plain, receiver, `suspend`, `suspend` receiver — which is why the
   failure looked specific to `suspend` receivers. Test:
   `tests/classpath_named_arg_skips_default_e2e.rs`.
-
+- **Signature-pass argument mapping keeps the slot-map contract, including vararg EXTRAS.** The
+  Pass-1 signature solver (`streaming_signature_bridge::candidate_call_slots`) maps a call's written
+  arguments onto parameter slots through the same `map_call_args` the checker uses. That mapper keeps
+  ONE source per slot: positional vararg elements beyond the first stay unmapped and are the vararg's
+  extras, reconstructed by lowering. The solver used to reject any candidate with an unmapped source,
+  so `"a,b;c".split(",", ";", limit = 2)` and `option("--target", "-t", help = "…")` (two elements,
+  then a named argument) declined in signature position while the same call in a body checked fine.
+  An unmapped positional argument is now admitted as a vararg extra when it carries the SAME element
+  type as the mapped first element (a spread contributes its array's element type; lambdas and
+  postponed arguments never qualify) — the per-slot selection downstream sees only the mapped element,
+  so an extra of another type keeps the candidate inapplicable. Argument mappings are collected only from the normalized source-callable
+  family: public declarations, must-inline declarations, and stable declarations in this compilation;
+  declaration origin is not inspected. Separately, a source top-level
+  function's vararg need not be LAST (`fun option(vararg names: String, help: String = "")`);
+  top-level selection expanded varargs with the final-slot assumption and declined every call shape
+  but named-only, so it now expands at the candidate's recorded slot (`candidate_vararg_shape` →
+  `vararg_parameter_shape_at`, defaults sliced past the context parameters). Tests:
+  `tests/vararg_elements_before_named_e2e.rs`.
 - **A property read is a property read; how it is READ is the target's business.** `Dispatchers.IO` was
   reported as `unresolved reference 'IO'`, and the cause was a category error rather than a missing case:
   the use denotes a Kotlin property, not a JVM accessor call — `getIO()` is only one possible class-file
