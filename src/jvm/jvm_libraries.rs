@@ -5509,6 +5509,10 @@ impl SymbolSource for JvmLibraries {
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         JvmLibraries::symbols(self, namespace, name)
     }
+
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        super::jvm_class_map::platform_flexible_upper_bound(lower)
+    }
 }
 
 impl JvmLibraries {

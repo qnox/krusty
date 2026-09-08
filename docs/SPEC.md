@@ -2036,6 +2036,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `streaming_signature_tests::expression_body_narrows_after_a_not_null_assertion_a_boolean_contract_and_a_safe_call_test`,
   `not_null_assert_e2e::inferred_signature_flow_facts_round_trip_through_a_dependency`
   (default-on kotlinc dependency cross-check).
+- **A Java-origin mutable collection expectation binds a read-only generic result.** A Java
+  `Map<K, V>` reaches Kotlin as the flexible `(Mutable)Map<K!, V!>!`; krusty carries its mutable
+  face under platform nullability (`MutableMap<String!, Any!>!`). Wherever that face is the
+  EXPECTATION for a generic call's result — a `T` bound to it and handed on (`every { j.attributes }
+  returns emptyMap()`, mockk's everyday stub of a Java getter) — the result variables must still
+  bind, as kotlinc binds them through the read-only side of the flexible type. The return
+  unifiers (`unify_inferred_ty`, `unify_ty`, and the scorer's restatement of the declared return
+  at the expected constructor) now ask the declaration provider for the resolved upper face of a
+  platform-flexible expectation. The JVM provider answers from its id-backed Java/Kotlin class map;
+  common inference contains no collection-name table. A Kotlin-declared `MutableMap<String, Any>`
+  carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. Tests:
+  `tests/java_flexible_collection_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
