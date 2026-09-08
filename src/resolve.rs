@@ -42,6 +42,7 @@ mod local_method_dependencies;
 mod override_plans;
 mod sam_constructors;
 mod scope;
+mod signature_defaults;
 mod source_constructors;
 mod stable_metadata;
 mod streaming_signature_bridge;
@@ -19957,7 +19958,7 @@ impl<'a> Checker<'a> {
             return self.check_collection_literal(scope, call, args, span, expected);
         }
         if let Some(declaration) = self.file.anonymous_object_classes.get(&call).copied() {
-            if !self.signature_defaults_only {
+            if self.selected_signature_default_declarations.is_none() {
                 let narrows = scope.local_narrowings();
                 let mut candidates = Vec::new();
                 scope.visit_bindings(Ns::Value, |name, binding| {
@@ -20119,7 +20120,8 @@ impl<'a> Checker<'a> {
                 // construction's candidate list cannot represent any of those lexical rungs.
                 if let Decl::Class(class) = self.file.decl(declaration) {
                     let class = class.clone();
-                    if !self.signature_defaults_only || self.signature_default_expression_depth != 0
+                    if self.selected_signature_default_declarations.is_none()
+                        || self.signature_default_expression_depth != 0
                     {
                         self.checked_local_class_declarations.insert(declaration);
                     }
@@ -20208,7 +20210,8 @@ impl<'a> Checker<'a> {
                 // (`yield(this)` binds the builder's `FT`) instead of losing them in a hoisted pass.
                 if let Decl::Class(class) = self.file.decl(declaration) {
                     let class = class.clone();
-                    if !self.signature_defaults_only || self.signature_default_expression_depth != 0
+                    if self.selected_signature_default_declarations.is_none()
+                        || self.signature_default_expression_depth != 0
                     {
                         self.checked_local_class_declarations.insert(declaration);
                     }
@@ -25518,7 +25521,9 @@ impl<'a> Checker<'a> {
                     return;
                 };
                 let cl = cl.clone();
-                if !self.signature_defaults_only || self.signature_default_expression_depth != 0 {
+                if self.selected_signature_default_declarations.is_none()
+                    || self.signature_default_expression_depth != 0
+                {
                     self.checked_local_class_declarations.insert(d);
                 }
                 // Bind the SOURCE name to the internal name the hoisted declaration was registered
@@ -38176,8 +38181,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         active_declarations,
         diags,
         selected_body_declarations: None,
+        selected_signature_default_declarations: None,
         pending_signature_default_expressions: std::collections::HashSet::new(),
-        signature_defaults_only: false,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         #[cfg(feature = "trace")]
         expr_visits: vec![0; file.expr_arena.len()],
@@ -39181,8 +39186,8 @@ fn check_selected_source_with_index<S: CheckerSymbolEnvironment>(
     diags: &mut DiagSink,
     selected_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     selected_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
+    selected_signature_defaults: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    signature_defaults_only: bool,
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
 ) -> TypeInfo {
     let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
@@ -39196,12 +39201,12 @@ fn check_selected_source_with_index<S: CheckerSymbolEnvironment>(
         diags,
     );
     c.selected_body_declarations = selected_bodies.cloned();
-    if signature_defaults_only {
-        c.pending_signature_default_expressions = selected_bodies
+    c.selected_signature_default_declarations = selected_signature_defaults.cloned();
+    if selected_signature_defaults.is_some() {
+        c.pending_signature_default_expressions = selected_signature_defaults
             .map(|selected| active_declarations.selected_default_expressions(file, selected))
             .unwrap_or_default();
     }
-    c.signature_defaults_only = signature_defaults_only;
     if selected_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
@@ -39243,7 +39248,7 @@ fn check_selected_source_with_index<S: CheckerSymbolEnvironment>(
     // same checked sidecar that will immediately hand this unit's declaration metadata to common
     // IR. Pass-1 default preparation is a bounded traversal whose result is discarded and must not
     // become a second owner of the application.
-    if !signature_defaults_only {
+    if selected_signature_defaults.is_none() {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
@@ -39377,7 +39382,10 @@ fn check_selected_source_with_index<S: CheckerSymbolEnvironment>(
             c.check_class(&direct_scope, &class, declaration);
         }
     }
-    if let Some(body) = file.script_body.filter(|_| !c.signature_defaults_only) {
+    if let Some(body) = file
+        .script_body
+        .filter(|_| c.selected_signature_default_declarations.is_none())
+    {
         c.reset_body_mutations(Some(body));
         c.in_script_body = true;
         c.with_ret_allowed(Ty::Unit, false, |c| {
@@ -39701,8 +39709,8 @@ pub(crate) fn check_active_source_with_index(
             diags,
             None,
             None,
+            None,
             active_declarations,
-            false,
             None,
         )
     })
@@ -39732,8 +39740,8 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
             diags,
             Some(selected_roots),
             Some(selected_bodies),
+            None,
             active_declarations,
-            false,
             None,
         )
     })
@@ -39759,8 +39767,8 @@ pub(crate) fn check_selected_declarations_in_pass_two(
             diags,
             Some(selected_roots),
             Some(selected_bodies),
+            None,
             active_declarations,
-            false,
             Some(streamed_cache),
         )
     })
@@ -39781,6 +39789,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
 ) -> TypeInfo {
     let environment = CheckerExternalEnvironment::from(syms);
     crate::wide_stack::on_wide_stack(move || {
+        let no_ordinary_bodies = std::collections::HashSet::new();
         check_selected_source_with_index(
             file,
             file_index,
@@ -39788,9 +39797,9 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             index,
             diags,
             Some(selected_stable_roots),
+            Some(&no_ordinary_bodies),
             Some(selected_stable_defaults),
             active_declarations,
-            true,
             None,
         )
     })
@@ -40222,12 +40231,14 @@ struct Checker<'a> {
     /// Exact stable declaration identities selected for this bounded body check. `None` is an
     /// ordinary authoritative file check; `Some` defers every other body to another streaming unit.
     selected_body_declarations: Option<std::collections::HashSet<crate::fir::DeclarationId>>,
+    /// Exact stable declarations whose parameter defaults belong to this Pass-1 unit. This is
+    /// orthogonal to `selected_body_declarations`: selecting a default never selects the callable's
+    /// ordinary body.
+    selected_signature_default_declarations:
+        Option<std::collections::HashSet<crate::fir::DeclarationId>>,
     /// Selected defaults not yet reached through their lexical declaration. These active parser
     /// expression IDs die with the checker and replace the former source-coordinate cutoff.
     pending_signature_default_expressions: std::collections::HashSet<ExprId>,
-    /// This selected Pass-1 check owns only parameter-default expressions. Finalized signatures
-    /// already supply callable result types, so no ordinary body may be reopened for inference.
-    signature_defaults_only: bool,
     /// The `(receiver, member)` pairs whose INTERSECTION-BOUND retry is already in progress.
     ///
     /// `where T : A, T : B` retries an unresolved member against each remaining bound, and a bound
@@ -41541,55 +41552,6 @@ impl<'a> Checker<'a> {
                 let shadow = self.lookup(scope, "this")?.ty;
                 (shadow != declared).then_some(shadow)
             })
-    }
-
-    fn expect_default_argument(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        expected: Ty,
-    ) {
-        let has_receiver = matches!(expected, Ty::Fun(function) if function.has_receiver);
-        let actual = self.check_argument_expected(scope, expression, expected, has_receiver, None);
-        self.expect_assignable(
-            expected,
-            actual,
-            self.value_diagnostic_span(expression, actual),
-            "default argument",
-        );
-    }
-
-    /// Check one callable's defaults in declaration order and publish each parameter only after its
-    /// own default has been checked. Kotlin permits a default to read preceding parameters, but a
-    /// parameter is not in scope in its own default and later parameters must not leak backwards.
-    /// Callers choose the receiver context (`this` available for functions, unavailable for
-    /// constructors); the ordering rule itself is shared by every callable kind.
-    fn check_parameter_defaults<'p>(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        parameters: impl ExactSizeIterator<Item = (&'p str, Option<ExprId>)>,
-        parameter_types: &[Ty],
-    ) {
-        assert_eq!(
-            parameters.len(),
-            parameter_types.len(),
-            "checked parameter declarations and semantic types must stay aligned"
-        );
-        for ((name, default), &ty) in parameters.zip(parameter_types) {
-            if let Some(default) = default {
-                if self.signature_defaults_only {
-                    self.signature_default_expression_depth += 1;
-                    self.expect_default_argument(scope, default, ty);
-                    self.signature_default_expression_depth -= 1;
-                    self.pending_signature_default_expressions.remove(&default);
-                } else {
-                    self.expect_default_argument(scope, default, ty);
-                }
-            }
-            if name != "_" {
-                self.declare(scope, name, ty, false);
-            }
-        }
     }
 
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
@@ -56972,7 +56934,7 @@ impl<'a> Checker<'a> {
             .any(|argument| self.file.expr_span(*argument).is_none())
         {
             assert!(
-                self.signature_defaults_only,
+                self.selected_signature_default_declarations.is_some(),
                 "only Pass-1 default checking may observe released annotation syntax"
             );
             // Annotation applications were resolved and validated during header collection.
@@ -57327,7 +57289,7 @@ impl<'a> Checker<'a> {
         }
         let check_ordinary_body = self.selected_function_body(f);
         self.reset_body_mutations(
-            (!self.signature_defaults_only && check_ordinary_body)
+            check_ordinary_body
                 .then(|| fun_body_expr(&f.body))
                 .flatten(),
         );
@@ -57448,8 +57410,7 @@ impl<'a> Checker<'a> {
         // declaration's current semantic scope. Collection may have a provisional result, but that
         // result cannot replace inference: for `fun <T> content(x: T) = Content(x)` it carries an
         // unscoped placeholder and would make the checker compare `Content<T#decl>` with `Content<T>`.
-        let infer_ret = !self.signature_defaults_only
-            && check_ordinary_body
+        let infer_ret = check_ordinary_body
             && f.ret.is_none()
             && matches!(&f.body, FunBody::Expr(_))
             // Pass 1 owns every non-local signature decision. Pass 2 still checks the expression
@@ -57457,7 +57418,7 @@ impl<'a> Checker<'a> {
             // the reparsed body. Ordinary local declarations have no finalized entry and continue
             // to infer on their lexical rung below.
             && !self.has_finalized_signature(stable_declaration);
-        if !self.signature_defaults_only && !infer_ret {
+        if check_ordinary_body && !infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
         // Default arguments are evaluated in the caller's context. The extension receiver and
@@ -57493,7 +57454,7 @@ impl<'a> Checker<'a> {
                     self.declare_function_parameter(scope, p, ty, None, index < f.context_count);
                 }
             }
-            if self.signature_defaults_only {
+            if !self.pending_signature_default_expressions.is_empty() {
                 // A default owned by a local declaration must be entered through the enclosing
                 // body's lexical statement path so preceding locals, classifiers, receivers, and
                 // type parameters exist exactly as written. The selected set contains the nested
@@ -57642,70 +57603,6 @@ impl<'a> Checker<'a> {
                 self.active_declarations
                     .selects_expression(self.file, selected, expression)
             })
-    }
-
-    fn selected_signature_default_function(&self, function: &FunDecl) -> bool {
-        self.signature_defaults_only
-            && self
-                .selected_body_declarations
-                .as_ref()
-                .is_some_and(|selected| {
-                    selected.iter().any(|declaration| {
-                        self.active_declarations
-                            .function(self.file, *declaration)
-                            .is_some_and(|candidate| std::ptr::eq(candidate, function))
-                    })
-                })
-    }
-
-    fn selected_signature_default_source_member(
-        &self,
-        member: crate::libraries::SourceMember,
-    ) -> bool {
-        self.signature_defaults_only
-            && self
-                .active_declarations
-                .source_member_declaration(self.file, self.resolved_index, member)
-                .is_some_and(|declaration| {
-                    self.selected_body_declarations
-                        .as_ref()
-                        .is_some_and(|selected| selected.contains(&declaration))
-                })
-    }
-
-    fn selected_signature_default_constructor(
-        &self,
-        class: DeclId,
-        secondary: Option<usize>,
-    ) -> bool {
-        self.signature_defaults_only
-            && self
-                .selected_body_declarations
-                .as_ref()
-                .is_some_and(|selected| {
-                    let Some(classifier) = self.active_declarations.classifier_declaration(class)
-                    else {
-                        return false;
-                    };
-                    selected.iter().any(|declaration| {
-                        let Some(anchor) = self.resolved_index.declaration_anchor(*declaration)
-                        else {
-                            return false;
-                        };
-                        anchor.kind == crate::fir::DeclarationKind::Constructor
-                            && anchor.owner.is_some_and(|owner| {
-                                owner == classifier
-                                    || self
-                                        .active_declarations
-                                        .same_parser_declaration(owner, classifier)
-                            })
-                            && anchor.sibling
-                                == secondary.map_or(0, |index| {
-                                    u32::try_from(index + 1)
-                                        .expect("too many secondary constructors")
-                                })
-                    })
-                })
     }
 
     fn check_property(&mut self, scope: &CheckerScope<'_>, p: &PropDecl, d: DeclId) {
@@ -58538,8 +58435,8 @@ impl<'a> Checker<'a> {
         // before the synthetic classifier contributes a dispatch receiver. Keep that exact scope
         // available after the class/member scopes below shadow the local `scope` binding.
         let enclosing_declaration_scope = scope;
-        let default_owned_class =
-            self.signature_defaults_only && self.checked_local_class_declarations.contains(&d);
+        let default_owned_class = self.selected_signature_default_declarations.is_some()
+            && self.checked_local_class_declarations.contains(&d);
         let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
         if cl.is_singleton() && self.file.is_local_declaration(d) && !is_anonymous_object {
             self.diags.error(
@@ -59519,7 +59416,10 @@ impl<'a> Checker<'a> {
                             method: method_index as u32,
                         },
                     );
-                    if self.signature_defaults_only && !default_owned_class && !selected_default {
+                    if self.selected_signature_default_declarations.is_some()
+                        && !default_owned_class
+                        && !selected_default
+                    {
                         continue;
                     }
                     let declared_extension_shape = if let Some(receiver_ref) = &m.receiver {
@@ -59699,7 +59599,8 @@ impl<'a> Checker<'a> {
                     })
                     .collect::<Vec<_>>();
                 for (declaration, class) in nested {
-                    if !self.signature_defaults_only || self.signature_default_expression_depth != 0
+                    if self.selected_signature_default_declarations.is_none()
+                        || self.signature_default_expression_depth != 0
                     {
                         self.checked_local_class_declarations.insert(declaration);
                     }
@@ -59707,7 +59608,7 @@ impl<'a> Checker<'a> {
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
                 }
-                if !self.signature_defaults_only || default_owned_class {
+                if self.selected_signature_default_declarations.is_none() || default_owned_class {
                     self.retry_body_local_properties_after_nested(scope, d, cl, &mut props);
                 }
             }
@@ -59718,12 +59619,9 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         method: method_index as u32,
                     };
-                    let selected = if self.signature_defaults_only {
-                        default_owned_class
-                            || self.selected_signature_default_source_member(source_member)
-                    } else {
-                        self.selected_function_body(method)
-                    };
+                    let selected = default_owned_class
+                        || self.selected_function_body(method)
+                        || self.selected_signature_default_source_member(source_member);
                     if selected {
                         self.register_local_method_dependency(
                             scope,
@@ -59753,12 +59651,9 @@ impl<'a> Checker<'a> {
                     )
                 })()
                 .or_else(|| self.active_source_member_declaration(source_member));
-                let selected = if self.signature_defaults_only {
-                    default_owned_class
-                        || self.selected_signature_default_source_member(source_member)
-                } else {
-                    self.selected_function_body(m)
-                };
+                let selected = default_owned_class
+                    || self.selected_function_body(m)
+                    || self.selected_signature_default_source_member(source_member);
                 if !selected {
                     self.check_unselected_method_annotation_applications(scope, m);
                     continue;
@@ -59777,7 +59672,7 @@ impl<'a> Checker<'a> {
             // checked like a method of the enum — `this` is the enum type, the enum's properties AND
             // the entry's own body properties are in scope, and the return type comes from the
             // abstract member it overrides.
-            if !self.signature_defaults_only || default_owned_class {
+            if self.selected_signature_default_declarations.is_none() || default_owned_class {
                 for (entry_index, entry) in cl.enum_entries.iter().enumerate() {
                     if entry.methods.is_empty()
                         && entry.props.is_empty()
@@ -60210,7 +60105,7 @@ impl<'a> Checker<'a> {
                             .collect();
                         (primary, source_primary, secondary)
                     }
-                    None if self.signature_defaults_only => {
+                    None if self.selected_signature_default_declarations.is_some() => {
                         self.declared_default_provider_constructor_shapes(scope, cl)
                     }
                     None => {
@@ -60248,13 +60143,11 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            let check_primary_constructor = if self.signature_defaults_only {
-                default_owned_class || self.selected_signature_default_constructor(d, None)
-            } else {
-                self.selected_primary_constructor_body(cl)
-            };
-            let check_primary_constructor_body =
-                check_primary_constructor && (!self.signature_defaults_only || default_owned_class);
+            let selected_primary_body = self.selected_primary_constructor_body(cl);
+            let check_primary_constructor = selected_primary_body
+                || default_owned_class
+                || self.selected_signature_default_constructor(d, None);
+            let check_primary_constructor_body = selected_primary_body || default_owned_class;
             // A *deferred* `val` (no initializer/getter/setter) is definitely-assigned once in a
             // constructor body, so it is assignable WITHIN a secondary constructor (kotlinc allows
             // it) — same relaxation the primary-ctor body uses below.
@@ -60280,12 +60173,10 @@ impl<'a> Checker<'a> {
                     .collect::<Vec<_>>(),
             );
             for (sc_index, sc) in cl.secondary_ctors.iter().enumerate() {
-                let selected_constructor = if self.signature_defaults_only {
-                    default_owned_class
-                        || self.selected_signature_default_constructor(d, Some(sc_index))
-                } else {
-                    self.selected_secondary_constructor_body(cl, sc)
-                };
+                let selected_constructor_body = self.selected_secondary_constructor_body(cl, sc);
+                let selected_constructor = selected_constructor_body
+                    || default_owned_class
+                    || self.selected_signature_default_constructor(d, Some(sc_index));
                 if !selected_constructor {
                     continue;
                 }
@@ -60318,7 +60209,7 @@ impl<'a> Checker<'a> {
                         &semantic_params[context_count..],
                     );
                 });
-                if self.signature_defaults_only && !default_owned_class {
+                if !selected_constructor_body && !default_owned_class {
                     self.active_statement_suppressions
                         .truncate(constructor_suppression_depth);
                     continue;
@@ -60429,7 +60320,7 @@ impl<'a> Checker<'a> {
                 self.active_statement_suppressions
                     .truncate(constructor_suppression_depth);
             }
-            if !self.signature_defaults_only || default_owned_class {
+            if self.selected_signature_default_declarations.is_none() || default_owned_class {
                 self.validate_ctor_delegation_graph(d, cl);
             }
             // Primary-constructor parameter defaults are evaluated without a dispatch `this`, but
@@ -60459,14 +60350,17 @@ impl<'a> Checker<'a> {
             // captures before its default becomes retained FIR. Nothing from the enclosing header
             // is retained, and Pass 2 still checks it authoritatively as ordinary body work.
             let selected_primary_default = self.selected_signature_default_constructor(d, None);
-            if self.signature_defaults_only {
+            if self.selected_signature_default_declarations.is_some() {
                 crate::trace_compiler!(
                     "fir",
                     "Pass 1 default class context class={} parser={d:?} selected_primary={selected_primary_default}",
                     cl.name,
                 );
             }
-            if self.signature_defaults_only && !default_owned_class && !selected_primary_default {
+            if self.selected_signature_default_declarations.is_some()
+                && !default_owned_class
+                && !selected_primary_default
+            {
                 let header_scope = scope.child(ScopeKind::Block);
                 for (parameter, &ty) in cl.props.iter().zip(&source_primary_params) {
                     self.declare(&header_scope, &parameter.name, ty, parameter.is_var);
@@ -60496,7 +60390,7 @@ impl<'a> Checker<'a> {
                 })
                 .map(|bp| bp.name.as_str())
                 .collect();
-            if !self.signature_defaults_only || default_owned_class {
+            if self.selected_signature_default_declarations.is_none() || default_owned_class {
                 // Dispatch properties and constructor parameters occupy separate tower rungs.
                 // Initializers see both; accessor methods start from the dispatch rung and cannot
                 // accidentally capture a constructor parameter as a local.
@@ -61204,7 +61098,9 @@ impl<'a> Checker<'a> {
         // static classifier-receiver scope. There is no entry INSTANCE yet: `this` is the nearest
         // companion published by the enum classifier hierarchy (`Choice.Companion`, otherwise the
         // companion declared by `kotlin.Enum`).
-        if cl.is_enum() && (!self.signature_defaults_only || default_owned_class) {
+        if cl.is_enum()
+            && (self.selected_signature_default_declarations.is_none() || default_owned_class)
+        {
             let static_this = current_owner.and_then(|owner| {
                 crate::symbol_resolver::classifier_companion_instance(
                     &self.fed_source(),
@@ -61361,7 +61257,7 @@ impl<'a> Checker<'a> {
     ) {
         let selected_default_method = source_member
             .is_some_and(|member| self.selected_signature_default_source_member(member));
-        let default_owned_method = self.signature_defaults_only
+        let default_owned_method = self.selected_signature_default_declarations.is_some()
             && source_member.is_some_and(|member| match member {
                 crate::libraries::SourceMember::Class { owner, .. }
                 | crate::libraries::SourceMember::ClassProperty { owner, .. }
@@ -61371,8 +61267,14 @@ impl<'a> Checker<'a> {
             });
         let previous_function_return_label = self.function_return_label.replace(f.name.clone());
         self.check_infix_declaration(f, true);
+        // The caller selects ordinary members before entering this method. A registered local
+        // dependency is another authoritative entry and may therefore be absent from the bounded
+        // top-level body set. Default preparation is the only entry that selects the declaration
+        // for its defaults without selecting its ordinary body.
+        let check_ordinary_body =
+            self.selected_signature_default_declarations.is_none() || default_owned_method;
         self.reset_body_mutations(
-            (!self.signature_defaults_only || default_owned_method)
+            check_ordinary_body
                 .then(|| fun_body_expr(&f.body))
                 .flatten(),
         );
@@ -61493,7 +61395,7 @@ impl<'a> Checker<'a> {
                 }
             }
         };
-        if !self.signature_defaults_only && f.ret.is_some() && self.ret_ty != Ty::Error {
+        if check_ordinary_body && f.ret.is_some() && self.ret_ty != Ty::Error {
             if let Some(source_member) = source_member {
                 // A body-local member may explicitly return its enclosing local classifier
                 // (`inner class D { fun outer(): C = ... }`). Its pre-check module signature uses
@@ -61515,7 +61417,7 @@ impl<'a> Checker<'a> {
             }
             _ => Vec::new(),
         };
-        let infer_ret = (!self.signature_defaults_only || default_owned_method)
+        let infer_ret = check_ordinary_body
             && f.ret.is_none()
             && matches!(&f.body, FunBody::Expr(_))
             // A source member published by Pass 1 is checked, never reinferred, during Pass 2.
@@ -61619,7 +61521,7 @@ impl<'a> Checker<'a> {
                     index < f.context_count,
                 );
             }
-            if !self.signature_defaults_only && !infer_ret {
+            if check_ordinary_body && !infer_ret {
                 self.check_operator_declaration(f, self.ret_ty);
             }
             if infer_ret {
@@ -61676,14 +61578,14 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-            } else if self.signature_defaults_only {
+            } else if !self.pending_signature_default_expressions.is_empty() {
                 // A selected method owns only its retained defaults. An enclosing method whose body
                 // introduces another selected local provider must be walked now to recreate that
                 // lexical scope; its ordinary FIR is still deferred to Pass 2.
                 if default_owned_method || !selected_default_method {
                     self.check_fun_body(scope, f);
                 }
-            } else {
+            } else if check_ordinary_body {
                 self.check_fun_body(scope, f);
             }
         }
@@ -69229,8 +69131,8 @@ impl<'a> Checker<'a> {
             // body throws before its trailing would be typed by the dead trailing, and the lowerer
             // would emit that dead code (an unframed branch target → VerifyError).
             let mut diverged = false;
-            let stop_after_selected_defaults = self.signature_defaults_only
-                && !self.pending_signature_default_expressions.is_empty();
+            let stop_after_selected_defaults =
+                !self.pending_signature_default_expressions.is_empty();
             let mut signature_defaults_complete = false;
             for s in &stmts {
                 let unreachable = diverged;
