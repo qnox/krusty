@@ -101,17 +101,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 )?,
                 SigExpr::MemberCall {
                     receiver,
-                    target,
                     arguments,
+                    origin,
                     ..
-                } if graph.call_arguments(arguments).is_empty() => {
-                    let spelling = graph.name(graph.member_selection(target)?.spelling)?;
-                    semantics.fold_selected_member_constant(
-                        spelling,
+                } if graph.call_arguments(arguments).is_empty() => semantics
+                    .fold_selected_member_constant(
+                        semantics.selected_compiler_intrinsic(origin)?,
                         evaluated_compile_time_constant(semantics, receiver, graph, memo)?,
                         result,
-                    )?
-                }
+                    )?,
                 SigExpr::StringTemplate(parts) => {
                     let parts = graph
                         .operands(parts)

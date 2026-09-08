@@ -163,18 +163,19 @@ pub(crate) fn fold_selected_signature_binary(
 }
 
 pub(crate) fn fold_selected_signature_member(
-    spelling: &str,
+    intrinsic: CompilerIntrinsic,
     receiver: LibraryConst,
     result: Ty,
 ) -> Option<LibraryConst> {
-    match spelling {
-        "unaryPlus" => evaluate_unary(UnOp::Plus, receiver, result),
-        "unaryMinus" => evaluate_unary(UnOp::Neg, receiver, result),
-        "not" => evaluate_unary(UnOp::Not, receiver, result),
-        "toByte" | "toShort" | "toInt" | "toLong" | "toFloat" | "toDouble" | "toChar"
-        | "toUByte" | "toUShort" | "toUInt" | "toULong" => {
-            evaluate_numeric_conversion(receiver, result)
+    match intrinsic {
+        CompilerIntrinsic::PrimitiveUnary(crate::libraries::PrimitiveUnaryIntrinsic::Identity) => {
+            evaluate_unary(UnOp::Plus, receiver, result)
         }
+        CompilerIntrinsic::PrimitiveUnary(crate::libraries::PrimitiveUnaryIntrinsic::Negate) => {
+            evaluate_unary(UnOp::Neg, receiver, result)
+        }
+        CompilerIntrinsic::BooleanNot => evaluate_unary(UnOp::Not, receiver, result),
+        CompilerIntrinsic::NumericConversion => evaluate_numeric_conversion(receiver, result),
         _ => None,
     }
 }
@@ -788,6 +789,34 @@ mod tests {
             Some(LibraryConst {
                 ty: Ty::Float,
                 value: LibConst::Float(2.75),
+            }),
+        );
+    }
+
+    #[test]
+    fn compact_member_folding_consumes_the_selected_intrinsic() {
+        let operand = LibraryConst {
+            ty: Ty::Int,
+            value: LibConst::Int(7),
+        };
+        assert_eq!(
+            fold_selected_signature_member(
+                CompilerIntrinsic::PrimitiveUnary(
+                    crate::libraries::PrimitiveUnaryIntrinsic::Negate,
+                ),
+                operand.clone(),
+                Ty::Int,
+            ),
+            Some(LibraryConst {
+                ty: Ty::Int,
+                value: LibConst::Int(-7),
+            }),
+        );
+        assert_eq!(
+            fold_selected_signature_member(CompilerIntrinsic::NumericConversion, operand, Ty::Long,),
+            Some(LibraryConst {
+                ty: Ty::Long,
+                value: LibConst::Long(7),
             }),
         );
     }

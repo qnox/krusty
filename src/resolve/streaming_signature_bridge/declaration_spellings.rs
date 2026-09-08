@@ -308,6 +308,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         evaluated_compile_time_constants: std::cell::RefCell::new(std::collections::HashMap::new()),
         compile_time_constant_declarations: std::collections::HashSet::new(),
         selected_compile_time_constants: std::cell::RefCell::new(std::collections::HashMap::new()),
+        selected_compiler_intrinsics: std::cell::RefCell::new(std::collections::HashMap::new()),
         selected_call_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
         source_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
     };

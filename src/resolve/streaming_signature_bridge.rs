@@ -98,6 +98,8 @@ struct ProductionSignatureSemantics<'a> {
     /// identity-based fact instead of repeating lookup from the source spelling.
     selected_compile_time_constants:
         RefCell<HashMap<crate::fir::OriginId, crate::libraries::LibraryConst>>,
+    selected_compiler_intrinsics:
+        RefCell<HashMap<crate::fir::OriginId, crate::libraries::CompilerIntrinsic>>,
     /// The contract of the callable selected for each top-level call, by call origin, so a
     /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
     selected_call_contracts: RefCell<HashMap<crate::fir::OriginId, SelectedCallContract>>,
@@ -4293,6 +4295,7 @@ pub(crate) fn finalized_streamed_signature_index(
         evaluated_compile_time_constants: RefCell::new(HashMap::new()),
         compile_time_constant_declarations: std::collections::HashSet::new(),
         selected_compile_time_constants: RefCell::new(HashMap::new()),
+        selected_compiler_intrinsics: RefCell::new(HashMap::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
     };
@@ -4868,6 +4871,7 @@ pub(crate) fn finalized_streamed_signature_index(
         evaluated_compile_time_constants: RefCell::new(HashMap::new()),
         compile_time_constant_declarations,
         selected_compile_time_constants: RefCell::new(HashMap::new()),
+        selected_compiler_intrinsics: RefCell::new(HashMap::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
     };

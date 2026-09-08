@@ -4598,6 +4598,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .classifier(internal)
                 .and_then(|declaration| declaration.constants.get(spelling).cloned())
             {
+                self.remember_selected_compile_time_constant(origin, None, Some(constant.clone()));
                 return crate::fir::ResolvedTy::new(constant.ty).map_err(|_| Self::failure());
             }
         }
@@ -4775,6 +4776,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 selected.kind,
                 selected.source_key,
             );
+            let compiler_intrinsic = selected.callable.compiler_intrinsic;
             let postponed_bindings = projected.selected_bindings(&selected);
             if selected.kind == crate::libraries::FnKind::Member {
                 let mut member = selected.member_with_return(result);
@@ -4787,6 +4789,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     argument_types,
                     postponed_bindings,
                     None,
+                    compiler_intrinsic,
                 ));
             }
             Some((
@@ -4797,6 +4800,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 argument_types,
                 postponed_bindings,
                 Some(parameters),
+                compiler_intrinsic,
             ))
         });
         let (result, member, source, source_declaration, argument_types) = match selected {
@@ -4808,7 +4812,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 argument_types,
                 postponed_bindings,
                 extension_parameters,
+                compiler_intrinsic,
             )) => {
+                if let Some(intrinsic) = compiler_intrinsic {
+                    self.selected_compiler_intrinsics
+                        .borrow_mut()
+                        .insert(origin, intrinsic);
+                }
                 self.commit_postponed_bindings(scope, postponed_bindings);
                 if let Some(parameters) = extension_parameters {
                     // An extension's selected value parameters can still contain active builder
@@ -4944,6 +4954,25 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             operator,
                         )
                     }) {
+                        let intrinsic = match operator {
+                            Some(crate::ast::UnOp::Plus) => {
+                                crate::libraries::CompilerIntrinsic::PrimitiveUnary(
+                                    crate::libraries::PrimitiveUnaryIntrinsic::Identity,
+                                )
+                            }
+                            Some(crate::ast::UnOp::Neg) => {
+                                crate::libraries::CompilerIntrinsic::PrimitiveUnary(
+                                    crate::libraries::PrimitiveUnaryIntrinsic::Negate,
+                                )
+                            }
+                            Some(crate::ast::UnOp::Not) => {
+                                crate::libraries::CompilerIntrinsic::BooleanNot
+                            }
+                            None => unreachable!("a selected unary operation must exist"),
+                        };
+                        self.selected_compiler_intrinsics
+                            .borrow_mut()
+                            .insert(origin, intrinsic);
                         return crate::fir::ResolvedTy::new(result)
                             .map(|ty| crate::fir::ResolvedMemberCall {
                                 ty: Some(ty),
@@ -5238,12 +5267,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
 
     fn fold_selected_member_constant(
         &self,
-        spelling: &str,
+        intrinsic: crate::libraries::CompilerIntrinsic,
         receiver: crate::libraries::LibraryConst,
         result: crate::fir::ResolvedTy,
     ) -> Option<crate::libraries::LibraryConst> {
         super::super::constant_evaluation::fold_selected_signature_member(
-            spelling,
+            intrinsic,
             receiver,
             result.get(),
         )
@@ -5264,6 +5293,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         self.evaluated_compile_time_constants
             .borrow_mut()
             .insert(declaration, constant);
+    }
+
+    fn selected_compiler_intrinsic(
+        &self,
+        origin: crate::fir::OriginId,
+    ) -> Option<crate::libraries::CompilerIntrinsic> {
+        self.selected_compiler_intrinsics
+            .borrow()
+            .get(&origin)
+            .copied()
     }
 
     fn owns_compile_time_constant(&self, declaration: crate::fir::DeclarationId) -> bool {

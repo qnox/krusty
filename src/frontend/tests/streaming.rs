@@ -2698,6 +2698,7 @@ fn production_pass_one_publishes_checked_const_expression_payloads_only_for_cons
                   const val word = \"O\" + \"K\"\n\
                   const val template = \"<$word>\"\n\
                   const val wide: Long = 2L * 3L\n\
+                  const val negative = -answer\n\
                   val ordinary = 2 + 2\n";
     let inputs = [SourceInput::kotlin(source).with_file_stem("Constants")];
     let mut diagnostics = DiagSink::new();
@@ -2766,6 +2767,13 @@ fn production_pass_one_publishes_checked_const_expression_payloads_only_for_cons
         Some(crate::libraries::LibraryConst {
             ty: crate::types::Ty::Long,
             value: crate::libraries::LibConst::Long(6),
+        })
+    );
+    assert_eq!(
+        constant("negative"),
+        Some(crate::libraries::LibraryConst {
+            ty: crate::types::Ty::Int,
+            value: crate::libraries::LibConst::Int(-4),
         })
     );
     assert_eq!(constant("ordinary"), None);

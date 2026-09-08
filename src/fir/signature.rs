@@ -1149,7 +1149,7 @@ pub trait SignatureSemantics {
 
     fn fold_selected_member_constant(
         &self,
-        _spelling: &str,
+        _intrinsic: crate::libraries::CompilerIntrinsic,
         _receiver: crate::libraries::LibraryConst,
         _result: ResolvedTy,
     ) -> Option<crate::libraries::LibraryConst> {
@@ -1170,6 +1170,13 @@ pub trait SignatureSemantics {
         &self,
         _origin: OriginId,
     ) -> Option<crate::libraries::LibraryConst> {
+        None
+    }
+
+    fn selected_compiler_intrinsic(
+        &self,
+        _origin: OriginId,
+    ) -> Option<crate::libraries::CompilerIntrinsic> {
         None
     }
 
