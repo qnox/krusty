@@ -35,13 +35,38 @@ pub struct DefaultArgumentProvider {
 }
 
 /// Pass-1-only executable inventory used to select and immediately check retained inline bodies.
-/// Both this inventory and its same-pass checker-root map are destroyed before Pass 2 begins.
 #[derive(Debug, Default)]
 pub struct PassOneBodyInventory {
     units: Vec<BodyWorkItem>,
-    /// Same-pass checker roots used only while preparing retained inline bodies. This map is
-    /// destroyed before the Pass-1 result is returned.
-    checker_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
+}
+
+fn stable_checker_root(
+    index: &ResolvedModuleIndex,
+    mut declaration: DeclarationId,
+) -> DeclarationId {
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(declaration) {
+            return declaration;
+        }
+        if let Some(root) = index.local_classifier_lexical_root(declaration) {
+            declaration = root;
+            continue;
+        }
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            return declaration;
+        };
+        let local_classifier = anchor.kind == super::DeclarationKind::Classifier
+            && index
+                .declaration_header(declaration)
+                .is_some_and(|header| header.flags.has(super::DeclarationFlags::LOCAL_CLASS));
+        if (anchor.kind == super::DeclarationKind::Classifier && !local_classifier)
+            || anchor.owner.is_none()
+        {
+            return declaration;
+        }
+        declaration = anchor.owner.expect("a non-root declaration has an owner");
+    }
 }
 
 impl PassOneBodyInventory {
@@ -63,8 +88,7 @@ impl PassOneBodyInventory {
 
     /// Stable parser-unit roots whose subtrees contain work in this queue. Nested classifiers are
     /// parser-hoisted declarations even though their stable semantic owner is another classifier;
-    /// `checker_roots` records the already-established structural root without retaining or
-    /// reconstructing source coordinates.
+    /// the finalized index's lexical-root edge supplies their structural root.
     pub(crate) fn checker_roots_by_source(
         &self,
         index: &ResolvedModuleIndex,
@@ -72,11 +96,7 @@ impl PassOneBodyInventory {
     ) -> Vec<std::collections::HashSet<DeclarationId>> {
         let mut selected = vec![std::collections::HashSet::new(); source_count];
         for unit in &self.units {
-            let root = self
-                .checker_roots
-                .get(&unit.declaration)
-                .copied()
-                .unwrap_or(unit.declaration);
+            let root = stable_checker_root(index, unit.declaration);
             let anchor = index
                 .declaration_anchor(root)
                 .expect("every body unit root must retain its stable anchor");
@@ -127,30 +147,8 @@ impl PassOneBodyInventory {
                     .is_some_and(ResolvedCallableHeader::is_inline)
             });
         BodyPartition {
-            inline: PassOneBodyInventory {
-                checker_roots: self
-                    .checker_roots
-                    .iter()
-                    .filter(|(declaration, _)| {
-                        inline.iter().any(|unit| unit.declaration == **declaration)
-                    })
-                    .map(|(declaration, root)| (*declaration, *root))
-                    .collect(),
-                units: inline,
-            },
-            ordinary: PassOneBodyInventory {
-                checker_roots: self
-                    .checker_roots
-                    .iter()
-                    .filter(|(declaration, _)| {
-                        ordinary
-                            .iter()
-                            .any(|unit| unit.declaration == **declaration)
-                    })
-                    .map(|(declaration, root)| (*declaration, *root))
-                    .collect(),
-                units: ordinary,
-            },
+            inline: PassOneBodyInventory { units: inline },
+            ordinary: PassOneBodyInventory { units: ordinary },
         }
     }
 }
@@ -198,8 +196,12 @@ impl BodyPartition {
                     return Some(candidate);
                 }
                 current = index
-                    .declaration_header(candidate)
-                    .and_then(|header| header.owner)
+                    .local_classifier_lexical_root(candidate)
+                    .or_else(|| {
+                        index
+                            .declaration_header(candidate)
+                            .and_then(|header| header.owner)
+                    })
                     .or_else(|| {
                         index
                             .declaration_anchor(candidate)
@@ -210,13 +212,7 @@ impl BodyPartition {
         };
         let mut payload_roots = std::collections::HashMap::new();
         for unit in self.inline.units.iter().chain(&self.ordinary.units) {
-            let root = self
-                .inline
-                .checker_roots
-                .get(&unit.declaration)
-                .or_else(|| self.ordinary.checker_roots.get(&unit.declaration))
-                .copied()
-                .unwrap_or(unit.declaration);
+            let root = stable_checker_root(index, unit.declaration);
             let inline_owner =
                 retained_inline_owner(root).or_else(|| retained_inline_owner(unit.declaration));
             let Some(inline_owner) = inline_owner else {
@@ -375,20 +371,6 @@ impl StreamedHeaderModule {
                 })
             })
             .collect::<Vec<_>>();
-        let checker_roots = units
-            .iter()
-            .map(|unit| {
-                (
-                    unit.declaration,
-                    checker_root_for_declaration(
-                        &index,
-                        &declarations,
-                        &local_classifier_lexical_roots,
-                        unit.declaration,
-                    ),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
         // Declaration inventory is grouped by declaration family, while executable initialization
         // semantics are source ordered. Establish that order before syntax disappears so a
         // consuming Pass-2 sink never has to retain/re-sort checked bodies.
@@ -417,13 +399,6 @@ impl StreamedHeaderModule {
             index.publish_declarations(declarations);
         }
         index.publish_local_classifier_lexical_roots(local_classifier_lexical_roots);
-        (
-            index,
-            sources,
-            PassOneBodyInventory {
-                units,
-                checker_roots,
-            },
-        )
+        (index, sources, PassOneBodyInventory { units })
     }
 }
