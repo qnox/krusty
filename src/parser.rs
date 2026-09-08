@@ -3112,26 +3112,25 @@ impl<'a> Parser<'a> {
                     let mut body = Vec::new();
                     let mut bprops = Vec::new();
                     let mut init_order = Vec::new();
+                    let mut nested_classifiers = Vec::new();
                     if self.eat(TokenKind::LBrace) {
-                        let entry_nested_start = self.file.decls.len();
+                        self.classifier_children.push(Vec::new());
                         self.skip_newlines();
                         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                             let bmods = self.parse_member_decl_prefix();
                             let entry_owner = format!("{name}.{entry_name}");
-                            let nested_start = self.file.decls.len();
                             if self.parse_and_register_nested_classifier(&entry_owner, &bmods, true)
                             {
-                                if let Some(&declaration) = self.file.decls.get(nested_start) {
-                                    self.file
-                                        .enum_entry_nested_classifier_owners
-                                        .insert(declaration, entry_span);
-                                }
                                 // An `inner` classifier declared by an enum entry captures the entry value,
                                 // whose source type is the enum—not a separately nameable entry-subclass
                                 // type. Keep the JVM/source nesting path (`Enum.ENTRY.Inner`) while recording
                                 // the semantic dispatch receiver (`Enum`) independently.
                                 if bmods.iter().any(|modifier| modifier == "inner") {
-                                    if let Some(&declaration) = self.file.decls.get(nested_start) {
+                                    if let Some(&declaration) = self
+                                        .classifier_children
+                                        .last()
+                                        .and_then(|frame| frame.last())
+                                    {
                                         if let Decl::Class(nested) = self.file.decl_mut(declaration)
                                         {
                                             nested.inner_of = Some(name.clone());
@@ -3176,38 +3175,10 @@ impl<'a> Parser<'a> {
                             self.skip_newlines();
                         }
                         self.expect(TokenKind::RBrace, "'}'");
-                        // Classifiers are parser-hoisted out of an enum-entry body. Retain the
-                        // structural entry boundary for every outermost classifier created while
-                        // parsing that body, including anonymous objects in properties, methods,
-                        // and init blocks. Descendants remain owned by their containing classifier
-                        // through source containment; attaching all newly created declarations
-                        // directly to the entry would flatten anonymous/named nesting.
-                        let nested = self.file.decls[entry_nested_start..]
-                            .iter()
-                            .copied()
-                            .filter(|declaration| {
-                                matches!(self.file.decl(*declaration), Decl::Class(_))
-                            })
-                            .collect::<Vec<_>>();
-                        for &declaration in &nested {
-                            let Decl::Class(class) = self.file.decl(declaration) else {
-                                continue;
-                            };
-                            let has_nested_owner = nested.iter().copied().any(|candidate| {
-                                if candidate == declaration {
-                                    return false;
-                                }
-                                matches!(self.file.decl(candidate), Decl::Class(owner)
-                                    if owner.span.lo <= class.span.lo
-                                        && class.span.hi <= owner.span.hi)
-                            });
-                            if !has_nested_owner {
-                                self.file
-                                    .enum_entry_nested_classifier_owners
-                                    .entry(declaration)
-                                    .or_insert(entry_span);
-                            }
-                        }
+                        nested_classifiers = self
+                            .classifier_children
+                            .pop()
+                            .expect("an enum-entry body owns one classifier frame");
                     }
                     entries.push(AstEnumEntry {
                         name: entry_name,
@@ -3220,6 +3191,7 @@ impl<'a> Parser<'a> {
                         methods: body,
                         props: bprops,
                         init_order,
+                        nested_classifiers,
                     });
                     self.skip_newlines();
                     if !self.eat(TokenKind::Comma) {

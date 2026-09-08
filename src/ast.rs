@@ -1033,6 +1033,8 @@ pub struct AstEnumEntry {
     pub props: Vec<PropDecl>,
     /// Source-ordered property initializers and `init` blocks of the entry's anonymous subclass.
     pub init_order: Vec<ClassInit>,
+    /// Classifiers created directly while parsing this entry's anonymous subclass body.
+    pub nested_classifiers: Vec<DeclId>,
 }
 
 pub type ClassTypeParameters = crate::types::TypeParameters<Vec<(String, TypeRef)>>;
@@ -1606,10 +1608,6 @@ pub struct File {
     /// Enum entries have anonymous subclass scope (`Enum.ENTRY`) but no standalone `Decl`; retaining
     /// that parser-known owner lets signature resolution include entry-local nested classifiers.
     pub local_class_lexical_classifier_owners: std::collections::HashMap<DeclId, String>,
-    /// Parser-hoisted nested classifier declared directly in an enum-entry body -> that entry's
-    /// stable source range. This transient structural edge is consumed while declaration headers
-    /// receive stable identities; it never survives Pass 1 or becomes semantic identity itself.
-    pub enum_entry_nested_classifier_owners: std::collections::HashMap<DeclId, Span>,
     /// Nested types hoisted out of a local class during its parse, named by the path from that
     /// class (`Local.Inner`). They are requalified with it when it is given its final name.
     pub local_class_nested: std::collections::HashMap<StmtId, Vec<DeclId>>,

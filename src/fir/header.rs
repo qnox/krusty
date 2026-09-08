@@ -391,29 +391,24 @@ fn nested_classifier_owners(
         // An enum-entry body is a real semantic ownership boundary even though the parser does not
         // materialize its anonymous subclass as a `Decl::Class`. Consume the parser's transient
         // structural edge and immediately replace it with stable classifier/entry identities.
-        let enum_entry_owner = file
-            .enum_entry_nested_classifier_owners
-            .get(&declaration)
-            .and_then(|entry_range| {
-                declarations.iter().copied().find_map(|candidate| {
-                    let parent = stable.get(&candidate).copied()?;
-                    let Decl::Class(candidate_class) = file.decl(candidate) else {
-                        return None;
-                    };
-                    let (index, entry) = candidate_class
-                        .enum_entries
-                        .iter()
-                        .enumerate()
-                        .find(|(_, entry)| entry.span == *entry_range)?;
-                    Some(ids.intern(DeclarationAnchor {
-                        source,
-                        range: entry.span,
-                        owner: Some(parent),
-                        kind: DeclarationKind::EnumEntry,
-                        sibling: u32::try_from(index).expect("too many enum entries"),
-                    }))
-                })
-            });
+        let enum_entry_owner = declarations.iter().copied().find_map(|candidate| {
+            let parent = stable.get(&candidate).copied()?;
+            let Decl::Class(candidate_class) = file.decl(candidate) else {
+                return None;
+            };
+            let (index, entry) = candidate_class
+                .enum_entries
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| entry.nested_classifiers.contains(&declaration))?;
+            Some(ids.intern(DeclarationAnchor {
+                source,
+                range: entry.span,
+                owner: Some(parent),
+                kind: DeclarationKind::EnumEntry,
+                sibling: u32::try_from(index).expect("too many enum entries"),
+            }))
+        });
         let classifier_owner = structural_parents
             .get(&declaration)
             .and_then(|owner| stable.get(owner))
