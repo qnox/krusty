@@ -50645,6 +50645,12 @@ impl<'a> Checker<'a> {
                 self.expect_call_arg(scope, *p, args[i], actual);
             }
         }
+        // A committed invoke selection also commits the semantic type of its callee expression.
+        // Callable-tower probing can initially visit a bare function-valued name without enough
+        // context and leave its shared expression slot as `Error`; the selected invoke already
+        // proved the value's function type, so publish that fact at the owning phase boundary.
+        // Checked FIR must never reconstruct it from the lexical binding as a fallback.
+        self.set(receiver, semantic_receiver_ty);
         self.expr_lowers.insert(
             call,
             ExprLowering::Invoke {

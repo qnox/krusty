@@ -247,21 +247,12 @@ impl BodyFirChecker<'_> {
                 },
             });
         }
-        // The stable binding is authoritative for a lexical read. During the two-pass cutover the
-        // legacy checker can leave an `Error` cache entry for a nested function-type spelling even
-        // though Pass 1 has already published the complete parameter type. Do not copy that stale
-        // cache marker into FIR; use the selected binding type. Pending types remain hard errors.
-        let semantic = self.info.semantic_ty(source);
-        let result_ty = if semantic.mentions_error() {
-            storage_ty
-        } else {
-            self.resolved_type(
-                self.file
-                    .expr_span(source)
-                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
-                semantic,
-            )?
-        };
+        let result_ty = self.resolved_type(
+            self.file
+                .expr_span(source)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
+            self.info.semantic_ty(source),
+        )?;
         // A Unit local/capture/property is already stored as the language singleton. Resolution
         // may expose its classifier view (`kotlin/Unit`) for member selection, but that is not a
         // void-effect-to-value conversion. Preserve the stored read directly so lowering neither
