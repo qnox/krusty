@@ -98,27 +98,51 @@ impl Reachable {
             false
         });
         self.roots(file, roots);
-        let Decl::Class(class) = file.decl(declaration) else {
+        let Decl::Class(_) = file.decl(declaration) else {
             return;
         };
-        // Parser-hoisted nested declarations are not children of `ClassDecl`; source containment is
-        // the structural ownership relation already used by compact header inventory.
         let nested = file
             .decls
             .iter()
             .copied()
             .filter(|candidate| *candidate != declaration)
-            .filter(|candidate| match file.decl(*candidate) {
-                Decl::Class(candidate) => {
-                    class.span.lo <= candidate.span.lo && candidate.span.hi <= class.span.hi
-                }
-                Decl::Fun(_) | Decl::Property(_) => false,
-            })
+            .filter(|candidate| direct_enclosing_declaration(file, *candidate) == Some(declaration))
             .collect::<Vec<_>>();
         for nested in nested {
             self.declaration(file, nested);
         }
     }
+}
+
+fn direct_enclosing_declaration(
+    file: &File,
+    declaration: crate::ast::DeclId,
+) -> Option<crate::ast::DeclId> {
+    file.local_class_enclosing_declarations
+        .get(&declaration)
+        .copied()
+        .or_else(|| {
+            file.anonymous_object_enclosing_functions
+                .get(&declaration)
+                .map(|owner| match owner {
+                    crate::ast::AnonymousEnclosingFunction::TopLevel(function) => *function,
+                    crate::ast::AnonymousEnclosingFunction::Member { class, .. } => *class,
+                })
+        })
+}
+
+fn bounded_declaration_root(
+    file: &File,
+    mut declaration: crate::ast::DeclId,
+) -> crate::ast::DeclId {
+    let mut seen = HashSet::new();
+    while seen.insert(declaration) {
+        let Some(owner) = direct_enclosing_declaration(file, declaration) else {
+            break;
+        };
+        declaration = owner;
+    }
+    declaration
 }
 
 fn fun_body_root(body: &FunBody) -> Option<ExprId> {
@@ -278,7 +302,8 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
     let local_default_units = file
         .decl_arena
         .iter()
-        .filter_map(|declaration| {
+        .enumerate()
+        .filter_map(|(raw, declaration)| {
             let Decl::Class(class) = declaration else {
                 return None;
             };
@@ -302,27 +327,9 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     .flat_map(|entry| &entry.methods)
                     .flat_map(|method| &method.params)
                     .any(|parameter| parameter.default.is_some());
-            has_defaults.then_some(class.span)
-        })
-        .filter_map(|local_span| {
-            file.decls
-                .iter()
-                .copied()
-                .filter(|declaration| !file.is_local_declaration(*declaration))
-                .filter_map(|declaration| {
-                    let span = match file.decl(declaration) {
-                        Decl::Fun(function) => function.span,
-                        Decl::Class(class) => class.span,
-                        Decl::Property(property) => property.span,
-                    };
-                    (span != local_span && span.lo <= local_span.lo && local_span.hi <= span.hi)
-                        .then_some((span.hi - span.lo, declaration))
-                })
-                // Parser-hoisted anonymous and nested classifiers can themselves appear in
-                // `file.decls`. The bounded parser unit is the outermost containing declaration,
-                // not the nearest hoisted classifier.
-                .max_by_key(|(size, _)| *size)
-                .map(|(_, declaration)| declaration)
+            let declaration = crate::ast::DeclId(raw as u32);
+            (has_defaults && direct_enclosing_declaration(file, declaration).is_some())
+                .then(|| bounded_declaration_root(file, declaration))
         })
         .collect::<HashSet<_>>();
     crate::trace_compiler!(
