@@ -2055,20 +2055,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   re-checks the nested call under that expectation — but the first applicability probe checked the
   body against the open `T` and REPORTED what it found (`unresolved reference 'contains'` on `it`,
   once per matcher in a real project's `verify { … }` blocks). kotlinc postpones such a lambda. The
-  shared lambda entry point (`check_lambda_with_implicit_receivers_and_return_labeled`) now records
-  the body diagnostics of a lambda any of whose inputs is not lexically fixed as that lambda's
-  probe verdict (`provisional_lambda_diagnostics`, keyed by the lambda). The diagnostics STAY in
-  the sink meanwhile — applicability counts emitted errors, and draining them changed inference
-  (a fun-interface callee formal then captured the enclosing `T`) — and are withdrawn only when
-  the same lambda is checked again under closed inputs; a second probe of the same lambda leaves
-  the first verdict standing (a repeated diagnostic collapses later), and a verdict no closed
-  re-check withdrew is dropped from the record at statement end and stands. The top-level path's
-  `deferred_member_errors` (member lookups on a callee formal, answered by the finalized recheck)
-  join the record, keyed by the call, when the call had no expectation, and are withdrawn when the
-  call is checked again under one. Still open
-  beside it: a top-level callee whose `T` nothing fixes reports nothing where kotlinc reports
-  `cannot infer type for type parameter 'T'` (the batch compiler then fails FIR construction with
-  `UnsupportedCallShape`). Test: `tests/postponed_lambda_probe_e2e.rs`.
+  shared lambda entry point (`check_lambda_with_implicit_receivers_and_return_labeled`) now moves
+  the body diagnostics of a lambda whose inputs are not lexically fixed into an ordered postponed
+  buffer, outside the shared diagnostic sink. A closed recheck discards that expression's buffered
+  probe; statement completion publishes any probe nothing superseded. The top-level path's
+  `deferred_member_errors` follows the same ownership rule. A statement call whose result still
+  has a result formal without a retained binding is now diagnosed from its `GenericSig`, resolved
+  type arguments, and unsolved PCLA inputs for every callable origin, replacing the
+  classifier-value-only tracking set; `scope.m { it.foo() }`
+  therefore reports both the uninferable `T` and the unresolved body member. Test:
+  `tests/postponed_lambda_probe_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is

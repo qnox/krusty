@@ -43,6 +43,7 @@ mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
 mod override_plans;
+mod postponed_diagnostics;
 mod sam_constructors;
 mod scope;
 mod source_constructors;
@@ -67,6 +68,7 @@ use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
 pub(crate) use override_plans::publish_override_plans;
+use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
@@ -2436,6 +2438,11 @@ impl PostponedCallConstraints {
     }
 
     fn merge(&mut self, other: Self) {
+        for formal in other.formals {
+            if !self.formals.contains(&formal) {
+                self.formals.push(formal);
+            }
+        }
         for (formal, actual) in other.lower {
             let merged =
                 crate::symbol_resolver::merge_inferred_ty(self.lower.get(&formal).copied(), actual);
@@ -24747,14 +24754,6 @@ impl<'a> Checker<'a> {
             candidates.clone(),
         );
         if let Some(selected) = selection.and_then(CallableCandidateSelection::available) {
-            let signature = selected.semantic_signature();
-            if signature
-                .formals
-                .iter()
-                .any(|formal| !selected.bindings.contains_key(formal))
-            {
-                self.unbound_classifier_value_calls.insert(call);
-            }
             let selected_owner = selected.callable.owner_type();
             if self.reject_if_inaccessible(
                 selected.visibility,
@@ -27649,10 +27648,10 @@ impl<'a> Checker<'a> {
         // check is a discarded probe, not a second overload result; rebuild the call's exclusive
         // semantic handoff from this check.
         self.resolved_calls.remove(&call);
-        self.unbound_classifier_value_calls.remove(&call);
+        self.unbound_value_lambda_call_formals.remove(&call);
         self.resolved_constructors.remove(&call);
         if expected.is_some() {
-            self.withdraw_provisional_diagnostics(call);
+            self.postponed_diagnostics.discard(call);
         }
         if self.file.collection_literal_calls.contains(&call.0) {
             return self.check_collection_literal(scope, call, args, span, expected);
@@ -32051,6 +32050,37 @@ impl<'a> Checker<'a> {
                         postponed_solutions.insert(formal, solution);
                     }
                 }
+                if let Some(generic) = known_sig
+                    .as_ref()
+                    .and_then(|signature| signature.generic_sig.as_ref())
+                {
+                    let unresolved = generic
+                        .formals
+                        .iter()
+                        .filter(|formal| {
+                            postponed_constraints.formals.contains(formal)
+                                && !postponed_solutions.contains_key(*formal)
+                                && known_generic_bindings.get(*formal).is_none_or(|binding| {
+                                    ty_mentions_param(*binding, std::slice::from_ref(*formal))
+                                })
+                                && generic.params.iter().any(|parameter| {
+                                    matches!(parameter.non_null(), Ty::Fun(function)
+                                    if !function.has_receiver
+                                        && function.params.iter().any(|input| {
+                                            ty_mentions_param(
+                                                *input,
+                                                std::slice::from_ref(*formal),
+                                            )
+                                        }))
+                                })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !unresolved.is_empty() {
+                        self.unbound_value_lambda_call_formals
+                            .insert(call, unresolved);
+                    }
+                }
                 // PCLA checks each lambda once to collect constraints, then solves the shared
                 // callable variables. A solution can make an earlier lambda's parameter concrete
                 // from a later lambda (`T` becomes `TargetBase`); mechanically substituting only
@@ -32105,7 +32135,7 @@ impl<'a> Checker<'a> {
                 }
                 // Without an expectation this check is a probe: an enclosing call may still bind
                 // the formal and re-check the call, so a member error the finalized recheck could
-                // not answer is held for that re-check (see `provisional_lambda_diagnostics`).
+                // not answer remains outside the shared sink until the statement commits.
                 let call_expected: Option<Ty> = expected;
                 let deferred_mark = call_expected.is_none().then_some(self.diags.diags.len());
                 for (expression, diagnostic_span, name) in
@@ -32115,17 +32145,19 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let message = format!("unresolved reference '{name}'.");
-                    let already_reported = self.diags.diags.iter().any(|diagnostic| {
-                        diagnostic.file == self.file_index
-                            && diagnostic.span == diagnostic_span
-                            && diagnostic.msg == message
-                    });
+                    let already_reported = self.postponed_diagnostics.contains(
+                        self.diags,
+                        self.file_index,
+                        diagnostic_span,
+                        &message,
+                    );
                     if !already_reported {
                         self.diags.error(diagnostic_span, message);
                     }
                 }
                 if let Some(mark) = deferred_mark {
-                    self.hold_provisional_diagnostics(call, mark);
+                    self.postponed_diagnostics
+                        .capture_since(call, self.diags, mark);
                 }
                 let arg_tys = arg_tys
                     .into_iter()
@@ -33359,7 +33391,7 @@ impl<'a> Checker<'a> {
                         self.expr_inner_block_in_scope(
                             &do_scope, body, None, false, stmts, trailing,
                         );
-                        self.report_unbound_call_result_type_parameter(body);
+                        self.report_unbound_call_result_type_parameter(&do_scope, body);
                     }
                     _ => {
                         self.expr_statement(&do_scope, body);
@@ -33674,7 +33706,7 @@ impl<'a> Checker<'a> {
             _ => self.expr(scope, init),
         };
         let unbound_initializer =
-            declared.is_none() && self.report_unbound_call_result_type_parameter(init);
+            declared.is_none() && self.report_unbound_call_result_type_parameter(scope, init);
         let error_provenance = if declared.is_some() || (it != Ty::Error && !unbound_initializer) {
             ErrorProvenance::None
         } else if self.diags.diags[init_diag_mark..]
@@ -46233,8 +46265,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_suspend_function_conversions: HashMap::new(),
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
-        provisional_lambda_diagnostics: HashMap::new(),
-        unbound_classifier_value_calls: std::collections::HashSet::new(),
+        unbound_value_lambda_call_formals: HashMap::new(),
+        postponed_diagnostics: PostponedDiagnostics::default(),
         implicit_receiver_selections: HashMap::new(),
         implicit_receiver_identity_uses: HashMap::new(),
         source_contracts: HashMap::new(),
@@ -49602,14 +49634,14 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
-    /// Body diagnostics of a lambda checked against a callee formal nothing has bound yet (a probe
-    /// of `matching { it.contains(x) }` before the enclosing call supplies `T`). kotlinc postpones
-    /// such a lambda. The diagnostics stay in the sink while the probe is judged — applicability
-    /// counts emitted errors — and are withdrawn only when the same lambda (or call) is checked
-    /// again under the bound input; at statement end the record is dropped and they stand.
-    provisional_lambda_diagnostics: HashMap<ExprId, Vec<crate::diag::Diagnostic>>,
-    /// Classifier-value calls whose generic result remains provisional until its consumer is known.
-    unbound_classifier_value_calls: std::collections::HashSet<ExprId>,
+    /// Unsolved callee-owned formals used as ordinary lambda inputs. Receiver-lambda builder
+    /// inference has separate body-constraint semantics and is deliberately absent here.
+    unbound_value_lambda_call_formals: HashMap<ExprId, Vec<String>>,
+    /// Diagnostics produced while a lambda input still contains a callee-owned type parameter.
+    /// They remain outside the shared sink until the surrounding statement either rechecks the
+    /// expression with closed inputs or commits the open probe as its final verdict. A vector keeps
+    /// first-observed source order while still allowing replacement by expression identity.
+    postponed_diagnostics: PostponedDiagnostics,
     /// Checker-selected receiver for a bare call or property read. The receiver stack is semantic scope
     /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
     /// JVM slot names.
@@ -52066,18 +52098,72 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn report_unbound_call_result_type_parameter(&mut self, call: ExprId) -> bool {
-        if !self.unbound_classifier_value_calls.remove(&call) {
-            return false;
-        }
+    fn report_unbound_call_result_type_parameter(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+    ) -> bool {
         let Some(signature) = self.unbound_call_result_signature(call).cloned() else {
             return false;
         };
         let actual = self.expr_types[call.0 as usize];
-        let Some(formal) = signature.formals.iter().find(|formal| {
-            ty_mentions_param(actual, std::slice::from_ref(*formal))
-                || ty_mentions_param(signature.ret, std::slice::from_ref(*formal))
-        }) else {
+        let resolved = self.resolved_call_type_args.get(&call);
+        let lexical_formals = scope.lexical_tparam_identities();
+        let unbound_value_lambda_formals = self.unbound_value_lambda_call_formals.get(&call);
+        let call_arguments = match self.file.expr(call) {
+            Expr::Call { args, .. } => args.as_slice(),
+            _ => &[],
+        };
+        let had_postponed_argument_diagnostic = call_arguments
+            .iter()
+            .any(|argument| self.postponed_diagnostics.was_captured(*argument));
+        let call_span = self.span(call);
+        let has_nested_diagnostic = self.diags.diags.iter().any(|diagnostic| {
+            diagnostic.severity == crate::diag::Severity::Error
+                && diagnostic.file == self.file_index
+                && diagnostic.span.lo >= call_span.lo
+                && diagnostic.span.hi <= call_span.hi
+        }) || self
+            .postponed_diagnostics
+            .contains_error_in_span(self.file_index, call_span);
+        let Some(formal) = signature
+            .formals
+            .iter()
+            .enumerate()
+            .find(|(index, formal)| {
+                (ty_mentions_param(actual, std::slice::from_ref(*formal))
+                    || ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
+                    && (unbound_value_lambda_formals
+                        .is_some_and(|formals| formals.contains(formal))
+                        || had_postponed_argument_diagnostic
+                        || has_nested_diagnostic
+                        || !signature
+                            .params
+                            .iter()
+                            .any(|parameter| {
+                                ty_mentions_param(*parameter, std::slice::from_ref(*formal))
+                            }))
+                    && resolved
+                        .and_then(|arguments| arguments.get(*index))
+                        .copied()
+                        .flatten()
+                        .is_none_or(|argument| ty_mentions_param(argument, &signature.formals))
+                    // A star-projected receiver can leave the selected method result bounded by a
+                    // non-lexical classifier parameter. That stable symbolic bound is the captured
+                    // result Kotlin chooses; it is neither an uninferred method formal nor a
+                    // spelling-based fallback. A caller-owned lexical parameter does not have this
+                    // property and still requires ordinary inference evidence.
+                    && actual
+                        .type_parameter_occurrence_bound(formal)
+                        .or_else(|| signature.ret.type_parameter_occurrence_bound(formal))
+                        .and_then(|bound| bound.non_null().ty_param_name())
+                        .is_none_or(|bound| {
+                            signature.formals.iter().any(|owned| owned == bound)
+                                || lexical_formals.iter().any(|lexical| lexical == bound)
+                        })
+            })
+            .map(|(_, formal)| formal)
+        else {
             return false;
         };
         self.diags.error(
@@ -67956,7 +68042,7 @@ impl<'a> Checker<'a> {
                 None => self.expr(scope, init),
             };
             if p.declared_ty().is_none() {
-                self.report_unbound_call_result_type_parameter(init);
+                self.report_unbound_call_result_type_parameter(scope, init);
             }
             if let Some(declared) = declared {
                 if p.declared_ty().is_some() {
@@ -71485,7 +71571,10 @@ impl<'a> Checker<'a> {
                             body_inferred_property_type = Some(inferred_declaration_ty(it));
                         }
                         if bp.declared_ty().is_none() {
-                            self.report_unbound_call_result_type_parameter(init);
+                            self.report_unbound_call_result_type_parameter(
+                                &initializer_scope,
+                                init,
+                            );
                         }
                         if let Some(declared) = declared {
                             self.narrow_platform_value(
@@ -75030,7 +75119,7 @@ impl<'a> Checker<'a> {
     fn expr_statement(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
         self.discarded_exprs.insert(e);
         let ty = self.expr_with_context(scope, e, false);
-        if self.report_unbound_call_result_type_parameter(e) {
+        if self.report_unbound_call_result_type_parameter(scope, e) {
             Ty::Error
         } else {
             ty
@@ -75084,10 +75173,9 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.expr_depth -= 1;
-        // A statement is done: a probe verdict no re-check withdrew is the verdict, and it is
-        // already in the sink.
+        // A statement is done: a probe verdict no closed re-check superseded is authoritative.
         if self.expr_depth == 0 {
-            self.provisional_lambda_diagnostics.clear();
+            self.postponed_diagnostics.commit(self.diags);
         }
         #[cfg(feature = "trace")]
         self.expr_stack.pop();
@@ -75844,9 +75932,11 @@ impl<'a> Checker<'a> {
         let selected = self.selected_generic_call_signature(expression);
         crate::trace_compiler!(
             "expected_call",
-            "unbound call expression={expression:?} actual={:?} signature={:?}",
+            "unbound call expression={expression:?} actual={:?} signature={:?} bounds={:?} resolved={:?}",
             self.expr_types[expression.0 as usize],
             selected.map(|signature| (&signature.formals, signature.ret)),
+            selected.map(|signature| &signature.formal_bounds),
+            self.resolved_call_type_args.get(&expression),
         );
         let signature =
             selected.filter(|signature| ty_mentions_param(signature.ret, &signature.formals))?;
@@ -85731,12 +85821,9 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// Every shaped lambda check funnels through here. A lambda whose INPUT is still an open
-    /// callee formal (`matching { it.contains(x) }` probed before the enclosing call binds `T`)
-    /// cannot have its body judged yet: kotlinc postpones it. Its body diagnostics are held per
-    /// lambda (`provisional_lambda_diagnostics`), replaced by the next check of the same lambda —
-    /// the re-check under the bound input that follows the enclosing selection — and reported at
-    /// statement end when no such re-check came.
+    /// Every shaped lambda check funnels through here. A lambda whose input is still an open callee
+    /// formal cannot have its body judged yet: keep that probe's diagnostics outside the shared
+    /// sink until a closed recheck supersedes them or the surrounding statement commits them.
     fn check_lambda_with_implicit_receivers_and_return_labeled(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -85754,45 +85841,17 @@ impl<'a> Checker<'a> {
         // Only a check under closed inputs supersedes a probe verdict; a second probe of the same
         // lambda leaves the first verdict standing (a repeated diagnostic collapses later).
         if !open_input {
-            self.withdraw_provisional_diagnostics(e);
+            self.postponed_diagnostics.discard(e);
         }
         let probe_mark = open_input.then_some(self.diags.diags.len());
         let checked = self.check_lambda_with_implicit_receivers_and_return_labeled_now(
             scope, e, shape, label, mode,
         );
         if let Some(mark) = probe_mark {
-            self.hold_provisional_diagnostics(e, mark);
+            self.postponed_diagnostics
+                .capture_since(e, self.diags, mark);
         }
         checked
-    }
-
-    /// Record the diagnostics emitted since `mark` as the probe verdict of `key` (a lambda or a
-    /// call). They stay in the sink: the enclosing selection still sees an errored argument.
-    fn hold_provisional_diagnostics(&mut self, key: ExprId, mark: usize) {
-        if self.diags.diags.len() > mark {
-            let held = self.diags.diags[mark..].to_vec();
-            self.provisional_lambda_diagnostics
-                .entry(key)
-                .or_default()
-                .extend(held);
-        }
-    }
-
-    /// `key` is being checked again: its probe verdict is superseded, so withdraw it from the
-    /// sink (first matching entry per held diagnostic; the sink may have grown since).
-    fn withdraw_provisional_diagnostics(&mut self, key: ExprId) {
-        let Some(held) = self.provisional_lambda_diagnostics.remove(&key) else {
-            return;
-        };
-        for diagnostic in held {
-            if let Some(index) = self.diags.diags.iter().position(|candidate| {
-                candidate.file == diagnostic.file
-                    && candidate.span == diagnostic.span
-                    && candidate.msg == diagnostic.msg
-            }) {
-                self.diags.diags.remove(index);
-            }
-        }
     }
 
     fn check_lambda_with_implicit_receivers_and_return_labeled_now(

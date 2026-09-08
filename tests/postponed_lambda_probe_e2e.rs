@@ -40,12 +40,21 @@ fun box(): String = probe(Recorder(), Scope()) {{ m {{ it.contains(\"a\") }} }}\
 }
 
 #[test]
-fn an_unbound_lambda_input_is_still_reported_in_statement_position() {
-    // Nothing fixes `T` here and no enclosing call re-checks the lambda: the held probe verdict
-    // is the verdict, reported at statement end. (kotlinc additionally reports the call itself
-    // as uninferable, `cannot infer type for type parameter 'T'`; that diagnostic is still open
-    // in krusty for a top-level callee, which reports nothing at all for this shape.)
-    let src = format!("{LIB}fun f(scope: Scope) {{\n    scope.m {{ it.foo() }}\n}}\n");
+fn unbound_top_level_and_member_lambda_inputs_are_reported_in_statement_position() {
+    // Nothing fixes `T` here and no enclosing call re-checks the lambda. The top-level call reports
+    // the uninferable formal with either an invalid or clean body; the member call also has a body
+    // probe verdict to commit at statement end.
+    let src = format!(
+        "{LIB}fun f(scope: Scope) {{\n    matching {{ it.foo() }}\n    matching {{ true }}\n    scope.m {{ it.bar() }}\n}}\n"
+    );
     let diagnostics = common::front_end_diagnostics_files_with_stdlib(&[&src]);
-    assert_eq!(diagnostics, vec!["unresolved reference 'foo'.".to_string()]);
+    assert_eq!(
+        diagnostics,
+        [
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+            "cannot infer type for type parameter 'T'. Specify it explicitly.",
+            "unresolved reference 'bar'.",
+        ]
+    );
 }
