@@ -2322,12 +2322,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                                 &parameters,
                                 &selected_argument_types,
                             );
-                            return self.apply_demanded_member(
+                            return self.apply_demanded_member_expecting(
                                 receiver,
                                 member,
                                 &signature,
                                 &selected_argument_types,
                                 &resolved_type_arguments,
+                                expected.map(crate::fir::ResolvedTy::get),
                             );
                         }
                     }
@@ -2346,12 +2347,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             &parameters,
                             &selected_argument_types,
                         );
-                        return self.apply_demanded_member(
+                        return self.apply_demanded_member_expecting(
                             receiver,
                             member,
                             &signature,
                             &selected_argument_types,
                             &resolved_type_arguments,
+                            expected.map(crate::fir::ResolvedTy::get),
                         );
                     }
                     let parameters = member
@@ -2396,6 +2398,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         );
                     }
                 }
+                let result = match member.as_ref() {
+                    Some(member) => self.member_result_under_expectation(
+                        scope,
+                        member,
+                        result,
+                        expected.map(crate::fir::ResolvedTy::get),
+                    ),
+                    None => result,
+                };
                 crate::trace_compiler!(
                     "signature",
                     "implicit receiver call selected receiver={receiver:?} spelling={spelling} result={result:?}",
@@ -5078,12 +5089,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         &argument_types,
                     );
                     return self
-                        .apply_demanded_member(
+                        .apply_demanded_member_expecting(
                             receiver.get(),
                             member,
                             &signature,
                             &argument_types,
                             &type_arguments,
+                            expected.map(crate::fir::ResolvedTy::get),
                         )
                         .map(|ty| crate::fir::ResolvedMemberCall {
                             ty: Some(ty),
@@ -5107,12 +5119,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &argument_types,
                 );
                 return self
-                    .apply_demanded_member(
+                    .apply_demanded_member_expecting(
                         receiver.get(),
                         member,
                         &signature,
                         &argument_types,
                         &type_arguments,
+                        expected.map(crate::fir::ResolvedTy::get),
                     )
                     .map(|ty| crate::fir::ResolvedMemberCall {
                         ty: Some(ty),
@@ -5927,5 +5940,48 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         declaration: crate::fir::DeclarationId,
     ) -> crate::fir::DiagnosticId {
         self.record_missing_signature(declaration)
+    }
+}
+
+impl ProductionSignatureSemantics<'_> {
+    /// A selected member's result restated under the call's expectation. `any<T>()` used where
+    /// `Instant` is expected binds `T := Instant` from the result alone, as the top-level and
+    /// source-callable paths already do; a result that mentions no open formal is returned as is.
+    fn member_result_under_expectation(
+        &self,
+        scope: crate::fir::SignatureScope,
+        member: &crate::libraries::LibraryMember,
+        result: Ty,
+        expected: Option<Ty>,
+    ) -> Ty {
+        let (Some(expected), Some(generic)) = (expected, member.generic_sig.as_ref()) else {
+            return result;
+        };
+        if generic.formals.is_empty() || !result.mentions_ty_param() {
+            return result;
+        }
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let semantic_source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let oracle = crate::symbol_resolver::SourceOracle(&semantic_source);
+        let admits = |actual: Ty, bound: Ty| {
+            crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &oracle,
+                actual,
+                bound,
+            )
+        };
+        match crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+            &semantic_source,
+            generic,
+            expected,
+            admits,
+        ) {
+            Some(bindings) => crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings),
+            None => result,
+        }
     }
 }

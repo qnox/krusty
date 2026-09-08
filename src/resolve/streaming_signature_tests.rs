@@ -5702,3 +5702,53 @@ class Holder {
         assert_eq!(ty, Some(Ty::obj("Client")), "{name}");
     }
 }
+
+#[test]
+fn an_implicit_receiver_generic_member_binds_its_result_from_the_parameter_it_fills() {
+    // mockk's `any()` is a generic member of the lambda's receiver scope whose `T` is only fixed
+    // by the parameter it fills. The member call handing it that expectation is not enough: the
+    // implicit-receiver member path must restate the selected result under it.
+    let source = r#"// WITH_STDLIB
+class Scope { fun <T : Any> any(): T = throw IllegalStateException() }
+class Identity(val id: String)
+interface Repo {
+    suspend fun listReapable(cutoff: String): List<String>
+    suspend fun upsert(identity: Identity): Identity
+    fun delete(id: String)
+}
+fun <T> stub(block: suspend Scope.() -> T): Int = 1
+fun listed(repo: Repo) = stub { repo.listReapable(any()) }
+fun upserted(repo: Repo) = stub { repo.upsert(any()) }
+fun deleted(repo: Repo) = stub { repo.delete(any()) }
+fun explicit(repo: Repo, scope: Scope) = stub { repo.delete(scope.any()) }
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ImplicitReceiverAnyArgument")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("implicit-receiver any() regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    for name in ["listed", "upserted", "deleted", "explicit"] {
+        let ret = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find(|declaration| index.declaration_name(*declaration) == Some(name))
+            .and_then(|declaration| index.signature(declaration))
+            .map(|signature| signature.result.get());
+        assert_eq!(ret, Some(Ty::obj("kotlin/Int")), "{name}");
+    }
+}
