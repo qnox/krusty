@@ -10677,11 +10677,11 @@ pub(crate) fn publish_checked_compile_time_constants(
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("retained constant syntax must bind to the stable declaration inventory");
-    // Explicitly typed and already-inferred singleton constants do not necessarily pass through
-    // the deferred-property publication loop. Publish their literal payloads unconditionally from
-    // the bounded declaration fragment before stable metadata is projected. This stores only the
-    // semantic constant and never retains the member initializer or its source coordinate.
-    let mut member_literals = Vec::new();
+    // Literal constants need no body checker: the parser supplies their value and the finalized
+    // declaration signature supplies their semantic type. Publish every such fragment directly,
+    // whether top-level or owned by a classifier. Only a remaining compound top-level expression
+    // enters the temporary legacy evaluator below.
+    let mut literal_fragments = Vec::new();
     for (file_index, (file, active)) in files.iter().zip(&active_sources).enumerate() {
         let (Some(file), Some(active)) = (*file, active.as_ref()) else {
             continue;
@@ -10693,18 +10693,15 @@ pub(crate) fn publish_checked_compile_time_constants(
             };
             if header.kind != crate::fir::DeclarationKind::Property
                 || !header.flags.has(crate::fir::DeclarationFlags::CONST)
-                || index
-                    .declaration_anchor(stable)
-                    .is_none_or(|anchor| anchor.owner.is_none())
             {
                 continue;
             }
             if let Some(property) = active.property(file, stable) {
-                member_literals.push((file_index as u32, stable, property));
+                literal_fragments.push((file_index as u32, stable, property));
             }
         }
     }
-    for (file_index, stable, property) in member_literals {
+    for (file_index, stable, property) in literal_fragments {
         let Some(ty) = index
             .signature(stable)
             .map(|signature| signature.result.get())
