@@ -50,17 +50,11 @@ fn classifier_identity(
         .iter()
         .copied()
         .filter(|candidate| *candidate != declaration && !file.is_local_declaration(*candidate))
-        .filter_map(|candidate| match file.decl(candidate) {
-            Decl::Class(candidate_class)
-                if candidate_class.span.lo < class.span.lo
-                    && class.span.hi < candidate_class.span.hi =>
-            {
-                Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
-            }
-            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+        .find(|candidate| {
+            matches!(file.decl(*candidate), Decl::Class(owner)
+                if owner.nested_classifiers.contains(&declaration))
         })
-        .min_by_key(|(length, _)| *length)
-        .and_then(|(_, owner)| classifier_identity(file, source, ids, owner));
+        .and_then(|owner| classifier_identity(file, source, ids, owner));
     let companions = companion_declarations(file);
     let sibling = if companions.contains(&declaration) {
         0
@@ -358,19 +352,37 @@ fn nested_classifier_owners(
     ids: &mut DeclarationIds,
 ) -> std::collections::HashMap<DeclId, DeclarationId> {
     let mut owners = std::collections::HashMap::new();
+    let structural_parents = file
+        .decls
+        .iter()
+        .copied()
+        .filter_map(|parent| match file.decl(parent) {
+            Decl::Class(class) => Some(
+                class
+                    .nested_classifiers
+                    .iter()
+                    .copied()
+                    .map(move |child| (child, parent)),
+            ),
+            Decl::Fun(_) | Decl::Property(_) => None,
+        })
+        .flatten()
+        .collect::<std::collections::HashMap<_, _>>();
+    let structural_depth = |mut declaration: DeclId| {
+        let mut depth = 0usize;
+        while let Some(parent) = structural_parents.get(&declaration).copied() {
+            depth += 1;
+            declaration = parent;
+        }
+        depth
+    };
     let mut local_declarations = file
         .local_class_decls
         .values()
         .copied()
         .chain(file.local_class_nested.values().flatten().copied())
         .collect::<Vec<_>>();
-    local_declarations.sort_unstable_by_key(|declaration| match file.decl(*declaration) {
-        Decl::Class(class) => (
-            usize::MAX - (class.span.hi - class.span.lo) as usize,
-            class.span.lo,
-        ),
-        Decl::Fun(_) | Decl::Property(_) => (usize::MAX, u32::MAX),
-    });
+    local_declarations.sort_unstable_by_key(|declaration| structural_depth(*declaration));
     local_declarations.dedup();
     let mut stable_local = std::collections::HashMap::new();
     for declaration in local_declarations.iter().copied() {
@@ -383,30 +395,15 @@ fn nested_classifier_owners(
         // than an anchor-only duplicate.
         let executable_owner =
             local_executable_owner(file, source, ids, declaration, &stable_local);
-        let classifier_owner = local_declarations
-            .iter()
-            .copied()
-            .filter(|candidate| *candidate != declaration)
-            .filter_map(|candidate| match file.decl(candidate) {
-                Decl::Class(candidate_class)
-                    if candidate_class.span.lo <= class.span.lo
-                        && class.span.hi <= candidate_class.span.hi =>
-                {
-                    Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
-                }
-                Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-            })
-            .min_by_key(|(length, _)| *length)
-            .and_then(|(_, owner)| stable_local.get(&owner).copied());
+        let classifier_owner = structural_parents
+            .get(&declaration)
+            .and_then(|owner| stable_local.get(owner))
+            .copied();
         // A classifier declared as a member of a local classifier is parser-hoisted into
         // `file.decls`, but its semantic owner remains that classifier. Statement-local and
         // anonymous classifiers instead belong to the executable declaration that introduces
         // them, even when their source range is nested inside a classifier declaration.
-        let nested_local_member = file
-            .local_class_nested
-            .values()
-            .flatten()
-            .any(|nested| *nested == declaration);
+        let nested_local_member = classifier_owner.is_some();
         let owner = if nested_local_member {
             classifier_owner.or(executable_owner)
         } else {
@@ -431,10 +428,9 @@ fn nested_classifier_owners(
         }
     }
 
-    // Parser-hoisted member classifiers are also separate `file.decls` entries. Recover their
-    // lexical ownership structurally from source containment, including companions, before either
-    // compact-header walk interns an anchor. Local classifiers are handled above: their root belongs
-    // to an executable body rather than becoming a member of the surrounding source class.
+    // Parser-hoisted member classifiers are also separate `file.decls` entries. Consume the direct
+    // parser ownership edges, including companions, before either compact-header walk interns an
+    // anchor. Local classifier roots belong to executable bodies and were handled above.
     let companions = companion_declarations(file);
     let mut declarations = file
         .decls
@@ -443,13 +439,7 @@ fn nested_classifier_owners(
         .filter(|declaration| !file.is_local_declaration(*declaration))
         .filter(|declaration| matches!(file.decl(*declaration), Decl::Class(_)))
         .collect::<Vec<_>>();
-    declarations.sort_by_key(|declaration| match file.decl(*declaration) {
-        Decl::Class(class) => (
-            usize::MAX - (class.span.hi - class.span.lo) as usize,
-            class.span.lo,
-        ),
-        Decl::Fun(_) | Decl::Property(_) => unreachable!("filtered to classifiers"),
-    });
+    declarations.sort_by_key(|declaration| structural_depth(*declaration));
     let mut stable = std::collections::HashMap::new();
     for declaration in declarations.iter().copied() {
         let Decl::Class(class) = file.decl(declaration) else {
@@ -481,21 +471,10 @@ fn nested_classifier_owners(
                     }))
                 })
             });
-        let classifier_owner = declarations
-            .iter()
-            .copied()
-            .filter(|candidate| *candidate != declaration)
-            .filter_map(|candidate| match file.decl(candidate) {
-                Decl::Class(candidate_class)
-                    if candidate_class.span.lo < class.span.lo
-                        && class.span.hi < candidate_class.span.hi =>
-                {
-                    Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
-                }
-                Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-            })
-            .min_by_key(|(length, _)| *length)
-            .and_then(|(_, owner)| stable.get(&owner).copied());
+        let classifier_owner = structural_parents
+            .get(&declaration)
+            .and_then(|owner| stable.get(owner))
+            .copied();
         // An anonymous classifier declared inside an executable belongs to that FUNCTION body,
         // even when source-span containment also places it inside the surrounding source class.
         // The executable edge is what lets Pass 1 identify anonymous declarations owned by an

@@ -1048,6 +1048,11 @@ impl std::ops::Deref for ClassDecl {
 #[derive(Clone, Debug)]
 pub struct ClassDecl {
     pub name: String,
+    /// Classifiers created directly while parsing this classifier's body and hoisted into
+    /// `File::decl_arena`. For an anonymous object inside a member/property body this is an ordering
+    /// edge; its exact executable owner is recorded separately. Pass 1 consumes both without
+    /// reconstructing nesting from spans or qualified spellings.
+    pub nested_classifiers: Vec<DeclId>,
     /// Declaration visibility (`public` by default).
     pub visibility: Visibility,
     /// Simple names of annotations applied to the class (`@Serializable` → `["Serializable"]`).

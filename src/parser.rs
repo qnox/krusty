@@ -293,6 +293,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
     ClassDecl {
         primary_ctor_visibility: Visibility::Public,
         name: "<error>".to_string(),
+        nested_classifiers: Vec::new(),
         visibility: Visibility::Public,
         annotations: Vec::new(),
         annotation_args: Vec::new(),
@@ -1094,6 +1095,9 @@ struct Parser<'a> {
     /// (a trailing argument of `f`) from `(f()) { ... }` (an `invoke` on the value returned by
     /// `f`). This state is parser-local and disappears with the parser.
     parenthesized_expressions: std::collections::HashSet<u32>,
+    /// Direct hoisted classifier children of each active class-like parser. A child parse gets its
+    /// own frame; publishing that child appends only its root to the enclosing frame.
+    classifier_children: Vec<Vec<DeclId>>,
 }
 
 /// Semantic parser-recursion funnels governed by one depth/recovery mechanism.
@@ -1189,6 +1193,7 @@ impl<'a> Parser<'a> {
             stmt_depth: 0,
             parsing_anonymous_function_receiver: false,
             parenthesized_expressions: Default::default(),
+            classifier_children: Vec::new(),
         }
     }
 
@@ -2675,6 +2680,7 @@ impl<'a> Parser<'a> {
         // class's parameters merely because the recursive-descent parser is still inside its body.
         let enclosing_type_parameters = std::mem::take(&mut self.lexical_type_parameters);
         let nested_start = self.file.decls.len();
+        self.classifier_children.push(Vec::new());
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
@@ -2762,6 +2768,10 @@ impl<'a> Parser<'a> {
         let declaration = ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name,
+            nested_classifiers: self
+                .classifier_children
+                .pop()
+                .expect("a companion parser owns one child frame"),
             visibility: visibility_of(modifiers),
             annotations,
             annotation_args,
@@ -2801,6 +2811,10 @@ impl<'a> Parser<'a> {
         };
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(nested_start, id);
+        self.classifier_children
+            .last_mut()
+            .expect("a companion is parsed inside a classifier")
+            .push(id);
         debug_assert!(self.lexical_type_parameters.names().is_empty());
         self.lexical_type_parameters = enclosing_type_parameters;
         id
@@ -3256,6 +3270,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name,
+            nested_classifiers: Vec::new(),
             visibility: Visibility::Public,
             annotations,
             annotation_args,
@@ -3804,6 +3819,10 @@ impl<'a> Parser<'a> {
         nested.name = format!("{outer}.{}", nested.name);
         let id = self.file.add_decl(Decl::Class(nested));
         self.file.decls.insert(start, id);
+        self.classifier_children
+            .last_mut()
+            .expect("a nested classifier is parsed inside a classifier")
+            .push(id);
     }
 
     /// Parse and register any class-like declaration that this parser can represent as a hoisted
@@ -3953,7 +3972,8 @@ impl<'a> Parser<'a> {
     }
 
     fn guarded_class_like(&mut self, inner: fn(&mut Self) -> ClassDecl) -> ClassDecl {
-        self.with_nesting_guard(
+        self.classifier_children.push(Vec::new());
+        let mut declaration = self.with_nesting_guard(
             ParserNesting::Declaration,
             |parser, span| {
                 // The rejected declaration's pending prefix (annotations, context params) dies
@@ -3964,7 +3984,12 @@ impl<'a> Parser<'a> {
                 error_class_decl(span)
             },
             inner,
-        )
+        );
+        declaration.nested_classifiers = self
+            .classifier_children
+            .pop()
+            .expect("each class-like parser owns one child frame");
+        declaration
     }
 
     fn parse_class_inner(&mut self) -> ClassDecl {
@@ -4238,6 +4263,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             primary_ctor_visibility,
             name,
+            nested_classifiers: Vec::new(),
             visibility: Visibility::Public,
             annotations,
             annotation_args,
@@ -4622,6 +4648,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name,
+            nested_classifiers: Vec::new(),
             visibility: Visibility::Public,
             annotations,
             annotation_args,
@@ -4745,11 +4772,17 @@ impl<'a> Parser<'a> {
             base_args,
             interface_delegations,
         ) = self.parse_supertypes();
+        self.classifier_children.push(Vec::new());
         let (methods, body_props, init_order, type_aliases) = self.parse_object_body(&name);
+        let nested_classifiers = self
+            .classifier_children
+            .pop()
+            .expect("an anonymous-object parser owns one child frame");
         let end = self.t[self.i.saturating_sub(1)].span;
         let synth = ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name: name.clone(),
+            nested_classifiers,
             visibility: Visibility::Public,
             annotations: Vec::new(),
             annotation_args: Vec::new(),
@@ -4785,6 +4818,9 @@ impl<'a> Parser<'a> {
         };
         let did = self.file.add_decl(Decl::Class(synth));
         self.file.decls.push(did);
+        if let Some(enclosing) = self.classifier_children.last_mut() {
+            enclosing.push(did);
+        }
         let callee = self.file.add_expr(Expr::Name(name), span);
         let construction = self.file.add_expr(
             Expr::Call {
@@ -4890,6 +4926,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name,
+            nested_classifiers: Vec::new(),
             visibility: Visibility::Public,
             annotations,
             annotation_args,
@@ -10268,6 +10305,60 @@ mod tests {
         assert_eq!(visibility("Parent.DerivedOnly"), Visibility::Protected);
         assert_eq!(visibility("Parent.ModuleOnly"), Visibility::Internal);
         assert_eq!(visibility("Parent.Visible"), Visibility::Public);
+    }
+
+    #[test]
+    fn parser_records_direct_hoisted_classifier_edges() {
+        let mut diagnostics = DiagSink::new();
+        let source = "class Outer {\n\
+                          class Direct { class Deep }\n\
+                          companion object { class Associated }\n\
+                          fun build() = object { val child = object {} }\n\
+                      }\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test", source)
+        );
+        let classifier = |name: &str| {
+            file.decls
+                .iter()
+                .copied()
+                .find(|declaration| {
+                    matches!(file.decl(*declaration), Decl::Class(class) if class.name == name)
+                })
+                .expect("classifier")
+        };
+        let outer = classifier("Outer");
+        let direct = classifier("Outer.Direct");
+        let deep = classifier("Outer.Direct.Deep");
+        let companion = classifier("Outer.Companion");
+        let associated = classifier("Outer.Companion.Associated");
+        let mut anonymous = file
+            .anonymous_object_classes
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        anonymous.sort_by_key(|declaration| match file.decl(*declaration) {
+            Decl::Class(class) => class.span.hi - class.span.lo,
+            Decl::Fun(_) | Decl::Property(_) => unreachable!("anonymous object must be a class"),
+        });
+        let [inner_anonymous, outer_anonymous] = anonymous.as_slice() else {
+            panic!("expected exactly two anonymous classifiers")
+        };
+
+        let children = |declaration| match file.decl(declaration) {
+            Decl::Class(class) => class.nested_classifiers.as_slice(),
+            Decl::Fun(_) | Decl::Property(_) => panic!("classifier edge owner must be a class"),
+        };
+        assert!(children(outer).contains(&direct));
+        assert!(children(outer).contains(&companion));
+        assert!(children(outer).contains(outer_anonymous));
+        assert_eq!(children(direct), &[deep]);
+        assert_eq!(children(companion), &[associated]);
+        assert_eq!(children(*outer_anonymous), &[*inner_anonymous]);
     }
 
     #[test]
