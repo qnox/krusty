@@ -9,8 +9,8 @@ use super::header::{
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
     DeferredValueSelectionId, DiagnosticId, ExternalCallableId, HeaderDeclaration,
     HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames,
-    OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap,
-    StableDeclarationAnchor, TypeParameterId,
+    OriginId, PropertyId, SigConstantId, SigExprId, SigNameId, SignatureScopeId, SourceFileId,
+    SourceMap, StableDeclarationAnchor, TypeParameterId,
 };
 
 /// A half-open slice in the signature graph's shared operand arena.
@@ -148,6 +148,7 @@ pub enum SigBinaryOperator {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SigExpr {
     Known(ResolvedTy),
+    CompileTimeConstant(SigConstantId),
     /// An `Int` literal keeps its value until compact semantic evaluation. This is not a published
     /// type or a retained body: it is temporary literal provenance used by Kotlin's integer-
     /// constant adaptation during overload selection, and is destroyed with the signature graph.
@@ -209,6 +210,7 @@ pub enum SigExpr {
         scope: SignatureScopeId,
         origin: OriginId,
     },
+    StringTemplate(OperandRange),
     Invoke {
         callee: SigExprId,
         arguments: CallArgumentRange,
@@ -292,6 +294,15 @@ pub struct SignatureConstraint {
     pub origin: OriginId,
 }
 
+/// A declaration-owned compile-time initializer evaluated while the compact signature graph is
+/// alive. The root is semantic expression structure, not retained parser syntax; only a folded
+/// [`LibraryConst`](crate::libraries::LibraryConst) may cross the Pass-1 boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompileTimeConstantRoot {
+    pub declaration: DeclarationId,
+    pub result: SigExprId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalSignatureEffect {
     pub result: SigExprId,
@@ -329,6 +340,7 @@ pub struct ExplicitClassifierParents {
 #[derive(Default)]
 pub struct SignatureGraph {
     nodes: Vec<SigExpr>,
+    compile_time_constants: Vec<crate::libraries::LibraryConst>,
     operands: Vec<SigExprId>,
     call_arguments: Vec<SigCallArgument>,
     substitutions: Vec<SigSubstitution>,
@@ -342,6 +354,7 @@ pub struct SignatureGraph {
     type_names: LookupNames,
     constraints: Vec<SignatureConstraint>,
     constraint_by_declaration: HashMap<DeclarationId, usize>,
+    compile_time_constant_roots: Vec<CompileTimeConstantRoot>,
     local_effects: HashMap<DeclarationId, LocalSignatureEffect>,
     explicit_signature_types: HashMap<DeclarationId, ExplicitSignatureTypes>,
     explicit_classifier_parents: HashMap<DeclarationId, ExplicitClassifierParents>,
@@ -364,6 +377,25 @@ impl SignatureGraph {
 
     pub fn expr(&self, id: SigExprId) -> Option<SigExpr> {
         self.nodes.get(id.raw() as usize).copied()
+    }
+
+    pub fn add_compile_time_constant(
+        &mut self,
+        constant: crate::libraries::LibraryConst,
+    ) -> SigExprId {
+        let id = SigConstantId::from_raw(next_id(
+            self.compile_time_constants.len(),
+            "signature constants",
+        ));
+        self.compile_time_constants.push(constant);
+        self.add_expr(SigExpr::CompileTimeConstant(id))
+    }
+
+    pub fn compile_time_constant(
+        &self,
+        id: SigConstantId,
+    ) -> Option<&crate::libraries::LibraryConst> {
+        self.compile_time_constants.get(id.raw() as usize)
     }
 
     pub fn add_operands(&mut self, operands: impl IntoIterator<Item = SigExprId>) -> OperandRange {
@@ -583,6 +615,29 @@ impl SignatureGraph {
             .copied()
     }
 
+    pub fn add_compile_time_constant_root(
+        &mut self,
+        declaration: DeclarationId,
+        result: SigExprId,
+    ) {
+        assert!(self.expr(result).is_some(), "constant root must exist");
+        assert!(
+            self.compile_time_constant_roots
+                .iter()
+                .all(|root| root.declaration != declaration),
+            "a declaration may have only one compile-time constant root"
+        );
+        self.compile_time_constant_roots
+            .push(CompileTimeConstantRoot {
+                declaration,
+                result,
+            });
+    }
+
+    pub fn compile_time_constant_roots(&self) -> &[CompileTimeConstantRoot] {
+        &self.compile_time_constant_roots
+    }
+
     pub fn add_local_effect(&mut self, declaration: DeclarationId, effect: LocalSignatureEffect) {
         assert!(
             self.expr(effect.result).is_some(),
@@ -665,6 +720,19 @@ impl SignatureGraph {
     /// capacity. Intended for relative lifetime tests rather than process-memory accounting.
     pub fn storage_payload_bytes(&self) -> usize {
         self.nodes.len() * std::mem::size_of::<SigExpr>()
+            + self.compile_time_constants.len()
+                * std::mem::size_of::<crate::libraries::LibraryConst>()
+            + self
+                .compile_time_constants
+                .iter()
+                .map(|constant| match &constant.value {
+                    crate::libraries::LibConst::Str(value) => value.len_utf16() * 2,
+                    crate::libraries::LibConst::Int(_)
+                    | crate::libraries::LibConst::Long(_)
+                    | crate::libraries::LibConst::Float(_)
+                    | crate::libraries::LibConst::Double(_) => 0,
+                })
+                .sum::<usize>()
             + self.operands.len() * std::mem::size_of::<SigExprId>()
             + self.call_arguments.len() * std::mem::size_of::<SigCallArgument>()
             + self.substitutions.len() * std::mem::size_of::<SigSubstitution>()
@@ -676,6 +744,8 @@ impl SignatureGraph {
             + self.type_syntax.storage_payload_bytes()
             + self.type_names.storage_payload_bytes()
             + self.constraints.len() * std::mem::size_of::<SignatureConstraint>()
+            + self.compile_time_constant_roots.len()
+                * std::mem::size_of::<CompileTimeConstantRoot>()
             + self.local_effects.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<LocalSignatureEffect>())
@@ -1067,6 +1137,54 @@ pub trait SignatureSemantics {
         None
     }
 
+    fn fold_selected_binary_constant(
+        &self,
+        _operator: SigBinaryOperator,
+        _lhs: crate::libraries::LibraryConst,
+        _rhs: crate::libraries::LibraryConst,
+        _result: ResolvedTy,
+    ) -> Option<crate::libraries::LibraryConst> {
+        None
+    }
+
+    fn fold_selected_member_constant(
+        &self,
+        _spelling: &str,
+        _receiver: crate::libraries::LibraryConst,
+        _result: ResolvedTy,
+    ) -> Option<crate::libraries::LibraryConst> {
+        None
+    }
+
+    fn fold_string_template(
+        &self,
+        _parts: &[crate::libraries::LibraryConst],
+    ) -> Option<crate::libraries::LibraryConst> {
+        None
+    }
+
+    /// The declaration constant selected for a value expression at `origin`, if any. Selection is
+    /// recorded by the ordinary resolver implementation while the graph is evaluated; callers do
+    /// not repeat lookup from the source spelling.
+    fn selected_compile_time_constant(
+        &self,
+        _origin: OriginId,
+    ) -> Option<crate::libraries::LibraryConst> {
+        None
+    }
+
+    /// Retain a folded declaration payload, and no expression state, beyond graph evaluation.
+    fn record_compile_time_constant(
+        &self,
+        _declaration: DeclarationId,
+        _constant: crate::libraries::LibraryConst,
+    ) {
+    }
+
+    fn owns_compile_time_constant(&self, _declaration: DeclarationId) -> bool {
+        false
+    }
+
     fn select_invoke(
         &self,
         scope: SignatureScope,
@@ -1232,6 +1350,25 @@ impl SignatureSolver {
                 )
             },
         )
+    }
+
+    /// Evaluate a declaration-owned compact expression without publishing it as that declaration's
+    /// signature. Compile-time initializers use this before the graph is consumed.
+    pub fn evaluate_auxiliary_expression(
+        &mut self,
+        declaration: DeclarationId,
+        result: SigExprId,
+        evaluator: &impl SignatureConstraintEvaluator,
+    ) -> Result<ResolvedSignature, DiagnosticId> {
+        evaluator.evaluate(declaration, result, &self.graph, &mut |dependency| {
+            resolve_signature(
+                &self.graph,
+                &mut self.states,
+                &mut self.computing,
+                dependency,
+                evaluator,
+            )
+        })
     }
 
     fn publish_explicit_failure(&mut self, declaration: DeclarationId, diagnostic: DiagnosticId) {

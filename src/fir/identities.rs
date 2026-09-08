@@ -28,6 +28,7 @@ u32_id!(DeclarationId);
 u32_id!(BodyOwnerId);
 u32_id!(OriginId);
 u32_id!(SigExprId);
+u32_id!(SigConstantId);
 u32_id!(SignatureScopeId);
 u32_id!(SigNameId);
 u32_id!(DeferredCallableSelectionId);

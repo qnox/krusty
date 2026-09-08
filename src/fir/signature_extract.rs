@@ -3,7 +3,10 @@
 //! This is a structural pass only. It records compact operations and deferred lookups; ordinary
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
-use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
+use crate::ast::{
+    BinOp, Expr, ExprId, File, RangeKind, Stmt, TemplatePart, TrFlags, TypeRef, UnOp,
+};
+use crate::libraries::{LibConst, LibraryConst};
 use crate::types::Ty;
 use std::collections::{HashMap, HashSet};
 
@@ -213,10 +216,11 @@ impl SignatureConstraintExtractor {
         // while extracting that inferred non-local root, under its real lexical context. A local
         // member reached only from an explicit ordinary body belongs entirely to Pass 2 and must
         // not make that body enter the temporary signature graph.
-        for stub in stubs
-            .iter()
-            .filter(|stub| stub.signature_inference.is_some())
-        {
+        for stub in stubs.iter().filter(|stub| {
+            stub.signature_inference.is_some()
+                || (stub.kind == super::DeclarationKind::Property
+                    && stub.flags.has(super::DeclarationFlags::CONST))
+        }) {
             // Extracting an enclosing signature may discover a local classifier and eagerly add
             // constraints for its inferred members. That same member still appears in the flat
             // stub stream later; its declaration identity makes the already-extracted constraint
@@ -310,6 +314,9 @@ impl SignatureConstraintExtractor {
                 });
             match self.expression(file, expression, scope, &mut origin) {
                 Ok(mut result) => {
+                    if stub.flags.has(super::DeclarationFlags::CONST) {
+                        self.graph.add_compile_time_constant_root(stub.id, result);
+                    }
                     if stub.signature_inference
                         == Some(super::InferredSignatureKind::BackingFieldInitializer)
                     {
@@ -336,13 +343,18 @@ impl SignatureConstraintExtractor {
                     } else {
                         result
                     };
-                    self.graph
-                        .add_inferred_constraint(stub, result, constraint_origin)
+                    if stub.signature_inference.is_some() {
+                        self.graph
+                            .add_inferred_constraint(stub, result, constraint_origin);
+                    }
                 }
-                Err(form) => self.failures.push(SignatureExtractionFailure {
-                    declaration: stub.id,
-                    form,
-                }),
+                Err(form) if stub.signature_inference.is_some() => {
+                    self.failures.push(SignatureExtractionFailure {
+                        declaration: stub.id,
+                        form,
+                    })
+                }
+                Err(_) => {}
             }
             self.lexical_values.clear();
             self.lexical_callables.clear();
@@ -404,6 +416,11 @@ impl SignatureConstraintExtractor {
             Ok(value) => self.graph.add_expr(SigExpr::IntegerLiteral(value)),
             Err(_) => self.known(Ty::Int),
         }
+    }
+
+    fn compile_time_constant(&mut self, ty: Ty, value: LibConst) -> SigExprId {
+        self.graph
+            .add_compile_time_constant(LibraryConst { ty, value })
     }
 
     fn lexical_receivers(&self) -> Vec<SigExprId> {
@@ -1356,14 +1373,39 @@ impl SignatureConstraintExtractor {
         }
         let node = match file.expr(expression) {
             Expr::IntLit(value) => self.integer_literal(*value),
-            Expr::LongLit(_) => self.known(Ty::Long),
-            Expr::UIntLit(_) => self.known(Ty::UInt),
-            Expr::ULongLit(_) => self.known(Ty::ULong),
-            Expr::DoubleLit(_) => self.known(Ty::Double),
-            Expr::FloatLit(_) => self.known(Ty::Float),
-            Expr::BoolLit(_) => self.known(Ty::Boolean),
-            Expr::StringLit(_) | Expr::Template(_) => self.known(Ty::String),
-            Expr::CharLit(_) => self.known(Ty::Char),
+            Expr::LongLit(value) => self.compile_time_constant(Ty::Long, LibConst::Long(*value)),
+            Expr::UIntLit(value) => {
+                self.compile_time_constant(Ty::UInt, LibConst::Int(*value as i32))
+            }
+            Expr::ULongLit(value) => self.compile_time_constant(Ty::ULong, LibConst::Long(*value)),
+            Expr::DoubleLit(value) => {
+                self.compile_time_constant(Ty::Double, LibConst::Double(*value))
+            }
+            Expr::FloatLit(value) => self.compile_time_constant(Ty::Float, LibConst::Float(*value)),
+            Expr::BoolLit(value) => {
+                self.compile_time_constant(Ty::Boolean, LibConst::Int(i32::from(*value)))
+            }
+            Expr::StringLit(value) => {
+                self.compile_time_constant(Ty::String, LibConst::Str(value.clone()))
+            }
+            Expr::Template(parts) => {
+                let mut values = Vec::with_capacity(parts.len());
+                for part in parts {
+                    values.push(match part {
+                        TemplatePart::Str(value) => {
+                            self.compile_time_constant(Ty::String, LibConst::Str(value.clone()))
+                        }
+                        TemplatePart::Expr(value) => {
+                            self.expression(file, *value, scope, origin)?
+                        }
+                    });
+                }
+                let operands = self.graph.add_operands(values);
+                self.graph.add_expr(SigExpr::StringTemplate(operands))
+            }
+            Expr::CharLit(value) => {
+                self.compile_time_constant(Ty::Char, LibConst::Int(i32::from(*value)))
+            }
             Expr::NullLit => self.known(Ty::Null),
             Expr::Return { value, label } if self.lambda_return_matches(label.as_deref()) => {
                 let value = match value {

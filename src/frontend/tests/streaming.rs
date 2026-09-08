@@ -1761,8 +1761,8 @@ fn production_pass_one_retains_only_sources_with_bounded_executable_work() {
             .iter()
             .map(ReparseSource::retained_pass_one_syntax)
             .collect::<Vec<_>>(),
-        [false, true, false, true, true],
-        "ordinary and actual-only sources must drop after compact header extraction"
+        [false, true, false, true, false],
+        "ordinary, actual-only, and constant-only sources must drop after compact graph extraction"
     );
 }
 
@@ -2695,6 +2695,9 @@ fn production_pass_one_publishes_stable_pending_free_signatures() {
 fn production_pass_one_publishes_checked_const_expression_payloads_only_for_const_declarations() {
     let source = "const val later = 2\n\
                   const val answer = later + 2\n\
+                  const val word = \"O\" + \"K\"\n\
+                  const val template = \"<$word>\"\n\
+                  const val wide: Long = 2L * 3L\n\
                   val ordinary = 2 + 2\n";
     let inputs = [SourceInput::kotlin(source).with_file_stem("Constants")];
     let mut diagnostics = DiagSink::new();
@@ -2742,6 +2745,27 @@ fn production_pass_one_publishes_checked_const_expression_payloads_only_for_cons
         Some(crate::libraries::LibraryConst {
             ty: crate::types::Ty::Int,
             value: crate::libraries::LibConst::Int(2),
+        })
+    );
+    assert_eq!(
+        constant("word"),
+        Some(crate::libraries::LibraryConst {
+            ty: crate::types::Ty::String,
+            value: crate::libraries::LibConst::Str("OK".into()),
+        })
+    );
+    assert_eq!(
+        constant("template"),
+        Some(crate::libraries::LibraryConst {
+            ty: crate::types::Ty::String,
+            value: crate::libraries::LibConst::Str("<OK>".into()),
+        })
+    );
+    assert_eq!(
+        constant("wide"),
+        Some(crate::libraries::LibraryConst {
+            ty: crate::types::Ty::Long,
+            value: crate::libraries::LibConst::Long(6),
         })
     );
     assert_eq!(constant("ordinary"), None);

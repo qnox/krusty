@@ -89,6 +89,15 @@ struct ProductionSignatureSemantics<'a> {
     completed_scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
+    /// Declaration constants folded while their compact expression graph is live. Only the final
+    /// semantic payload survives signature finalization.
+    evaluated_compile_time_constants:
+        RefCell<HashMap<crate::fir::DeclarationId, crate::libraries::LibraryConst>>,
+    compile_time_constant_declarations: std::collections::HashSet<crate::fir::DeclarationId>,
+    /// Value selections bind an origin once to a constant payload. Constant folding consumes this
+    /// identity-based fact instead of repeating lookup from the source spelling.
+    selected_compile_time_constants:
+        RefCell<HashMap<crate::fir::OriginId, crate::libraries::LibraryConst>>,
     /// The contract of the callable selected for each top-level call, by call origin, so a
     /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
     selected_call_contracts: RefCell<HashMap<crate::fir::OriginId, SelectedCallContract>>,
@@ -2036,6 +2045,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         receiver: Ty,
         spelling: &str,
+        origin: Option<crate::fir::OriginId>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
@@ -2075,6 +2085,13 @@ impl ProductionSignatureSemantics<'_> {
                 let Ok(extension) = extension else {
                     return Ok(None);
                 };
+                if let Some(origin) = origin {
+                    self.remember_selected_compile_time_constant(
+                        origin,
+                        extension.stable_declaration,
+                        extension.compile_time_constant.clone(),
+                    );
+                }
                 if let Some(signature) = self.demanded_source_signature(
                     Some(scope),
                     extension.stable_declaration,
@@ -2095,6 +2112,13 @@ impl ProductionSignatureSemantics<'_> {
             }
         };
         if let Some(property) = selected.property.as_ref() {
+            if let Some(origin) = origin {
+                self.remember_selected_compile_time_constant(
+                    origin,
+                    property.stable_declaration,
+                    property.compile_time_constant.clone(),
+                );
+            }
             if let Some(declaration) = property.stable_declaration {
                 if self
                     .headers
@@ -2801,7 +2825,7 @@ impl ProductionSignatureSemantics<'_> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         if let Some(receiver) = class_super {
             if let Some(result) =
-                self.selected_member_property_type(scope, receiver, member_spelling, demand)?
+                self.selected_member_property_type(scope, receiver, member_spelling, None, demand)?
             {
                 return Ok(result);
             }
@@ -2809,7 +2833,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut selected = None;
         for receiver in interface_supers {
             let Some(result) =
-                self.selected_member_property_type(scope, receiver, member_spelling, demand)?
+                self.selected_member_property_type(scope, receiver, member_spelling, None, demand)?
             else {
                 continue;
             };
@@ -4266,6 +4290,9 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         diagnostics: RefCell::new(Vec::new()),
+        evaluated_compile_time_constants: RefCell::new(HashMap::new()),
+        compile_time_constant_declarations: std::collections::HashSet::new(),
+        selected_compile_time_constants: RefCell::new(HashMap::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
     };
@@ -4807,6 +4834,11 @@ pub(crate) fn finalized_streamed_signature_index(
         .iter()
         .map(|constraint| (constraint.declaration, constraint.origin))
         .collect();
+    let compile_time_constant_declarations = graph
+        .compile_time_constant_roots()
+        .iter()
+        .map(|root| root.declaration)
+        .collect();
     let source_orders = headers
         .declaration_inventory()
         .iter()
@@ -4833,6 +4865,9 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         diagnostics: RefCell::new(Vec::new()),
+        evaluated_compile_time_constants: RefCell::new(HashMap::new()),
+        compile_time_constant_declarations,
+        selected_compile_time_constants: RefCell::new(HashMap::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
     };
@@ -4852,6 +4887,16 @@ pub(crate) fn finalized_streamed_signature_index(
     for (declaration, signature) in explicit {
         solver.publish_explicit(declaration, signature);
     }
+    let constant_roots = solver.graph().compile_time_constant_roots().to_vec();
+    for _ in 0..constant_roots.len() {
+        let before = semantics.evaluated_compile_time_constants.borrow().len();
+        for root in &constant_roots {
+            let _ = solver.evaluate_auxiliary_expression(root.declaration, root.result, &evaluator);
+        }
+        if semantics.evaluated_compile_time_constants.borrow().len() == before {
+            break;
+        }
+    }
     let mut backing_field_types = explicit_backing_field_types;
     let mut auxiliary_failures = Vec::new();
     for declaration in backing_field_declarations {
@@ -4863,6 +4908,12 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     let (mut index, mut finalization_failures) = solver.finalize_recovering(&evaluator);
+    let evaluated_compile_time_constants = semantics
+        .evaluated_compile_time_constants
+        .borrow()
+        .iter()
+        .map(|(declaration, constant)| (*declaration, constant.clone()))
+        .collect::<Vec<_>>();
     finalization_failures.extend(auxiliary_failures);
     finalization_failures.sort_by_key(|(declaration, _)| declaration.raw());
     finalization_failures.dedup_by_key(|(declaration, _)| *declaration);
@@ -6142,6 +6193,13 @@ pub(crate) fn finalized_streamed_signature_index(
     };
     for (declaration, contract) in resolved_contracts {
         index.publish_contract(declaration, contract);
+    }
+    for (declaration, mut constant) in evaluated_compile_time_constants {
+        let Some(signature) = index.signature(declaration) else {
+            continue;
+        };
+        constant.ty = signature.result.get();
+        index.publish_compile_time_constant(declaration, constant);
     }
     for (&classifier, &retention) in &table.annotation_retentions {
         if index.classifier_declaration(classifier).is_some() {

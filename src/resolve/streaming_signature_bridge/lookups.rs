@@ -1053,7 +1053,7 @@ impl ProductionSignatureSemantics<'_> {
             // operation used by final call selection so an explicit or lazily inferred member
             // function type can contextualize its arguments without duplicating member lookup.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, demand)?
+                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
             {
                 if let Ok(expectations) =
                     <Self as crate::fir::SignatureSemantics>::invoke_argument_expectations(

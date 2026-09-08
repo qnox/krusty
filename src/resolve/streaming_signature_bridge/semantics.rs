@@ -113,6 +113,27 @@ fn selected_sam_constructor_result(
 }
 
 impl ProductionSignatureSemantics<'_> {
+    pub(super) fn remember_selected_compile_time_constant(
+        &self,
+        origin: crate::fir::OriginId,
+        stable_declaration: Option<crate::fir::DeclarationId>,
+        published: Option<crate::libraries::LibraryConst>,
+    ) {
+        let constant = stable_declaration
+            .and_then(|declaration| {
+                self.evaluated_compile_time_constants
+                    .borrow()
+                    .get(&declaration)
+                    .cloned()
+            })
+            .or(published);
+        if let Some(constant) = constant {
+            self.selected_compile_time_constants
+                .borrow_mut()
+                .insert(origin, constant);
+        }
+    }
+
     /// Capture storage visible from a compact inferred member signature. Pass-1 capture discovery
     /// has already selected the lexical value and its semantic type; evaluating the dependency
     /// must consume that fact directly instead of pretending the generated field is a Kotlin
@@ -894,6 +915,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         classifier: crate::types::TypeName,
         spelling: &str,
+        origin: crate::fir::OriginId,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
@@ -914,12 +936,24 @@ impl ProductionSignatureSemantics<'_> {
                 resolver.accessible_classifier_associated_property(classifier, spelling)
             });
             return match associated {
-                Ok(property) => crate::fir::ResolvedTy::new(property.ty)
-                    .map(Some)
-                    .map_err(|_| Self::failure()),
+                Ok(property) => {
+                    self.remember_selected_compile_time_constant(
+                        origin,
+                        property.stable_declaration,
+                        property.compile_time_constant.clone(),
+                    );
+                    crate::fir::ResolvedTy::new(property.ty)
+                        .map(Some)
+                        .map_err(|_| Self::failure())
+                }
                 Err(_) => Ok(None),
             };
         };
+        self.remember_selected_compile_time_constant(
+            origin,
+            property.stable_declaration,
+            property.compile_time_constant.clone(),
+        );
         if let Some(signature) =
             self.demanded_source_signature(None, property.stable_declaration, demand)?
         {
@@ -1464,9 +1498,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 if let Some(classifier) =
                     self.qualified_classifier_or_source_alias(scope, qualifier)
                 {
-                    if let Some(result) =
-                        self.select_associated_classifier_property(scope, classifier, name, demand)?
-                    {
+                    if let Some(result) = self.select_associated_classifier_property(
+                        scope, classifier, name, origin, demand,
+                    )? {
                         return Ok(result);
                     }
                 }
@@ -1502,6 +1536,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .and_then(crate::symbol_resolver::Symbol::value)
                 .filter(|property| property.kind == crate::libraries::PropKind::TopLevel);
                 if let Some(property) = property {
+                    self.remember_selected_compile_time_constant(
+                        origin,
+                        property.stable_declaration,
+                        property.compile_time_constant.clone(),
+                    );
                     if let Some(signature) = self.demanded_source_signature(
                         Some(scope),
                         property.stable_declaration,
@@ -1620,7 +1659,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .chain(self.enclosing_lexical_singleton_receivers(scope))
         {
             if let Some(result) =
-                self.selected_member_property_type(scope, receiver, spelling, demand)?
+                self.selected_member_property_type(scope, receiver, spelling, Some(origin), demand)?
             {
                 return Ok(result);
             }
@@ -1635,6 +1674,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     .classifier(internal)
                     .and_then(|declaration| declaration.constants.get(spelling).cloned())
                 {
+                    self.remember_selected_compile_time_constant(
+                        origin,
+                        None,
+                        Some(constant.clone()),
+                    );
                     return crate::fir::ResolvedTy::new(constant.ty).map_err(|_| Self::failure());
                 }
             }
@@ -1842,6 +1886,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return crate::fir::ResolvedTy::new(value).map_err(|_| Self::failure());
             }
         };
+        self.remember_selected_compile_time_constant(
+            origin,
+            property.stable_declaration,
+            property.compile_time_constant.clone(),
+        );
         if let Some(signature) = self.demanded_source_signature_at(
             Some(scope),
             property.stable_declaration,
@@ -2265,7 +2314,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // functions at this same receiver rung. The property declaration and the `invoke`
             // convention are both selected by the shared resolver; SigExpr only composes them.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, demand)?
+                self.selected_member_property_type(scope, receiver, spelling, Some(origin), demand)?
             {
                 if let Ok(result) = self.select_invoke(scope, origin, callee, arguments, demand) {
                     return Ok(result);
@@ -4510,9 +4559,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     .map_err(|_| Self::failure());
             }
         }
-        if let Some(result) =
-            self.selected_member_property_type(scope, receiver.get(), spelling, demand)?
-        {
+        if let Some(result) = self.selected_member_property_type(
+            scope,
+            receiver.get(),
+            spelling,
+            Some(origin),
+            demand,
+        )? {
             return Ok(result);
         }
         // A compactly inferred extension property is intentionally registered with an unpublished
@@ -4771,9 +4824,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // A member PROPERTY whose value is callable participates in call syntax after
                 // ordinary member functions, exactly as at a top-level callee: `outer.Inner().fn()`
                 // reads the property `fn` and applies the `invoke` convention to its value.
-                if let Some(callee) =
-                    self.selected_member_property_type(scope, receiver.get(), spelling, demand)?
-                {
+                if let Some(callee) = self.selected_member_property_type(
+                    scope,
+                    receiver.get(),
+                    spelling,
+                    Some(origin),
+                    demand,
+                )? {
                     if let Ok(result) = self.select_invoke(scope, origin, callee, arguments, demand)
                     {
                         return Ok(crate::fir::ResolvedMemberCall {
@@ -5152,6 +5209,66 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             | crate::fir::SigBinaryOperator::ReferentialEqual
             | crate::fir::SigBinaryOperator::ReferentialNotEqual => None,
         }
+    }
+
+    fn selected_compile_time_constant(
+        &self,
+        origin: crate::fir::OriginId,
+    ) -> Option<crate::libraries::LibraryConst> {
+        self.selected_compile_time_constants
+            .borrow()
+            .get(&origin)
+            .cloned()
+    }
+
+    fn fold_selected_binary_constant(
+        &self,
+        operator: crate::fir::SigBinaryOperator,
+        lhs: crate::libraries::LibraryConst,
+        rhs: crate::libraries::LibraryConst,
+        result: crate::fir::ResolvedTy,
+    ) -> Option<crate::libraries::LibraryConst> {
+        super::super::constant_evaluation::fold_selected_signature_binary(
+            operator,
+            lhs,
+            rhs,
+            result.get(),
+        )
+    }
+
+    fn fold_selected_member_constant(
+        &self,
+        spelling: &str,
+        receiver: crate::libraries::LibraryConst,
+        result: crate::fir::ResolvedTy,
+    ) -> Option<crate::libraries::LibraryConst> {
+        super::super::constant_evaluation::fold_selected_signature_member(
+            spelling,
+            receiver,
+            result.get(),
+        )
+    }
+
+    fn fold_string_template(
+        &self,
+        parts: &[crate::libraries::LibraryConst],
+    ) -> Option<crate::libraries::LibraryConst> {
+        super::super::constant_evaluation::fold_signature_string_template(parts)
+    }
+
+    fn record_compile_time_constant(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        constant: crate::libraries::LibraryConst,
+    ) {
+        self.evaluated_compile_time_constants
+            .borrow_mut()
+            .insert(declaration, constant);
+    }
+
+    fn owns_compile_time_constant(&self, declaration: crate::fir::DeclarationId) -> bool {
+        self.compile_time_constant_declarations
+            .contains(&declaration)
     }
 
     fn select_binary(

@@ -777,21 +777,6 @@ impl ActiveSourceDeclarations {
             })
     }
 
-    /// Parser declaration bound to one stable top-level property while this source is active.
-    /// The parser identity is consumed immediately by the temporary checker and never crosses the
-    /// active-source boundary.
-    pub(crate) fn top_level_property_parser_declaration(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<DeclId> {
-        let ActiveDeclarationRef::Property(ActivePropertyRef::TopLevel(parser)) =
-            self.binding(declaration)?
-        else {
-            return None;
-        };
-        Some(parser)
-    }
-
     pub(crate) fn constructor_property_declaration(
         &self,
         class: DeclId,

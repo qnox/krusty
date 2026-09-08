@@ -725,7 +725,7 @@ fn analyze_source_set_impl(
 ) -> SourceSetAnalysis {
     let diagnostics_start = diags.diags.len();
     // Inspection entry points deliberately retain the complete parser product. Production keeps a
-    // source slot only when Pass 1 still owes bounded executable work for it (inline/default/const);
+    // source slot only when Pass 1 still owes bounded executable work for it (inline/default);
     // ordinary files drop as soon as their compact headers and signature constraints are extracted.
     let mut inspection_files = Vec::with_capacity(if retain_inspection_analysis {
         sources.len()
@@ -804,10 +804,9 @@ fn analyze_source_set_impl(
             // that has not moved to its own store yet. MPP matching is compact-header work; only an
             // expect declaration that actually owns a default needs its parser fragment retained.
             let needs_bounded_pass_one_syntax = has_signature_defaults(&file)
-                || stubs.iter().any(|stub| {
-                    stub.flags.has(crate::fir::DeclarationFlags::INLINE)
-                        || stub.flags.has(crate::fir::DeclarationFlags::CONST)
-                });
+                || stubs
+                    .iter()
+                    .any(|stub| stub.flags.has(crate::fir::DeclarationFlags::INLINE));
             retain_bounded_syntax = index < inferred_count && needs_bounded_pass_one_syntax;
             local_class_contexts.push(crate::resolve::pass_one_local_class_context(
                 &file,
@@ -931,9 +930,6 @@ fn analyze_source_set_impl(
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &index, diags);
-        // A `const val` initializer is a stable declaration dependency. Check each such bounded
-        // fragment now, while Pass 1 still owns its AST and exact operator selections can be
-        // consumed; retain only the folded payload before the signature graph and arenas die.
         let pass_one_files = if retain_inspection_analysis {
             inspection_files
                 .iter()
@@ -947,11 +943,6 @@ fn analyze_source_set_impl(
                 .map(Option::as_ref)
                 .collect::<Vec<_>>()
         };
-        crate::resolve::publish_checked_compile_time_constants(
-            &pass_one_files,
-            &mut index,
-            &mut symbols,
-        );
         crate::resolve::publish_stable_declaration_metadata(
             &mut index,
             &symbols,

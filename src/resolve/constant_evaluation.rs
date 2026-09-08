@@ -109,6 +109,87 @@ pub(super) fn checked_constant_expression(
     Evaluator { context }.evaluate(expression, Some(declared_ty), 0)
 }
 
+pub(crate) fn fold_selected_signature_binary(
+    operation: crate::fir::SigBinaryOperator,
+    left: LibraryConst,
+    right: LibraryConst,
+    result: Ty,
+) -> Option<LibraryConst> {
+    use crate::fir::SigBinaryOperator as Operator;
+
+    let operation = match operation {
+        Operator::Add => BinOp::Add,
+        Operator::Subtract => BinOp::Sub,
+        Operator::Multiply => BinOp::Mul,
+        Operator::Divide => BinOp::Div,
+        Operator::Remainder => BinOp::Rem,
+        Operator::Equal => BinOp::Eq,
+        Operator::NotEqual => BinOp::Ne,
+        Operator::Less => BinOp::Lt,
+        Operator::LessOrEqual => BinOp::Le,
+        Operator::Greater => BinOp::Gt,
+        Operator::GreaterOrEqual => BinOp::Ge,
+        Operator::BooleanAnd => BinOp::And,
+        Operator::BooleanOr => BinOp::Or,
+        Operator::ReferentialEqual | Operator::ReferentialNotEqual => return None,
+    };
+    if operation == BinOp::Add && result.non_null() == Ty::String {
+        let mut output = KtStringBuf::new();
+        push_constant_string(&left, &mut output)?;
+        push_constant_string(&right, &mut output)?;
+        return Some(LibraryConst {
+            ty: result,
+            value: LibConst::Str(output.finish()),
+        });
+    }
+    match operation {
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => compare_numeric(operation, left, right),
+        BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => {
+            evaluate_non_call_binary(operation, left, right)
+        }
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            let intrinsic = match operation {
+                BinOp::Add => PrimitiveBinaryIntrinsic::Add,
+                BinOp::Sub => PrimitiveBinaryIntrinsic::Subtract,
+                BinOp::Mul => PrimitiveBinaryIntrinsic::Multiply,
+                BinOp::Div => PrimitiveBinaryIntrinsic::Divide,
+                BinOp::Rem => PrimitiveBinaryIntrinsic::Remainder,
+                _ => unreachable!(),
+            };
+            arithmetic_numeric(intrinsic, left, right, result)
+        }
+        BinOp::RefEq | BinOp::RefNe => None,
+    }
+}
+
+pub(crate) fn fold_selected_signature_member(
+    spelling: &str,
+    receiver: LibraryConst,
+    result: Ty,
+) -> Option<LibraryConst> {
+    match spelling {
+        "unaryPlus" => evaluate_unary(UnOp::Plus, receiver, result),
+        "unaryMinus" => evaluate_unary(UnOp::Neg, receiver, result),
+        "not" => evaluate_unary(UnOp::Not, receiver, result),
+        "toByte" | "toShort" | "toInt" | "toLong" | "toFloat" | "toDouble" | "toChar"
+        | "toUByte" | "toUShort" | "toUInt" | "toULong" => {
+            evaluate_numeric_conversion(receiver, result)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn fold_signature_string_template(parts: &[LibraryConst]) -> Option<LibraryConst> {
+    let mut output = KtStringBuf::new();
+    for part in parts {
+        push_constant_string(part, &mut output)?;
+    }
+    Some(LibraryConst {
+        ty: Ty::String,
+        value: LibConst::Str(output.finish()),
+    })
+}
+
 struct Evaluator<'a> {
     context: CheckedConstantExpression<'a>,
 }

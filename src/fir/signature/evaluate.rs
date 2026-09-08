@@ -35,6 +35,18 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         ) -> Option<i32> {
             match graph.expr(expression)? {
                 SigExpr::IntegerLiteral(value) => Some(value),
+                SigExpr::Value(selection) => graph
+                    .value_selection(selection)
+                    .and_then(|selection| {
+                        semantics.selected_compile_time_constant(selection.origin)
+                    })
+                    .and_then(|constant| match constant.value {
+                        crate::libraries::LibConst::Int(value) => Some(value),
+                        crate::libraries::LibConst::Long(_)
+                        | crate::libraries::LibConst::Float(_)
+                        | crate::libraries::LibConst::Double(_)
+                        | crate::libraries::LibConst::Str(_) => None,
+                    }),
                 SigExpr::Binary {
                     operator, lhs, rhs, ..
                 } => {
@@ -57,6 +69,85 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 }
                 _ => None,
             }
+        }
+
+        fn evaluated_compile_time_constant<S: SignatureSemantics>(
+            semantics: &S,
+            expression: SigExprId,
+            graph: &SignatureGraph,
+            memo: &HashMap<SigExprId, ResolvedTy>,
+        ) -> Option<crate::libraries::LibraryConst> {
+            let result = *memo.get(&expression)?;
+            let mut constant = match graph.expr(expression)? {
+                SigExpr::IntegerLiteral(value) => crate::libraries::LibraryConst {
+                    ty: Ty::Int,
+                    value: crate::libraries::LibConst::Int(value),
+                },
+                SigExpr::CompileTimeConstant(constant) => {
+                    graph.compile_time_constant(constant)?.clone()
+                }
+                SigExpr::Value(selection) => semantics
+                    .selected_compile_time_constant(graph.value_selection(selection)?.origin)?,
+                SigExpr::Member { origin, .. } => {
+                    semantics.selected_compile_time_constant(origin)?
+                }
+                SigExpr::Binary {
+                    operator, lhs, rhs, ..
+                } => semantics.fold_selected_binary_constant(
+                    operator,
+                    evaluated_compile_time_constant(semantics, lhs, graph, memo)?,
+                    evaluated_compile_time_constant(semantics, rhs, graph, memo)?,
+                    result,
+                )?,
+                SigExpr::MemberCall {
+                    receiver,
+                    target,
+                    arguments,
+                    ..
+                } if graph.call_arguments(arguments).is_empty() => {
+                    let spelling = graph.name(graph.member_selection(target)?.spelling)?;
+                    semantics.fold_selected_member_constant(
+                        spelling,
+                        evaluated_compile_time_constant(semantics, receiver, graph, memo)?,
+                        result,
+                    )?
+                }
+                SigExpr::StringTemplate(parts) => {
+                    let parts = graph
+                        .operands(parts)
+                        .iter()
+                        .map(|part| evaluated_compile_time_constant(semantics, *part, graph, memo))
+                        .collect::<Option<Vec<_>>>()?;
+                    semantics.fold_string_template(&parts)?
+                }
+                SigExpr::Sequence { result, .. }
+                | SigExpr::ScopedReceiver { result, .. }
+                | SigExpr::NonNullable(result)
+                | SigExpr::Substitute { base: result, .. } => {
+                    evaluated_compile_time_constant(semantics, result, graph, memo)?
+                }
+                SigExpr::Known(_)
+                | SigExpr::DeclarationType(_)
+                | SigExpr::ClassifierType { .. }
+                | SigExpr::Parameter { .. }
+                | SigExpr::Type { .. }
+                | SigExpr::ContextualType { .. }
+                | SigExpr::Call { .. }
+                | SigExpr::CallableReference(_)
+                | SigExpr::BoundCallableReference { .. }
+                | SigExpr::ClassLiteral { .. }
+                | SigExpr::MemberCall { .. }
+                | SigExpr::Invoke { .. }
+                | SigExpr::Function { .. }
+                | SigExpr::ContextualParameter(_)
+                | SigExpr::ContextualFunction { .. }
+                | SigExpr::Delegate { .. }
+                | SigExpr::Join { .. }
+                | SigExpr::Nullable(_)
+                | SigExpr::ContractNarrowed { .. } => return None,
+            };
+            constant.ty = result.get();
+            Some(constant)
         }
 
         fn argument_probe<'a, S: SignatureSemantics>(
@@ -673,6 +764,13 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let ty = (|| -> Result<ResolvedTy, DiagnosticId> {
                 match node {
                     SigExpr::Known(ty) => Ok(ty),
+                    SigExpr::CompileTimeConstant(constant) => Ok(ResolvedTy::new(
+                        graph
+                            .compile_time_constant(constant)
+                            .expect("a compact constant must belong to its graph")
+                            .ty,
+                    )
+                    .expect("a compact constant must carry a publishable semantic type")),
                     SigExpr::IntegerLiteral(_) => Ok(ResolvedTy::new(Ty::Int)
                         .expect("the built-in Int literal type is always publishable")),
                     SigExpr::DeclarationType(declaration) => {
@@ -1032,6 +1130,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         );
                         semantics.select_binary(scope, operator, origin, lhs, rhs, demand)
                     }
+                    SigExpr::StringTemplate(operands) => {
+                        for operand in graph.operands(operands) {
+                            evaluate_expression(
+                                semantics, *operand, graph, demand, memo, computing,
+                            )?;
+                        }
+                        Ok(ResolvedTy::new(Ty::String)
+                            .expect("the built-in String type is always publishable"))
+                    }
                     SigExpr::Invoke {
                         callee,
                         arguments,
@@ -1299,14 +1406,25 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             Ok(ty)
         }
 
+        let root = result;
+        let mut memo = HashMap::new();
+        let mut computing = std::collections::HashSet::new();
         let result = evaluate_expression(
             self.semantics,
-            result,
+            root,
             graph,
             demand,
-            &mut HashMap::new(),
-            &mut std::collections::HashSet::new(),
+            &mut memo,
+            &mut computing,
         )?;
+        if self.semantics.owns_compile_time_constant(declaration) {
+            if let Some(constant) =
+                evaluated_compile_time_constant(self.semantics, root, graph, &memo)
+            {
+                self.semantics
+                    .record_compile_time_constant(declaration, constant);
+            }
+        }
         let result = self
             .semantics
             .approximate_declaration_result(declaration, result)?;
