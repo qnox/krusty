@@ -38319,7 +38319,7 @@ fn class_declaration_label(name: &str) -> &str {
 
 fn enclosing_enum_entry_context<'a>(
     file: &'a File,
-    class: &ClassDecl,
+    target: DeclId,
 ) -> Option<(DeclId, &'a ClassDecl, usize, &'a crate::ast::AstEnumEntry)> {
     file.decls.iter().find_map(|&declaration| {
         let Decl::Class(owner) = file.decl(declaration) else {
@@ -38328,13 +38328,27 @@ fn enclosing_enum_entry_context<'a>(
         if !owner.is_enum() {
             return None;
         }
-        let tail = class.name.strip_prefix(&format!("{}.", owner.name))?;
-        let entry_name = tail.split('.').next()?;
         owner
             .enum_entries
             .iter()
             .enumerate()
-            .find(|(_, entry)| entry.name == entry_name)
+            .find(|(_, entry)| {
+                let mut pending = entry.nested_classifiers.clone();
+                let mut visited = std::collections::HashSet::new();
+                while let Some(candidate) = pending.pop() {
+                    if !visited.insert(candidate) {
+                        continue;
+                    }
+                    if candidate == target {
+                        return true;
+                    }
+                    let Decl::Class(class) = file.decl(candidate) else {
+                        continue;
+                    };
+                    pending.extend(class.nested_classifiers.iter().copied());
+                }
+                false
+            })
             .map(|(entry_index, entry)| (declaration, owner, entry_index, entry))
     })
 }
@@ -51038,6 +51052,7 @@ impl<'a> Checker<'a> {
     /// parser-keyed class graph.
     fn stable_class_receiver_labels(
         &self,
+        declaration: DeclId,
         class: &ClassDecl,
         current: Option<Ty>,
     ) -> Vec<(String, Ty, bool)> {
@@ -51084,7 +51099,7 @@ impl<'a> Checker<'a> {
                 ))
             })
             .collect::<Vec<_>>();
-        if let Some((_, owner, _, entry)) = enclosing_enum_entry_context(self.file, class) {
+        if let Some((_, owner, _, entry)) = enclosing_enum_entry_context(self.file, declaration) {
             let receiver = Ty::obj_name(type_name(&class_internal(self.file, &owner.name)));
             if let Some(label) = labels
                 .iter_mut()
@@ -51209,10 +51224,12 @@ impl<'a> Checker<'a> {
     fn enclosing_enum_entry_properties(
         &mut self,
         scope: &CheckerScope<'_>,
+        declaration: DeclId,
         class: &ClassDecl,
         visible_properties: &[ScopedProperty],
     ) -> Vec<ScopedProperty> {
-        let Some((_, outer, _, entry)) = enclosing_enum_entry_context(self.file, class) else {
+        let Some((_, outer, _, entry)) = enclosing_enum_entry_context(self.file, declaration)
+        else {
             return Vec::new();
         };
         let property_scope = scope.child(ScopeKind::Block);
@@ -51266,10 +51283,10 @@ impl<'a> Checker<'a> {
     fn declare_enclosing_enum_entry_methods(
         &mut self,
         scope: &CheckerScope<'_>,
-        class: &ClassDecl,
+        declaration: DeclId,
     ) {
         let Some((owner_declaration, owner, entry_index, entry)) =
-            enclosing_enum_entry_context(self.file, class)
+            enclosing_enum_entry_context(self.file, declaration)
         else {
             return;
         };
@@ -59085,9 +59102,9 @@ impl<'a> Checker<'a> {
             }
             // An inner class declared inside one enum entry captures the entry receiver and its
             // preceding properties. Keep this lexical publication shared with Pass-1 inference.
-            let entry_properties = self.enclosing_enum_entry_properties(scope, cl, &props);
+            let entry_properties = self.enclosing_enum_entry_properties(scope, d, cl, &props);
             props.extend(entry_properties);
-            self.declare_enclosing_enum_entry_methods(scope, cl);
+            self.declare_enclosing_enum_entry_methods(scope, d);
             // The class's type parameters belong to the CLASS rung, so they retire with it rather
             // than staying visible to the next declaration checked from the same enclosing scope.
             // An inner/local classifier also owns semantic formals captured from enclosing
@@ -59468,7 +59485,7 @@ impl<'a> Checker<'a> {
                     .clone()
                     .map(|label| (label, receiver.ty, false))
             }));
-            labels.extend(self.stable_class_receiver_labels(cl, scope.this_ty()));
+            labels.extend(self.stable_class_receiver_labels(d, cl, scope.this_ty()));
             let enclosing_label_depth = self.this_labels.len();
             let label_depth = labels.len();
             self.this_labels.extend(labels);
