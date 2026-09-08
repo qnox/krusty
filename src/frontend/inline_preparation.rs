@@ -535,9 +535,11 @@ pub(super) fn streaming(
 
     crate::trace_compiler!(
         "fir",
-        "Pass 1 streaming inline preparation inline_units={} ordinary_units={}",
+        "Pass 1 streaming inline preparation inline_units={} ordinary_units={} owners={inline_owners:?} roots={:?} bodies={:?}",
         inline_work.len(),
         bodies.ordinary.len(),
+        selection.roots,
+        selection.bodies,
     );
     for (raw_source, owners) in inline_owners.iter().enumerate() {
         if owners.is_empty() {
@@ -553,7 +555,7 @@ pub(super) fn streaming(
         let source = crate::fir::SourceFileId::from_raw(raw_source as u32);
         diags.set_file(raw_source as u32);
         if !owners.is_empty() {
-            let selected_stable_bodies = selection.stable_bodies[raw_source].clone();
+            let selected_stable_bodies = selection.bodies[raw_source].clone();
             crate::trace_compiler!(
                 "fir",
                 "Pass 1 retained stable bodies source={source:?} bodies={selected_stable_bodies:?}",
@@ -571,7 +573,7 @@ pub(super) fn streaming(
                 source,
                 &index,
                 &active_roots,
-                &selection.stable_bodies[raw_source],
+                &selection.bodies[raw_source],
             ) {
                 Ok(active) => active,
                 Err(error) => {
@@ -587,7 +589,6 @@ pub(super) fn streaming(
                 raw_source as u32,
                 &selection.roots[raw_source],
                 &selection.bodies[raw_source],
-                &selected_stable_bodies,
                 &active,
                 &index,
                 symbols,

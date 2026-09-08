@@ -61,15 +61,15 @@ impl PassOneBodyInventory {
         self.units.len() * std::mem::size_of::<BodyWorkItem>()
     }
 
-    /// Parser declaration ranges whose subtrees contain work in this queue. Nested classifiers are
-    /// parser-hoisted declarations even though their stable semantic owner is another classifier,
-    /// so a member stops at its nearest classifier rather than walking to the outermost owner. Enum
-    /// entries are not parser declarations and continue to their enclosing enum classifier.
-    pub(crate) fn top_level_ranges(
+    /// Stable parser-unit roots whose subtrees contain work in this queue. Nested classifiers are
+    /// parser-hoisted declarations even though their stable semantic owner is another classifier;
+    /// `checker_roots` records the already-established structural root without retaining or
+    /// reconstructing source coordinates.
+    pub(crate) fn checker_roots_by_source(
         &self,
         index: &ResolvedModuleIndex,
         source_count: usize,
-    ) -> Vec<std::collections::HashSet<crate::diag::Span>> {
+    ) -> Vec<std::collections::HashSet<DeclarationId>> {
         let mut selected = vec![std::collections::HashSet::new(); source_count];
         for unit in &self.units {
             let root = self
@@ -81,11 +81,7 @@ impl PassOneBodyInventory {
                 .declaration_anchor(root)
                 .expect("every body unit root must retain its stable anchor");
             if let Some(ranges) = selected.get_mut(anchor.source.raw() as usize) {
-                ranges.insert(
-                    index
-                        .declaration_range(root)
-                        .expect("Pass-1 body roots retain same-pass coordinates"),
-                );
+                ranges.insert(root);
             }
         }
         selected
@@ -183,7 +179,7 @@ impl BodyPartition {
         index: &ResolvedModuleIndex,
         source_count: usize,
     ) -> BodyCheckSelection {
-        let roots = self.inline.top_level_ranges(index, source_count);
+        let roots = self.inline.checker_roots_by_source(index, source_count);
         let inline_owners = self
             .inline
             .units
@@ -191,7 +187,6 @@ impl BodyPartition {
             .map(|unit| unit.declaration)
             .collect::<std::collections::HashSet<_>>();
         let mut bodies = vec![std::collections::HashSet::new(); source_count];
-        let mut stable_bodies = vec![std::collections::HashSet::new(); source_count];
         let retained_inline_owner = |declaration: DeclarationId| {
             let mut current = Some(declaration);
             let mut seen = std::collections::HashSet::new();
@@ -230,13 +225,7 @@ impl BodyPartition {
             let anchor = index
                 .declaration_anchor(unit.declaration)
                 .expect("every inline-owned body must retain its stable declaration anchor");
-            let selected = &mut bodies[anchor.source.raw() as usize];
-            selected.insert(
-                index
-                    .declaration_range(unit.declaration)
-                    .expect("Pass-1 inline bodies retain same-pass coordinates"),
-            );
-            stable_bodies[anchor.source.raw() as usize].insert(unit.declaration);
+            bodies[anchor.source.raw() as usize].insert(unit.declaration);
             if !inline_owners.contains(&unit.declaration) {
                 payload_roots.insert(unit.declaration, inline_owner);
             }
@@ -244,19 +233,16 @@ impl BodyPartition {
         BodyCheckSelection {
             roots,
             bodies,
-            stable_bodies,
             payload_roots,
         }
     }
 }
 
 pub(crate) struct BodyCheckSelection {
-    pub roots: Vec<std::collections::HashSet<crate::diag::Span>>,
-    pub bodies: Vec<std::collections::HashSet<crate::diag::Span>>,
-    /// Stable identities whose syntax is checked as part of a retained inline subtree. This is
-    /// transient Pass-1 selection state used to bind the live parser arena; it is consumed before
-    /// ordinary body streaming and is never a source locator.
-    pub stable_bodies: Vec<std::collections::HashSet<DeclarationId>>,
+    pub roots: Vec<std::collections::HashSet<DeclarationId>>,
+    /// Stable identities whose syntax is checked as part of a retained inline subtree. This
+    /// transient Pass-1 selection state is consumed before ordinary body streaming.
+    pub bodies: Vec<std::collections::HashSet<DeclarationId>>,
     /// Ordinary declaration bodies whose lexical lifetime is owned by a retained inline root.
     /// They are checked during Pass 1 and embedded into that root's FIR payload; this transient map
     /// is destroyed with the body inventory and never becomes a retained ordinary-body index.

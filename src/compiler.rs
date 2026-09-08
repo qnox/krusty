@@ -148,28 +148,24 @@ fn check_active_diagnostic_unit(
         .source_inventory(source_id)
         .iter()
         .copied()
-        .filter_map(|declaration| {
+        .filter(|declaration| {
             active
-                .span(active_file, declaration)
-                .map(|span| (declaration, span))
+                .stable_declarations()
+                .any(|active| active == *declaration)
         })
         .collect::<Vec<_>>();
     let selected_roots = declarations
         .iter()
-        .filter(|(declaration, _)| {
+        .filter(|declaration| {
             index
-                .declaration_anchor(*declaration)
+                .declaration_anchor(**declaration)
                 .is_some_and(|anchor| anchor.owner.is_none())
         })
-        .map(|(_, span)| *span)
+        .copied()
         .collect::<std::collections::HashSet<_>>();
     let selected_bodies = declarations
         .iter()
-        .map(|(_, span)| *span)
-        .collect::<std::collections::HashSet<_>>();
-    let selected_stable_bodies = declarations
-        .iter()
-        .map(|(declaration, _)| *declaration)
+        .copied()
         .collect::<std::collections::HashSet<_>>();
     let anonymous_captures = crate::resolve::discover_anonymous_object_captures_in_pass_two_file(
         active_file,
@@ -177,7 +173,6 @@ fn check_active_diagnostic_unit(
         &selected_roots,
         &selected_bodies,
         active,
-        &selected_stable_bodies,
         symbols,
         index,
     );
@@ -187,7 +182,6 @@ fn check_active_diagnostic_unit(
         &selected_roots,
         &selected_bodies,
         active,
-        &selected_stable_bodies,
         symbols,
         index,
         streamed_cache,
@@ -357,7 +351,7 @@ pub fn emit_analyzed<B: Backend>(
                     return;
                 }
             };
-            let groups = active_body_check_groups(work, &active_file, &active, &index);
+            let groups = active_body_check_groups(work, &active, &index);
             crate::trace_compiler!(
                 "fir",
                 "Pass 2 bound sequential declaration unit groups={}",
@@ -525,12 +519,11 @@ fn body_check_groups(
     groups.into_iter().map(|(_, group)| group).collect()
 }
 
-/// Reconstruct checker roots from the one parser unit that is live now. Source containment is
-/// consulted only inside that unit to repair parser-hoisted local classifiers; no resulting root
-/// survives the callback.
+/// Reconstruct checker roots from finalized ownership and the explicit local-class lexical-root
+/// edge published in Pass 1. Parser hoisting therefore never requires a coordinate containment
+/// join when an ordinary body is rebound in Pass 2.
 fn active_body_check_groups(
-    mut work: Vec<crate::fir::BodyWorkItem>,
-    file: &File,
+    work: Vec<crate::fir::BodyWorkItem>,
     active: &crate::fir::ActiveSourceDeclarations,
     index: &crate::fir::ResolvedModuleIndex,
 ) -> Vec<BodyCheckGroup> {
@@ -539,6 +532,10 @@ fn active_body_check_groups(
         index: &crate::fir::ResolvedModuleIndex,
     ) -> crate::fir::DeclarationId {
         loop {
+            if let Some(root) = index.local_classifier_lexical_root(declaration) {
+                declaration = root;
+                continue;
+            }
             let Some(anchor) = index.declaration_anchor(declaration) else {
                 return declaration;
             };
@@ -555,50 +552,9 @@ fn active_body_check_groups(
         }
     }
 
-    // Parser hoisting may enumerate a local classifier before the executable declaration that
-    // creates it. Check by the live unit's lexical order so the enclosing body publishes capture
-    // state before a nested member consumes it. This ordering is computed from the active AST and
-    // disappears with it; no Pass-1 coordinate participates.
-    work.sort_by_key(|unit| {
-        active
-            .span(file, unit.declaration)
-            .map_or((u32::MAX, u32::MAX, unit.declaration), |span| {
-                (span.lo, span.hi, unit.declaration)
-            })
-    });
-    let declarations = work.iter().map(|unit| unit.declaration).collect::<Vec<_>>();
     let mut rooted = Vec::with_capacity(work.len());
     for unit in work {
-        let mut root = ordinary_root(unit.declaration, index);
-        let root_is_orphaned_local_classifier =
-            index.declaration_anchor(root).is_some_and(|anchor| {
-                anchor.kind == crate::fir::DeclarationKind::Classifier
-                    && anchor.owner.is_none()
-                    && index.declaration_header(root).is_some_and(|header| {
-                        header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                    })
-            });
-        if root_is_orphaned_local_classifier {
-            if let Some(classifier_span) = active.span(file, root) {
-                if let Some(enclosing) = declarations
-                    .iter()
-                    .copied()
-                    .filter(|candidate| *candidate != root)
-                    .filter_map(|candidate| {
-                        active.span(file, candidate).map(|span| (candidate, span))
-                    })
-                    .filter(|(_, span)| {
-                        span.lo <= classifier_span.lo
-                            && classifier_span.hi <= span.hi
-                            && *span != classifier_span
-                    })
-                    .min_by_key(|(_, span)| span.hi - span.lo)
-                    .map(|(candidate, _)| candidate)
-                {
-                    root = ordinary_root(enclosing, index);
-                }
-            }
-        }
+        let root = ordinary_root(unit.declaration, index);
         rooted.push((root, unit));
     }
     let mut groups = body_check_groups(rooted);
@@ -620,13 +576,7 @@ fn active_body_check_groups(
             work: Vec::new(),
         });
     }
-    groups.sort_by_key(|group| {
-        active
-            .span(file, group.root)
-            .map_or((u32::MAX, u32::MAX, group.root), |span| {
-                (span.lo, span.hi, group.root)
-            })
-    });
+    groups.sort_by_key(|group| group.root);
     groups
 }
 
@@ -642,48 +592,8 @@ fn check_body_group(
     diags: &mut DiagSink,
 ) -> Option<crate::resolve::TypeInfo> {
     let diagnostics_start = diags.diags.len();
-    let selected_roots = std::collections::HashSet::from([active.span(active_file, group.root)?]);
-    let body_spans = group
-        .bodies
-        .iter()
-        .filter_map(|declaration| active.span(active_file, *declaration))
-        .collect::<Vec<_>>();
-    if body_spans.len() != group.bodies.len() {
-        let missing = group
-            .bodies
-            .iter()
-            .filter(|declaration| active.span(active_file, **declaration).is_none())
-            .copied()
-            .collect::<Vec<_>>();
-        crate::trace_compiler!(
-            "fir",
-            "active body declarations without parser bindings root={:?} missing={missing:?}",
-            group.root,
-        );
-        diags.error(
-            Span::new(0, 0),
-            "internal error: active body declaration has no parser binding",
-        );
-        return None;
-    }
-    // A constructor, initializer, accessor, and nested anonymous member can legitimately share the
-    // same enclosing expression span. The checker selects syntax regions, so deduplicate only after
-    // proving that every stable body declaration has an active parser binding.
-    let mut selected_bodies = body_spans
-        .into_iter()
-        .collect::<std::collections::HashSet<_>>();
-    if selected_bodies.len() != group.bodies.len() {
-        crate::trace_compiler!(
-            "fir",
-            "active body declarations share parser spans root={:?} bindings={:?}",
-            group.root,
-            group
-                .bodies
-                .iter()
-                .map(|declaration| (*declaration, active.span(active_file, *declaration)))
-                .collect::<Vec<_>>(),
-        );
-    }
+    let selected_roots = std::collections::HashSet::from([group.root]);
+    let mut selected_bodies = group.bodies.clone();
     // A local declaration's stable owner chain names the executable declarations whose lexical
     // scopes introduce it. Re-enter those ancestor bodies during this active reparse so nested
     // class headers, captures, and local bindings are checked on their real tower rungs. They are
@@ -705,15 +615,11 @@ fn check_body_group(
                     .declaration_header(owner)
                     .is_some_and(|header| header.kind == crate::fir::DeclarationKind::Classifier)
                 {
-                    if let Some(span) = active.span(active_file, owner) {
-                        selected_bodies.insert(span);
-                    }
+                    selected_bodies.insert(owner);
                 }
                 break;
             }
-            if let Some(span) = active.span(active_file, owner) {
-                selected_bodies.insert(span);
-            }
+            selected_bodies.insert(owner);
             current = owner;
         }
     }
@@ -723,7 +629,6 @@ fn check_body_group(
         &selected_roots,
         &selected_bodies,
         active,
-        &group.bodies,
         symbols,
         index,
     );
@@ -733,7 +638,6 @@ fn check_body_group(
         &selected_roots,
         &selected_bodies,
         active,
-        &group.bodies,
         symbols,
         index,
         streamed_cache,
@@ -1070,15 +974,13 @@ pub fn check_frontend_only(
                         return;
                     }
                 };
-                let selected_spans = std::collections::HashSet::new();
                 let selected_bodies = std::collections::HashSet::new();
                 drop(crate::resolve::check_selected_declarations_in_pass_two(
                     &active_file,
                     raw_source as u32,
-                    &selected_spans,
-                    &selected_spans,
-                    &active,
                     &selected_bodies,
+                    &selected_bodies,
+                    &active,
                     &mut symbols,
                     &index,
                     &streamed_cache,
@@ -1152,7 +1054,7 @@ pub fn check_frontend_only(
                     return;
                 }
             };
-            for group in active_body_check_groups(work, &active_file, &active, &index) {
+            for group in active_body_check_groups(work, &active, &index) {
                 let before = diags.diags.len();
                 let Some(info) = check_body_group(
                     &active_file,

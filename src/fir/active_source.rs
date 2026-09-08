@@ -648,7 +648,7 @@ impl ActiveSourceDeclarations {
             }
             false
         };
-        let mut work = parser_stubs
+        let work = parser_stubs
             .into_iter()
             .filter_map(|stub| stub.body.map(|kind| (stub, kind)))
             .filter_map(|(stub, kind)| {
@@ -670,12 +670,6 @@ impl ActiveSourceDeclarations {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        work.sort_by_key(|unit| {
-            self.span(file, unit.declaration)
-                .map_or((u32::MAX, u32::MAX, unit.declaration), |span| {
-                    (span.lo, span.hi, unit.declaration)
-                })
-        });
         Ok(work)
     }
 
@@ -1029,6 +1023,141 @@ impl ActiveSourceDeclarations {
             ActiveDeclarationRef::Script => file.script_body,
             _ => None,
         }
+    }
+
+    /// Whether one selected stable body identity binds this exact function syntax node.
+    /// Selection stays identity-based even though the active parser arena is temporary.
+    pub(crate) fn selects_function(
+        &self,
+        file: &File,
+        selected: &std::collections::HashSet<DeclarationId>,
+        function: &FunDecl,
+    ) -> bool {
+        selected.iter().any(|declaration| {
+            self.function(file, *declaration)
+                .is_some_and(|candidate| std::ptr::eq(candidate, function))
+        })
+    }
+
+    /// Whether a selected stable property identity binds this exact property declaration.
+    /// Accessor identities deliberately do not select the initializer/delegate body.
+    pub(crate) fn selects_property_declaration(
+        &self,
+        file: &File,
+        selected: &std::collections::HashSet<DeclarationId>,
+        property: &PropDecl,
+    ) -> bool {
+        selected.iter().any(|declaration| {
+            matches!(
+                self.binding(*declaration),
+                Some(ActiveDeclarationRef::Property(_))
+            ) && self
+                .property(file, *declaration)
+                .is_some_and(|candidate| std::ptr::eq(candidate, property))
+        })
+    }
+
+    /// Whether a selected stable accessor identity binds this property's getter or setter.
+    pub(crate) fn selects_property_accessor(
+        &self,
+        file: &File,
+        selected: &std::collections::HashSet<DeclarationId>,
+        property: &PropDecl,
+        setter: bool,
+    ) -> bool {
+        selected.iter().any(|declaration| {
+            matches!(
+                self.binding(*declaration),
+                Some(ActiveDeclarationRef::Accessor {
+                    setter: candidate,
+                    ..
+                }) if candidate == setter
+            ) && self
+                .property(file, *declaration)
+                .is_some_and(|candidate| std::ptr::eq(candidate, property))
+        })
+    }
+
+    pub(crate) fn selects_primary_constructor(
+        &self,
+        file: &File,
+        selected: &std::collections::HashSet<DeclarationId>,
+        class: &ClassDecl,
+    ) -> bool {
+        selected.iter().any(|declaration| {
+            self.constructor(file, *declaration)
+                .is_some_and(|(_, candidate, secondary)| {
+                    secondary.is_none() && std::ptr::eq(candidate, class)
+                })
+        })
+    }
+
+    pub(crate) fn selects_secondary_constructor(
+        &self,
+        file: &File,
+        selected: &std::collections::HashSet<DeclarationId>,
+        class: &ClassDecl,
+        constructor: &SecondaryCtor,
+    ) -> bool {
+        selected.iter().any(|declaration| {
+            self.constructor(file, *declaration)
+                .is_some_and(|(_, candidate, secondary)| {
+                    std::ptr::eq(candidate, class)
+                        && secondary.is_some_and(|candidate| std::ptr::eq(candidate, constructor))
+                })
+        })
+    }
+
+    pub(crate) fn selects_expression(
+        &self,
+        file: &File,
+        selected: &std::collections::HashSet<DeclarationId>,
+        expression: crate::ast::ExprId,
+    ) -> bool {
+        selected
+            .iter()
+            .any(|declaration| self.expression(file, *declaration) == Some(expression))
+    }
+
+    /// Active parser expressions owned by the selected callable/constructor defaults. The set is
+    /// used only to stop a bounded lexical walk after every selected default has been reached.
+    pub(crate) fn selected_default_expressions(
+        &self,
+        file: &File,
+        selected: &std::collections::HashSet<DeclarationId>,
+    ) -> std::collections::HashSet<crate::ast::ExprId> {
+        let mut expressions = std::collections::HashSet::new();
+        for declaration in selected {
+            if let Some(function) = self.function(file, *declaration) {
+                expressions.extend(
+                    function
+                        .params
+                        .iter()
+                        .filter_map(|parameter| parameter.default),
+                );
+                continue;
+            }
+            let Some((_, class, secondary)) = self.constructor(file, *declaration) else {
+                continue;
+            };
+            expressions.extend(
+                class
+                    .context_params
+                    .iter()
+                    .filter_map(|parameter| parameter.default),
+            );
+            if let Some(constructor) = secondary {
+                expressions.extend(
+                    constructor
+                        .params
+                        .iter()
+                        .filter_map(|parameter| parameter.default),
+                );
+            } else {
+                expressions.extend(class.props.iter().filter_map(|parameter| parameter.default));
+            }
+        }
+        expressions
     }
 
     pub(crate) fn span(&self, file: &File, declaration: DeclarationId) -> Option<Span> {

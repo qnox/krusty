@@ -38393,7 +38393,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         active_declarations,
         diags,
         selected_body_declarations: None,
-        selected_stable_body_declarations: None,
+        pending_signature_default_expressions: std::collections::HashSet::new(),
         signature_defaults_only: false,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         #[cfg(feature = "trace")]
@@ -39538,11 +39538,10 @@ fn discover_anonymous_object_captures_at(
     file: &File,
     file_index: u32,
     syms: &mut PassTwoSymbols,
-    selected_declarations: Option<&std::collections::HashSet<Span>>,
-    selected_body_declarations: Option<&std::collections::HashSet<Span>>,
+    selected_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
+    selected_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     resolved_index: &crate::fir::ResolvedModuleIndex,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
 ) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
     let declarations = file
         .anonymous_object_classes
@@ -39560,17 +39559,15 @@ fn discover_anonymous_object_captures_at(
         resolved_index,
         &mut scratch,
         true,
-        selected_declarations,
-        selected_body_declarations,
+        selected_roots,
+        selected_bodies,
         active_declarations,
-        None,
-        selected_stable_bodies,
         false,
         None,
         None,
     );
     let mut discovered = info.anonymous_object_captures_by_class;
-    if selected_declarations.is_none() {
+    if selected_roots.is_none() {
         for declaration in declarations {
             discovered.entry(declaration).or_default();
         }
@@ -39581,10 +39578,9 @@ fn discover_anonymous_object_captures_at(
 pub(crate) fn discover_anonymous_object_captures_in_pass_two_file(
     file: &File,
     file_index: u32,
-    selected_declarations: &std::collections::HashSet<Span>,
-    selected_body_declarations: &std::collections::HashSet<Span>,
+    selected_roots: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
     symbols: &mut PassTwoSymbols,
     index: &crate::fir::ResolvedModuleIndex,
 ) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
@@ -39593,11 +39589,10 @@ pub(crate) fn discover_anonymous_object_captures_in_pass_two_file(
             file,
             file_index,
             symbols,
-            Some(selected_declarations),
-            Some(selected_body_declarations),
+            Some(selected_roots),
+            Some(selected_bodies),
             index,
             active_declarations,
-            Some(selected_stable_bodies),
         )
     })
 }
@@ -39624,11 +39619,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     resolved_index: &crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
     capture_discovery: bool,
-    selected_declarations: Option<&std::collections::HashSet<Span>>,
-    selected_body_declarations: Option<&std::collections::HashSet<Span>>,
+    selected_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
+    selected_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
-    selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     signature_defaults_only: bool,
     seeded_anonymous_captures: Option<&HashMap<DeclId, Vec<AnonymousObjectCapture>>>,
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
@@ -39643,13 +39636,17 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         streamed_cache,
         diags,
     );
-    c.selected_body_declarations = selected_body_declarations.cloned();
-    c.selected_stable_body_declarations = selected_stable_bodies.cloned();
+    c.selected_body_declarations = selected_bodies.cloned();
+    if signature_defaults_only {
+        c.pending_signature_default_expressions = selected_bodies
+            .map(|selected| active_declarations.selected_default_expressions(file, selected))
+            .unwrap_or_default();
+    }
     if let Some(captures) = seeded_anonymous_captures {
         c.discovered_anonymous_captures = captures.clone();
     }
     c.signature_defaults_only = signature_defaults_only;
-    if selected_stable_bodies.is_some_and(|declarations| {
+    if selected_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
                 resolved_index.declaration_suppresses_invisible_reference(*declaration)
@@ -39663,7 +39660,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.active_statement_suppressions
             .push("INVISIBLE_REFERENCE".to_string());
     }
-    if selected_stable_bodies.is_some_and(|declarations| {
+    if selected_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
                 resolved_index.declaration_suppresses_invisible_member(*declaration)
@@ -39672,7 +39669,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.active_statement_suppressions
             .push("INVISIBLE_MEMBER".to_string());
     }
-    if selected_stable_bodies.is_some_and(|declarations| {
+    if selected_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
                 resolved_index.declaration_suppresses_optional_declaration_usage(*declaration)
@@ -39726,16 +39723,21 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
         crate::trace_compiler!(
             "fir",
-            "capture discovery file={file_index} selected_roots={selected_declarations:?} owners={:?}",
+            "capture discovery file={file_index} selected_roots={selected_roots:?} owners={:?}",
             c.capture_scope.as_ref().map(|scope| {
                 scope
                     .declarations
                     .iter()
-                    .map(|declaration| (*declaration, match file.decl(*declaration) {
-                        Decl::Fun(function) => function.span,
-                        Decl::Class(class) => class.span,
-                        Decl::Property(property) => property.span,
-                    }))
+                    .map(|declaration| {
+                        (
+                            *declaration,
+                            match file.decl(*declaration) {
+                                Decl::Fun(function) => function.span,
+                                Decl::Class(class) => class.span,
+                                Decl::Property(property) => property.span,
+                            },
+                        )
+                    })
                     .collect::<Vec<_>>()
             }),
         );
@@ -39754,34 +39756,20 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         {
             continue;
         }
-        let declaration_span = match file.decl(d) {
-            Decl::Fun(function) => function.span,
-            Decl::Class(class) => class.span,
-            Decl::Property(property) => property.span,
-        };
-        // Inline work selects the stable outer declaration root, while capture discovery selects
-        // the exact nested classifier that owns the construction. During the scratch capture pass
-        // those are the same bounded source region even when their declaration ranges differ.
-        let selected_stable_root = signature_defaults_only.then(|| {
-            let stable = active_declarations.file_declaration(file, d);
-            crate::trace_compiler!(
-                "fir",
-                "Pass 1 default root candidate parser={d:?} stable={stable:?} selected={selected_stable_roots:?}",
-            );
-            stable.is_some_and(|declaration| {
-                selected_stable_roots.is_some_and(|roots| roots.contains(&declaration))
+        let stable_root = active_declarations.file_declaration(file, d);
+        let selected_root = selected_roots.is_none_or(|roots| {
+            stable_root.is_some_and(|declaration| {
+                roots.iter().any(|root| {
+                    *root == declaration
+                        || active_declarations.same_parser_declaration(*root, declaration)
+                })
             })
         });
-        if selected_stable_root == Some(false)
-            || (selected_stable_root.is_none()
-                && selected_declarations.is_some_and(|selected| {
-                    !selected.contains(&declaration_span)
-                        && !(capture_discovery
-                            && selected.iter().any(|root| {
-                                root.lo <= declaration_span.lo && declaration_span.hi <= root.hi
-                            }))
-                }))
-        {
+        crate::trace_compiler!(
+            "fir",
+            "checker root candidate parser={d:?} stable={stable_root:?} selected={selected_roots:?}",
+        );
+        if !selected_root {
             continue;
         }
         c.set_anonymous_lexical_class_context(d);
@@ -39796,7 +39784,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
     }
     if !capture_discovery {
-        if let Some(selected_bodies) = selected_stable_bodies {
+        if let Some(selected_bodies) = selected_bodies {
             let index = resolved_index;
             let direct_classes = selected_inline_owned_anonymous_classes(
                 file,
@@ -40216,8 +40204,6 @@ pub(crate) fn check_active_source_with_index(
             None,
             None,
             active_declarations,
-            None,
-            None,
             false,
             None,
             None,
@@ -40232,9 +40218,8 @@ pub(crate) fn check_active_source_with_index(
 pub(crate) fn check_preinferred_inline_declarations_at_with_index(
     file: &File,
     file_index: u32,
-    selected_declarations: &std::collections::HashSet<Span>,
-    selected_body_declarations: &std::collections::HashSet<Span>,
-    selected_stable_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_roots: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
     resolved_index: &crate::fir::ResolvedModuleIndex,
     syms: &SymbolTable,
@@ -40249,11 +40234,9 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
             resolved_index,
             diags,
             false,
-            Some(selected_declarations),
-            Some(selected_body_declarations),
+            Some(selected_roots),
+            Some(selected_bodies),
             active_declarations,
-            None,
-            Some(selected_stable_bodies),
             false,
             None,
             None,
@@ -40264,10 +40247,9 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
 pub(crate) fn check_selected_declarations_in_pass_two(
     file: &File,
     file_index: u32,
-    selected_declarations: &std::collections::HashSet<Span>,
-    selected_body_declarations: &std::collections::HashSet<Span>,
+    selected_roots: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
     symbols: &mut PassTwoSymbols,
     index: &crate::fir::ResolvedModuleIndex,
     streamed_cache: &crate::fir::StreamedModuleProjectionCache,
@@ -40282,11 +40264,9 @@ pub(crate) fn check_selected_declarations_in_pass_two(
             index,
             diags,
             false,
-            Some(selected_declarations),
-            Some(selected_body_declarations),
+            Some(selected_roots),
+            Some(selected_bodies),
             active_declarations,
-            None,
-            Some(selected_stable_bodies),
             false,
             Some(anonymous_captures),
             Some(streamed_cache),
@@ -40316,11 +40296,9 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             index,
             diags,
             false,
-            None,
-            None,
-            active_declarations,
             Some(selected_stable_roots),
             Some(selected_stable_defaults),
+            active_declarations,
             true,
             None,
             None,
@@ -40751,12 +40729,12 @@ struct Checker<'a> {
     /// these identities and never joins the fresh AST back to Pass-1 source ranges.
     active_declarations: &'a crate::fir::ActiveSourceDeclarations,
     diags: &'a mut DiagSink,
-    /// Exact inline declaration ranges selected for the temporary Pass-1 body check. `None` is an
-    /// ordinary authoritative file check; `Some` defers every other body to Pass 2.
-    selected_body_declarations: Option<std::collections::HashSet<Span>>,
-    /// Stable callable/classifier identities selected for Pass-1 default checking. This replaces
-    /// source ranges as the authority whenever `signature_defaults_only` is active.
-    selected_stable_body_declarations: Option<std::collections::HashSet<crate::fir::DeclarationId>>,
+    /// Exact stable declaration identities selected for this bounded body check. `None` is an
+    /// ordinary authoritative file check; `Some` defers every other body to another streaming unit.
+    selected_body_declarations: Option<std::collections::HashSet<crate::fir::DeclarationId>>,
+    /// Selected defaults not yet reached through their lexical declaration. These active parser
+    /// expression IDs die with the checker and replace the former source-coordinate cutoff.
+    pending_signature_default_expressions: std::collections::HashSet<ExprId>,
     /// This selected Pass-1 check owns only parameter-default expressions. Finalized signatures
     /// already supply callable result types, so no ordinary body may be reopened for inference.
     signature_defaults_only: bool,
@@ -42170,6 +42148,7 @@ impl<'a> Checker<'a> {
                     self.signature_default_expression_depth += 1;
                     self.expect_default_argument(scope, default, ty);
                     self.signature_default_expression_depth -= 1;
+                    self.pending_signature_default_expressions.remove(&default);
                 } else {
                     self.expect_default_argument(scope, default, ty);
                 }
@@ -57910,10 +57889,7 @@ impl<'a> Checker<'a> {
                 "'reified' type parameter is only allowed on an 'inline' function".to_string(),
             );
         }
-        let check_ordinary_body = self
-            .selected_body_declarations
-            .as_ref()
-            .is_none_or(|selected| selected.contains(&f.span));
+        let check_ordinary_body = self.selected_function_body(f);
         self.reset_body_mutations(
             (!self.signature_defaults_only && check_ordinary_body)
                 .then(|| fun_body_expr(&f.body))
@@ -58170,20 +58146,72 @@ impl<'a> Checker<'a> {
     ///
     /// Mirrors [`Self::check_class`]: the file walk delegates rather than inlining, so every
     /// declaration kind is reachable from any scope.
-    fn should_check_selected_fun_body(&self, body: &FunBody) -> bool {
+    fn selected_function_body(&self, function: &FunDecl) -> bool {
         self.selected_body_declarations
             .as_ref()
             .is_none_or(|selected| {
-                fun_body_expr(body)
-                    .and_then(|root| self.file.expr_span(root))
-                    .is_some_and(|span| selected.contains(&span))
+                self.active_declarations
+                    .selects_function(self.file, selected, function)
+            })
+    }
+
+    fn selected_property_declaration_body(&self, property: &PropDecl) -> bool {
+        self.selected_body_declarations
+            .as_ref()
+            .is_none_or(|selected| {
+                self.active_declarations
+                    .selects_property_declaration(self.file, selected, property)
+            })
+    }
+
+    fn selected_property_accessor_body(&self, property: &PropDecl, setter: bool) -> bool {
+        self.selected_body_declarations
+            .as_ref()
+            .is_none_or(|selected| {
+                self.active_declarations
+                    .selects_property_accessor(self.file, selected, property, setter)
+            })
+    }
+
+    fn selected_primary_constructor_body(&self, class: &ClassDecl) -> bool {
+        self.selected_body_declarations
+            .as_ref()
+            .is_none_or(|selected| {
+                self.active_declarations
+                    .selects_primary_constructor(self.file, selected, class)
+            })
+    }
+
+    fn selected_secondary_constructor_body(
+        &self,
+        class: &ClassDecl,
+        constructor: &SecondaryCtor,
+    ) -> bool {
+        self.selected_body_declarations
+            .as_ref()
+            .is_none_or(|selected| {
+                self.active_declarations.selects_secondary_constructor(
+                    self.file,
+                    selected,
+                    class,
+                    constructor,
+                )
+            })
+    }
+
+    fn selected_initializer_body(&self, expression: ExprId) -> bool {
+        self.selected_body_declarations
+            .as_ref()
+            .is_none_or(|selected| {
+                self.active_declarations
+                    .selects_expression(self.file, selected, expression)
             })
     }
 
     fn selected_signature_default_function(&self, function: &FunDecl) -> bool {
         self.signature_defaults_only
             && self
-                .selected_stable_body_declarations
+                .selected_body_declarations
                 .as_ref()
                 .is_some_and(|selected| {
                     selected.iter().any(|declaration| {
@@ -58203,7 +58231,7 @@ impl<'a> Checker<'a> {
                 .active_declarations
                 .source_member_declaration(self.file, self.resolved_index, member)
                 .is_some_and(|declaration| {
-                    self.selected_stable_body_declarations
+                    self.selected_body_declarations
                         .as_ref()
                         .is_some_and(|selected| selected.contains(&declaration))
                 })
@@ -58216,7 +58244,7 @@ impl<'a> Checker<'a> {
     ) -> bool {
         self.signature_defaults_only
             && self
-                .selected_stable_body_declarations
+                .selected_body_declarations
                 .as_ref()
                 .is_some_and(|selected| {
                     let Some(classifier) = self.active_declarations.classifier_declaration(class)
@@ -58245,10 +58273,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_property(&mut self, scope: &CheckerScope<'_>, p: &PropDecl, d: DeclId) {
-        let check_ordinary_property_body = self
-            .selected_body_declarations
-            .as_ref()
-            .is_none_or(|selected| selected.contains(&p.span));
+        let check_ordinary_property_body = self.selected_property_declaration_body(p);
         let suppression_depth =
             self.push_declaration_suppressions(scope, &p.annotations, &p.annotation_args);
         // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
@@ -58371,7 +58396,7 @@ impl<'a> Checker<'a> {
             if let Some(g) = p
                 .getter
                 .as_ref()
-                .filter(|body| self.should_check_selected_fun_body(body))
+                .filter(|_| self.selected_property_accessor_body(p, false))
             {
                 let field_ty = has_backing_field.then_some(storage_ty);
                 self.with_ret_field(prop_ty, field_ty, scope, |c| match g {
@@ -58391,7 +58416,7 @@ impl<'a> Checker<'a> {
                 .setter
                 .as_ref()
                 .and_then(|setter| setter.body.as_ref().map(|body| (setter, body)))
-                .filter(|(_, body)| self.should_check_selected_fun_body(body))
+                .filter(|_| self.selected_property_accessor_body(p, true))
             {
                 let field_ty = has_backing_field.then_some(storage_ty);
                 self.with_ret_field(Ty::Unit, field_ty, scope, |c| {
@@ -59969,10 +59994,7 @@ impl<'a> Checker<'a> {
                     let Some(field) = property.explicit_backing_field.as_ref() else {
                         continue;
                     };
-                    let selected = self
-                        .selected_body_declarations
-                        .as_ref()
-                        .is_none_or(|selected| selected.contains(&property.span));
+                    let selected = self.selected_property_declaration_body(property);
                     if !selected {
                         continue;
                     }
@@ -60272,9 +60294,7 @@ impl<'a> Checker<'a> {
                         default_owned_class
                             || self.selected_signature_default_source_member(source_member)
                     } else {
-                        self.selected_body_declarations
-                            .as_ref()
-                            .is_none_or(|selected| selected.contains(&method.span))
+                        self.selected_function_body(method)
                     };
                     if selected {
                         self.register_local_method_dependency(
@@ -60310,9 +60330,7 @@ impl<'a> Checker<'a> {
                     default_owned_class
                         || self.selected_signature_default_source_member(source_member)
                 } else {
-                    self.selected_body_declarations
-                        .as_ref()
-                        .is_none_or(|selected| selected.contains(&m.span))
+                    self.selected_function_body(m)
                 };
                 if !selected {
                     self.check_unselected_method_annotation_applications(scope, m);
@@ -60820,9 +60838,7 @@ impl<'a> Checker<'a> {
             let check_primary_constructor = if self.signature_defaults_only {
                 default_owned_class || self.selected_signature_default_constructor(d, None)
             } else {
-                self.selected_body_declarations
-                    .as_ref()
-                    .is_none_or(|selected| selected.contains(&cl.span))
+                self.selected_primary_constructor_body(cl)
             };
             let check_primary_constructor_body =
                 check_primary_constructor && (!self.signature_defaults_only || default_owned_class);
@@ -60855,9 +60871,7 @@ impl<'a> Checker<'a> {
                     default_owned_class
                         || self.selected_signature_default_constructor(d, Some(sc_index))
                 } else {
-                    self.selected_body_declarations
-                        .as_ref()
-                        .is_none_or(|selected| selected.contains(&sc.span))
+                    self.selected_secondary_constructor_body(cl, sc)
                 };
                 if !selected_constructor {
                     continue;
@@ -61341,33 +61355,13 @@ impl<'a> Checker<'a> {
                     }
                 }
                 for (bp_index, bp) in cl.body_props.iter().enumerate() {
-                    let selected_property =
-                        self.selected_body_declarations
-                            .as_ref()
-                            .is_none_or(|selected| {
-                                selected.contains(&bp.span)
-                                    || bp.getter.as_ref().is_some_and(|body| {
-                                        fun_body_expr(body)
-                                            .and_then(|root| self.file.expr_span(root))
-                                            .is_some_and(|span| selected.contains(&span))
-                                    })
-                                    || bp
-                                        .setter
-                                        .as_ref()
-                                        .and_then(|setter| setter.body.as_ref())
-                                        .is_some_and(|body| {
-                                            fun_body_expr(body)
-                                                .and_then(|root| self.file.expr_span(root))
-                                                .is_some_and(|span| selected.contains(&span))
-                                        })
-                            });
+                    let selected_property = self.selected_property_declaration_body(bp)
+                        || self.selected_property_accessor_body(bp, false)
+                        || self.selected_property_accessor_body(bp, true);
                     if !selected_property {
                         continue;
                     }
-                    let check_ordinary_property_body = self
-                        .selected_body_declarations
-                        .as_ref()
-                        .is_none_or(|selected| selected.contains(&bp.span));
+                    let check_ordinary_property_body = self.selected_property_declaration_body(bp);
                     let mut body_inferred_property_type = None;
                     // The property's own type parameters get a rung of their own, so they retire
                     // with the iteration.
@@ -61711,7 +61705,7 @@ impl<'a> Checker<'a> {
                         if let Some(getter) = bp
                             .getter
                             .as_ref()
-                            .filter(|body| self.should_check_selected_fun_body(body))
+                            .filter(|_| self.selected_property_accessor_body(bp, false))
                         {
                             self.with_ret_field(prop_ty, field_ty, scope, |c| match getter {
                                 FunBody::Expr(g) => {
@@ -61728,7 +61722,7 @@ impl<'a> Checker<'a> {
                             if let Some(body) = setter
                                 .body
                                 .as_ref()
-                                .filter(|body| self.should_check_selected_fun_body(body))
+                                .filter(|_| self.selected_property_accessor_body(bp, true))
                             {
                                 self.with_ret_field(Ty::Unit, field_ty, scope, |c| {
                                     let setter_scope =
@@ -61782,14 +61776,7 @@ impl<'a> Checker<'a> {
                 }
                 for step in &cl.init_order {
                     if let ClassInit::Block(b) = step {
-                        let selected =
-                            self.selected_body_declarations
-                                .as_ref()
-                                .is_none_or(|selected| {
-                                    self.file
-                                        .expr_span(*b)
-                                        .is_some_and(|span| selected.contains(&span))
-                                });
+                        let selected = self.selected_initializer_body(*b);
                         if selected {
                             self.expr_statement(scope, *b);
                         }
@@ -69829,19 +69816,8 @@ impl<'a> Checker<'a> {
             // body throws before its trailing would be typed by the dead trailing, and the lowerer
             // would emit that dead code (an unframed branch target → VerifyError).
             let mut diverged = false;
-            let signature_default_cutoff = self
-                .signature_defaults_only
-                .then(|| {
-                    self.selected_stable_body_declarations
-                        .iter()
-                        .flatten()
-                        .filter_map(|declaration| {
-                            self.resolved_index.declaration_range(*declaration)
-                        })
-                        .map(|range| range.hi)
-                        .max()
-                })
-                .flatten();
+            let stop_after_selected_defaults = self.signature_defaults_only
+                && !self.pending_signature_default_expressions.is_empty();
             let mut signature_defaults_complete = false;
             for s in &stmts {
                 let unreachable = diverged;
@@ -69936,8 +69912,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if signature_default_cutoff
-                    .is_some_and(|cutoff| self.file.stmt_spans[s.0 as usize].hi >= cutoff)
+                if stop_after_selected_defaults
+                    && self.pending_signature_default_expressions.is_empty()
                 {
                     signature_defaults_complete = true;
                     break;
