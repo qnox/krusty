@@ -2001,6 +2001,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   mask.) Tests: `tests/omitted_default_generic_overload_e2e.rs` (the shape as a krusty-compiled
   library with both facades and the class; checked and run),
   `streaming_signature_tests::a_generic_call_omitting_a_defaulted_trailing_parameter_selects_in_pass_one`.
+- **A signature-pass member call binds a result-only formal from the parameter it fills.** mockk's
+  `any()` is a generic member of the lambda's receiver scope (`fun <T : Any> any(): T`) whose `T` is
+  fixed only by the parameter it fills: `coEvery { repo.listReapable(any()) }` inside
+  `= runTest { … }` selects `listReapable(cutoff: Instant)` with `T := Instant`. The member
+  expectation phase (above) already hands `any()` that parameter, but the paths that finish a
+  selected member — the demanded-signature path (`apply_demanded_member`) and the implicit-receiver
+  member return — ignored it and returned the open `T`, so the enclosing call reported `none of the
+  following candidates is applicable` on every such stub (eight in one real test source set,
+  more in two others). Both paths now unify the selected result with the expectation for formals
+  the arguments left open, as the source-callable path already did; an explicit receiver
+  (`scope.any()`) reaches the same rule because a member-call argument now counts as a contextual
+  call and the expectation-aware evaluator has a member-call arm. Test:
+  `streaming_signature_tests::an_implicit_receiver_generic_member_binds_its_result_from_the_parameter_it_fills`
+  (implicit and explicit receivers, three parameter shapes).
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
