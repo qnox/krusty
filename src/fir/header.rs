@@ -75,111 +75,111 @@ fn classifier_identity(
     }))
 }
 
-fn anonymous_property_owner(
+fn expression_contains_classifier(
+    file: &File,
+    root: crate::ast::ExprId,
+    classifier: DeclId,
+) -> bool {
+    let mut expressions = vec![root];
+    let mut statements = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = expressions.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if file.anonymous_object_classes.get(&expression) == Some(&classifier) {
+            return true;
+        }
+        file.any_child_expr(
+            expression,
+            &mut |child| {
+                expressions.push(child);
+                false
+            },
+            &mut |child| {
+                statements.push(child);
+                false
+            },
+        );
+        while let Some(statement) = statements.pop() {
+            if file.local_class_decls.get(&statement) == Some(&classifier) {
+                return true;
+            }
+            file.any_child_stmt(statement, &mut |child| {
+                expressions.push(child);
+                false
+            });
+        }
+    }
+    false
+}
+
+fn body_contains_classifier(file: &File, body: &FunBody, classifier: DeclId) -> bool {
+    match body {
+        FunBody::Expr(expression) | FunBody::Block(expression) => {
+            expression_contains_classifier(file, *expression, classifier)
+        }
+        FunBody::None => false,
+    }
+}
+
+fn function_contains_classifier(file: &File, function: &FunDecl, classifier: DeclId) -> bool {
+    let mut contains = false;
+    file.any_fun_expr(function, &mut |root| {
+        contains = expression_contains_classifier(file, root, classifier);
+        contains
+    });
+    contains
+}
+
+fn property_classifier_owner(
     file: &File,
     source: SourceFileId,
     ids: &mut DeclarationIds,
     property: &PropDecl,
     owner: Option<DeclarationId>,
     sibling: u32,
-    anonymous: Span,
-) -> Option<(u32, DeclarationId)> {
-    let contains = |outer: Span| outer.lo <= anonymous.lo && anonymous.hi <= outer.hi;
-    let body_range = |body: &FunBody| match body {
-        FunBody::Expr(expression) | FunBody::Block(expression) => file.expr_span(*expression),
-        FunBody::None => None,
+    classifier: DeclId,
+) -> Option<DeclarationId> {
+    let property_id = |ids: &mut DeclarationIds| {
+        ids.intern(DeclarationAnchor {
+            source,
+            range: property.span,
+            owner,
+            kind: DeclarationKind::Property,
+            sibling,
+        })
     };
-    if let Some(range) = property
-        .getter
-        .as_ref()
-        .and_then(body_range)
-        .filter(|range| contains(*range))
-    {
-        let property_id = ids.intern(DeclarationAnchor {
+    for (accessor_sibling, body) in property.getter.iter().map(|body| (0, body)).chain(
+        property
+            .setter
+            .iter()
+            .filter_map(|setter| setter.body.as_ref().map(|body| (1, body))),
+    ) {
+        if !body_contains_classifier(file, body, classifier) {
+            continue;
+        }
+        let range = match body {
+            FunBody::Expr(expression) | FunBody::Block(expression) => {
+                file.expr_span(*expression)?
+            }
+            FunBody::None => unreachable!("a body without syntax cannot contain a classifier"),
+        };
+        let property = property_id(ids);
+        return Some(ids.intern(DeclarationAnchor {
             source,
-            range: property.span,
-            owner,
-            kind: DeclarationKind::Property,
-            sibling,
-        });
-        return Some((
-            range.hi - range.lo,
-            ids.intern(DeclarationAnchor {
-                source,
-                range,
-                owner: Some(property_id),
-                kind: DeclarationKind::Accessor,
-                sibling: 0,
-            }),
-        ));
-    }
-    if let Some(range) = property
-        .setter
-        .as_ref()
-        .and_then(|setter| setter.body.as_ref())
-        .and_then(body_range)
-        .filter(|range| contains(*range))
-    {
-        let property_id = ids.intern(DeclarationAnchor {
-            source,
-            range: property.span,
-            owner,
-            kind: DeclarationKind::Property,
-            sibling,
-        });
-        return Some((
-            range.hi - range.lo,
-            ids.intern(DeclarationAnchor {
-                source,
-                range,
-                owner: Some(property_id),
-                kind: DeclarationKind::Accessor,
-                sibling: 1,
-            }),
-        ));
+            range,
+            owner: Some(property),
+            kind: DeclarationKind::Accessor,
+            sibling: accessor_sibling,
+        }));
     }
     property
         .init
         .into_iter()
         .chain(property.delegate)
-        .filter_map(|expression| file.expr_span(expression))
-        .filter(|range| contains(*range))
-        .min_by_key(|range| range.hi - range.lo)
-        .map(|range| {
-            let property_id = ids.intern(DeclarationAnchor {
-                source,
-                range: property.span,
-                owner,
-                kind: DeclarationKind::Property,
-                sibling,
-            });
-            (range.hi - range.lo, property_id)
-        })
-}
-
-fn property_contains_anonymous(file: &File, property: &PropDecl, anonymous: Span) -> bool {
-    let contains = |outer: Span| outer.lo <= anonymous.lo && anonymous.hi <= outer.hi;
-    let body_range = |body: &FunBody| match body {
-        FunBody::Expr(expression) | FunBody::Block(expression) => file.expr_span(*expression),
-        FunBody::None => None,
-    };
-    property
-        .getter
-        .as_ref()
-        .and_then(body_range)
-        .is_some_and(contains)
-        || property
-            .setter
-            .as_ref()
-            .and_then(|setter| setter.body.as_ref())
-            .and_then(body_range)
-            .is_some_and(contains)
-        || property
-            .init
-            .into_iter()
-            .chain(property.delegate)
-            .filter_map(|expression| file.expr_span(expression))
-            .any(contains)
+        .any(|expression| expression_contains_classifier(file, expression, classifier))
+        .then(|| property_id(ids))
 }
 
 fn local_executable_owner(
@@ -189,34 +189,46 @@ fn local_executable_owner(
     declaration: DeclId,
     classifier_ids: &std::collections::HashMap<DeclId, DeclarationId>,
 ) -> Option<DeclarationId> {
-    let local = match file.decl(declaration) {
-        Decl::Class(class) => class.span,
-        Decl::Fun(_) | Decl::Property(_) => return None,
-    };
-    let mut property_candidates = Vec::new();
+    if !matches!(file.decl(declaration), Decl::Class(_)) {
+        return None;
+    }
     for (sibling, candidate) in file.decls.iter().copied().enumerate() {
         match file.decl(candidate) {
             Decl::Property(property) => {
-                if let Some(candidate) = anonymous_property_owner(
+                if let Some(owner) = property_classifier_owner(
                     file,
                     source,
                     ids,
                     property,
                     None,
                     u32::try_from(sibling).expect("too many file declarations"),
-                    local,
+                    declaration,
                 ) {
-                    property_candidates.push(candidate);
+                    return Some(owner);
                 }
             }
             Decl::Class(class) => {
-                if !class
-                    .body_props
-                    .iter()
-                    .any(|property| property_contains_anonymous(file, property, local))
-                {
+                let Some((property_sibling, property)) =
+                    class.body_props.iter().enumerate().find(|(_, property)| {
+                        property
+                            .getter
+                            .iter()
+                            .chain(
+                                property
+                                    .setter
+                                    .iter()
+                                    .filter_map(|setter| setter.body.as_ref()),
+                            )
+                            .any(|body| body_contains_classifier(file, body, declaration))
+                            || property.init.into_iter().chain(property.delegate).any(
+                                |expression| {
+                                    expression_contains_classifier(file, expression, declaration)
+                                },
+                            )
+                    })
+                else {
                     continue;
-                }
+                };
                 let class_id = classifier_ids
                     .get(&candidate)
                     .copied()
@@ -224,126 +236,57 @@ fn local_executable_owner(
                 let Some(class_id) = class_id else {
                     continue;
                 };
-                for (property_sibling, property) in class.body_props.iter().enumerate() {
-                    if let Some(candidate) = anonymous_property_owner(
-                        file,
-                        source,
-                        ids,
-                        property,
-                        Some(class_id),
-                        u32::try_from(property_sibling).expect("too many class properties"),
-                        local,
-                    ) {
-                        property_candidates.push(candidate);
-                    }
+                if let Some(owner) = property_classifier_owner(
+                    file,
+                    source,
+                    ids,
+                    property,
+                    Some(class_id),
+                    u32::try_from(property_sibling).expect("too many class properties"),
+                    declaration,
+                ) {
+                    return Some(owner);
                 }
             }
             Decl::Fun(_) => {}
         }
     }
-    if let Some((_, owner)) = property_candidates
-        .into_iter()
-        .min_by_key(|(length, _)| *length)
-    {
-        return Some(owner);
-    }
 
-    let contains = |outer: Span| outer.lo <= local.lo && local.hi <= outer.hi;
-    let mut function_candidates = Vec::new();
     for (sibling, candidate) in file.decls.iter().copied().enumerate() {
         match file.decl(candidate) {
-            Decl::Fun(function) if contains(function.span) => {
-                function_candidates.push((
-                    function.span.hi - function.span.lo,
-                    ids.intern(DeclarationAnchor {
-                        source,
-                        range: function.span,
-                        owner: None,
-                        kind: DeclarationKind::Function,
-                        sibling: u32::try_from(sibling).expect("too many file declarations"),
-                    }),
-                ));
+            Decl::Fun(function) if function_contains_classifier(file, function, declaration) => {
+                return Some(ids.intern(DeclarationAnchor {
+                    source,
+                    range: function.span,
+                    owner: None,
+                    kind: DeclarationKind::Function,
+                    sibling: u32::try_from(sibling).expect("too many file declarations"),
+                }));
             }
             Decl::Class(class) => {
-                let containing_methods = class
-                    .methods
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, function)| contains(function.span))
-                    .collect::<Vec<_>>();
-                if containing_methods.is_empty() {
+                let Some((method_sibling, function)) =
+                    class.methods.iter().enumerate().find(|(_, function)| {
+                        function_contains_classifier(file, function, declaration)
+                    })
+                else {
                     continue;
-                }
+                };
                 let class_id = classifier_ids
                     .get(&candidate)
                     .copied()
-                    .or_else(|| classifier_identity(file, source, ids, candidate));
-                let Some(class_id) = class_id else {
-                    continue;
-                };
-                for (method_sibling, function) in containing_methods {
-                    function_candidates.push((
-                        function.span.hi - function.span.lo,
-                        ids.intern(DeclarationAnchor {
-                            source,
-                            range: function.span,
-                            owner: Some(class_id),
-                            kind: DeclarationKind::Function,
-                            sibling: u32::try_from(method_sibling).expect("too many class methods"),
-                        }),
-                    ));
-                }
+                    .or_else(|| classifier_identity(file, source, ids, candidate))?;
+                return Some(ids.intern(DeclarationAnchor {
+                    source,
+                    range: function.span,
+                    owner: Some(class_id),
+                    kind: DeclarationKind::Function,
+                    sibling: u32::try_from(method_sibling).expect("too many class methods"),
+                }));
             }
             Decl::Fun(_) | Decl::Property(_) => {}
         }
     }
-    if let Some((_, owner)) = function_candidates
-        .into_iter()
-        .min_by_key(|(length, _)| *length)
-    {
-        return Some(owner);
-    }
-
-    match file
-        .anonymous_object_enclosing_functions
-        .get(&declaration)?
-    {
-        crate::ast::AnonymousEnclosingFunction::TopLevel(function) => {
-            let Decl::Fun(function_decl) = file.decl(*function) else {
-                return None;
-            };
-            let sibling = u32::try_from(
-                file.decls
-                    .iter()
-                    .position(|candidate| candidate == function)?,
-            )
-            .ok()?;
-            Some(ids.intern(DeclarationAnchor {
-                source,
-                range: function_decl.span,
-                owner: None,
-                kind: DeclarationKind::Function,
-                sibling,
-            }))
-        }
-        crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
-            let owner = classifier_ids
-                .get(class)
-                .copied()
-                .or_else(|| classifier_identity(file, source, ids, *class))?;
-            let Decl::Class(class_decl) = file.decl(*class) else {
-                return None;
-            };
-            let function = class_decl.methods.get(*method as usize)?;
-            Some(ids.intern(DeclarationAnchor {
-                source,
-                range: function.span,
-                owner: Some(owner),
-                kind: DeclarationKind::Function,
-                sibling: *method,
-            }))
-        }
-    }
+    None
 }
 
 fn nested_classifier_owners(
