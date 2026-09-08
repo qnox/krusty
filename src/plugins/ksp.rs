@@ -252,7 +252,7 @@ impl Default for KspHost {
 
 /// Lift `IrClass`es + an annotation side table into the `KsClass` symbol view a processor reads.
 /// (Production: an adapter over the resolved `SymbolTable`/`TypeInfo`, exposed via the shim.)
-pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext<'_>) -> Vec<KsClass> {
+pub fn symbols_from_ir(ir: &IrFile, ctx: &super::PluginContext) -> Vec<KsClass> {
     ir.classes
         .iter()
         .enumerate()
@@ -338,7 +338,7 @@ mod tests {
         }
     }
 
-    fn annotated_foo() -> (IrFile, PluginContext<'static>) {
+    fn annotated_foo() -> (IrFile, PluginContext) {
         let mut ir = IrFile::default();
         let id = ir.add_class(synthetic_class("demo/Foo"));
         let mut ctx = PluginContext::default();

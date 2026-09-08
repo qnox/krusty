@@ -27,12 +27,12 @@ pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
 pub const KSERIALIZER_FQ: &str = "kotlinx/serialization/KSerializer";
 const GENERATED_SERIALIZER_FQ: &str = "kotlinx/serialization/internal/GeneratedSerializer";
 
-fn custom_serializer_of(ctx: &PluginContext<'_>, ir: &IrFile, class_id: ClassId) -> Option<String> {
+fn custom_serializer_of(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> Option<String> {
     ctx.class_annotation_class_literal_internal(ir, class_id, "Serializable")
 }
 
 fn field_serializer_of(
-    ctx: &PluginContext<'_>,
+    ctx: &PluginContext,
     ir: &IrFile,
     class_id: ClassId,
     property: &str,
@@ -41,7 +41,7 @@ fn field_serializer_of(
 }
 
 fn serial_name_of(
-    ctx: &PluginContext<'_>,
+    ctx: &PluginContext,
     ir: &IrFile,
     class_id: ClassId,
     property: &str,
@@ -50,7 +50,7 @@ fn serial_name_of(
 }
 
 fn property_is_contextual(
-    ctx: &PluginContext<'_>,
+    ctx: &PluginContext,
     ir: &IrFile,
     class_id: ClassId,
     property: &str,
@@ -564,7 +564,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
 }
 
 /// The target descriptor for a property getter result.
-fn ty_descriptor(ctx: &PluginContext<'_>, ty: &Ty) -> Option<String> {
+fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
     ctx.target_type_descriptor(*ty)
 }
 
@@ -1308,7 +1308,7 @@ impl SerializationPlugin {
     /// over its `@Serializable` direct subclasses — the way kotlinc compiles a sealed polymorphic base.
     fn add_sealed_serializer_accessor(
         ir: &mut IrFile,
-        ctx: &PluginContext<'_>,
+        ctx: &PluginContext,
         class_id: u32,
         class_fq: &str,
     ) {
@@ -1603,7 +1603,7 @@ impl IrPlugin for SerializationPlugin {
     }
 
     /// Generate the `$serializer` object, its members, and the `serializer()` accessor.
-    fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext<'_>) {
+    fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for class_id in ctx.classes_with_simple("Serializable") {
             let class_fq = ir.classes[class_id as usize].fq_name();
             // `@Serializable(with = X::class)`: no generated `$serializer` — `serializer()` returns an
@@ -2242,7 +2242,7 @@ impl IrPlugin for SerializationPlugin {
 
     /// IR backend generation: fill `childSerializers` with a real per-field element-serializer array
     /// (arity == field count), and `serialize`/`deserialize` with placeholder `return` bodies.
-    fn transform_bodies(&self, ir: &mut IrFile, ctx: &PluginContext<'_>) {
+    fn transform_bodies(&self, ir: &mut IrFile, ctx: &PluginContext) {
         // Specialize the generic reified-serialization placeholders core emitted in user bodies
         // (`fmt.encodeToString(x)` / `fmt.decodeFromString<C>(s)`) into the concrete `StringFormat`
         // member calls — the kotlinx descriptors live here, not in core lowering.
@@ -3182,7 +3182,7 @@ mod tests {
         Some(crate::jvm::names::type_descriptor(ty))
     }
 
-    fn plugin_context() -> PluginContext<'static> {
+    fn plugin_context() -> PluginContext {
         PluginContext::default().with_target_type_descriptor(jvm_type_descriptor)
     }
 
@@ -3297,10 +3297,7 @@ mod tests {
     }
 
     /// Build `@Serializable class <name>(<one val per field type>)` as IR + an annotation table.
-    fn serializable_class(
-        name: &str,
-        field_types: &[&str],
-    ) -> (IrFile, PluginContext<'static>, u32) {
+    fn serializable_class(name: &str, field_types: &[&str]) -> (IrFile, PluginContext, u32) {
         let mut ir = IrFile::default();
         let mut c = synthetic_class(name);
         c.fields = field_types
@@ -3316,7 +3313,7 @@ mod tests {
         (ir, ctx, id)
     }
 
-    fn run(ir: &mut IrFile, ctx: &PluginContext<'_>) {
+    fn run(ir: &mut IrFile, ctx: &PluginContext) {
         let mut host = PluginHost::new();
         host.register(Box::new(SerializationPlugin::default()));
         host.run(ir, ctx);

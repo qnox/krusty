@@ -108,35 +108,29 @@ fn annotation_type_simple_name(annotation: TypeName) -> String {
 /// Contexts are built from checked common IR and own their compact annotation index; parser syntax
 /// and source spellings never cross the plugin boundary.
 
-pub struct PluginContext<'a> {
-    pub class_annotations: HashMap<ClassId, AnnotationList<'a>>,
+pub struct PluginContext {
+    pub class_annotations: HashMap<ClassId, AnnotationList>,
     target_type_descriptor: fn(Ty) -> Option<String>,
 }
 
 #[derive(Clone, Debug)]
-pub enum AnnotationList<'a> {
-    Borrowed(&'a [TypeName]),
-    Owned(Vec<TypeName>),
-}
+pub struct AnnotationList(Vec<TypeName>);
 
-impl<'a> AnnotationList<'a> {
+impl AnnotationList {
     pub fn as_slice(&self) -> &[TypeName] {
-        match self {
-            AnnotationList::Borrowed(annotations) => annotations,
-            AnnotationList::Owned(annotations) => annotations,
-        }
+        &self.0
     }
 }
 
-impl<'a> From<&'a [TypeName]> for AnnotationList<'a> {
-    fn from(value: &'a [TypeName]) -> Self {
-        AnnotationList::Borrowed(value)
+impl From<&[TypeName]> for AnnotationList {
+    fn from(value: &[TypeName]) -> Self {
+        AnnotationList(value.to_vec())
     }
 }
 
-impl From<Vec<String>> for AnnotationList<'_> {
+impl From<Vec<String>> for AnnotationList {
     fn from(value: Vec<String>) -> Self {
-        AnnotationList::Owned(
+        AnnotationList(
             value
                 .into_iter()
                 .map(|annotation| crate::types::type_name(&annotation.replace('.', "/")))
@@ -145,13 +139,13 @@ impl From<Vec<String>> for AnnotationList<'_> {
     }
 }
 
-impl Default for AnnotationList<'_> {
+impl Default for AnnotationList {
     fn default() -> Self {
-        AnnotationList::Owned(Vec::new())
+        AnnotationList(Vec::new())
     }
 }
 
-impl Default for PluginContext<'_> {
+impl Default for PluginContext {
     fn default() -> Self {
         Self {
             class_annotations: HashMap::new(),
@@ -160,7 +154,7 @@ impl Default for PluginContext<'_> {
     }
 }
 
-impl Clone for PluginContext<'_> {
+impl Clone for PluginContext {
     fn clone(&self) -> Self {
         Self {
             class_annotations: self.class_annotations.clone(),
@@ -169,7 +163,7 @@ impl Clone for PluginContext<'_> {
     }
 }
 
-impl<'a> PluginContext<'a> {
+impl PluginContext {
     pub fn with_target_type_descriptor(mut self, f: fn(Ty) -> Option<String>) -> Self {
         self.target_type_descriptor = f;
         self
@@ -340,7 +334,7 @@ impl<'a> PluginContext<'a> {
     /// Build a plugin context exclusively from checked common IR. All annotation arguments have
     /// already been resolved and folded by the frontend; no parser declaration or source spelling
     /// is available to plugin realization.
-    pub fn from_ir(ir: &IrFile) -> PluginContext<'static> {
+    pub fn from_ir(ir: &IrFile) -> PluginContext {
         let mut context = PluginContext::default();
         for (class, declaration) in ir.classes.iter().enumerate() {
             let annotations = declaration
@@ -351,7 +345,7 @@ impl<'a> PluginContext<'a> {
             if !annotations.is_empty() {
                 context
                     .class_annotations
-                    .insert(class as u32, AnnotationList::Owned(annotations));
+                    .insert(class as u32, AnnotationList(annotations));
             }
         }
         context
@@ -403,13 +397,13 @@ pub trait IrPlugin {
     }
 
     /// Add interfaces or superclasses to existing classes.
-    fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext<'_>) {}
+    fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
     /// Synthesize new classes or members.
-    fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext<'_>) {}
+    fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
     /// Fill in or rewrite method bodies after IR lowering.
-    fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext<'_>) {}
+    fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 }
 
 /// Run native backend plugins from frontend-checked common IR only. Production streaming emission
@@ -486,7 +480,7 @@ impl PluginHost {
         plans
     }
 
-    pub fn run(&self, ir: &mut IrFile, ctx: &PluginContext<'_>) {
+    pub fn run(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for p in &self.plugins {
             p.generate_supertypes(ir, ctx);
         }
@@ -514,7 +508,7 @@ mod tests {
         fn name(&self) -> &str {
             "touch"
         }
-        fn generate_declarations(&self, ir: &mut IrFile, _ctx: &PluginContext<'_>) {
+        fn generate_declarations(&self, ir: &mut IrFile, _ctx: &PluginContext) {
             ir.add_class(synthetic_class("demo/Generated"));
         }
     }
