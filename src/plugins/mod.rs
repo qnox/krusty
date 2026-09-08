@@ -104,23 +104,12 @@ fn annotation_type_simple_name(annotation: TypeName) -> String {
     annotation.segment()
 }
 
-fn source_annotation_simple_name(annotation: &crate::ast::AnnotationRef) -> &str {
-    annotation
-        .name
-        .rsplit('.')
-        .next()
-        .unwrap_or(&annotation.name)
-}
-
 /// Applied annotations keyed by `ClassId`, plus target services required by native plugins.
-/// Streaming production contexts are built from checked common IR and own their compact annotation
-/// index. `source_file` is a legacy/test adapter only and is never present during streamed emission.
-type ClassNameResolver<'a> = dyn Fn(&str) -> Option<TypeName> + 'a;
+/// Contexts are built from checked common IR and own their compact annotation index; parser syntax
+/// and source spellings never cross the plugin boundary.
 
 pub struct PluginContext<'a> {
     pub class_annotations: HashMap<ClassId, AnnotationList<'a>>,
-    source_file: Option<&'a crate::ast::File>,
-    class_name_resolver: Option<&'a ClassNameResolver<'a>>,
     target_type_descriptor: fn(Ty) -> Option<String>,
 }
 
@@ -166,8 +155,6 @@ impl Default for PluginContext<'_> {
     fn default() -> Self {
         Self {
             class_annotations: HashMap::new(),
-            source_file: None,
-            class_name_resolver: None,
             target_type_descriptor: no_target_type_descriptor,
         }
     }
@@ -177,8 +164,6 @@ impl Clone for PluginContext<'_> {
     fn clone(&self) -> Self {
         Self {
             class_annotations: self.class_annotations.clone(),
-            source_file: self.source_file,
-            class_name_resolver: self.class_name_resolver,
             target_type_descriptor: self.target_type_descriptor,
         }
     }
@@ -230,12 +215,6 @@ impl<'a> PluginContext<'a> {
             .is_some_and(|anns| anns.as_slice().iter().any(|a| a == fq))
     }
 
-    fn source_class(&self, ir: &IrFile, class: ClassId) -> Option<&'a crate::ast::ClassDecl> {
-        let file = self.source_file?;
-        let internal = ir.classes.get(class as usize)?.fq_name();
-        source_class_by_internal(file, &internal)
-    }
-
     fn ir_property_annotations<'ir>(
         &self,
         ir: &'ir IrFile,
@@ -259,56 +238,22 @@ impl<'a> PluginContext<'a> {
             .find(|annotation| annotation.internal.segment() == name)
     }
 
-    fn class_literal_internal(
-        &self,
-        file: &crate::ast::File,
-        e: crate::ast::ExprId,
-    ) -> Option<String> {
-        let crate::ast::Expr::CallableRef {
-            receiver: Some(r),
-            name,
-        } = file.expr(e)
-        else {
-            return None;
-        };
-        if name != "class" {
-            return None;
-        }
-        let crate::ast::Expr::Name(x) = file.expr(*r) else {
-            return None;
-        };
-        self.class_name_resolver
-            .and_then(|resolve| resolve(x))
-            .map(TypeName::render)
-            .or_else(|| Some(source_internal(file, x)))
-    }
-
     pub fn class_annotation_class_literal_internal(
         &self,
         ir: &IrFile,
         class: ClassId,
         annotation: &str,
     ) -> Option<String> {
-        if let Some(value) = ir
+        match ir
             .classes
             .get(class as usize)
             .and_then(|class| Self::annotation_named(&class.applied_annotations, annotation))
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)
         {
-            return match value {
-                crate::ir::AnnoValue::Class(classifier) => Some(classifier.render()),
-                _ => None,
-            };
+            Some(crate::ir::AnnoValue::Class(classifier)) => Some(classifier.render()),
+            Some(_) | None => None,
         }
-        let file = self.source_file?;
-        let c = self.source_class(ir, class)?;
-        let i = c
-            .annotations
-            .iter()
-            .position(|a| source_annotation_simple_name(a) == annotation)?;
-        let arg = c.annotation_args.get(i).and_then(|args| args.first())?;
-        self.class_literal_internal(file, *arg)
     }
 
     pub fn property_annotation_class_literal_internal(
@@ -318,29 +263,15 @@ impl<'a> PluginContext<'a> {
         property: &str,
         annotation: &str,
     ) -> Option<String> {
-        if let Some(value) = self
+        match self
             .ir_property_annotations(ir, class, property)
             .and_then(|annotations| Self::annotation_named(annotations, annotation))
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)
         {
-            return match value {
-                crate::ir::AnnoValue::Class(classifier) => Some(classifier.render()),
-                _ => None,
-            };
+            Some(crate::ir::AnnoValue::Class(classifier)) => Some(classifier.render()),
+            Some(_) | None => None,
         }
-        let file = self.source_file?;
-        let p = self
-            .source_class(ir, class)?
-            .props
-            .iter()
-            .find(|p| p.name == property)?;
-        let i = p
-            .annotations
-            .iter()
-            .position(|a| source_annotation_simple_name(a) == annotation)?;
-        let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
-        self.class_literal_internal(file, *arg)
     }
 
     pub fn property_annotation_const_string(
@@ -350,31 +281,17 @@ impl<'a> PluginContext<'a> {
         property: &str,
         annotation: &str,
     ) -> Option<crate::kt_string::KtString> {
-        if let Some(value) = self
+        match self
             .ir_property_annotations(ir, class, property)
             .and_then(|annotations| Self::annotation_named(annotations, annotation))
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)
         {
-            return match value {
-                crate::ir::AnnoValue::Const(crate::ir::IrConst::String(value)) => {
-                    Some(value.clone())
-                }
-                _ => None,
-            };
+            Some(crate::ir::AnnoValue::Const(crate::ir::IrConst::String(value))) => {
+                Some(value.clone())
+            }
+            Some(_) | None => None,
         }
-        let file = self.source_file?;
-        let p = self
-            .source_class(ir, class)?
-            .props
-            .iter()
-            .find(|p| p.name == property)?;
-        let i = p
-            .annotations
-            .iter()
-            .position(|a| source_annotation_simple_name(a) == annotation)?;
-        let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
-        file.const_string_value(*arg)
     }
 
     pub fn property_has_annotation_simple(
@@ -384,19 +301,8 @@ impl<'a> PluginContext<'a> {
         property: &str,
         annotation: &str,
     ) -> bool {
-        if self
-            .ir_property_annotations(ir, class, property)
+        self.ir_property_annotations(ir, class, property)
             .is_some_and(|annotations| Self::annotation_named(annotations, annotation).is_some())
-        {
-            return true;
-        }
-        self.source_class(ir, class)
-            .and_then(|c| c.props.iter().find(|p| p.name == property))
-            .is_some_and(|p| {
-                p.annotations
-                    .iter()
-                    .any(|a| source_annotation_simple_name(a) == annotation)
-            })
     }
 
     pub fn property_canonical_type_name(
@@ -405,8 +311,7 @@ impl<'a> PluginContext<'a> {
         class: ClassId,
         property: &str,
     ) -> Option<String> {
-        if let Some(ty) = ir
-            .classes
+        ir.classes
             .get(class as usize)
             .and_then(|class| {
                 class
@@ -415,16 +320,7 @@ impl<'a> PluginContext<'a> {
                     .find(|candidate| candidate.name == property)
             })
             .map(|property| property.ty)
-        {
-            return ty.non_null().kotlin_class_internal().map(TypeName::render);
-        }
-        let file = self.source_file?;
-        let p = self
-            .source_class(ir, class)?
-            .props
-            .iter()
-            .find(|p| p.name == property)?;
-        Some(canonical_type_name(file, &p.ty.name))
+            .and_then(|ty| ty.non_null().kotlin_class_internal().map(TypeName::render))
     }
 
     pub fn file_annotation_mentions_canonical_type(
@@ -433,28 +329,12 @@ impl<'a> PluginContext<'a> {
         annotation: &str,
         canonical_type: &str,
     ) -> bool {
-        if let Some(annotation) = Self::annotation_named(&ir.file_annotations, annotation) {
-            return annotation
+        Self::annotation_named(&ir.file_annotations, annotation).is_some_and(|annotation| {
+            annotation
                 .values
                 .iter()
-                .any(|(_, value)| annotation_value_mentions_class(value, canonical_type));
-        }
-        let Some(file) = self.source_file else {
-            return false;
-        };
-        file.file_annotations
-            .iter()
-            .filter(|(ann, _)| source_annotation_simple_name(ann) == annotation)
-            .flat_map(|(_, args)| args)
-            .filter_map(|&arg| class_literal_name(file, arg))
-            .map(|name| canonical_type_name(file, name))
-            .any(|name| name == canonical_type)
-    }
-
-    /// Build the annotation index from parsed source by matching class declarations to IR classes by
-    /// fully-qualified internal name.
-    pub fn from_source(file: &'a crate::ast::File, ir: &IrFile) -> PluginContext<'a> {
-        Self::from_source_with_class_resolver(file, ir, None)
+                .any(|(_, value)| annotation_value_mentions_class(value, canonical_type))
+        })
     }
 
     /// Build a plugin context exclusively from checked common IR. All annotation arguments have
@@ -476,42 +356,6 @@ impl<'a> PluginContext<'a> {
         }
         context
     }
-
-    pub fn from_source_with_class_resolver(
-        file: &'a crate::ast::File,
-        ir: &IrFile,
-        class_name_resolver: Option<&'a ClassNameResolver<'a>>,
-    ) -> PluginContext<'a> {
-        let mut ctx = PluginContext {
-            class_annotations: HashMap::new(),
-            source_file: Some(file),
-            class_name_resolver,
-            target_type_descriptor: no_target_type_descriptor,
-        };
-        for (i, c) in ir.classes.iter().enumerate() {
-            let internal = c.fq_name();
-            if let Some(cd) = source_class_by_internal(file, &internal) {
-                if !cd.annotations.is_empty() {
-                    let annotations = cd
-                        .annotations
-                        .iter()
-                        .filter_map(|annotation| {
-                            class_name_resolver
-                                .and_then(|resolve| resolve(&annotation.name))
-                                .or_else(|| {
-                                    class_name_resolver.is_none().then(|| {
-                                        crate::types::type_name(&annotation.name.replace('.', "/"))
-                                    })
-                                })
-                        })
-                        .collect();
-                    ctx.class_annotations
-                        .insert(i as u32, AnnotationList::Owned(annotations));
-                }
-            }
-        }
-        ctx
-    }
 }
 
 fn annotation_value_mentions_class(value: &crate::ir::AnnoValue, canonical_type: &str) -> bool {
@@ -528,50 +372,6 @@ fn annotation_value_mentions_class(value: &crate::ir::AnnoValue, canonical_type:
             .any(|value| annotation_value_mentions_class(value, canonical_type)),
         crate::ir::AnnoValue::Const(_) | crate::ir::AnnoValue::Enum(_, _) => false,
     }
-}
-
-fn source_class_by_internal<'a>(
-    file: &'a crate::ast::File,
-    internal: &str,
-) -> Option<&'a crate::ast::ClassDecl> {
-    // A NESTED class is hoisted with a DOTTED name (`Outer.Inner`) while its IrClass.fq_name uses `$`
-    // (`pkg/Outer$Inner`), so mangle `.`→`$` (via `source_internal`) before comparing.
-    file.decl_arena.iter().find_map(|d| match d {
-        crate::ast::Decl::Class(c) if source_internal(file, &c.name) == internal => Some(c),
-        _ => None,
-    })
-}
-
-fn source_internal(file: &crate::ast::File, name: &str) -> String {
-    let mangled = name.replace('.', "$");
-    match &file.package {
-        Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), mangled),
-        _ => mangled,
-    }
-}
-
-fn class_literal_name(file: &crate::ast::File, e: crate::ast::ExprId) -> Option<&str> {
-    let crate::ast::Expr::CallableRef {
-        receiver: Some(r),
-        name,
-    } = file.expr(e)
-    else {
-        return None;
-    };
-    if name != "class" {
-        return None;
-    }
-    match file.expr(*r) {
-        crate::ast::Expr::Name(x) => Some(x.as_str()),
-        _ => None,
-    }
-}
-
-fn canonical_type_name(file: &crate::ast::File, name: &str) -> String {
-    file.type_aliases
-        .iter()
-        .find_map(|(a, t)| (a == name).then(|| t.clone()))
-        .unwrap_or_else(|| name.to_string())
 }
 
 fn no_target_type_descriptor(_ty: Ty) -> Option<String> {
@@ -762,33 +562,24 @@ mod tests {
     }
 
     #[test]
-    fn from_source_matches_by_fqname_not_simple_name() {
-        use crate::ast::{AnnotationRef, ClassDecl, Decl, File};
-        // Two classes, same simple name `Foo`, different packages — only the annotated one's IrClass
-        // must receive the annotation (no simple-name cross-contamination).
-        let mut file = File {
-            package: Some("a.b".to_string()),
-            ..File::default()
-        };
-        let annotated = ClassDecl {
-            name: "Foo".to_string(),
-            annotations: vec![AnnotationRef {
-                name: "Serializable".to_string(),
-                span: crate::diag::Span::new(0, 0),
-            }],
-            ..blank_class("Foo")
-        };
-        file.decl_arena.push(Decl::Class(annotated));
-
+    fn checked_ir_annotations_are_indexed_by_class_identity() {
         let mut ir = IrFile::default();
-        let other = ir.add_class(synthetic_class("x/y/Foo")); // same simple name, different package
-        let target = ir.add_class(synthetic_class("a/b/Foo")); // the real one
+        let other = ir.add_class(synthetic_class("x/y/Foo"));
+        let target = ir.add_class(synthetic_class("a/b/Foo"));
+        ir.classes[target as usize].applied_annotations =
+            crate::ir::DeclarationAnnotations::new(vec![crate::ir::RetainedAnnotation {
+                retention: crate::types::AnnotationRetention::Runtime,
+                annotation: crate::ir::AppliedAnnotation {
+                    internal: crate::types::type_name("kotlinx/serialization/Serializable"),
+                    values: Vec::new(),
+                },
+            }]);
 
-        let ctx = PluginContext::from_source(&file, &ir);
-        assert!(ctx.has_annotation(target, "Serializable"));
+        let ctx = PluginContext::from_ir(&ir);
+        assert!(ctx.has_annotation(target, "kotlinx/serialization/Serializable"));
         assert!(
-            !ctx.has_annotation(other, "Serializable"),
-            "annotation must not bleed onto a same-simple-name class in another package"
+            !ctx.has_annotation(other, "kotlinx/serialization/Serializable"),
+            "an annotation must not bleed onto a same-simple-name classifier"
         );
     }
 
@@ -817,24 +608,11 @@ mod tests {
         )]);
 
         let ctx = PluginContext::from_ir(&ir);
-        assert!(ctx.source_file.is_none());
         assert_eq!(ctx.classes_with_simple("Serializable"), vec![class]);
         assert!(ctx.file_annotation_mentions_canonical_type(
             &ir,
             "UseContextualSerialization",
             "demo/External"
         ));
-    }
-
-    /// A `ClassDecl` with only the fields `from_source` reads (name + annotations) populated.
-    fn blank_class(name: &str) -> crate::ast::ClassDecl {
-        let src = format!("class {name}");
-        let mut d = crate::diag::DiagSink::new();
-        let toks = crate::lexer::lex(&src, &mut d);
-        let file = crate::parser::parse(&src, &toks, &mut d);
-        match file.decl_arena.into_iter().next() {
-            Some(crate::ast::Decl::Class(c)) => c,
-            _ => unreachable!(),
-        }
     }
 }

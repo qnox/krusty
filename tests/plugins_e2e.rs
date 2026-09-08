@@ -8,50 +8,38 @@
 
 use std::rc::Rc;
 
-use krusty::diag::DiagSink;
-use krusty::frontend::{analyze_source_set_with_features, SourceInput};
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::plugins::serialization::{SerializationPlugin, SERIALIZABLE_FQ};
 use krusty::plugins::{PluginContext, PluginHost};
 
 use super::common;
 
-/// Lower a source through krusty's full front end to its parsed `File` + real `IrFile`, or `None` if
-/// it can't compile (or no stdlib is available).
-fn lower(src: &str) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
+/// Lower a source through krusty's full streaming frontend to real checked common IR, or `None` if
+/// it cannot compile (or no stdlib is available).
+fn lower(src: &str) -> Option<krusty::ir::IrFile> {
     lower_with_classpath(src, &[])
 }
 
 fn lower_with_classpath(
     src: &str,
     extra_classpath: &[std::path::PathBuf],
-) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
+) -> Option<krusty::ir::IrFile> {
     let mut jars = vec![common::stdlib_jar()];
     jars.extend_from_slice(extra_classpath);
     let cp = Rc::new(krusty::jvm::classpath::Classpath::new(jars));
 
-    let mut d = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(src);
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let mut analysis =
-        analyze_source_set_with_features(&[SourceInput::kotlin(src)], platform, &features, &mut d);
-    if d.has_errors() {
-        return None;
-    }
     let (mut captured, diagnostics) =
         common::capture_common_ir(src, "PluginInput", Box::new(JvmLibraries::new(cp.clone())));
     if !diagnostics.is_empty() {
         return None;
     }
-    let ir = captured.pop()?;
-    let file = analysis.files.pop()?;
-    Some((file, ir))
+    captured.pop()
 }
 
 #[test]
 fn serialization_plugin_runs_on_real_lowered_ir() {
     // A plain class krusty's IR subset lowers (primary-constructor val properties).
-    let Some((_file, mut ir)) = lower("class Foo(val a: Int, val b: String)") else {
+    let Some(mut ir) = lower("class Foo(val a: Int, val b: String)") else {
         eprintln!("skipping: no stdlib jar / class outside IR subset");
         return;
     };
@@ -131,14 +119,15 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
 
 #[test]
 fn serialization_activates_from_source_annotation() {
-    // The keystone: the surface activates from a REAL `@Serializable` in source — parser captures the
-    // annotation, `PluginContext::from_source` indexes it, the plugin fires. No manual injection.
+    // The keystone: a real source annotation crosses the streaming frontend as a resolved common-IR
+    // application, `PluginContext::from_ir` indexes it, and the plugin fires. No manual injection or
+    // parser fallback participates.
     let Some(serialization) = common::find_jar("kotlinx-serialization-core-jvm-", &["sources"])
     else {
         eprintln!("skipping: no kotlinx-serialization core jar");
         return;
     };
-    let Some((file, mut ir)) = lower_with_classpath(
+    let Some(mut ir) = lower_with_classpath(
         "import kotlinx.serialization.Serializable\n@Serializable class Foo(val a: Int, val b: String)",
         &[serialization],
     ) else {
@@ -146,7 +135,7 @@ fn serialization_activates_from_source_annotation() {
         return;
     };
 
-    let ctx = PluginContext::from_source(&file, &ir);
+    let ctx = PluginContext::from_ir(&ir);
     assert!(
         !ctx.classes_with_simple("Serializable").is_empty(),
         "@Serializable captured from source and indexed"
@@ -169,7 +158,7 @@ fn serializable_enum_relocates_serializer_to_companion() {
     // A `@Serializable enum` (kotlinx ≥ 1.5) gets `serializer()` on a nested `Companion` backed by a
     // cached `Lazy` delegate — NOT a static `serializer()` on the enum itself. Matches kotlinc's member
     // set (Companion class + `access$get$cachedSerializer$delegate$cp` accessor).
-    let Some((_file, mut ir)) = lower("enum class E { A, B }") else {
+    let Some(mut ir) = lower("enum class E { A, B }") else {
         eprintln!("skipping: no stdlib jar / class outside IR subset");
         return;
     };
@@ -223,7 +212,7 @@ fn deser_ctor_appends_marker_for_value_class_field() {
     // A `@Serializable` data class with a value-class-typed field: kotlinc appends a trailing
     // `DefaultConstructorMarker` to the synthetic deserialization ctor (its value-class-param ABI
     // disambiguator), on top of the usual `SerializationConstructorMarker`.
-    let Some((_file, mut ir)) =
+    let Some(mut ir) =
         lower("@JvmInline value class V(val s: String)\nclass D(val v: V, val n: Int)")
     else {
         eprintln!("skipping: no stdlib jar / class outside IR subset");
@@ -269,7 +258,7 @@ fn value_class_serializer_omits_write_self() {
     // A `@JvmInline value class` serializes its sole underlying value inline — kotlinc emits NO
     // `write$Self` helper for it (unlike a plain data class). krusty must match: emitting one is a
     // spurious extra member the downstream ABI gate flags.
-    let Some((_file, mut ir)) = lower("@JvmInline value class V(val s: String)") else {
+    let Some(mut ir) = lower("@JvmInline value class V(val s: String)") else {
         eprintln!("skipping: no stdlib jar / class outside IR subset");
         return;
     };
@@ -301,9 +290,7 @@ fn value_class_serializer_omits_write_self() {
 
 #[test]
 fn top_level_function_registers_parameter_defaults_for_plugins() {
-    let Some((_file, ir)) =
-        lower("fun bar(a: Int, b: String = \"hello\", c: Boolean = true) = \"\"")
-    else {
+    let Some(ir) = lower("fun bar(a: Int, b: String = \"hello\", c: Boolean = true) = \"\"") else {
         eprintln!("skipping: no stdlib jar / outside IR subset");
         return;
     };
