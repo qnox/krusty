@@ -809,7 +809,7 @@ fn analyze_source_set_impl(
                 Some(&active_headers),
             ));
             drop(active_headers);
-            if !retain_inspection_analysis && index < inferred_count {
+            if index < inferred_count {
                 if needs_bounded_pass_one_syntax {
                     retained_syntax::compact(&mut file);
                 }
@@ -824,20 +824,15 @@ fn analyze_source_set_impl(
         } else {
             local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, None));
         }
-        if retain_inspection_analysis {
-            inspection_files.push(file);
-        } else {
-            #[cfg(test)]
-            {
-                reparse_sources
-                    .last_mut()
-                    .expect("the active source owns reparse state")
-                    .retained_pass_one_syntax = retain_bounded_syntax;
-            }
-            if retain_bounded_syntax {
-                retained_pass_one_syntax
-                    .insert(crate::fir::SourceFileId::from_raw(index as u32), file);
-            }
+        #[cfg(test)]
+        {
+            reparse_sources
+                .last_mut()
+                .expect("the active source owns reparse state")
+                .retained_pass_one_syntax = retain_bounded_syntax;
+        }
+        if retain_bounded_syntax {
+            retained_pass_one_syntax.insert(crate::fir::SourceFileId::from_raw(index as u32), file);
         }
     }
 
@@ -879,11 +874,6 @@ fn analyze_source_set_impl(
         )
     };
     let inferred_end = inferred_count.min(sources.len());
-    if retain_inspection_analysis && trim_support_bodies {
-        for file in &mut inspection_files[inferred_end..] {
-            file.release_body_arenas();
-        }
-    }
     let collected_signatures = crate::resolve::collect_streamed_signatures_with_cp(
         &pass1_headers,
         &local_class_contexts,
@@ -902,16 +892,14 @@ fn analyze_source_set_impl(
         );
     }
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
-    if !retain_inspection_analysis {
-        // A bounded source that compacted to no executable syntax has no remaining Pass-1 owner.
-        // Remove the slot entirely; stable headers remain authoritative for declaration facts.
-        for raw_source in 0..inferred_end {
-            if retained_pass_one_syntax
-                .get(raw_source)
-                .is_some_and(|file| file.expr_arena.is_empty() && file.stmt_arena.is_empty())
-            {
-                retained_pass_one_syntax.remove(raw_source);
-            }
+    // A bounded source that compacted to no executable syntax has no remaining Pass-1 owner.
+    // Remove the slot entirely; stable headers remain authoritative for declaration facts.
+    for raw_source in 0..inferred_end {
+        if retained_pass_one_syntax
+            .get(raw_source)
+            .is_some_and(|file| file.expr_arena.is_empty() && file.stmt_arena.is_empty())
+        {
+            retained_pass_one_syntax.remove(raw_source);
         }
     }
     let streamed_index = crate::resolve::finalized_streamed_signature_index(
@@ -944,34 +932,16 @@ fn analyze_source_set_impl(
         // compact header environment is consumed; no provider root or source locator crosses
         // this boundary.
         let providers = std::mem::take(&mut signature_default_work_items);
-        let default_arguments = if retain_inspection_analysis {
-            let pass_one_files = inspection_files
-                .iter()
-                .take(inferred_end)
-                .map(Some)
-                .collect::<Vec<_>>();
-            inline_preparation::defaults(
-                &mut pass1_headers,
-                &mut index,
-                providers,
-                pass_one_files.as_slice(),
-                &parse_errors,
-                checked_count,
-                &mut symbols,
-                diags,
-            )
-        } else {
-            inline_preparation::defaults(
-                &mut pass1_headers,
-                &mut index,
-                providers,
-                &retained_pass_one_syntax,
-                &parse_errors,
-                checked_count,
-                &mut symbols,
-                diags,
-            )
-        };
+        let default_arguments = inline_preparation::defaults(
+            &mut pass1_headers,
+            &mut index,
+            providers,
+            &retained_pass_one_syntax,
+            &parse_errors,
+            checked_count,
+            &mut symbols,
+            diags,
+        );
         match default_arguments {
             Some(default_arguments) => {
                 let (index, sources, body_work) = pass1_headers.finish(index);
@@ -1007,21 +977,45 @@ fn analyze_source_set_impl(
         recovery_streamed = Some(diagnostic_streamed_state(index, sources));
         None
     };
-    if retain_inspection_analysis && trim_support_bodies {
-        for file in &mut inspection_files[checked_count.min(inferred_end)..inferred_end] {
-            file.release_body_arenas();
+    // Inline preparation always consumes the same bounded syntax retained from the initial parse.
+    // Inspection must not select a second FIR construction path through its full AST/TypeInfo.
+    let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
+        inline_preparation::streaming(
+            module,
+            bodies,
+            default_arguments,
+            &mut retained_pass_one_syntax,
+            &parse_errors,
+            checked_count,
+            &mut symbols,
+            diags,
+        )
+    });
+    let streamed = streamed.or(recovery_streamed);
+    let types = if retain_inspection_analysis {
+        // The public inspection product owns a full parser view, but that view is materialized only
+        // after Pass 1 has produced detached checked FIR. It can therefore never become an alternate
+        // inline/default preparation input.
+        for (source_index, source) in sources.iter().enumerate() {
+            diags.set_file(source_index as u32);
+            let mut features = project_features.clone();
+            features.apply_source_directives(source.text);
+            let mut file = parse_source_kind(source.text, source.kind, &features, diags);
+            file.is_common = source.is_common;
+            if source.kind == SourceKind::Kotlin {
+                if let Some(stem) = source.file_stem {
+                    name_anonymous_classes(&mut file, &format!("{stem}Kt"));
+                }
+            }
+            inspection_files.push(file);
         }
-    }
-    let (types, streamed) = if retain_inspection_analysis {
-        let retained_index = pending_streamed
-            .as_ref()
-            .map(|(module, _, _)| module.index())
-            .or_else(|| {
-                recovery_streamed
-                    .as_ref()
-                    .map(|streamed| streamed.module.index())
-            });
-        let types: Vec<Option<FrontendTypeInfo>> = if let Some(index) = retained_index {
+        if trim_support_bodies {
+            let retained_count = checked_count.min(inspection_files.len());
+            for file in &mut inspection_files[retained_count..] {
+                file.release_body_arenas();
+            }
+        }
+        if let Some(index) = streamed.as_ref().map(|streamed| streamed.module.index()) {
             inspection_files
                 .iter()
                 .enumerate()
@@ -1036,7 +1030,7 @@ fn analyze_source_set_impl(
                         crate::fir::SourceFileId::from_raw(source as u32),
                         index,
                     )
-                    .expect("retained Pass-1 syntax must bind to the stable declaration inventory");
+                    .expect("inspection syntax must bind to the stable declaration inventory");
                     Some(check_active_source_with_index(
                         file,
                         source as u32,
@@ -1051,37 +1045,10 @@ fn analyze_source_set_impl(
             std::iter::repeat_with(|| None)
                 .take(inspection_files.len())
                 .collect()
-        };
-        let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
-            inline_preparation::from_checked_analysis(
-                module,
-                bodies,
-                default_arguments,
-                &inspection_files,
-                &types,
-                &mut symbols,
-            )
-        });
-        (types, streamed)
+        }
     } else {
-        // Inline preparation consumes the bounded syntax retained from the initial parse. It moves
-        // checked inline FIR into `InlineBodyStore` and releases every remaining parser body arena;
-        // there is no separate inline-source parse between the two source passes.
-        let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
-            inline_preparation::streaming(
-                module,
-                bodies,
-                default_arguments,
-                &mut retained_pass_one_syntax,
-                &parse_errors,
-                checked_count,
-                &mut symbols,
-                diags,
-            )
-        });
-        (Vec::new(), streamed)
+        Vec::new()
     };
-    let streamed = streamed.or(recovery_streamed);
     diags.collapse_duplicates_from(diagnostics_start);
     let analysis = SourceSetAnalysis {
         files: inspection_files,

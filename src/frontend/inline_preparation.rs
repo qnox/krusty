@@ -5,7 +5,7 @@
 //! advancing. No parser coordinate or default provider work survives into Pass 2.
 
 use super::retained_syntax::RetainedPassOneSyntax;
-use super::{File, FrontendSymbols, FrontendTypeInfo, StreamedPassState};
+use super::{File, FrontendSymbols, StreamedPassState};
 
 pub(super) trait PassOneSyntaxFiles {
     fn source_count(&self) -> usize;
@@ -19,16 +19,6 @@ impl PassOneSyntaxFiles for RetainedPassOneSyntax {
 
     fn file(&self, raw_source: usize) -> Option<&File> {
         self.get(raw_source)
-    }
-}
-
-impl PassOneSyntaxFiles for [Option<&File>] {
-    fn source_count(&self) -> usize {
-        self.len()
-    }
-
-    fn file(&self, raw_source: usize) -> Option<&File> {
-        self.get(raw_source).copied().flatten()
     }
 }
 
@@ -381,145 +371,6 @@ fn check_default_source(
         }
     }
     true
-}
-
-pub(super) fn from_checked_analysis(
-    module: crate::fir::FrontendModule,
-    bodies: crate::fir::BodyPartition,
-    default_arguments: crate::fir::DefaultArgumentStore,
-    files: &[File],
-    types: &[Option<FrontendTypeInfo>],
-    symbols: &mut FrontendSymbols,
-) -> Option<StreamedPassState> {
-    let selection = bodies.inline_check_selection(module.index(), files.len());
-    let payload_roots = inline_payload_roots(&selection, module.index())?;
-    let (mut index, mut inline_bodies, initial_defaults, mut sources) = module.into_parts();
-    assert!(
-        initial_defaults.is_empty(),
-        "signature defaults are installed only after Pass-1 body preparation"
-    );
-    crate::trace_compiler!(
-        "fir",
-        "Pass 1 inline preparation inline_units={} ordinary_units={}",
-        bodies.inline.len(),
-        bodies.ordinary.len(),
-    );
-    let mut inline_owners = vec![Vec::new(); files.len()];
-    for work in bodies.inline.units() {
-        let Some(anchor) = index.declaration_anchor(work.declaration) else {
-            crate::trace_compiler!(
-                "fir",
-                "Pass 1 inline work has no declaration anchor: {work:?}",
-            );
-            return None;
-        };
-        inline_owners[anchor.source.raw() as usize].push(work.declaration);
-    }
-    for (raw_source, owners) in inline_owners.iter().enumerate() {
-        if owners.is_empty() {
-            continue;
-        }
-        let source = crate::fir::SourceFileId::from_raw(raw_source as u32);
-        let Some(file) = files.get(raw_source) else {
-            crate::trace_compiler!("fir", "Pass 1 inline-local source {raw_source} is absent",);
-            return None;
-        };
-        let Some(info) = types.get(raw_source).and_then(Option::as_ref) else {
-            crate::trace_compiler!(
-                "fir",
-                "Pass 1 inline-local source {raw_source} has no checked type information",
-            );
-            return None;
-        };
-        let active = match crate::fir::ActiveSourceDeclarations::bind_complete_source(
-            file, source, &index,
-        ) {
-            Ok(active) => active,
-            Err(error) => {
-                crate::trace_compiler!(
-                    "fir",
-                    "Pass 1 inline-local source {raw_source} cannot bind active declarations: {error:?}",
-                );
-                return None;
-            }
-        };
-        if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
-            file, source, symbols, info, &mut index, owners, &active,
-        ) {
-            crate::trace_compiler!(
-                "fir",
-                "Pass 1 inline-local signature publication failed: {declarations:?}",
-            );
-            return None;
-        }
-    }
-    let mut unexpected = UnexpectedOrdinaryInlineBody::default();
-    let mut sessions = (0..files.len())
-        .map(|_| crate::fir::BodyCheckSession::default())
-        .collect::<Vec<_>>();
-    for work in bodies.inline.units().iter().copied() {
-        let anchor = index.declaration_anchor(work.declaration)?;
-        let source = anchor.source;
-        let file = files.get(source.raw() as usize)?;
-        let info = types.get(source.raw() as usize).and_then(Option::as_ref)?;
-        if let Err(error) = crate::fir::check_and_dispatch_body_in_session(
-            file,
-            info,
-            source,
-            work,
-            &mut index,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut unexpected,
-            &mut sessions[source.raw() as usize],
-        ) {
-            crate::trace_compiler!(
-                "fir",
-                "Pass 1 inline FIR construction failed for {:?}: {error:?}",
-                work.declaration,
-            );
-            return None;
-        }
-    }
-    let mut nested = InlineNestedBodyCollector {
-        roots: payload_roots,
-        ..InlineNestedBodyCollector::default()
-    };
-    let nested_work = bodies
-        .ordinary
-        .units()
-        .iter()
-        .copied()
-        .filter(|work| nested.roots.contains_key(&work.declaration))
-        .collect::<Vec<_>>();
-    for work in nested_work {
-        let anchor = index.declaration_anchor(work.declaration)?;
-        let source = anchor.source;
-        let file = files.get(source.raw() as usize)?;
-        let info = types.get(source.raw() as usize).and_then(Option::as_ref)?;
-        if let Err(error) = crate::fir::check_and_dispatch_body_in_session(
-            file,
-            info,
-            source,
-            work,
-            &mut index,
-            sources.origins_mut(),
-            &mut inline_bodies,
-            &mut nested,
-            &mut sessions[source.raw() as usize],
-        ) {
-            crate::trace_compiler!(
-                "fir",
-                "Pass 1 nested inline-payload FIR construction failed for {:?}: {error:?}",
-                work.declaration,
-            );
-            return None;
-        }
-    }
-    if !attach_inline_nested_bodies(&mut inline_bodies, nested) {
-        return None;
-    }
-    finish(index, inline_bodies, sources, default_arguments, unexpected)
 }
 
 pub(super) fn streaming(

@@ -151,6 +151,12 @@ fn direct_enclosing_declaration(
         .get(&declaration)
         .copied()
         .or_else(|| {
+            file.decls.iter().copied().find(|parent| {
+                matches!(file.decl(*parent), Decl::Class(class)
+                    if class.nested_classifiers.contains(&declaration))
+            })
+        })
+        .or_else(|| {
             file.anonymous_object_enclosing_functions
                 .get(&declaration)
                 .map(|owner| match owner {

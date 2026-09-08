@@ -20118,8 +20118,8 @@ impl<'a> Checker<'a> {
                 // scratch pass. Nested object constructions can then capture method parameters,
                 // receiver values, and locals declared inside this body; copying the outer
                 // construction's candidate list cannot represent any of those lexical rungs.
-                if let Decl::Class(class) = self.file.decl(declaration) {
-                    let class = class.clone();
+                let file = self.file;
+                if let Decl::Class(class) = file.decl(declaration) {
                     if self.selected_signature_default_declarations.is_none()
                         || self.signature_default_expression_depth != 0
                     {
@@ -20127,7 +20127,7 @@ impl<'a> Checker<'a> {
                     }
                     let saved = self.take_body_state();
                     self.set_anonymous_lexical_class_context(declaration);
-                    self.check_class(scope, &class, declaration);
+                    self.check_class(scope, class, declaration);
                     self.restore_body_state(saved);
                 }
                 let mut selected_receiver_candidates = Vec::new();
@@ -20208,8 +20208,8 @@ impl<'a> Checker<'a> {
                 // Check the anonymous declaration at its lexical construction site. Besides ordinary
                 // scope correctness, a postponed builder call then sees constraints from member bodies
                 // (`yield(this)` binds the builder's `FT`) instead of losing them in a hoisted pass.
-                if let Decl::Class(class) = self.file.decl(declaration) {
-                    let class = class.clone();
+                let file = self.file;
+                if let Decl::Class(class) = file.decl(declaration) {
                     if self.selected_signature_default_declarations.is_none()
                         || self.signature_default_expression_depth != 0
                     {
@@ -20217,7 +20217,7 @@ impl<'a> Checker<'a> {
                     }
                     let saved = self.take_body_state();
                     self.set_anonymous_lexical_class_context(declaration);
-                    self.check_class(scope, &class, declaration);
+                    self.check_class(scope, class, declaration);
                     self.restore_body_state(saved);
                 }
                 return self.anonymous_object_type(scope, declaration);
@@ -39322,7 +39322,6 @@ fn check_selected_source_with_index<S: CheckerSymbolEnvironment>(
             let Decl::Class(class) = file.decl(declaration) else {
                 continue;
             };
-            let class = class.clone();
             let direct_scope = root.child(ScopeKind::Block);
             let mut parameters = TParams::default();
             let mut names = Vec::new();
@@ -39379,7 +39378,7 @@ fn check_selected_source_with_index<S: CheckerSymbolEnvironment>(
                 class.span,
             );
             c.set_anonymous_lexical_class_context(declaration);
-            c.check_class(&direct_scope, &class, declaration);
+            c.check_class(&direct_scope, class, declaration);
         }
     }
     if let Some(body) = file

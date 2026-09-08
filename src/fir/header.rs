@@ -87,6 +87,12 @@ fn expression_contains_classifier(
         if !seen.insert(expression) {
             continue;
         }
+        // A retained Pass-1 fragment rewrites every selected expression densely and leaves
+        // non-selected declaration roots absent. Reconstructing active stable bindings must never
+        // reopen those released siblings merely because their header node still exists.
+        if file.expr_span(expression).is_none() {
+            continue;
+        }
         if file.anonymous_object_classes.get(&expression) == Some(&classifier) {
             return true;
         }
