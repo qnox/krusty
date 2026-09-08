@@ -1306,6 +1306,8 @@ mod synthetic_accessor_e2e;
 mod tailrec_e2e;
 #[path = "test_harness_sharding_e2e.rs"]
 mod test_harness_sharding_e2e;
+#[path = "test_set_parser_gaps_e2e.rs"]
+mod test_set_parser_gaps_e2e;
 #[path = "this_callable_ref_e2e.rs"]
 mod this_callable_ref_e2e;
 #[path = "this_smartcast_e2e.rs"]

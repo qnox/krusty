@@ -2080,6 +2080,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CharSequence` EXTENSION receiver (`"a".split(...)`), neither of which this rule covers. Test:
   `tests/vararg_elements_before_named_e2e.rs` (`packed_vararg_arrays_are_byte_identical`,
   `module_vararg_elements_before_named_argument_are_byte_identical`).
+- **Two parser shapes that dropped whole files from a real project's test source sets.** A parse
+  error removes every declaration in the file, and each sibling that names one of them then fails
+  with `unresolved reference` — one bad line cost 38 and 49 errors respectively. (1) An enum entry
+  list closed by a trailing comma and a `;` on its own line, then a member: `HTTP(...), TCP(...),`
+  newline `;` newline `companion object { … }`. The `;` is lexed as a newline, so the entry loop
+  read `companion` as the next entry and failed on `object` ("expected object name"). An entry name
+  must be followed by `(`, `{`, `,`, a separator, or `}`; anything else starts the members.
+  (2) `target op= value` whose target is not assignable — `m[k]!! += x`, `(m[k]!!) += x` — is
+  Kotlin's operator-call form (`plusAssign` on the value), not an assignment; the parser rejected
+  everything but a name, an index, a member, or a call ("invalid assignment target"). It now hands
+  any other target to the same `CompoundAssign` statement the call form uses, and the checker
+  decides whether the value's type offers the operator. Tests: `tests/test_set_parser_gaps_e2e.rs`
+  (diagnostics plus a box run for each).
+- **Signature-pass member selection sees only the overloads the written arguments can fit.** The
+  Pass-1 solver hands selection one argument per parameter SLOT, an omitted defaulted slot as
+  `OmittedDefault`. A sibling overload with NO default at that slot then looked exactly as
+  applicable, so `Instant.fromEpochSeconds(0)` — `(Long, Int = 0)` beside `(Long, Long)` — was
+  "ambiguous" in signature position (an inferred-return `fun at() = Instant.fromEpochSeconds(0)`)
+  while the same call in a body, mapped per candidate, selected. The member path now keeps only the
+  overloads whose own names/defaults/vararg shape can consume the written arguments, as the
+  top-level and extension paths already did. Side effect measured by an existing test: a provider
+  member taking a callable reference (`HashMap.merge("a", 2, Int::plus)`) now selects in Pass 1
+  instead of declining. Test: `tests/test_set_parser_gaps_e2e.rs`
+  (`an_int_literal_selects_a_long_parameter_beside_a_defaulted_one`).
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is
