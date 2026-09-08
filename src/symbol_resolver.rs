@@ -1587,6 +1587,9 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
             .filter(|bounds| !bounds.is_empty())
             .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))])
     }
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.0.platform_flexible_upper_bound(lower)
+    }
 }
 
 pub(crate) use crate::types::{ty_subst, ty_subst_all, ty_subst_keep_unbound};

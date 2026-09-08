@@ -509,8 +509,6 @@ pub fn same(a: TypeName, b: TypeName) -> bool {
     a == b
 }
 
-/// Well-known class internal names, each inserted ONCE into the type-name tree and reused for id
-/// comparison against other object type names.
 pub mod wk {
     use super::{type_name, TypeName};
     use std::sync::OnceLock;

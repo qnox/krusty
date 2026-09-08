@@ -410,6 +410,10 @@ impl SymbolSource for DependencyPlatform {
         }
         merged
     }
+
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.platform.platform_flexible_upper_bound(lower)
+    }
 }
 
 impl SemanticPlatform for DependencyPlatform {

@@ -424,6 +424,10 @@ struct BootstrapSymbolSource<'a> {
 }
 
 impl SymbolSource for BootstrapSymbolSource<'_> {
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.libraries.platform_flexible_upper_bound(lower)
+    }
+
     fn symbols(
         &self,
         namespace: crate::symbol_source::SymbolNamespace,
@@ -75655,29 +75659,19 @@ impl<'a> Checker<'a> {
             resolved.is_some(),
             generic.as_ref().map(|signature| signature.ret),
         );
-        let Some(mut generic) = generic else {
+        let Some(generic) = generic else {
             return false;
         };
+        let source = self.fed_source();
         let admits = |signature: &GenericSig| {
-            crate::symbol_resolver::infer_generic_return_bindings(
+            crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+                &source,
                 signature,
                 expected,
                 |actual, bound| self.receiver_is_assignable(actual, bound),
             )
             .is_some()
         };
-        if admits(&generic) {
-            return true;
-        }
-        let source = self.fed_source();
-        let Some(applied) = crate::assignable::applied_supertype(
-            &crate::symbol_resolver::SourceOracle(&source),
-            generic.ret,
-            expected,
-        ) else {
-            return false;
-        };
-        generic.ret = applied;
         admits(&generic)
     }
 
