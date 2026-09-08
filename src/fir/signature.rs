@@ -2036,15 +2036,6 @@ impl ResolvedModuleIndex {
             .copied()
     }
 
-    /// Same-pass source coordinate used only while checking retained inline/default fragments.
-    /// Production finalization destroys this sidecar before Pass 2 starts.
-    pub(crate) fn declaration_range(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<crate::diag::Span> {
-        self.declarations.range(declaration)
-    }
-
     pub(crate) fn release_source_coordinates(&mut self) {
         self.declarations.release_source_coordinates();
     }
@@ -2079,34 +2070,6 @@ impl ResolvedModuleIndex {
             self.publish_declaration_header(declaration, header, Some(emission_name));
         }
         declaration
-    }
-
-    /// Same-parse compatibility lookup for legacy/test checker entry points. Production Pass 2
-    /// binds fresh parser declarations through [`super::ActiveSourceDeclarations`] and must not
-    /// use a retained Pass-1 range as a source locator.
-    pub fn declaration_at(
-        &self,
-        source: SourceFileId,
-        range: crate::diag::Span,
-        kind: DeclarationKind,
-    ) -> Option<DeclarationId> {
-        (0..self.declaration_count())
-            .filter_map(|raw| {
-                let declaration = DeclarationId::from_raw(
-                    u32::try_from(raw).expect("too many stable declarations for a packed id"),
-                );
-                self.declaration_anchor(declaration)
-                    .filter(|anchor| {
-                        anchor.source == source
-                            && self.declaration_range(declaration) == Some(range)
-                            && anchor.kind == kind
-                    })
-                    .map(|_| declaration)
-            })
-            // Header extraction can retain a parser-ancestry alias beside the repaired semantic
-            // local-class identity. Only the published identity may enter checked FIR, matching
-            // `ActiveSourceDeclarations::canonical_classifier_declaration` in production Pass 2.
-            .max_by_key(|declaration| self.declaration_header(*declaration).is_some())
     }
 
     /// Find a declaration by its stable owner-local structural coordinate. This is used while
