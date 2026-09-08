@@ -4811,6 +4811,23 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .into_parts();
             functions.overloads =
                 self.implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
+            // Selection sees the arguments one per parameter SLOT, with an omitted defaulted slot
+            // as `OmittedDefault`, so a sibling overload that has NO default there looked just as
+            // applicable and `Instant.fromEpochSeconds(0)` — `(Long, Int = 0)` beside
+            // `(Long, Long)` — was "ambiguous" in signature position while the body checker,
+            // which maps per candidate, selected it. Keep only the overloads whose own
+            // names/defaults/vararg shape can consume the written arguments, as the top-level and
+            // extension paths already do.
+            let argument_names = arguments
+                .iter()
+                .map(|argument| argument.name.map(str::to_owned))
+                .collect::<Vec<_>>();
+            functions.overloads = Self::structurally_applicable_call_candidates(
+                std::mem::take(&mut functions.overloads),
+                &argument_names,
+                arguments.len(),
+                trailing_lambda,
+            );
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let (argument_kinds, argument_types) =
                 Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;

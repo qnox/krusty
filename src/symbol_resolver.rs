@@ -8381,10 +8381,13 @@ fn best_by_args_at_priority<'a>(
         }
     }
 
+    // At the candidate's OWN vararg slot: a slot-mapped call (`split(",", ignoreCase = false)`
+    // against `split(vararg String, Boolean, Int)`) keeps the element at that slot, and a
+    // non-final vararg is not the last parameter.
     source_aware_most_specific(
         cands.iter().filter_map(|(candidate, params)| {
             candidate.call_sig.vararg.then(|| {
-                vararg_parameter_shape(params, args, |position, param, arg| {
+                candidate_vararg_shape(candidate, params, args, |position, param, arg| {
                     fits(position, param, arg) || adapts(param, arg, position)
                 })
                 .map(|shape| (shape, *candidate))
