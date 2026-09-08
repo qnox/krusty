@@ -5752,3 +5752,132 @@ fun explicit(repo: Repo, scope: Scope) = stub { repo.delete(scope.any()) }
         assert_eq!(ret, Some(Ty::obj("kotlin/Int")), "{name}");
     }
 }
+
+#[test]
+fn expression_body_narrows_after_a_not_null_assertion_a_boolean_contract_and_a_safe_call_test() {
+    // Three more flow facts the body check already applies, now also in the signature pass:
+    // `x!!` in an earlier statement, `assertTrue(x != null)` (`returns() implies actual`), and
+    // `if (x?.p == true)` on the true edge.
+    let source = r#"// WITH_STDLIB
+import kotlin.test.assertTrue
+class Runtime(val status: String, val mock: Boolean)
+class Backend { fun status(id: String): Runtime? = null }
+fun bang(backend: Backend) = run {
+    val r = backend.status("a")
+    val n = r!!.status.length
+    r.status
+}
+fun asserted(backend: Backend) = run {
+    val r = backend.status("a")
+    assertTrue(r != null, "status must exist")
+    r.status
+}
+fun safeEq(r: Runtime?) = run { if (r?.mock == true) r.status else "none" }
+fun safeNe(r: Runtime?) = run { if (r?.status != null) r.mock else false }
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("MoreSignatureFlowFacts")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("signature flow facts regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    for (name, expected) in [
+        ("bang", Ty::obj("kotlin/String")),
+        ("asserted", Ty::obj("kotlin/String")),
+        ("safeEq", Ty::obj("kotlin/String")),
+        ("safeNe", Ty::obj("kotlin/Boolean")),
+    ] {
+        let ty = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find(|declaration| index.declaration_name(*declaration) == Some(name))
+            .and_then(|declaration| index.signature(declaration))
+            .map(|signature| signature.result.get());
+        assert_eq!(ty, Some(expected), "{name}");
+    }
+}
+
+#[test]
+fn a_conditional_not_null_assertion_does_not_escape_its_branch_in_pass_one() {
+    let source = r#"// WITH_STDLIB
+class Runtime(val status: String)
+fun conditional(r: Runtime?, flag: Boolean) = run {
+    if (flag) r!!
+    r.status
+}
+"#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ConditionalNotNullAssertion")];
+    let mut paths = crate::toolchain::classpath_jars_for(source);
+    paths.push(
+        crate::toolchain::jdk_modules()
+            .expect("conditional not-null assertion regression requires the configured JDK"),
+    );
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(paths));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let signature = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("conditional"))
+        .and_then(|declaration| index.signature(declaration));
+    assert_eq!(signature, None);
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| (
+                diagnostic.file,
+                diagnostic.span,
+                diagnostic.editor_span,
+                diagnostic.severity,
+                diagnostic.kind,
+                diagnostic.msg.as_str(),
+                diagnostic.identity,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                crate::diag::Span::new(125, 131),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "unresolved reference 'status'.",
+                None,
+            ),
+            (
+                0,
+                crate::diag::Span::new(124, 131),
+                None,
+                crate::diag::Severity::Error,
+                crate::diag::DiagnosticKind::Compiler,
+                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
+                None,
+            ),
+        ],
+    );
+}
