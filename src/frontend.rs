@@ -732,11 +732,7 @@ fn analyze_source_set_impl(
     } else {
         0
     });
-    let mut retained_pass_one_syntax = Vec::with_capacity(if retain_inspection_analysis {
-        0
-    } else {
-        sources.len()
-    });
+    let mut retained_pass_one_syntax = retained_syntax::RetainedPassOneSyntax::new(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
     let mut reparse_sources = Vec::with_capacity(sources.len());
     let mut pass1_builder = crate::fir::HeaderInventoryBuilder::default();
@@ -838,7 +834,10 @@ fn analyze_source_set_impl(
                     .expect("the active source owns reparse state")
                     .retained_pass_one_syntax = retain_bounded_syntax;
             }
-            retained_pass_one_syntax.push(retain_bounded_syntax.then_some(file));
+            if retain_bounded_syntax {
+                retained_pass_one_syntax
+                    .insert(crate::fir::SourceFileId::from_raw(index as u32), file);
+            }
         }
     }
 
@@ -906,12 +905,12 @@ fn analyze_source_set_impl(
     if !retain_inspection_analysis {
         // A bounded source that compacted to no executable syntax has no remaining Pass-1 owner.
         // Remove the slot entirely; stable headers remain authoritative for declaration facts.
-        for file in retained_pass_one_syntax.iter_mut().take(inferred_end) {
-            if file
-                .as_ref()
+        for raw_source in 0..inferred_end {
+            if retained_pass_one_syntax
+                .get(raw_source)
                 .is_some_and(|file| file.expr_arena.is_empty() && file.stmt_arena.is_empty())
             {
-                *file = None;
+                retained_pass_one_syntax.remove(raw_source);
             }
         }
     }
@@ -930,19 +929,6 @@ fn analyze_source_set_impl(
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &index, diags);
-        let pass_one_files = if retain_inspection_analysis {
-            inspection_files
-                .iter()
-                .take(inferred_end)
-                .map(Some)
-                .collect::<Vec<_>>()
-        } else {
-            retained_pass_one_syntax
-                .iter()
-                .take(inferred_end)
-                .map(Option::as_ref)
-                .collect::<Vec<_>>()
-        };
         crate::resolve::publish_stable_declaration_metadata(
             &mut index,
             &symbols,
@@ -957,16 +943,35 @@ fn analyze_source_set_impl(
         // Defaults are signature-owned executable fragments. Check and detach them before the
         // compact header environment is consumed; no provider root or source locator crosses
         // this boundary.
-        let default_arguments = inline_preparation::defaults(
-            &mut pass1_headers,
-            &mut index,
-            std::mem::take(&mut signature_default_work_items),
-            &pass_one_files,
-            &parse_errors,
-            checked_count,
-            &mut symbols,
-            diags,
-        );
+        let providers = std::mem::take(&mut signature_default_work_items);
+        let default_arguments = if retain_inspection_analysis {
+            let pass_one_files = inspection_files
+                .iter()
+                .take(inferred_end)
+                .map(Some)
+                .collect::<Vec<_>>();
+            inline_preparation::defaults(
+                &mut pass1_headers,
+                &mut index,
+                providers,
+                pass_one_files.as_slice(),
+                &parse_errors,
+                checked_count,
+                &mut symbols,
+                diags,
+            )
+        } else {
+            inline_preparation::defaults(
+                &mut pass1_headers,
+                &mut index,
+                providers,
+                &retained_pass_one_syntax,
+                &parse_errors,
+                checked_count,
+                &mut symbols,
+                diags,
+            )
+        };
         match default_arguments {
             Some(default_arguments) => {
                 let (index, sources, body_work) = pass1_headers.finish(index);

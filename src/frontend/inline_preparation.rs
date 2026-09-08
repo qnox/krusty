@@ -4,7 +4,33 @@
 //! moves their checked FIR into their dedicated stores, and drops that source's `TypeInfo` before
 //! advancing. No parser coordinate or default provider work survives into Pass 2.
 
+use super::retained_syntax::RetainedPassOneSyntax;
 use super::{File, FrontendSymbols, FrontendTypeInfo, StreamedPassState};
+
+pub(super) trait PassOneSyntaxFiles {
+    fn source_count(&self) -> usize;
+    fn file(&self, raw_source: usize) -> Option<&File>;
+}
+
+impl PassOneSyntaxFiles for RetainedPassOneSyntax {
+    fn source_count(&self) -> usize {
+        self.source_count()
+    }
+
+    fn file(&self, raw_source: usize) -> Option<&File> {
+        self.get(raw_source)
+    }
+}
+
+impl PassOneSyntaxFiles for [Option<&File>] {
+    fn source_count(&self) -> usize {
+        self.len()
+    }
+
+    fn file(&self, raw_source: usize) -> Option<&File> {
+        self.get(raw_source).copied().flatten()
+    }
+}
 
 #[derive(Default)]
 struct UnexpectedOrdinaryInlineBody(usize);
@@ -142,11 +168,11 @@ fn default_check_selection(
 /// FIR returned from this function survives consumption of `headers`; provider/root selection is
 /// transient stack state.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn defaults(
+pub(super) fn defaults<F: PassOneSyntaxFiles + ?Sized>(
     headers: &mut crate::fir::StreamedHeaderModule,
     index: &mut crate::fir::ResolvedModuleIndex,
     mut providers: Vec<crate::fir::DefaultArgumentProvider>,
-    files: &[Option<&File>],
+    files: &F,
     skip: &[bool],
     checked_count: usize,
     symbols: &mut FrontendSymbols,
@@ -154,12 +180,13 @@ pub(super) fn defaults(
 ) -> Option<crate::fir::DefaultArgumentStore> {
     providers.sort_by_key(|provider| (provider.target, provider.provider, provider.relation));
     providers.dedup();
-    let selection = default_check_selection(&providers, index, headers, files.len())?;
+    let source_count = files.source_count();
+    let selection = default_check_selection(&providers, index, headers, source_count)?;
     let mut store = crate::fir::DefaultArgumentStore::default();
-    let mut sessions = (0..files.len())
+    let mut sessions = (0..source_count)
         .map(|_| crate::fir::BodyCheckSession::default())
         .collect::<Vec<_>>();
-    for raw_source in 0..files.len() {
+    for raw_source in 0..source_count {
         if selection.bodies[raw_source].is_empty() {
             continue;
         }
@@ -171,7 +198,7 @@ pub(super) fn defaults(
             return None;
         }
         diags.set_file(raw_source as u32);
-        let Some(file) = files[raw_source] else {
+        let Some(file) = files.file(raw_source) else {
             crate::trace_compiler!(
                 "fir",
                 "Pass 1 signature-default source {raw_source} has no retained syntax",
@@ -499,13 +526,14 @@ pub(super) fn streaming(
     module: crate::fir::FrontendModule,
     bodies: crate::fir::BodyPartition,
     default_arguments: crate::fir::DefaultArgumentStore,
-    files: &mut [Option<File>],
+    files: &mut RetainedPassOneSyntax,
     skip: &[bool],
     checked_count: usize,
     symbols: &mut FrontendSymbols,
     diags: &mut crate::diag::DiagSink,
 ) -> Option<StreamedPassState> {
-    let selection = bodies.inline_check_selection(module.index(), files.len());
+    let source_count = files.source_count();
+    let selection = bodies.inline_check_selection(module.index(), source_count);
     let payload_roots = inline_payload_roots(&selection, module.index())?;
     let (mut index, mut inline_bodies, initial_defaults, mut sources) = module.into_parts();
     assert!(
@@ -513,23 +541,21 @@ pub(super) fn streaming(
         "signature defaults are installed only after Pass-1 body preparation"
     );
     let mut inline_work = bodies.inline;
-    let mut inline_owners = vec![Vec::new(); files.len()];
+    let mut inline_owners = vec![Vec::new(); source_count];
     for work in inline_work.units() {
         let anchor = index.declaration_anchor(work.declaration)?;
         inline_owners[anchor.source.raw() as usize].push(work.declaration);
     }
     let mut unexpected = UnexpectedOrdinaryInlineBody::default();
-    let mut sessions = (0..files.len())
+    let mut sessions = (0..source_count)
         .map(|_| crate::fir::BodyCheckSession::default())
         .collect::<Vec<_>>();
 
     // Sources without inline bodies have no remaining Pass-1 syntax consumer: signature defaults
-    // were already checked and detached before compact headers were consumed. Drop the complete
-    // legacy declaration view, not only its expression/statement arenas; active inline checking
-    // below resolves every sibling declaration through the finalized semantic index.
+    // were already checked and detached before compact headers were consumed.
     for (raw_source, owners) in inline_owners.iter().enumerate() {
         if owners.is_empty() {
-            files[raw_source] = None;
+            files.remove(raw_source);
         }
     }
 
@@ -561,7 +587,7 @@ pub(super) fn streaming(
                 "Pass 1 retained stable bodies source={source:?} bodies={selected_stable_bodies:?}",
             );
             let active_roots = owners.iter().copied().collect();
-            let Some(file) = files[raw_source].as_ref() else {
+            let Some(file) = files.get(raw_source) else {
                 crate::trace_compiler!(
                     "fir",
                     "Pass 1 inline source {raw_source} has no retained syntax",
@@ -666,16 +692,16 @@ pub(super) fn streaming(
             }
         }
         // `info` is intentionally dropped here. Production never accumulates checked side tables
-        // for more than the active inline source. Release the complete legacy declaration view at
-        // the same boundary; later inline files see this source only through stable semantic data.
-        files[raw_source] = None;
+        // for more than the active inline source. Later files see this source only through stable
+        // semantic data.
+        files.remove(raw_source);
     }
     assert!(
         inline_work.is_empty(),
         "every selected inline body must be consumed with its source"
     );
     assert!(
-        files.iter().all(Option::is_none),
+        files.is_empty(),
         "no bounded parser syntax may survive Pass-1 inline/default preparation"
     );
     finish(index, inline_bodies, sources, default_arguments, unexpected)

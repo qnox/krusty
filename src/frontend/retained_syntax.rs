@@ -13,6 +13,46 @@ use crate::ast::{
 
 const MISSING_EXPR: ExprId = ExprId(u32::MAX);
 
+/// Sparse owner of parser fragments that still owe Pass-1 inline/default FIR. Sources without
+/// bounded executable work never enter this collection, and each retained file is removed as soon
+/// as its last selected body is checked.
+pub(super) struct RetainedPassOneSyntax {
+    source_count: usize,
+    files: HashMap<crate::fir::SourceFileId, File>,
+}
+
+impl RetainedPassOneSyntax {
+    pub(super) fn new(source_count: usize) -> Self {
+        Self {
+            source_count,
+            files: HashMap::new(),
+        }
+    }
+
+    pub(super) fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    pub(super) fn insert(&mut self, source: crate::fir::SourceFileId, file: File) {
+        let previous = self.files.insert(source, file);
+        assert!(previous.is_none(), "Pass-1 syntax source inserted twice");
+    }
+
+    pub(super) fn get(&self, raw_source: usize) -> Option<&File> {
+        self.files
+            .get(&crate::fir::SourceFileId::from_raw(raw_source as u32))
+    }
+
+    pub(super) fn remove(&mut self, raw_source: usize) -> Option<File> {
+        self.files
+            .remove(&crate::fir::SourceFileId::from_raw(raw_source as u32))
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
 #[derive(Default)]
 struct Reachable {
     expressions: HashSet<ExprId>,
