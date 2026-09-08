@@ -637,6 +637,23 @@ pub fn jvm_collection_to_kotlin_mutable_type_name(internal: TypeName) -> Option<
     builtin_ids().coll_to_kotlin_mutable.get(&internal).copied()
 }
 
+/// The read-only upper face of a Java collection platform type. The classpath provider exposes
+/// this resolved relation to common inference; consumers never compare collection spellings or
+/// depend on JVM erasure groups directly.
+pub fn platform_flexible_upper_bound(lower: Ty) -> Ty {
+    let Ty::Obj(lower_owner, arguments) = lower else {
+        return lower;
+    };
+    let jvm = to_jvm_type_name(lower_owner);
+    if jvm_collection_to_kotlin_mutable_type_name(jvm) != Some(lower_owner) {
+        return lower;
+    }
+    let Some(upper) = jvm_collection_to_kotlin_type_name(jvm) else {
+        return lower;
+    };
+    Ty::obj_args_name(upper, arguments)
+}
+
 pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
     builtin_ids().jvm_builtin.get(&internal).map(|(s, _)| *s)
 }
@@ -874,8 +891,8 @@ mod tests {
         is_kotlin_collection_type_name, jvm_collection_to_kotlin_type_name,
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
         mapped_builtin_has_authoritative_kotlin_scope, mapped_scope_keeps_jvm_method,
-        to_jvm_internal, to_jvm_type_name, to_kotlin_internal, wrapper_internal,
-        wrapper_to_kotlin_prim_name, MAPPED_VISIBLE_METHODS,
+        platform_flexible_upper_bound, to_jvm_internal, to_jvm_type_name, to_kotlin_internal,
+        wrapper_internal, wrapper_to_kotlin_prim_name, MAPPED_VISIBLE_METHODS,
     };
     use crate::types::{type_name, Ty};
 
@@ -972,6 +989,21 @@ mod tests {
         assert!(!is_kotlin_collection_type_name(type_name("java/util/List")));
         assert!(!is_kotlin_collection_type_name(type_name("kotlin/String")));
         assert!(!is_kotlin_collection_type_name(type_name("demo/Foo")));
+    }
+
+    #[test]
+    fn mapped_collection_flexible_upper_bound_uses_resolved_identity() {
+        let arguments = [Ty::String, Ty::obj("kotlin/Any")];
+        let mutable = Ty::obj_args("kotlin/collections/MutableMap", &arguments);
+        assert_eq!(
+            platform_flexible_upper_bound(mutable),
+            Ty::obj_args("kotlin/collections/Map", &arguments)
+        );
+
+        let read_only = Ty::obj_args("kotlin/collections/Map", &arguments);
+        assert_eq!(platform_flexible_upper_bound(read_only), read_only);
+        let unrelated = Ty::obj("example/MutableMap");
+        assert_eq!(platform_flexible_upper_bound(unrelated), unrelated);
     }
 
     #[test]

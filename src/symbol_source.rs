@@ -14,7 +14,7 @@
 
 pub use crate::libraries::ClassifierAccess;
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
-use crate::types::TypeName;
+use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SymbolNamespace {
@@ -80,6 +80,13 @@ pub trait SymbolSource {
     /// exposed.
     fn symbols(&self, _namespace: SymbolNamespace, _name: &str) -> std::rc::Rc<ResolvedSymbols> {
         std::rc::Rc::new(ResolvedSymbols::default())
+    }
+
+    /// The upper semantic face paired with a platform type's retained lower bound.
+    /// This is a relation over resolved identities, not a declaration lookup: core inference must
+    /// not reconstruct platform-specific flexible pairs from classifier spellings.
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        lower
     }
 }
 
@@ -170,6 +177,14 @@ impl SymbolSource for CompositeSource<'_> {
             }
         }
     }
+
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.children
+            .iter()
+            .map(|source| source.platform_flexible_upper_bound(lower))
+            .find(|upper| *upper != lower)
+            .unwrap_or(lower)
+    }
 }
 
 /// Caller-owned memo for repeated reads from an immutable composite source.
@@ -225,6 +240,10 @@ impl SymbolSource for CachedCompositeSource<'_> {
             .or_default()
             .insert(name.to_owned(), symbols.clone());
         symbols
+    }
+
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.source.platform_flexible_upper_bound(lower)
     }
 }
 

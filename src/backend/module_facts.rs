@@ -135,12 +135,7 @@ impl BackendClassifierFact {
                 .into_boxed_slice(),
             surface: surface.into_boxed_slice(),
             own_type_parameter_count: shape.own_type_parameter_count,
-            type_param_variances: shape
-                .type_param_variances()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
         }
     }

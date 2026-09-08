@@ -509,37 +509,6 @@ pub fn same(a: TypeName, b: TypeName) -> bool {
     a == b
 }
 
-/// Well-known class internal names, each inserted ONCE into the type-name tree and reused for id
-/// comparison against other object type names.
-/// The read-only `kotlin.collections` interface each mutable one refines. A Java `Map<K, V>`
-/// reaches Kotlin as the flexible `(Mutable)Map<K!, V!>!`, so where krusty carries its mutable
-/// face with platform nullability, the read-only face is admissible too.
-pub const READ_ONLY_COLLECTION_COUNTERPARTS: &[(&str, &str)] = &[
-    (
-        "kotlin/collections/MutableIterable",
-        "kotlin/collections/Iterable",
-    ),
-    (
-        "kotlin/collections/MutableIterator",
-        "kotlin/collections/Iterator",
-    ),
-    (
-        "kotlin/collections/MutableCollection",
-        "kotlin/collections/Collection",
-    ),
-    ("kotlin/collections/MutableList", "kotlin/collections/List"),
-    ("kotlin/collections/MutableSet", "kotlin/collections/Set"),
-    (
-        "kotlin/collections/MutableListIterator",
-        "kotlin/collections/ListIterator",
-    ),
-    ("kotlin/collections/MutableMap", "kotlin/collections/Map"),
-    (
-        "kotlin/collections/MutableMap.MutableEntry",
-        "kotlin/collections/Map.Entry",
-    ),
-];
-
 pub mod wk {
     use super::{type_name, TypeName};
     use std::sync::OnceLock;

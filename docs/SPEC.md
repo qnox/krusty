@@ -2043,10 +2043,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   returns emptyMap()`, mockk's everyday stub of a Java getter) — the result variables must still
   bind, as kotlinc binds them through the read-only side of the flexible type. The return
   unifiers (`unify_inferred_ty`, `unify_ty`, and the scorer's restatement of the declared return
-  at the expected constructor) now project a platform-nullable `kotlin/collections/MutableX`
-  expectation onto its read-only counterpart (`READ_ONLY_COLLECTION_COUNTERPARTS`) when the
-  declared shape is that counterpart; a Kotlin-declared `MutableMap<String, Any>` carries no
-  platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. Tests:
+  at the expected constructor) now ask the declaration provider for the resolved upper face of a
+  platform-flexible expectation. The JVM provider answers from its id-backed Java/Kotlin class map;
+  common inference contains no collection-name table. A Kotlin-declared `MutableMap<String, Any>`
+  carries no platform mark and still rejects `Map<K, V>`, as kotlinc rejects it. Tests:
   `tests/java_flexible_collection_e2e.rs`.
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's

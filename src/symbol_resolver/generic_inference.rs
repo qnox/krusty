@@ -1039,37 +1039,31 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             // The outer classifiers must denote the same type: matching `Array<T>` against
             // `Wrapper<Int>` by argument position invents `T = Int`. Vararg calls unwrap their array
             // declaration explicitly in `infer_generic_call_bindings`; ordinary unification never does.
-            let flexible_mutability = matches!(
-                actual.projection_inner().unwrap_or(actual),
-                Ty::PlatformNullable(_)
-            );
-            let mut actual = actual.projection_inner().unwrap_or(actual).non_null();
+            let actual = actual.projection_inner().unwrap_or(actual);
+            let flexible_upper = platform_flexible_upper_bound(source, actual).map(Ty::non_null);
+            let mut actual = actual.non_null();
             while let (Some(_), Ty::TyParam(_, bound)) = (source, actual) {
                 actual = bound.projection_inner().unwrap_or(*bound).non_null();
             }
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
-                // A Java collection reaches Kotlin as the flexible `(Mutable)X<..>!`; its
-                // read-only face binds the declared shape too.
-                Ty::Obj(actual_name, _)
-                    if flexible_mutability
-                        && crate::types::READ_ONLY_COLLECTION_COUNTERPARTS.iter().any(
-                            |(mutable, read_only)| {
-                                actual_name.matches(mutable) && name.matches(read_only)
-                            },
-                        ) =>
-                {
-                    Some(actual)
-                }
-                Ty::Obj(_, _) => source.and_then(|source| {
-                    receiver_hierarchy(source, actual)
-                        .into_iter()
-                        .map(|(ty, _)| ty)
-                        .find(|ty| {
-                            ty.obj_internal()
-                                .is_some_and(|actual_name| name == actual_name)
+                Ty::Obj(_, _) => flexible_upper
+                    .filter(|upper| {
+                        upper
+                            .obj_internal()
+                            .is_some_and(|actual_name| name == actual_name)
+                    })
+                    .or_else(|| {
+                        source.and_then(|source| {
+                            receiver_hierarchy(source, actual)
+                                .into_iter()
+                                .map(|(ty, _)| ty)
+                                .find(|ty| {
+                                    ty.obj_internal()
+                                        .is_some_and(|actual_name| name == actual_name)
+                                })
                         })
-                }),
+                    }),
                 _ => None,
             };
             if let Some(Ty::Obj(_, targs)) = projected {
@@ -1628,31 +1622,27 @@ pub(super) fn unify_inferred_ty_impl(
         }
         Ty::Obj(name, arguments) => {
             let actual = actual.projection_inner().unwrap_or(actual);
-            // A Java collection reaches Kotlin as the flexible `(Mutable)X<..>!`; krusty carries
-            // its mutable face under platform nullability, and the read-only face binds too.
-            let flexible_mutability = matches!(actual, Ty::PlatformNullable(_));
+            let flexible_upper = platform_flexible_upper_bound(source, actual).map(Ty::non_null);
             let actual = actual.non_null();
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
-                Ty::Obj(actual_name, _)
-                    if flexible_mutability
-                        && crate::types::READ_ONLY_COLLECTION_COUNTERPARTS.iter().any(
-                            |(mutable, read_only)| {
-                                actual_name.matches(mutable) && name.matches(read_only)
-                            },
-                        ) =>
-                {
-                    Some(actual)
-                }
-                Ty::Obj(_, _) => source.and_then(|source| {
-                    receiver_hierarchy(source, actual)
-                        .into_iter()
-                        .map(|(ty, _)| ty)
-                        .find(|ty| {
-                            ty.obj_internal()
-                                .is_some_and(|actual_name| name == actual_name)
+                Ty::Obj(_, _) => flexible_upper
+                    .filter(|upper| {
+                        upper
+                            .obj_internal()
+                            .is_some_and(|actual_name| name == actual_name)
+                    })
+                    .or_else(|| {
+                        source.and_then(|source| {
+                            receiver_hierarchy(source, actual)
+                                .into_iter()
+                                .map(|(ty, _)| ty)
+                                .find(|ty| {
+                                    ty.obj_internal()
+                                        .is_some_and(|actual_name| name == actual_name)
+                                })
                         })
-                }),
+                    }),
                 _ => None,
             };
             if let Some(Ty::Obj(_, actual_arguments)) = projected {
@@ -3208,10 +3198,19 @@ pub(crate) fn generic_bindings_admit_expected_return_intersection(
 pub(crate) fn infer_generic_return_bindings(
     generic_sig: &GenericSig,
     expected: Ty,
+    admits: impl FnMut(Ty, Ty) -> bool,
+) -> Option<GSigBinds> {
+    infer_generic_return_bindings_impl(None, generic_sig, expected, admits)
+}
+
+fn infer_generic_return_bindings_impl(
+    source: Option<&dyn SymbolSource>,
+    generic_sig: &GenericSig,
+    expected: Ty,
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Option<GSigBinds> {
     let mut bindings = GSigBinds::new();
-    unify_inferred_ty(generic_sig.ret, expected, &mut bindings);
+    unify_inferred_ty_impl(source, generic_sig.ret, expected, &mut bindings);
     if bindings.is_empty() {
         return None;
     }
@@ -3335,7 +3334,7 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
         match return_shape_at_expected_owner(source, generic_sig.ret, expected) {
             Some(declared) => (declared, expected),
             None => {
-                let read_only = platform_read_only_face(expected)?;
+                let read_only = platform_flexible_upper_bound(Some(source), expected)?;
                 (
                     return_shape_at_expected_owner(source, generic_sig.ret, read_only)?,
                     read_only,
@@ -3344,22 +3343,19 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
         };
     let mut projected = generic_sig.clone();
     projected.ret = declared;
-    infer_generic_return_bindings(&projected, expected, admits)
+    infer_generic_return_bindings_impl(Some(source), &projected, expected, admits)
 }
 
-/// The read-only face of a platform-nullable mutable collection (`(Mutable)Map<K!, V!>!` seen as
-/// `Map<K!, V!>!`), or `None` when `ty` is not that shape.
-pub(crate) fn platform_read_only_face(ty: Ty) -> Option<Ty> {
-    let Ty::PlatformNullable(inner) = ty else {
+/// The provider-declared upper face of a platform type, preserving the platform nullability marker.
+fn platform_flexible_upper_bound(source: Option<&dyn SymbolSource>, ty: Ty) -> Option<Ty> {
+    let (Some(source), Ty::PlatformNullable(lower)) = (source, ty) else {
         return None;
     };
-    let Ty::Obj(name, args) = inner else {
-        return None;
-    };
-    let (_, read_only) = crate::types::READ_ONLY_COLLECTION_COUNTERPARTS
-        .iter()
-        .find(|(mutable, _)| name.matches(mutable))?;
-    Some(Ty::platform_nullable(Ty::obj_args(read_only, args)))
+    let upper = crate::assignable::TypeOracle::platform_flexible_upper_bound(
+        &crate::symbol_resolver::SourceOracle(source),
+        *lower,
+    );
+    (upper != *lower).then(|| Ty::platform_nullable(upper))
 }
 
 /// The declared return restated at the expected type's own constructor. `MutableReply<T>` used where
