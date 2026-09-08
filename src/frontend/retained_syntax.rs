@@ -1,8 +1,8 @@
 //! Bounded parser syntax retained for Pass-1-only executable work.
 //!
 //! Production signature extraction runs while one source is active. Afterwards only inline bodies
-//! and compile-time constant initializers may still need parser syntax. This compactor follows those
-//! roots, rewrites every retained parser identity densely, and drops neighboring ordinary bodies.
+//! and parameter defaults may still need parser syntax. This compactor follows those roots, rewrites
+//! every retained parser identity densely, and drops neighboring ordinary bodies.
 
 use std::collections::{HashMap, HashSet};
 
@@ -91,33 +91,6 @@ impl Reachable {
         self.roots(file, roots);
     }
 
-    fn property(&mut self, file: &File, property: &PropDecl) {
-        self.roots(
-            file,
-            property
-                .annotation_args
-                .iter()
-                .flatten()
-                .copied()
-                .chain(
-                    property
-                        .context_params
-                        .iter()
-                        .flat_map(parameter_expression_roots),
-                )
-                .chain(property.init)
-                .chain(property.delegate)
-                .chain(property.getter.as_ref().and_then(fun_body_root))
-                .chain(
-                    property
-                        .setter
-                        .as_ref()
-                        .and_then(|setter| setter.body.as_ref())
-                        .and_then(fun_body_root),
-                ),
-        );
-    }
-
     fn declaration(&mut self, file: &File, declaration: crate::ast::DeclId) {
         let mut roots = Vec::new();
         file.any_decl_expr(declaration, &mut |root| {
@@ -148,15 +121,6 @@ impl Reachable {
     }
 }
 
-fn parameter_expression_roots(parameter: &Param) -> impl Iterator<Item = ExprId> + '_ {
-    parameter
-        .annotation_args
-        .iter()
-        .flatten()
-        .copied()
-        .chain(parameter.default)
-}
-
 fn fun_body_root(body: &FunBody) -> Option<ExprId> {
     match body {
         FunBody::Expr(root) | FunBody::Block(root) => Some(*root),
@@ -177,6 +141,26 @@ fn retain_parameter_defaults<'a>(
     );
 }
 
+fn retain_inline_accessors(retained: &mut Reachable, file: &File, property: &PropDecl) {
+    if property.getter_inline {
+        retained.roots(file, property.getter.as_ref().and_then(fun_body_root));
+    }
+    if property
+        .setter
+        .as_ref()
+        .is_some_and(|setter| setter.is_inline)
+    {
+        retained.roots(
+            file,
+            property
+                .setter
+                .as_ref()
+                .and_then(|setter| setter.body.as_ref())
+                .and_then(fun_body_root),
+        );
+    }
+}
+
 fn collect_pass_one_roots(file: &File) -> Reachable {
     let mut retained = Reachable::default();
     for declaration in &file.decl_arena {
@@ -187,29 +171,7 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     retained.function(file, function);
                 }
             }
-            Decl::Property(property) => {
-                if property.is_const {
-                    retained.property(file, property);
-                } else {
-                    if property.getter_inline {
-                        retained.roots(file, property.getter.as_ref().and_then(fun_body_root));
-                    }
-                    if property
-                        .setter
-                        .as_ref()
-                        .is_some_and(|setter| setter.is_inline)
-                    {
-                        retained.roots(
-                            file,
-                            property
-                                .setter
-                                .as_ref()
-                                .and_then(|setter| setter.body.as_ref())
-                                .and_then(fun_body_root),
-                        );
-                    }
-                }
-            }
+            Decl::Property(property) => retain_inline_accessors(&mut retained, file, property),
             Decl::Class(class) => {
                 retained.roots(
                     file,
@@ -279,27 +241,7 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     }
                 }
                 for property in &class.body_props {
-                    if property.is_const {
-                        retained.property(file, property);
-                    } else {
-                        if property.getter_inline {
-                            retained.roots(file, property.getter.as_ref().and_then(fun_body_root));
-                        }
-                        if property
-                            .setter
-                            .as_ref()
-                            .is_some_and(|setter| setter.is_inline)
-                        {
-                            retained.roots(
-                                file,
-                                property
-                                    .setter
-                                    .as_ref()
-                                    .and_then(|setter| setter.body.as_ref())
-                                    .and_then(fun_body_root),
-                            );
-                        }
-                    }
+                    retain_inline_accessors(&mut retained, file, property);
                 }
                 for entry in &class.enum_entries {
                     for method in &entry.methods {
@@ -308,9 +250,7 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                         }
                     }
                     for property in &entry.props {
-                        if property.is_const {
-                            retained.property(file, property);
-                        }
+                        retain_inline_accessors(&mut retained, file, property);
                     }
                 }
             }
@@ -780,8 +720,8 @@ fn remap_u32_set(
         .collect()
 }
 
-/// Drop every ordinary parser body while retaining dense syntax for inline bodies and `const`
-/// initializers. Header/declaration structures remain available to the temporary legacy adapters.
+/// Drop every ordinary parser body while retaining dense syntax for inline bodies and parameter
+/// defaults. Header/declaration structures remain available to the bounded Pass-1 checker.
 pub(super) fn compact(file: &mut File) {
     let reachable = collect_pass_one_roots(file);
     let (old_expression_ids, expressions) = expr_map(&reachable);
@@ -1003,5 +943,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["INVISIBLE_MEMBER", "INVISIBLE_REFERENCE"],
         );
+    }
+
+    #[test]
+    fn compact_signature_constants_do_not_survive_beside_inline_syntax() {
+        let source = "const val TOP = 1 + 2\n\
+            inline fun increment(value: Int): Int = value + 1\n\
+            object Holder {\n\
+            \x20 const val MEMBER = 3 + 4\n\
+            \x20 inline fun value(): Int = MEMBER\n\
+            }\n";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let mut file =
+            crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
+
+        compact(&mut file);
+
+        let top = file
+            .decls
+            .iter()
+            .find_map(|declaration| match file.decl(*declaration) {
+                Decl::Property(property) if property.name == "TOP" => Some(property),
+                _ => None,
+            })
+            .expect("top-level constant declaration");
+        assert_eq!(top.init, Some(MISSING_EXPR));
+        let holder = file
+            .decls
+            .iter()
+            .find_map(|declaration| match file.decl(*declaration) {
+                Decl::Class(class) if class.name == "Holder" => Some(class),
+                _ => None,
+            })
+            .expect("object declaration");
+        let member = holder
+            .body_props
+            .iter()
+            .find(|property| property.name == "MEMBER")
+            .expect("member constant declaration");
+        assert_eq!(member.init, Some(MISSING_EXPR));
+        assert!(matches!(
+            holder.methods[0].body,
+            FunBody::Expr(expression) if expression != MISSING_EXPR
+        ));
     }
 }
