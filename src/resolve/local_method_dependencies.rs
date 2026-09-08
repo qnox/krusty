@@ -118,7 +118,7 @@ impl Checker<'_> {
         properties: &[ScopedProperty],
         source: crate::libraries::SourceMember,
     ) {
-        if self.signature_defaults_only || self.capture_scope.is_some() {
+        if self.signature_defaults_only {
             return;
         }
         let Some(declaration) = self.active_source_member_declaration(source) else {

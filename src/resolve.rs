@@ -19957,7 +19957,7 @@ impl<'a> Checker<'a> {
             return self.check_collection_literal(scope, call, args, span, expected);
         }
         if let Some(declaration) = self.file.anonymous_object_classes.get(&call).copied() {
-            if self.discover_anonymous_captures {
+            if !self.signature_defaults_only {
                 let narrows = scope.local_narrowings();
                 let mut candidates = Vec::new();
                 scope.visit_bindings(Ns::Value, |name, binding| {
@@ -27956,7 +27956,7 @@ mod tests {
     use super::*;
     use crate::features::LangFeatures;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_script_with_features, parse_with_features};
+    use crate::parser::{parse, parse_with_features};
     use std::cell::RefCell;
     use std::ops::{Deref, DerefMut};
 
@@ -28542,223 +28542,6 @@ mod tests {
         .expect("CallSig receiver metadata must survive erased provider parameters");
         assert_eq!(expectation.receiver, Some(Ty::String));
         assert!(expectation.value_params.is_empty());
-    }
-
-    #[test]
-    fn capture_discovery_selects_only_enclosing_top_level_declarations() {
-        let mut diagnostics = DiagSink::new();
-        let source = r#"
-interface Marker
-fun before(): Int = 1
-val top: Marker = object : Marker { fun value(): Int = 4 }
-fun defaulted(value: Marker = object : Marker {}): Marker = value
-fun target(seed: Int): Marker {
-    val captured = seed
-    return object : Marker { fun value(): Int = captured }
-}
-class MethodHost {
-    fun declared(): Int = 2
-    fun inferred() = source()
-    override fun toString() = source()
-    fun block(): Int { return 2 }
-    fun build(seed: Int): Marker {
-        val captured = seed
-        return object : Marker { fun value(): Int = captured }
-    }
-    fun defaulted(value: Marker = object : Marker {}): Marker = value
-    fun after(): Int = 3
-}
-class PropertyHost {
-    fun declared(): Int = 2
-    fun inferred() = source()
-    override fun toString() = source()
-    fun block(): Int { return 2 }
-    val target: Marker = object : Marker { fun value(): Int = 4 }
-    fun laterInferred() = source()
-}
-class CompanionHost {
-    fun dependency() = source()
-    fun declared(): Int = 5
-    companion object {
-        fun untouched(): Int = 6
-        fun build(seed: Int): Marker {
-            val captured = seed
-            return object : Marker { fun value(): Int = captured }
-        }
-    }
-}
-fun after(): Int = 3
-"#;
-        let file = parse_file(source, &mut diagnostics);
-        assert!(diagnostics.diags.is_empty());
-
-        let scope = capture_discovery_scope(&file);
-        assert!(scope.complete);
-        let selected = scope.declarations;
-        let named = file
-            .decls
-            .iter()
-            .filter_map(|declaration| match file.decl(*declaration) {
-                Decl::Fun(function) if selected.contains(declaration) => {
-                    Some(function.name.as_str())
-                }
-                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
-                Decl::Property(property) if selected.contains(declaration) => {
-                    Some(property.name.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            named,
-            vec![
-                "top",
-                "defaulted",
-                "target",
-                "MethodHost",
-                "PropertyHost",
-                "CompanionHost.Companion"
-            ]
-        );
-
-        let class = |name: &str| {
-            file.decls
-                .iter()
-                .find_map(|declaration| match file.decl(*declaration) {
-                    Decl::Class(class) if class.name == name => Some((*declaration, class)),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("source should contain {name}"))
-        };
-        let scope = capture_discovery_scope(&file);
-        let (method_host, _) = class("MethodHost");
-        let method_plan = scope
-            .class_plans
-            .get(&method_host)
-            .expect("selected class should have a complete plan");
-        // The last target is in a parameter default, proving the generic function-root seam is not
-        // a body-only shortcut. Within that prefix, only an inferred-return publisher and the two
-        // target owners require semantic checking; declared, block-body, and fixed-contract methods
-        // retain only the cheap mutation-summary transition. The unrelated suffix is omitted.
-        assert_eq!(
-            method_plan.methods,
-            vec![false, true, false, false, true, true]
-        );
-
-        let (property_host, _) = class("PropertyHost");
-        let property_plan = scope
-            .class_plans
-            .get(&property_host)
-            .expect("selected class should have a complete plan");
-        // A property target retains the complete ordered method sequence, including a publisher
-        // after the property. This is intentionally conservative because the checker processes
-        // method return publication before later class regions.
-        assert_eq!(property_plan.methods, vec![false, true, false, false, true]);
-
-        let (companion_host, _) = class("CompanionHost.Companion");
-        let companion_plan = scope
-            .class_plans
-            .get(&companion_host)
-            .expect("selected class should have a complete plan");
-        assert_eq!(companion_plan.methods, vec![false, true]);
-    }
-
-    #[test]
-    fn capture_discovery_uses_generic_declaration_expression_roots() {
-        let mut diagnostics = DiagSink::new();
-        let source = r#"
-interface Marker
-open class Base(val marker: Marker)
-fun before(): Int = 1
-class Primary(val marker: Marker = object : Marker {})
-class Derived : Base(object : Marker {})
-class Delegated : Marker by object : Marker {}
-class Container {
-    init { val initialized = object : Marker {} }
-    val member = object : Marker {}
-    companion object : Base(object : Marker {}) {
-        fun make(): Marker = object : Marker {}
-        val value = object : Marker {}
-    }
-    constructor(marker: Marker = object : Marker {}) {
-        val constructed = object : Marker {}
-    }
-}
-enum class Choice(val marker: Marker) {
-    FIRST(object : Marker {})
-}
-val custom: Marker get() = object : Marker {}
-val delegated: Marker by object {
-    operator fun getValue(owner: Any?, property: Any?): Marker = object : Marker {}
-}
-fun after(): Int = 2
-"#;
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
-        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-
-        let scope = capture_discovery_scope(&file);
-        assert!(scope.complete);
-        let selected = scope.declarations;
-        let synthesized = file
-            .anonymous_object_classes
-            .values()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        let named = file
-            .decls
-            .iter()
-            // A construction inside an anonymous object's member correctly selects that synthesized
-            // class too. Compare only source-level owners here so the regression neither depends on
-            // nor prints parser-generated internal class names.
-            .filter(|declaration| !synthesized.contains(declaration))
-            .filter_map(|declaration| match file.decl(*declaration) {
-                Decl::Fun(function) if selected.contains(declaration) => {
-                    Some(function.name.as_str())
-                }
-                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
-                Decl::Property(property) if selected.contains(declaration) => {
-                    Some(property.name.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        // `before`, `after`, `Marker`, and `Base` are sentinels: if a future parser field falls
-        // outside `File::any_decl_expr`, completeness detection selects every declaration and makes
-        // this assertion fail instead of silently losing capture information.
-        assert_eq!(
-            named,
-            vec![
-                "Primary",
-                "Derived",
-                "Delegated",
-                "Container",
-                "Container.Companion",
-                "Choice",
-                "custom",
-                "delegated",
-            ]
-        );
-    }
-
-    #[test]
-    fn capture_discovery_selects_script_body() {
-        let mut diagnostics = DiagSink::new();
-        let source = r#"
-val captured = "OK"
-val result = object { fun value(): String = captured }
-"#;
-        let tokens = lex(source, &mut diagnostics);
-        let file =
-            parse_script_with_features(source, &tokens, &mut diagnostics, &LangFeatures::default());
-        assert!(diagnostics.diags.is_empty());
-
-        let scope = capture_discovery_scope(&file);
-        assert!(scope.complete);
-        assert!(scope.declarations.is_empty());
-        assert!(scope.script_body);
     }
 
     struct ClassifierImportSource;
@@ -38510,7 +38293,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
         unreachable_statement_depth: 0,
-        discover_anonymous_captures: false,
         discovered_anonymous_captures: HashMap::new(),
         discovered_local_class_captures: HashMap::new(),
         discovered_local_class_capture_bindings: HashMap::new(),
@@ -38521,7 +38303,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         checked_local_classifier_type_arguments: HashMap::new(),
         signature_default_expression_depth: 0,
         anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
-        capture_scope: None,
         loop_labels: Vec::new(),
         loop_depth: 0,
         return_allowed: true,
@@ -39077,94 +38858,6 @@ fn record_expression_targets(
     }
 }
 
-fn record_function_capture_targets(
-    file: &File,
-    function: &FunDecl,
-    targets: &std::collections::HashSet<ExprId>,
-    discovered: &mut std::collections::HashSet<ExprId>,
-) -> bool {
-    let mut roots = Vec::new();
-    file.any_fun_expr(function, &mut |expression| {
-        roots.push(expression);
-        false
-    });
-    record_expression_targets(file, targets, roots, discovered)
-}
-
-fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
-    function_needs_return_preinfer(function) && !function.is_override()
-}
-
-#[derive(Clone)]
-struct ClassCapturePlan {
-    /// One decision per method in the retained instance/enum-entry prefix. A shorter vector means
-    /// the remaining suffix is irrelevant; `false` inside the vector means semantic checking may be
-    /// skipped but the checker's ordered mutation summary must still advance past that method.
-    methods: Vec<bool>,
-}
-
-impl ClassCapturePlan {
-    /// Refine one already-selected class without reintroducing a resolver-owned inventory of class
-    /// fields. `declaration_targets` came from the generic `File::any_decl_expr` walk above; this
-    /// method only asks the corresponding generic function seam which ordered method owns each
-    /// target.
-    ///
-    /// Instance and enum-entry methods publish inferred returns into shared checker state. Retain
-    /// the exact prefix through the last capture-bearing method, but semantically check within that
-    /// prefix only methods that own a target or can publish such a return. A target in any other
-    /// class region keeps the complete prefix because constructors, properties, init blocks, enum
-    /// arguments may consume those published returns.
-    fn for_class(
-        file: &File,
-        class: &ClassDecl,
-        targets: &std::collections::HashSet<ExprId>,
-        declaration_targets: &std::collections::HashSet<ExprId>,
-    ) -> Self {
-        let methods = class
-            .methods
-            .iter()
-            .chain(
-                class
-                    .enum_entries
-                    .iter()
-                    .flat_map(|entry| entry.methods.iter()),
-            )
-            .collect::<Vec<_>>();
-        let mut method_targets = std::collections::HashSet::new();
-        let mut selected_methods = methods
-            .iter()
-            .map(|method| {
-                record_function_capture_targets(file, method, targets, &mut method_targets)
-            })
-            .collect::<Vec<_>>();
-        let mut method_check_prefix_len = selected_methods
-            .iter()
-            .rposition(|selected| *selected)
-            .map_or(0, |index| index + 1);
-        if declaration_targets
-            .iter()
-            .any(|target| !method_targets.contains(target))
-        {
-            method_check_prefix_len = methods.len();
-        }
-        selected_methods.truncate(method_check_prefix_len);
-        for (selected, method) in selected_methods.iter_mut().zip(methods) {
-            *selected |= method_may_publish_inferred_return(method);
-        }
-
-        Self {
-            methods: selected_methods,
-        }
-    }
-}
-
-struct CaptureDiscoveryScope {
-    declarations: std::collections::HashSet<DeclId>,
-    script_body: bool,
-    class_plans: std::collections::HashMap<DeclId, ClassCapturePlan>,
-    complete: bool,
-}
-
 /// Anonymous-class bodies nested under an inline callable are ordinary emission bodies, but their
 /// enclosing inline syntax was consumed in Pass 1. When one of those bodies is selected in
 /// Pass 2, enter its classifier directly from stable declaration ownership and the capture/type-
@@ -39173,7 +38866,7 @@ struct CaptureDiscoveryScope {
 fn selected_inline_owned_anonymous_classes(
     file: &File,
     index: &crate::fir::ResolvedModuleIndex,
-    active: Option<&crate::fir::ActiveSourceDeclarations>,
+    active: &crate::fir::ActiveSourceDeclarations,
     selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
     anonymous: &AnonymousLexicalClassScope,
 ) -> Vec<(DeclId, Vec<crate::fir::DeclarationId>)> {
@@ -39199,9 +38892,7 @@ fn selected_inline_owned_anonymous_classes(
                     .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
                     .find(|other| {
                         *other != candidate
-                            && active.is_some_and(|active| {
-                                active.same_parser_declaration(*other, candidate)
-                            })
+                            && active.same_parser_declaration(*other, candidate)
                             && index.declaration_header(*other).is_some_and(|header| {
                                 header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
                             })
@@ -39214,22 +38905,16 @@ fn selected_inline_owned_anonymous_classes(
             if candidate_anchor.kind == crate::fir::DeclarationKind::Classifier
                 && anonymous_class.is_none()
             {
-                let transient = active.and_then(|active| {
-                    active
-                        .class(file, candidate)
-                        .map(|(transient, _)| transient)
-                });
-                let retained_local = active.is_none()
-                    && index.declaration_header(candidate).is_some_and(|header| {
-                        header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                    });
+                let transient = active
+                    .class(file, candidate)
+                    .map(|(transient, _)| transient);
                 let stable_anonymous = index.declaration_header(candidate).is_some_and(|header| {
                     header
                         .flags
                         .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
                 });
                 anonymous_class = transient.filter(|transient| {
-                    stable_anonymous || retained_local || anonymous.declarations.contains(transient)
+                    stable_anonymous || anonymous.declarations.contains(transient)
                 });
             }
             if index
@@ -39259,66 +38944,7 @@ fn selected_inline_owned_anonymous_classes(
     selected
 }
 
-/// Capture discovery needs lexical state from the declaration containing each anonymous-object
-/// construction, but declarations are checked in isolated top-level scopes. Find those owners once
-/// so the scratch checker does not re-check every unrelated declaration in the file.
-fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
-    let targets = file
-        .anonymous_object_classes
-        .keys()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    let mut discovered = std::collections::HashSet::with_capacity(targets.len());
-    let mut class_plans = std::collections::HashMap::new();
-    let declarations = file
-        .decls
-        .iter()
-        .copied()
-        .filter(|declaration| {
-            let mut roots = Vec::new();
-            file.any_decl_expr(*declaration, &mut |expression| {
-                roots.push(expression);
-                false
-            });
-            let mut declaration_targets = std::collections::HashSet::new();
-            let owns_target =
-                record_expression_targets(file, &targets, roots, &mut declaration_targets);
-            if owns_target {
-                if let Decl::Class(class) = file.decl(*declaration) {
-                    class_plans.insert(
-                        *declaration,
-                        ClassCapturePlan::for_class(file, class, &targets, &declaration_targets),
-                    );
-                }
-                discovered.extend(declaration_targets);
-            }
-            owns_target
-        })
-        // Parser-hoisted local classifiers are entered only while their enclosing executable is
-        // checked. Selecting the hoisted declaration itself would be a dead root: the file-level
-        // checker deliberately skips it, and an anonymous construction in one of its initializer
-        // bodies would never run capture discovery. Follow the parser's explicit lexical edge to
-        // the bounded source declaration that actually enters the local classifier. This is an
-        // active-AST ownership edge, not a retained source-range locator.
-        .map(|declaration| {
-            file.local_class_enclosing_declarations
-                .get(&declaration)
-                .copied()
-                .unwrap_or(declaration)
-        })
-        .collect::<std::collections::HashSet<_>>();
-    let script_body = file
-        .script_body
-        .is_some_and(|body| record_expression_targets(file, &targets, [body], &mut discovered));
-    let complete = discovered.len() == targets.len();
-    CaptureDiscoveryScope {
-        declarations,
-        script_body,
-        class_plans,
-        complete,
-    }
-}
-
+/// Parser ownership for anonymous objects and classifiers nested inside them.
 #[derive(Default, Clone)]
 struct AnonymousLexicalClassScope {
     owners: HashMap<DeclId, DeclId>,
@@ -39531,99 +39157,18 @@ fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
     }
 }
 
-/// Classifier roots visible from a declaration in nearest-first order. Ordinary nested declarations
-/// may derive their source parents from their hoisted internal name; anonymous declarations may not —
-/// their generated `$` name is exact, and their parents come only from the structural ownership map.
-fn discover_anonymous_object_captures_at(
-    file: &File,
-    file_index: u32,
-    syms: &mut PassTwoSymbols,
-    selected_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
-    selected_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
-    resolved_index: &crate::fir::ResolvedModuleIndex,
-    active_declarations: &crate::fir::ActiveSourceDeclarations,
-) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
-    let declarations = file
-        .anonymous_object_classes
-        .values()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    if declarations.is_empty() {
-        return HashMap::new();
-    }
-    let mut scratch = DiagSink::new();
-    let info = check_file_at_impl_mode_with_index(
-        file,
-        file_index,
-        syms,
-        resolved_index,
-        &mut scratch,
-        true,
-        selected_roots,
-        selected_bodies,
-        active_declarations,
-        false,
-        None,
-        None,
-    );
-    let mut discovered = info.anonymous_object_captures_by_class;
-    if selected_roots.is_none() {
-        for declaration in declarations {
-            discovered.entry(declaration).or_default();
-        }
-    }
-    discovered
-}
-
-pub(crate) fn discover_anonymous_object_captures_in_pass_two_file(
-    file: &File,
-    file_index: u32,
-    selected_roots: &std::collections::HashSet<crate::fir::DeclarationId>,
-    selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
-    active_declarations: &crate::fir::ActiveSourceDeclarations,
-    symbols: &mut PassTwoSymbols,
-    index: &crate::fir::ResolvedModuleIndex,
-) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
-    crate::wide_stack::on_wide_stack(|| {
-        discover_anonymous_object_captures_at(
-            file,
-            file_index,
-            symbols,
-            Some(selected_roots),
-            Some(selected_bodies),
-            index,
-            active_declarations,
-        )
-    })
-}
-
-/// The exact function shape whose return the WALK cannot determine: no declared return type and an
-/// expression body. Both the engine's declaration index and its per-declaration inference gate on
-/// this one predicate, so adding another inferred shape cannot make one of them see a declaration
-/// the other does not.
-fn function_needs_return_preinfer(function: &FunDecl) -> bool {
-    function.ret.is_none() && matches!(function.body, FunBody::Expr(_))
-}
-
-/// Return the receiver and expression getter for the exact member-extension property shape consumed
-/// by the engine's member-extension property inference. An `Option` carries the operands as well as
-/// the eligibility decision, avoiding a parallel boolean predicate that could drift from it.
-/// Commit primary-constructor declaration types from the authoritative checker into the module
-/// signature. Signature collection runs before the full classifier graph exists and therefore keeps
-/// some projections conservative; consumers after checking must not continue seeing that provisional
-/// shape (`Box<*>`, `Box<T : E>` must become `Box<out E>`, not `Box<out Any?>`).
-fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
+/// Check one active source fragment against the finalized module index. Capture selection happens
+/// inside this authoritative traversal at each anonymous construction site.
+fn check_selected_source_with_index<S: CheckerSymbolEnvironment>(
     file: &File,
     file_index: u32,
     syms: &S,
     resolved_index: &crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
-    capture_discovery: bool,
     selected_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     selected_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
     signature_defaults_only: bool,
-    seeded_anonymous_captures: Option<&HashMap<DeclId, Vec<AnonymousObjectCapture>>>,
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
 ) -> TypeInfo {
     let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
@@ -39641,9 +39186,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.pending_signature_default_expressions = selected_bodies
             .map(|selected| active_declarations.selected_default_expressions(file, selected))
             .unwrap_or_default();
-    }
-    if let Some(captures) = seeded_anonymous_captures {
-        c.discovered_anonymous_captures = captures.clone();
     }
     c.signature_defaults_only = signature_defaults_only;
     if selected_bodies.is_some_and(|declarations| {
@@ -39681,14 +39223,13 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // Entry point: the file scope is the root of every chain (see `scope`).
     let root = CheckerScope::root();
     let scope = &root;
-    c.discover_anonymous_captures = capture_discovery;
 
     // File annotations belong to the active source unit, not to any one declaration body. Pass 2
     // reparses them alongside every bounded declaration unit, so validate and fold them in the
     // same checked sidecar that will immediately hand this unit's declaration metadata to common
-    // IR. Capture discovery and Pass-1 default preparation are scratch traversals whose results are
-    // discarded; neither may become a second owner of the application.
-    if !capture_discovery && !signature_defaults_only {
+    // IR. Pass-1 default preparation is a bounded traversal whose result is discarded and must not
+    // become a second owner of the application.
+    if !signature_defaults_only {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
@@ -39699,56 +39240,15 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // Rechecking a source unit must neither rediscover a caller-visible signature fact nor patch
     // the module table.
     // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
-    // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
-    // the authoritative check below owns annotation validation and folded values.
-    if !capture_discovery {
-        for &declaration_start in &file.type_alias_declaration_starts {
-            c.check_declaration_type_parameter_annotations(scope, declaration_start);
-        }
+    // same checker path explicitly at file scope.
+    for &declaration_start in &file.type_alias_declaration_starts {
+        c.check_declaration_type_parameter_annotations(scope, declaration_start);
     }
 
     // Each top-level declaration is checked in its OWN scope, so a prior declaration's bindings
     // cannot leak into the next one.
     c.anonymous_lexical_scope = anonymous_lexical_scope;
-    c.capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
-    if capture_discovery {
-        if c.capture_scope
-            .as_ref()
-            .is_some_and(|scope| !scope.complete)
-        {
-            c.diags.error(
-                Span::new(0, 0),
-                "krusty: incomplete anonymous-object capture inventory",
-            );
-        }
-        crate::trace_compiler!(
-            "fir",
-            "capture discovery file={file_index} selected_roots={selected_roots:?} owners={:?}",
-            c.capture_scope.as_ref().map(|scope| {
-                scope
-                    .declarations
-                    .iter()
-                    .map(|declaration| {
-                        (
-                            *declaration,
-                            match file.decl(*declaration) {
-                                Decl::Fun(function) => function.span,
-                                Decl::Class(class) => class.span,
-                                Decl::Property(property) => property.span,
-                            },
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }),
-        );
-    }
     for d in file.decls.clone() {
-        if c.capture_scope
-            .as_ref()
-            .is_some_and(|scope| !scope.declarations.contains(&d))
-        {
-            continue;
-        }
         // Local and anonymous classes are entered at their lexical declaration/construction site.
         // Checking either here as well would reopen it without its enclosing values, receivers, or
         // postponed inference frame.
@@ -39783,100 +39283,87 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             }
         }
     }
-    if !capture_discovery {
-        if let Some(selected_bodies) = selected_bodies {
-            let index = resolved_index;
-            let direct_classes = selected_inline_owned_anonymous_classes(
-                file,
-                index,
-                Some(active_declarations),
-                selected_bodies,
-                &c.anonymous_lexical_scope,
-            );
-            for (declaration, inline_owners) in direct_classes {
-                // The selected inline root normally reaches its anonymous objects at their exact
-                // lexical construction site. Reopening one here loses captured values such as a
-                // crossinline parameter and duplicates diagnostics. This fallback is only for a
-                // selected nested body that no active root entered.
-                if c.checked_local_class_declarations.contains(&declaration) {
-                    continue;
-                }
-                let Decl::Class(class) = file.decl(declaration) else {
-                    continue;
-                };
-                let class = class.clone();
-                let direct_scope = root.child(ScopeKind::Block);
-                let mut parameters = TParams::default();
-                let mut names = Vec::new();
-                let mut reified = std::collections::HashSet::new();
-                if let Some(captured) = c.active_classifier_captured_type_parameters(declaration) {
-                    for (source, semantic, bound) in captured {
-                        parameters.insert_binding(
-                            &source,
-                            Ty::ty_param(&semantic, bound),
-                            Vec::new(),
-                        );
-                        if !names.contains(&source) {
-                            names.push(source);
-                        }
-                    }
-                }
-                for owner in inline_owners {
-                    for ordinal in 0u32.. {
-                        let Some(parameter) = index.type_parameter(owner, ordinal) else {
-                            break;
-                        };
-                        let Some(header) = index.type_parameter_header(parameter) else {
-                            break;
-                        };
-                        let Some(source_name) = index.type_parameter_name(parameter) else {
-                            break;
-                        };
-                        let Some(semantic_name) = index.type_parameter_semantic_name(parameter)
-                        else {
-                            break;
-                        };
-                        let bound = header
-                            .bounds
-                            .first()
-                            .map(|bound| bound.ty.get())
-                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                        let extra_bounds = header
-                            .bounds
-                            .iter()
-                            .skip(1)
-                            .map(|bound| bound.ty.get())
-                            .collect();
-                        parameters.insert_binding(
-                            source_name,
-                            Ty::ty_param(semantic_name, bound),
-                            extra_bounds,
-                        );
-                        names.retain(|name| name != source_name);
-                        names.push(source_name.to_string());
-                        if header.flags.is_reified() {
-                            reified.insert(source_name.to_string());
-                        }
-                    }
-                }
-                direct_scope.declare_tparams(&names, &parameters, |name| reified.contains(name));
-                crate::trace_compiler!(
-                    "fir",
-                    "Pass 2 direct inline-owned anonymous class declaration={declaration:?} span={:?}",
-                    class.span,
-                );
-                c.set_anonymous_lexical_class_context(declaration);
-                c.check_class(&direct_scope, &class, declaration);
+    if let Some(selected_bodies) = selected_bodies {
+        let index = resolved_index;
+        let direct_classes = selected_inline_owned_anonymous_classes(
+            file,
+            index,
+            active_declarations,
+            selected_bodies,
+            &c.anonymous_lexical_scope,
+        );
+        for (declaration, inline_owners) in direct_classes {
+            // A selected inline root reaches its anonymous objects at the exact lexical
+            // construction site. A nested body whose inline root syntax was consumed instead
+            // enters here from stable ownership and captured type-parameter facts. Never enter
+            // the same classifier through both paths.
+            if c.checked_local_class_declarations.contains(&declaration) {
+                continue;
             }
+            let Decl::Class(class) = file.decl(declaration) else {
+                continue;
+            };
+            let class = class.clone();
+            let direct_scope = root.child(ScopeKind::Block);
+            let mut parameters = TParams::default();
+            let mut names = Vec::new();
+            let mut reified = std::collections::HashSet::new();
+            if let Some(captured) = c.active_classifier_captured_type_parameters(declaration) {
+                for (source, semantic, bound) in captured {
+                    parameters.insert_binding(&source, Ty::ty_param(&semantic, bound), Vec::new());
+                    if !names.contains(&source) {
+                        names.push(source);
+                    }
+                }
+            }
+            for owner in inline_owners {
+                for ordinal in 0u32.. {
+                    let Some(parameter) = index.type_parameter(owner, ordinal) else {
+                        break;
+                    };
+                    let Some(header) = index.type_parameter_header(parameter) else {
+                        break;
+                    };
+                    let Some(source_name) = index.type_parameter_name(parameter) else {
+                        break;
+                    };
+                    let Some(semantic_name) = index.type_parameter_semantic_name(parameter) else {
+                        break;
+                    };
+                    let bound = header
+                        .bounds
+                        .first()
+                        .map(|bound| bound.ty.get())
+                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                    let extra_bounds = header
+                        .bounds
+                        .iter()
+                        .skip(1)
+                        .map(|bound| bound.ty.get())
+                        .collect();
+                    parameters.insert_binding(
+                        source_name,
+                        Ty::ty_param(semantic_name, bound),
+                        extra_bounds,
+                    );
+                    names.retain(|name| name != source_name);
+                    names.push(source_name.to_string());
+                    if header.flags.is_reified() {
+                        reified.insert(source_name.to_string());
+                    }
+                }
+            }
+            direct_scope.declare_tparams(&names, &parameters, |name| reified.contains(name));
+            crate::trace_compiler!(
+                "fir",
+                "Pass 2 direct inline-owned anonymous class declaration={declaration:?} span={:?}",
+                class.span,
+            );
+            c.set_anonymous_lexical_class_context(declaration);
+            c.check_class(&direct_scope, &class, declaration);
         }
     }
-    if let Some(body) = file.script_body.filter(|_| {
-        !c.signature_defaults_only
-            && (!capture_discovery
-                || c.capture_scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.script_body))
-    }) {
+    if let Some(body) = file.script_body.filter(|_| !c.signature_defaults_only) {
         c.reset_body_mutations(Some(body));
         c.in_script_body = true;
         c.with_ret_allowed(Ty::Unit, false, |c| {
@@ -39884,28 +39371,26 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         });
         c.in_script_body = false;
     }
-    if !capture_discovery {
-        c.check_import_paths();
-        for reference in &file.detached_type_refs {
-            if c.resolved_type_tys
-                .contains_key(&(reference.span.lo, reference.span.hi))
-            {
-                // The declaration/body walk already bound this exact occurrence in its lexical
-                // classifier scope. Rechecking it from file scope loses statement-local classes
-                // (`class A; fun A.ext()`) and can only replace a stable semantic identity with a
-                // false unresolved-name record. Detached references are a coverage fallback, not
-                // a second resolution authority.
-                continue;
-            }
-            if reference.is_annotation() {
-                // Annotation occurrences are retained by their owning declaration and checked in
-                // that declaration's lexical scope. `detached_type_refs` carries the same reference
-                // only so Pass 1 can bind its identity for compact-header projection; rechecking it
-                // here from file scope loses local/nested scope and declaration suppressions.
-                continue;
-            }
-            c.type_ref_ty(scope, reference);
+    c.check_import_paths();
+    for reference in &file.detached_type_refs {
+        if c.resolved_type_tys
+            .contains_key(&(reference.span.lo, reference.span.hi))
+        {
+            // The declaration/body walk already bound this exact occurrence in its lexical
+            // classifier scope. Rechecking it from file scope loses statement-local classes
+            // (`class A; fun A.ext()`) and can only replace a stable semantic identity with a
+            // false unresolved-name record. Detached references are a coverage fallback, not
+            // a second resolution authority.
+            continue;
         }
+        if reference.is_annotation() {
+            // Annotation occurrences are retained by their owning declaration and checked in
+            // that declaration's lexical scope. `detached_type_refs` carries the same reference
+            // only so Pass 1 can bind its identity for compact-header projection; rechecking it
+            // here from file scope loses local/nested scope and declaration suppressions.
+            continue;
+        }
+        c.type_ref_ty(scope, reference);
     }
     let Checker {
         expr_types,
@@ -40009,7 +39494,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         .collect();
     crate::trace_compiler!(
         "resolve",
-        "checker result file={file_index} capture_discovery={capture_discovery} sam_conversions={:?} constructors={:?}",
+        "checker result file={file_index} sam_conversions={:?} constructors={:?}",
         resolved_sam_conversions.keys().collect::<Vec<_>>(),
         resolved_constructors.keys().collect::<Vec<_>>(),
     );
@@ -40079,7 +39564,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_provide_targets,
         context_args,
     };
-    if !capture_discovery {
+    {
         let calls = info
             .resolved_calls
             .iter()
@@ -40194,18 +39679,16 @@ pub(crate) fn check_active_source_with_index(
 ) -> TypeInfo {
     let environment = CheckerExternalEnvironment::from(syms);
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
+        check_selected_source_with_index(
             file,
             file_index,
             &environment,
             resolved_index,
             diags,
-            false,
             None,
             None,
             active_declarations,
             false,
-            None,
             None,
         )
     })
@@ -40227,18 +39710,16 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
 ) -> TypeInfo {
     let environment = CheckerExternalEnvironment::from(syms);
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
+        check_selected_source_with_index(
             file,
             file_index,
             &environment,
             resolved_index,
             diags,
-            false,
             Some(selected_roots),
             Some(selected_bodies),
             active_declarations,
             false,
-            None,
             None,
         )
     })
@@ -40253,22 +39734,19 @@ pub(crate) fn check_selected_declarations_in_pass_two(
     symbols: &mut PassTwoSymbols,
     index: &crate::fir::ResolvedModuleIndex,
     streamed_cache: &crate::fir::StreamedModuleProjectionCache,
-    anonymous_captures: &HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
+        check_selected_source_with_index(
             file,
             file_index,
             symbols,
             index,
             diags,
-            false,
             Some(selected_roots),
             Some(selected_bodies),
             active_declarations,
             false,
-            Some(anonymous_captures),
             Some(streamed_cache),
         )
     })
@@ -40289,18 +39767,16 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
 ) -> TypeInfo {
     let environment = CheckerExternalEnvironment::from(syms);
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
+        check_selected_source_with_index(
             file,
             file_index,
             &environment,
             index,
             diags,
-            false,
             Some(selected_stable_roots),
             Some(selected_stable_defaults),
             active_declarations,
             true,
-            None,
             None,
         )
     })
@@ -41013,7 +40489,6 @@ struct Checker<'a> {
     /// semantic state, but a write there is not a reachable reassignment and therefore must never
     /// create a `VAL_REASSIGNMENT` diagnostic.
     unreachable_statement_depth: usize,
-    discover_anonymous_captures: bool,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     discovered_local_class_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     /// Resolver-only binding identities parallel to each local classifier's capture vector.
@@ -41030,12 +40505,9 @@ struct Checker<'a> {
     /// Classifiers entered there belong to the retained fragment; classifiers merely crossed while
     /// rebuilding its enclosing lexical scope do not.
     signature_default_expression_depth: u32,
-    /// The file's anonymous-object ownership graph and (in capture-discovery mode) the narrowed set
-    /// of declarations to walk. Both are per-FILE facts every classifier check needs, and a local
-    /// class is entered from a statement deep inside a body — threading them down as parameters
-    /// would mean carrying them through every `stmt`/`expr` frame.
+    /// The file's anonymous-object ownership graph. A local class is entered from a statement deep
+    /// inside a body, so threading this through every `stmt`/`expr` frame would obscure ownership.
     anonymous_lexical_scope: AnonymousLexicalClassScope,
-    capture_scope: Option<CaptureDiscoveryScope>,
     /// In-scope loop labels (`l@ for …`), innermost last. A `break@l`/`continue@l` must name one of
     /// these — an unknown label is rejected (the file skips) rather than silently retargeting a loop.
     loop_labels: Vec<String>,
@@ -41797,51 +41269,6 @@ impl<'a> Checker<'a> {
         if let Some(body) = body {
             collect_all_reassigned(self.file, body, &mut self.fn_reassigned);
             collect_closure_reassigned(self.file, body, &mut self.fn_closure_reassigned);
-        }
-    }
-
-    /// Apply one ordered class-capture method decision. A missing plan is the conservative full-walk
-    /// fallback used both outside capture discovery and when target-inventory completeness failed.
-    /// A missing entry in a present plan is instead the irrelevant suffix after the final target.
-    /// Skipped non-publishers inside the retained prefix still replace the mutation summary because
-    /// `check_method` normally performs that state transition before semantic work, and a later
-    /// selected class region reads these checker-wide sets while discovering mutable captures.
-    fn check_method_in_capture_plan(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        function: &FunDecl,
-        properties: &[ScopedProperty],
-        plan: Option<&ClassCapturePlan>,
-        method_index: usize,
-        declaration: (
-            crate::libraries::SourceMember,
-            Option<crate::fir::DeclarationId>,
-        ),
-    ) {
-        let (source_member, stable_declaration) = declaration;
-        let Some(plan) = plan else {
-            self.check_method(
-                scope,
-                function,
-                properties,
-                Some(source_member),
-                stable_declaration,
-            );
-            return;
-        };
-        match plan.methods.get(method_index) {
-            Some(true) => self.check_method(
-                scope,
-                function,
-                properties,
-                Some(source_member),
-                stable_declaration,
-            ),
-            Some(false) => {
-                self.check_unselected_method_annotation_applications(scope, function);
-                self.reset_body_mutations(fun_body_expr(&function.body));
-            }
-            None => self.check_unselected_method_annotation_applications(scope, function),
         }
     }
 
@@ -48324,7 +47751,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Decode every top-level function's `contract { … }` block up front (see the call site in
-    /// `check_file_at_impl_mode`).
+    /// `check_selected_source_with_index`).
     fn contract_for_call(
         &self,
         call: ExprId,
@@ -48343,7 +47770,7 @@ impl<'a> Checker<'a> {
             // name scan could bind a same-named sibling overload's contract (nondeterministically)
             // to this call. `source` is (file, decl); only same-file decls are decoded here —
             // cross-file extension contracts arrive already patched onto the signature (see the
-            // `source_contracts` drain in `check_file_at_impl_mode`).
+            // `source_contracts` drain in `check_selected_source_with_index`).
             _ => None,
         }
     }
@@ -59104,13 +58531,6 @@ impl<'a> Checker<'a> {
         let enclosing_declaration_scope = scope;
         let default_owned_class =
             self.signature_defaults_only && self.checked_local_class_declarations.contains(&d);
-        // Read once: `capture_scope` and `anonymous_lexical_scope` live on the checker, and the
-        // member walks below take `&mut self`.
-        let class_capture_plan = self
-            .capture_scope
-            .as_ref()
-            .and_then(|scope| scope.class_plans.get(&d))
-            .cloned();
         let is_anonymous_object = self.anonymous_lexical_scope.declarations.contains(&d);
         if cl.is_singleton() && self.file.is_local_declaration(d) && !is_anonymous_object {
             self.diags.error(
@@ -60282,7 +59702,6 @@ impl<'a> Checker<'a> {
                     self.retry_body_local_properties_after_nested(scope, d, cl, &mut props);
                 }
             }
-            let method_capture_plan = class_capture_plan.as_ref();
             if body_local_class {
                 for (method_index, method) in cl.methods.iter().enumerate() {
                     let source_member = crate::libraries::SourceMember::Class {
@@ -60308,7 +59727,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let mut method_check_index = 0;
             for (method_index, m) in cl.methods.iter().enumerate() {
                 let source_member = crate::libraries::SourceMember::Class {
                     file: self.file_index,
@@ -60334,27 +59752,17 @@ impl<'a> Checker<'a> {
                 };
                 if !selected {
                     self.check_unselected_method_annotation_applications(scope, m);
-                    method_check_index += 1;
                     continue;
                 }
                 if self.registered_local_method_is_complete(source_member) {
                     self.check_unselected_method_annotation_applications(scope, m);
-                    method_check_index += 1;
                     continue;
                 }
                 let registered = self.begin_registered_local_method(source_member);
-                self.check_method_in_capture_plan(
-                    scope,
-                    m,
-                    &props,
-                    method_capture_plan,
-                    method_check_index,
-                    (source_member, stable_declaration),
-                );
+                self.check_method(scope, m, &props, Some(source_member), stable_declaration);
                 if let Some(declaration) = registered {
                     self.finish_registered_local_method(declaration);
                 }
-                method_check_index += 1;
             }
             // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
             // checked like a method of the enum — `this` is the enum type, the enum's properties AND
@@ -60655,15 +60063,13 @@ impl<'a> Checker<'a> {
                                         .expect("too many enum-entry methods"),
                                 )
                             });
-                        self.check_method_in_capture_plan(
+                        self.check_method(
                             entry_scope,
                             bm,
                             &entry_props,
-                            method_capture_plan,
-                            method_check_index,
-                            (source_member, stable_declaration),
+                            Some(source_member),
+                            stable_declaration,
                         );
-                        method_check_index += 1;
                     }
                     // A deferred entry-body `val` is writable only during the entry subclass's
                     // initialization. Keep the ordinary entry scope immutable for methods/accessors,

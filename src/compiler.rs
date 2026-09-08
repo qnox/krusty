@@ -167,15 +167,6 @@ fn check_active_diagnostic_unit(
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    let anonymous_captures = crate::resolve::discover_anonymous_object_captures_in_pass_two_file(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
-        active,
-        symbols,
-        index,
-    );
     drop(crate::resolve::check_selected_declarations_in_pass_two(
         active_file,
         raw_source as u32,
@@ -185,7 +176,6 @@ fn check_active_diagnostic_unit(
         symbols,
         index,
         streamed_cache,
-        &anonymous_captures,
         diags,
     ));
     diags.collapse_duplicates_from(diagnostics_start);
@@ -623,15 +613,6 @@ fn check_body_group(
             current = owner;
         }
     }
-    let anonymous_captures = crate::resolve::discover_anonymous_object_captures_in_pass_two_file(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
-        active,
-        symbols,
-        index,
-    );
     let info = crate::resolve::check_selected_declarations_in_pass_two(
         active_file,
         raw_source as u32,
@@ -641,11 +622,10 @@ fn check_body_group(
         symbols,
         index,
         streamed_cache,
-        &anonymous_captures,
         diags,
     );
-    // Capture discovery and the authoritative body check enter the same active lexical headers.
-    // Keep one exact source diagnostic when both observe the same invalid declaration.
+    // Resolver and FIR construction can report the same invalid source expression; keep one exact
+    // source diagnostic at this active-unit boundary.
     diags.collapse_duplicates_from(diagnostics_start);
     if diags.diags[diagnostics_start..]
         .iter()
@@ -984,7 +964,6 @@ pub fn check_frontend_only(
                     &mut symbols,
                     &index,
                     &streamed_cache,
-                    &std::collections::HashMap::new(),
                     diags,
                 ));
             });
