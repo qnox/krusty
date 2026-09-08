@@ -793,11 +793,15 @@ impl ProductionSignatureSemantics<'_> {
                 .iter()
                 .map(|argument| argument.name.map(str::to_owned))
                 .collect::<Vec<_>>();
+            let extra_admitted = |first: usize, extra: usize| {
+                Self::same_vararg_element(&arguments[first], &arguments[extra])
+            };
             if let Some(mapping) = Self::mapped_call_slots(
                 std::slice::from_ref(candidate),
                 &names,
                 arguments.len(),
                 trailing_lambda,
+                &extra_admitted,
             ) {
                 if let Some((argument_origin, expected, actual)) =
                     mapping.iter().enumerate().find_map(|(parameter, source)| {
@@ -1372,9 +1376,16 @@ impl ProductionSignatureSemantics<'_> {
             .iter()
             .map(|argument| argument.name.map(str::to_owned))
             .collect::<Vec<_>>();
-        let Some(mapping) =
-            Self::mapped_call_slots(candidates, &names, arguments.len(), trailing_lambda)
-        else {
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element(&arguments[first], &arguments[extra])
+        };
+        let Some(mapping) = Self::mapped_call_slots(
+            candidates,
+            &names,
+            arguments.len(),
+            trailing_lambda,
+            &extra_admitted,
+        ) else {
             return (!has_named).then(ordinary);
         };
         let reordered = mapping
@@ -1584,14 +1595,23 @@ impl ProductionSignatureSemantics<'_> {
         })
     }
 
+    /// Map source arguments onto this candidate's parameter slots.
+    ///
+    /// The slot map keeps ONE source per parameter; positional vararg ELEMENTS beyond the first are
+    /// left unmapped by `map_call_args` and are that vararg's extras (`split(",", ";", limit = 2)`,
+    /// `option("--a", "-b", help = "…")`). The per-slot selection downstream sees only the mapped
+    /// element, so an extra is admitted only when `extra_admitted(first, extra)` says it carries
+    /// the same element type as the mapped one — then dropping it cannot change which overload
+    /// applies. Any other unmapped source makes the candidate structurally inapplicable.
     fn candidate_call_slots(
         candidate: &crate::libraries::FunctionInfo,
         names: &[Option<String>],
         argument_count: usize,
         trailing_lambda: bool,
+        extra_admitted: &dyn Fn(usize, usize) -> bool,
     ) -> Option<Vec<Option<usize>>> {
         let source_indices = (0..argument_count).collect::<Vec<_>>();
-        crate::libraries::map_call_args(
+        let slots = crate::libraries::map_call_args(
             &source_indices,
             Some(names),
             &candidate.call_sig.param_names,
@@ -1601,7 +1621,23 @@ impl ProductionSignatureSemantics<'_> {
             candidate.call_sig.vararg_index,
             trailing_lambda,
         )
-        .ok()
+        .ok()?;
+        let vararg_first = candidate
+            .call_sig
+            .vararg_index
+            .and_then(|vararg| slots.get(vararg).copied().flatten())
+            .filter(|first| names.get(*first).is_some_and(Option::is_none));
+        source_indices
+            .iter()
+            .all(|source| {
+                slots.iter().any(|slot| slot == &Some(*source))
+                    || vararg_first.is_some_and(|first| {
+                        first < *source
+                            && names.get(*source).is_some_and(Option::is_none)
+                            && extra_admitted(first, *source)
+                    })
+            })
+            .then_some(slots)
     }
 
     fn selected_argument_parameters(
@@ -1613,9 +1649,16 @@ impl ProductionSignatureSemantics<'_> {
             .iter()
             .map(|argument| argument.name.map(str::to_owned))
             .collect::<Vec<_>>();
-        let source_by_parameter =
-            Self::candidate_call_slots(candidate, &names, arguments.len(), trailing_lambda)
-                .expect("a selected call must retain its declaration argument mapping");
+        let source_by_parameter = Self::candidate_call_slots(
+            candidate,
+            &names,
+            arguments.len(),
+            trailing_lambda,
+            // Selection has already validated the argument list: every unmapped positional
+            // argument is a vararg extra of the selected declaration.
+            &|_, _| true,
+        )
+        .expect("a selected call must retain its declaration argument mapping");
         let mut parameter_by_argument = vec![None; arguments.len()];
         for (parameter, source) in source_by_parameter.into_iter().enumerate() {
             if let Some(source) = source {
@@ -1638,6 +1681,39 @@ impl ProductionSignatureSemantics<'_> {
             }
         }
         parameter_by_argument.into_boxed_slice()
+    }
+
+    /// Two typed arguments carry the same vararg element type: a plain element by its own type, a
+    /// spread by its array's element type. Lambdas and postponed arguments are never admitted.
+    fn same_vararg_element(
+        first: &crate::fir::ResolvedSigCallArgument<'_>,
+        extra: &crate::fir::ResolvedSigCallArgument<'_>,
+    ) -> bool {
+        let element = |argument: &crate::fir::ResolvedSigCallArgument<'_>| {
+            if argument.lambda || argument.contextual_call {
+                return None;
+            }
+            let ty = argument.ty.get();
+            if argument.spread {
+                ty.array_read_elem()
+            } else {
+                Some(ty)
+            }
+        };
+        matches!((element(first), element(extra)), (Some(a), Some(b)) if a == b)
+    }
+
+    fn same_vararg_element_probe(
+        first: &crate::fir::SigCallArgumentProbe<'_>,
+        extra: &crate::fir::SigCallArgumentProbe<'_>,
+    ) -> bool {
+        match (first, extra) {
+            (
+                crate::fir::SigCallArgumentProbe::Typed(first),
+                crate::fir::SigCallArgumentProbe::Typed(extra),
+            ) => Self::same_vararg_element(first, extra),
+            _ => false,
+        }
     }
 
     /// Keep only declarations whose own parameter names/defaults/vararg shape can consume the
@@ -1674,11 +1750,27 @@ impl ProductionSignatureSemantics<'_> {
         names: &[Option<String>],
         argument_count: usize,
         trailing_lambda: bool,
+        extra_admitted: &dyn Fn(usize, usize) -> bool,
     ) -> Option<Vec<Option<usize>>> {
         let mut mappings = candidates
             .iter()
+            // Argument mapping must use the same source-callable family that can participate in
+            // selection. Public declarations, compiler-provided must-inline bodies, and stable
+            // declarations from this compilation all carry that fact on the normalized candidate;
+            // no provider/origin branch belongs here.
+            .filter(|candidate| {
+                candidate.visibility == crate::types::Visibility::Public
+                    || candidate.flags.inline.must_inline()
+                    || candidate.stable_declaration.is_some()
+            })
             .filter_map(|candidate| {
-                Self::candidate_call_slots(candidate, names, argument_count, trailing_lambda)
+                Self::candidate_call_slots(
+                    candidate,
+                    names,
+                    argument_count,
+                    trailing_lambda,
+                    extra_admitted,
+                )
             })
             .collect::<Vec<_>>();
         mappings.sort_unstable();
@@ -1710,9 +1802,18 @@ impl ProductionSignatureSemantics<'_> {
                 }
             })
             .collect::<Vec<_>>();
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
+        };
         let mut matching = candidates.iter().filter(|candidate| {
-            Self::candidate_call_slots(candidate, &names, arguments.len(), trailing_lambda)
-                .is_some()
+            Self::candidate_call_slots(
+                candidate,
+                &names,
+                arguments.len(),
+                trailing_lambda,
+                &extra_admitted,
+            )
+            .is_some()
         });
         let selected = matching.next()?.clone();
         matching.next().is_none().then_some(selected)
@@ -1748,8 +1849,17 @@ impl ProductionSignatureSemantics<'_> {
             })
             .collect::<Vec<_>>();
         let requires_mapping = trailing_lambda || names.iter().any(Option::is_some);
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
+        };
         let slots = if requires_mapping {
-            Self::mapped_call_slots(candidates, &names, arguments.len(), trailing_lambda)?
+            Self::mapped_call_slots(
+                candidates,
+                &names,
+                arguments.len(),
+                trailing_lambda,
+                &extra_admitted,
+            )?
         } else {
             (0..arguments.len()).map(Some).collect()
         };

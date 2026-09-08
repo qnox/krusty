@@ -624,6 +624,8 @@ fun merge(map: java.util.HashMap<String, Int>) = map.merge("a", 2, Int::plus)
         &mut diagnostics,
     );
 
+    // Once the overloads a call cannot structurally take are out of the way, the provider member
+    // with a callable-reference argument selects in Pass 1 and nothing is reported.
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
     assert!(
         analysis
