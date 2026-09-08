@@ -104,6 +104,7 @@ fn parse_with_features_and_script(
         hasher.finish()
     });
     hoist_local_classes(&mut p.file, script_scope);
+    record_anonymous_enclosing_functions(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     fill_class_decl_lines(&mut p.file, src);
     expand_fun_type_aliases(&mut p.file);
@@ -114,6 +115,82 @@ fn parse_with_features_and_script(
         }
     }
     p.file
+}
+
+/// Bind anonymous-object constructions to their exact enclosing source function while syntax
+/// ownership is still explicit. Later phases must not recover this edge from overlapping spans.
+fn record_anonymous_enclosing_functions(file: &mut File) {
+    fn in_roots(file: &File, roots: Vec<ExprId>) -> Vec<DeclId> {
+        let mut expressions = roots;
+        let mut statements = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut declarations = Vec::new();
+        while let Some(expression) = expressions.pop() {
+            if !seen.insert(expression) {
+                continue;
+            }
+            if let Some(declaration) = file.anonymous_object_classes.get(&expression).copied() {
+                declarations.push(declaration);
+            }
+            file.any_child_expr(
+                expression,
+                &mut |child| {
+                    expressions.push(child);
+                    false
+                },
+                &mut |child| {
+                    statements.push(child);
+                    false
+                },
+            );
+            while let Some(statement) = statements.pop() {
+                file.any_child_stmt(statement, &mut |child| {
+                    expressions.push(child);
+                    false
+                });
+            }
+        }
+        declarations
+    }
+
+    let mut owners = Vec::new();
+    for declaration in file.decls.iter().copied() {
+        match file.decl(declaration) {
+            Decl::Fun(function) => {
+                let mut roots = Vec::new();
+                file.any_fun_expr(function, &mut |root| {
+                    roots.push(root);
+                    false
+                });
+                owners.extend(in_roots(file, roots).into_iter().map(|anonymous| {
+                    (
+                        anonymous,
+                        crate::ast::AnonymousEnclosingFunction::TopLevel(declaration),
+                    )
+                }));
+            }
+            Decl::Class(class) => {
+                for (method, function) in class.methods.iter().enumerate() {
+                    let mut roots = Vec::new();
+                    file.any_fun_expr(function, &mut |root| {
+                        roots.push(root);
+                        false
+                    });
+                    owners.extend(in_roots(file, roots).into_iter().map(|anonymous| {
+                        (
+                            anonymous,
+                            crate::ast::AnonymousEnclosingFunction::Member {
+                                class: declaration,
+                                method: u32::try_from(method).expect("too many class methods"),
+                            },
+                        )
+                    }));
+                }
+            }
+            Decl::Property(_) => {}
+        }
+    }
+    file.anonymous_object_enclosing_functions.extend(owners);
 }
 
 /// Fill each `ClassDecl::decl_line` with the 1-based source line of its `span.lo`. kotlinc maps the
@@ -10359,6 +10436,17 @@ mod tests {
         assert_eq!(children(direct), &[deep]);
         assert_eq!(children(companion), &[associated]);
         assert_eq!(children(*outer_anonymous), &[*inner_anonymous]);
+        assert_eq!(
+            file.anonymous_object_enclosing_functions
+                .get(outer_anonymous),
+            Some(&crate::ast::AnonymousEnclosingFunction::Member {
+                class: outer,
+                method: 0,
+            })
+        );
+        assert!(!file
+            .anonymous_object_enclosing_functions
+            .contains_key(inner_anonymous));
     }
 
     #[test]

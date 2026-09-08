@@ -1169,78 +1169,35 @@ fn name_anonymous_classes_with_counters(
         .collect();
     anons.sort_by_key(|(construction, _)| file.expr_spans[construction.0 as usize].lo);
     for (construction, decl) in anons {
-        let span = file.expr_spans[construction.0 as usize];
-        let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction)> = None;
-        for &candidate in &file.decls {
-            match file.decl(candidate) {
-                Decl::Fun(function) => {
-                    if function.span.lo <= span.lo && span.hi <= function.span.hi {
-                        let size = function.span.hi - function.span.lo;
-                        if best
-                            .as_ref()
-                            .is_none_or(|(smallest, _, _)| size < *smallest)
-                        {
-                            best = Some((
-                                size,
-                                format!("{facade_simple}${}", function.name),
-                                crate::ast::AnonymousEnclosingFunction::TopLevel(candidate),
-                            ));
-                        }
-                    }
-                }
-                Decl::Class(class) => {
-                    if candidate == decl {
-                        continue;
-                    }
-                    let chain = class.name.replace('.', "$");
-                    for (method_index, method) in class.methods.iter().enumerate() {
-                        if method.span.lo <= span.lo && span.hi <= method.span.hi {
-                            let size = method.span.hi - method.span.lo;
-                            if best
-                                .as_ref()
-                                .is_none_or(|(smallest, _, _)| size < *smallest)
-                            {
-                                best = Some((
-                                    size,
-                                    format!("{chain}${}", method.name),
-                                    crate::ast::AnonymousEnclosingFunction::Member {
-                                        class: candidate,
-                                        method: method_index as u32,
-                                    },
-                                ));
-                            }
-                        }
-                    }
-                }
-                _ => {}
+        let scope = match file
+            .anonymous_object_enclosing_functions
+            .get(&decl)
+            .copied()
+        {
+            Some(crate::ast::AnonymousEnclosingFunction::TopLevel(function)) => {
+                let Decl::Fun(function) = file.decl(function) else {
+                    unreachable!("parser validated an anonymous top-level function owner")
+                };
+                format!("{facade_simple}${}", function.name)
             }
-        }
-        let (scope, enclosing) = match best {
-            Some((_, scope, enclosing)) => (scope, Some(enclosing)),
-            None => {
-                let classifier_scope = file
-                    .decls
-                    .iter()
-                    .filter_map(|&candidate| match file.decl(candidate) {
-                        Decl::Class(class)
-                            if candidate != decl
-                                && class.span.lo <= span.lo
-                                && span.hi <= class.span.hi =>
-                        {
-                            Some((class.span.hi - class.span.lo, class.name.replace('.', "$")))
-                        }
-                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-                    })
-                    .min_by_key(|(size, _)| *size)
-                    .map(|(_, scope)| scope)
-                    .unwrap_or_else(|| facade_simple.to_string());
-                (classifier_scope, None)
+            Some(crate::ast::AnonymousEnclosingFunction::Member { class, method }) => {
+                let Decl::Class(class) = file.decl(class) else {
+                    unreachable!("parser validated an anonymous member-function owner")
+                };
+                let method = &class.methods[method as usize];
+                format!("{}${}", class.name.replace('.', "$"), method.name)
             }
+            None => file
+                .decls
+                .iter()
+                .find_map(|candidate| match file.decl(*candidate) {
+                    Decl::Class(class) if class.nested_classifiers.contains(&decl) => {
+                        Some(class.name.replace('.', "$"))
+                    }
+                    Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+                })
+                .unwrap_or_else(|| facade_simple.to_string()),
         };
-        if let Some(enclosing) = enclosing {
-            file.anonymous_object_enclosing_functions
-                .insert(decl, enclosing);
-        }
         let ordinal = counters.entry(scope.clone()).or_insert(0);
         *ordinal += 1;
         let fresh = format!("{scope}${ordinal}");

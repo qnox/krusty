@@ -1445,9 +1445,9 @@ pub enum Decl {
     Property(PropDecl),
 }
 
-/// The exact source declaration that lexically encloses an anonymous-object construction.
-/// Recorded before resolution so lowering can bind it once to a [`crate::ir::FunId`]; backends must
-/// not reconstruct this relationship from generated class or method spellings.
+/// The exact source function that lexically encloses an anonymous-object construction. The parser
+/// records this structural edge before resolution so later phases never reconstruct it from ranges
+/// or generated class/method spellings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AnonymousEnclosingFunction {
     TopLevel(DeclId),
