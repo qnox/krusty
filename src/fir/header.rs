@@ -3630,6 +3630,7 @@ impl HeaderInventoryBuilder {
             .collect();
         Some(ActiveSourceHeaders::bind(
             source_id,
+            file,
             &self.declarations,
             extracted,
             type_parameter_declarations,

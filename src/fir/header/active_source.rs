@@ -20,6 +20,7 @@ pub(crate) struct ActiveSourceHeaders<'file> {
     enclosing_classifiers: HashMap<DeclarationId, DeclId>,
     direct_classifier_children: HashMap<DeclId, Vec<DeclId>>,
     classifier_members: HashMap<(DeclId, ActiveClassifierMemberKind, u32), DeclarationId>,
+    declaration_syntax: HashMap<DeclarationId, ActiveDeclarationSyntax>,
     active_file: std::marker::PhantomData<&'file File>,
 }
 
@@ -32,9 +33,19 @@ enum ActiveClassifierMemberKind {
     BodyProperty,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveDeclarationSyntax {
+    Primary(DeclId),
+    ClassifierMethod(DeclId, u32),
+    ClassifierProperty(DeclId, u32),
+    EnumEntryMethod(DeclId, u32, u32),
+    EnumEntryProperty(DeclId, u32, u32),
+}
+
 impl<'file> ActiveSourceHeaders<'file> {
     pub(super) fn bind(
         source: SourceFileId,
+        file: &'file File,
         declarations: &DeclarationIds,
         extracted: ExtractedFileStubs,
         type_parameter_declarations: HashMap<u32, DeclarationId>,
@@ -94,6 +105,20 @@ impl<'file> ActiveSourceHeaders<'file> {
             .map(|stub| (stub.id, stub))
             .collect::<HashMap<_, _>>();
         let mut classifier_members = HashMap::new();
+        let mut declaration_syntax = extracted
+            .primary_declarations
+            .iter()
+            .enumerate()
+            .filter_map(|(raw, declaration)| {
+                let declaration = (*declaration)?;
+                let parser = DeclId(u32::try_from(raw).expect("too many parser declarations"));
+                matches!(
+                    file.decl(parser),
+                    crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_)
+                )
+                .then_some((declaration, ActiveDeclarationSyntax::Primary(parser)))
+            })
+            .collect::<HashMap<_, _>>();
         for (&declaration, &parser) in &classifier_parsers {
             for &member in declarations.owned(declaration) {
                 let anchor = declarations
@@ -133,6 +158,64 @@ impl<'file> ActiveSourceHeaders<'file> {
                         .is_none(),
                     "one parser classifier member must bind to one stable declaration",
                 );
+                let syntax = match kind {
+                    ActiveClassifierMemberKind::Method => {
+                        Some(ActiveDeclarationSyntax::ClassifierMethod(parser, ordinal))
+                    }
+                    ActiveClassifierMemberKind::BodyProperty => {
+                        Some(ActiveDeclarationSyntax::ClassifierProperty(parser, ordinal))
+                    }
+                    ActiveClassifierMemberKind::PrimaryConstructor
+                    | ActiveClassifierMemberKind::SecondaryConstructor
+                    | ActiveClassifierMemberKind::ConstructorProperty => None,
+                };
+                if let Some(syntax) = syntax {
+                    declaration_syntax.insert(member, syntax);
+                }
+            }
+            let crate::ast::Decl::Class(class) = file.decl(parser) else {
+                unreachable!("a classifier parser binding must name a class declaration")
+            };
+            for entry_ordinal in 0..class.enum_entries.len() {
+                let entry_ordinal = u32::try_from(entry_ordinal).expect("too many enum entries");
+                let Some(entry) = declarations
+                    .owned(declaration)
+                    .iter()
+                    .copied()
+                    .find(|entry| {
+                        declarations.stable_anchor(*entry).is_some_and(|anchor| {
+                            anchor.kind == DeclarationKind::EnumEntry
+                                && anchor.sibling == entry_ordinal
+                        })
+                    })
+                else {
+                    continue;
+                };
+                for &member in declarations.owned(entry) {
+                    let anchor = declarations
+                        .stable_anchor(member)
+                        .expect("an enum-entry member must have a stable anchor");
+                    let syntax = match anchor.kind {
+                        DeclarationKind::Function => ActiveDeclarationSyntax::EnumEntryMethod(
+                            parser,
+                            entry_ordinal,
+                            anchor.sibling,
+                        ),
+                        DeclarationKind::Property => ActiveDeclarationSyntax::EnumEntryProperty(
+                            parser,
+                            entry_ordinal,
+                            anchor.sibling,
+                        ),
+                        DeclarationKind::Classifier
+                        | DeclarationKind::EnumEntry
+                        | DeclarationKind::TypeAlias
+                        | DeclarationKind::Constructor
+                        | DeclarationKind::Accessor
+                        | DeclarationKind::Initializer
+                        | DeclarationKind::Script => continue,
+                    };
+                    declaration_syntax.insert(member, syntax);
+                }
             }
         }
         Self {
@@ -143,6 +226,7 @@ impl<'file> ActiveSourceHeaders<'file> {
             enclosing_classifiers,
             direct_classifier_children,
             classifier_members,
+            declaration_syntax,
             active_file: std::marker::PhantomData,
         }
     }
@@ -160,6 +244,16 @@ impl<'file> ActiveSourceHeaders<'file> {
             .get(parser.0 as usize)
             .copied()
             .flatten()
+    }
+
+    pub(crate) fn declarations(&self) -> impl Iterator<Item = (DeclId, DeclarationId)> + '_ {
+        self.primary_declarations
+            .iter()
+            .enumerate()
+            .filter_map(|(raw, declaration)| {
+                let parser = DeclId(u32::try_from(raw).expect("too many parser declarations"));
+                declaration.map(|stable| (parser, stable))
+            })
     }
 
     pub(crate) fn type_parameter_declaration(&self, signature_start: u32) -> Option<DeclarationId> {
@@ -229,5 +323,67 @@ impl<'file> ActiveSourceHeaders<'file> {
             ActiveClassifierMemberKind::BodyProperty,
             ordinal,
         )
+    }
+
+    pub(crate) fn function(
+        &self,
+        file: &'file File,
+        declaration: DeclarationId,
+    ) -> Option<&'file crate::ast::FunDecl> {
+        match *self.declaration_syntax.get(&declaration)? {
+            ActiveDeclarationSyntax::Primary(parser) => match file.decl(parser) {
+                crate::ast::Decl::Fun(function) => Some(function),
+                crate::ast::Decl::Class(_) | crate::ast::Decl::Property(_) => None,
+            },
+            ActiveDeclarationSyntax::ClassifierMethod(classifier, ordinal) => {
+                let crate::ast::Decl::Class(class) = file.decl(classifier) else {
+                    return None;
+                };
+                class.methods.get(ordinal as usize)
+            }
+            ActiveDeclarationSyntax::EnumEntryMethod(classifier, entry, ordinal) => {
+                let crate::ast::Decl::Class(class) = file.decl(classifier) else {
+                    return None;
+                };
+                class
+                    .enum_entries
+                    .get(entry as usize)?
+                    .methods
+                    .get(ordinal as usize)
+            }
+            ActiveDeclarationSyntax::ClassifierProperty(_, _)
+            | ActiveDeclarationSyntax::EnumEntryProperty(_, _, _) => None,
+        }
+    }
+
+    pub(crate) fn property(
+        &self,
+        file: &'file File,
+        declaration: DeclarationId,
+    ) -> Option<&'file crate::ast::PropDecl> {
+        match *self.declaration_syntax.get(&declaration)? {
+            ActiveDeclarationSyntax::Primary(parser) => match file.decl(parser) {
+                crate::ast::Decl::Property(property) => Some(property),
+                crate::ast::Decl::Class(_) | crate::ast::Decl::Fun(_) => None,
+            },
+            ActiveDeclarationSyntax::ClassifierProperty(classifier, ordinal) => {
+                let crate::ast::Decl::Class(class) = file.decl(classifier) else {
+                    return None;
+                };
+                class.body_props.get(ordinal as usize)
+            }
+            ActiveDeclarationSyntax::EnumEntryProperty(classifier, entry, ordinal) => {
+                let crate::ast::Decl::Class(class) = file.decl(classifier) else {
+                    return None;
+                };
+                class
+                    .enum_entries
+                    .get(entry as usize)?
+                    .props
+                    .get(ordinal as usize)
+            }
+            ActiveDeclarationSyntax::ClassifierMethod(_, _)
+            | ActiveDeclarationSyntax::EnumEntryMethod(_, _, _) => None,
+        }
     }
 }

@@ -159,20 +159,13 @@ impl SignatureConstraintExtractor {
         let source = active.source();
         let stubs = active.stubs();
         self.source_declarations.clear();
-        self.source_declarations
-            .extend((0..file.decl_arena.len()).filter_map(|raw| {
-                let parser =
-                    crate::ast::DeclId(u32::try_from(raw).expect("too many parser declarations"));
-                active.declaration(parser).map(|stable| (parser, stable))
-            }));
+        self.source_declarations.extend(active.declarations());
         self.source_primary_constructors.clear();
         self.source_secondary_constructors.clear();
         self.source_constructor_properties.clear();
         self.source_methods.clear();
         self.source_body_properties.clear();
-        for raw in 0..file.decl_arena.len() {
-            let classifier =
-                crate::ast::DeclId(u32::try_from(raw).expect("too many parser declarations"));
+        for (classifier, _) in active.declarations() {
             let crate::ast::Decl::Class(class) = file.decl(classifier) else {
                 continue;
             };
@@ -234,7 +227,7 @@ impl SignatureConstraintExtractor {
             if stub.flags.has(super::DeclarationFlags::LOCAL_CLASS) {
                 continue;
             }
-            let Some(expression) = source_signature_expression(file, stub) else {
+            let Some(expression) = source_signature_expression(active, file, stub) else {
                 self.failures.push(SignatureExtractionFailure {
                     declaration: stub.id,
                     form: ExpressionForm::UnsupportedAnnotationArgument,
@@ -256,7 +249,7 @@ impl SignatureConstraintExtractor {
             self.extracting_local_effects.clear();
             let mut parameters = HashMap::new();
             let mut callables = HashMap::new();
-            let function = source_function(file, stub.range);
+            let function = active.function(file, stub.id);
             if let Some(function) = function {
                 for (index, parameter) in function.params.iter().enumerate() {
                     let value = self.graph.add_expr(SigExpr::Parameter {
@@ -320,7 +313,8 @@ impl SignatureConstraintExtractor {
                     if stub.signature_inference
                         == Some(super::InferredSignatureKind::BackingFieldInitializer)
                     {
-                        let declared = source_property(file, stub.range)
+                        let declared = active
+                            .property(file, stub.id)
                             .and_then(crate::ast::PropDecl::declared_ty)
                             .cloned();
                         if let Some(declared) = declared {
@@ -745,7 +739,7 @@ impl SignatureConstraintExtractor {
                     origin,
                 )?;
             }
-            for (ordinal, _property) in class.body_props.iter().enumerate() {
+            for (ordinal, property) in class.body_props.iter().enumerate() {
                 let ordinal = u32::try_from(ordinal).expect("too many classifier properties");
                 let Some(stub) = self
                     .source_body_properties
@@ -758,7 +752,7 @@ impl SignatureConstraintExtractor {
                 if stub.signature_inference.is_none() || self.graph.constraint(stub.id).is_some() {
                     continue;
                 }
-                let Some(expression) = source_signature_expression(file, &stub) else {
+                let Some(expression) = property_signature_expression(property) else {
                     continue;
                 };
                 let constraint_origin = origin(
@@ -2749,73 +2743,28 @@ impl SignatureConstraintExtractor {
     }
 }
 
-fn source_function(file: &File, range: crate::diag::Span) -> Option<&crate::ast::FunDecl> {
-    for declaration in &file.decl_arena {
-        match declaration {
-            crate::ast::Decl::Fun(function) if function.span == range => return Some(function),
-            crate::ast::Decl::Class(class) => {
-                if let Some(function) = class
-                    .methods
-                    .iter()
-                    .chain(
-                        class
-                            .enum_entries
-                            .iter()
-                            .flat_map(|entry| entry.methods.iter()),
-                    )
-                    .find(|function| function.span == range)
-                {
-                    return Some(function);
-                }
-            }
-            crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => {}
-        }
-    }
-    None
+fn property_signature_expression(property: &crate::ast::PropDecl) -> Option<ExprId> {
+    property
+        .delegate
+        .or(property.init)
+        .or_else(|| match property.getter.as_ref() {
+            Some(crate::ast::FunBody::Expr(expression)) => Some(*expression),
+            Some(crate::ast::FunBody::Block(_) | crate::ast::FunBody::None) | None => None,
+        })
 }
 
-fn source_property(file: &File, range: crate::diag::Span) -> Option<&crate::ast::PropDecl> {
-    for declaration in &file.decl_arena {
-        match declaration {
-            crate::ast::Decl::Property(property) if property.span == range => {
-                return Some(property);
-            }
-            crate::ast::Decl::Class(class) => {
-                if let Some(property) = class
-                    .body_props
-                    .iter()
-                    .chain(
-                        class
-                            .enum_entries
-                            .iter()
-                            .flat_map(|entry| entry.props.iter()),
-                    )
-                    .find(|property| property.span == range)
-                {
-                    return Some(property);
-                }
-            }
-            crate::ast::Decl::Fun(_) | crate::ast::Decl::Property(_) => {}
-        }
-    }
-    None
-}
-
-fn source_signature_expression(file: &File, stub: &DeclarationStub) -> Option<ExprId> {
+fn source_signature_expression(
+    active: &super::ActiveSourceHeaders<'_>,
+    file: &File,
+    stub: &DeclarationStub,
+) -> Option<ExprId> {
     match stub.kind {
-        super::DeclarationKind::Function => match source_function(file, stub.range)?.body {
+        super::DeclarationKind::Function => match active.function(file, stub.id)?.body {
             crate::ast::FunBody::Expr(expression) => Some(expression),
             crate::ast::FunBody::Block(_) | crate::ast::FunBody::None => None,
         },
         super::DeclarationKind::Property => {
-            let property = source_property(file, stub.range)?;
-            property
-                .delegate
-                .or(property.init)
-                .or_else(|| match property.getter.as_ref() {
-                    Some(crate::ast::FunBody::Expr(expression)) => Some(*expression),
-                    Some(crate::ast::FunBody::Block(_) | crate::ast::FunBody::None) | None => None,
-                })
+            property_signature_expression(active.property(file, stub.id)?)
         }
         super::DeclarationKind::Classifier
         | super::DeclarationKind::EnumEntry
