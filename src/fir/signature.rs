@@ -264,6 +264,9 @@ pub enum SigExpr {
         value: SigExprId,
         call: SigExprId,
         argument: u32,
+        /// The argument is the CONDITION `value != null` rather than the value itself: the proof
+        /// is a `returns() implies <argument>` effect (`assertTrue(x != null)`).
+        condition: bool,
     },
     Substitute {
         base: SigExprId,
@@ -1147,7 +1150,12 @@ pub trait SignatureSemantics {
     /// `returns() implies (<parameter> != null)` contract effect for source `argument`.
     /// Consulted after the call itself evaluated; a semantics that keeps no selection state
     /// proves nothing.
-    fn call_proves_argument_non_null(&self, _origin: OriginId, _argument: u32) -> bool {
+    fn call_proves_argument_non_null(
+        &self,
+        _origin: OriginId,
+        _argument: u32,
+        _condition: bool,
+    ) -> bool {
         false
     }
 

@@ -3,6 +3,8 @@
 //! This is a structural pass only. It records compact operations and deferred lookups; ordinary
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
+mod definitely_evaluated;
+
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
 use crate::types::Ty;
 use std::collections::{HashMap, HashSet};
@@ -1186,7 +1188,53 @@ impl SignatureConstraintExtractor {
                 bindings.extend(self.positive_smartcasts(file, *rhs, scope, origin)?);
                 Ok(bindings)
             }
-            Expr::Binary { op, lhs, rhs, .. } if matches!(op, BinOp::Ne | BinOp::RefNe) => {
+            // `x?.p == literal` and `x?.p != null` hold only when `x` is non-null.
+            Expr::Binary { op, lhs, rhs, .. }
+                if matches!(op, BinOp::Eq | BinOp::RefEq | BinOp::Ne | BinOp::RefNe)
+                    && matches!(
+                        (file.expr(*lhs), file.expr(*rhs)),
+                        (Expr::SafeCall { .. }, _) | (_, Expr::SafeCall { .. })
+                    ) =>
+            {
+                let (receiver, other) = match (file.expr(*lhs), file.expr(*rhs)) {
+                    (Expr::SafeCall { receiver, .. }, other) => (*receiver, other),
+                    (other, Expr::SafeCall { receiver, .. }) => (*receiver, other),
+                    _ => return Ok(Vec::new()),
+                };
+                let proves = match op {
+                    BinOp::Eq | BinOp::RefEq => matches!(
+                        other,
+                        Expr::BoolLit(_)
+                            | Expr::IntLit(_)
+                            | Expr::LongLit(_)
+                            | Expr::StringLit(_)
+                            | Expr::CharLit(_)
+                    ),
+                    _ => matches!(other, Expr::NullLit),
+                };
+                let Expr::Name(name) = file.expr(receiver) else {
+                    return Ok(Vec::new());
+                };
+                Ok(proves
+                    .then(|| {
+                        let value = self
+                            .lexical_values
+                            .iter()
+                            .rev()
+                            .find_map(|values| values.get(name.as_str()).copied())?;
+                        let non_null = self.graph.add_expr(SigExpr::NonNullable(value));
+                        Some((name.clone().into_boxed_str(), non_null))
+                    })
+                    .flatten()
+                    .into_iter()
+                    .collect())
+            }
+            Expr::Binary {
+                op: BinOp::Ne | BinOp::RefNe,
+                lhs,
+                rhs,
+                ..
+            } => {
                 let name = match (file.expr(*lhs), file.expr(*rhs)) {
                     (Expr::Name(name), Expr::NullLit) | (Expr::NullLit, Expr::Name(name)) => {
                         Some(name)
@@ -1223,8 +1271,22 @@ impl SignatureConstraintExtractor {
             return;
         }
         for (index, argument) in args.iter().enumerate() {
-            let Expr::Name(name) = file.expr(*argument) else {
-                continue;
+            // The value itself (`requireNotNull(x)`), or the condition `x != null`
+            // (`assertTrue(x != null)`), whose callee may promise `returns() implies actual`.
+            let (name, condition) = match file.expr(*argument) {
+                Expr::Name(name) => (name, false),
+                Expr::Binary {
+                    op: BinOp::Ne | BinOp::RefNe,
+                    lhs,
+                    rhs,
+                    ..
+                } => match (file.expr(*lhs), file.expr(*rhs)) {
+                    (Expr::Name(name), Expr::NullLit) | (Expr::NullLit, Expr::Name(name)) => {
+                        (name, true)
+                    }
+                    _ => continue,
+                },
+                _ => continue,
             };
             let Some(value) = self
                 .lexical_values
@@ -1238,11 +1300,33 @@ impl SignatureConstraintExtractor {
                 value,
                 call: effect,
                 argument: u32::try_from(index).expect("too many call arguments"),
+                condition,
             });
             self.lexical_values
                 .last_mut()
                 .expect("block scope must exist")
                 .insert(name.clone().into_boxed_str(), narrowed);
+        }
+    }
+
+    /// After a statement that definitely evaluated `x!!`, `x` is non-null for the rest of the
+    /// block, as the body check narrows it. Conditional children must not publish facts here: the
+    /// statement can complete without evaluating them.
+    fn narrow_not_null_asserted(&mut self, file: &File, statement: crate::ast::StmtId) {
+        for name in definitely_evaluated::not_null_assertions_after(file, statement) {
+            let Some(value) = self
+                .lexical_values
+                .iter()
+                .rev()
+                .find_map(|values| values.get(name).copied())
+            else {
+                continue;
+            };
+            let non_null = self.graph.add_expr(SigExpr::NonNullable(value));
+            self.lexical_values
+                .last_mut()
+                .expect("block scope must exist")
+                .insert(name.into(), non_null);
         }
     }
 
@@ -1941,6 +2025,9 @@ impl SignatureConstraintExtractor {
                 let mut effects = Vec::new();
                 let mut terminal_lambda_return = false;
                 for (statement_index, statement) in stmts.iter().enumerate() {
+                    if let Some(previous) = statement_index.checked_sub(1) {
+                        self.narrow_not_null_asserted(file, stmts[previous]);
+                    }
                     match file.stmt(*statement) {
                         Stmt::Local {
                             name,
@@ -2212,6 +2299,9 @@ impl SignatureConstraintExtractor {
                             }
                         }
                     }
+                }
+                if let Some(last) = stmts.last() {
+                    self.narrow_not_null_asserted(file, *last);
                 }
                 let result = if terminal_lambda_return {
                     self.known(Ty::Nothing)

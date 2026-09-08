@@ -5881,15 +5881,27 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
     }
 
-    fn call_proves_argument_non_null(&self, origin: crate::fir::OriginId, argument: u32) -> bool {
+    fn call_proves_argument_non_null(
+        &self,
+        origin: crate::fir::OriginId,
+        argument: u32,
+        condition: bool,
+    ) -> bool {
         use crate::contracts::{Condition, Effect, ParamRef, ReturnsValue};
-        fn proves(condition: &Condition, argument: u32) -> bool {
-            match condition {
+        fn proves(conclusion: &Condition, argument: u32, condition: bool) -> bool {
+            match conclusion {
                 Condition::IsNull {
                     param: ParamRef::Param(index),
                     negated: true,
-                } => *index == argument as usize,
-                Condition::And(left, right) => proves(left, argument) || proves(right, argument),
+                } => !condition && *index == argument as usize,
+                // `returns() implies actual`: the boolean argument itself holds, and the
+                // extractor only takes this shape for an argument spelled `value != null`.
+                Condition::BoolParam(ParamRef::Param(index)) => {
+                    condition && *index == argument as usize
+                }
+                Condition::And(left, right) => {
+                    proves(left, argument, condition) || proves(right, argument, condition)
+                }
                 _ => false,
             }
         }
@@ -5911,7 +5923,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 Effect::ConditionalReturns {
                     returns: ReturnsValue::Any,
                     conclusion,
-                } if proves(conclusion, argument)
+                } if proves(conclusion, argument, condition)
             )
         })
     }

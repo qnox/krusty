@@ -2015,6 +2015,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call and the expectation-aware evaluator has a member-call arm. Test:
   `streaming_signature_tests::an_implicit_receiver_generic_member_binds_its_result_from_the_parameter_it_fills`
   (implicit and explicit receivers, three parameter shapes).
+- **Three more flow facts reach the signature pass (and one the body check).** The body check
+  narrows a stable value after `x!!`, after `assertTrue(x != null)` (kotlin.test's `returns()
+  implies actual`), and on the true edge of `if (x?.p != null)`; the compact model an inferred
+  signature is solved on knew only `if (x != null)` and, since the contract rule above, a plain
+  `requireNotNull(x)`. Test bodies written as `= runTest { … }` lost their signature to each of
+  these: `assertEquals(RUNNING, result!!.status); assertEquals("unknown", result.host)` and
+  `assertTrue(result != null, msg); result.contains(…)` (six reads in one real test source set),
+  and `if (session?.mock == true) { mockHttpClient(session) … }` in an inferred-signature lambda
+  (six more in a main set). The extractor now (1) rebinds every name asserted `x!!` in a statement
+  — outside lambdas — to its non-null value for the rest of the block, including the trailing
+  expression; (2) takes an argument spelled `x != null` as a contract candidate whose proof is a
+  `returns() implies actual` effect (`ContractNarrowed { condition: true }`); (3) narrows the
+  safe-call receiver of `x?.p == literal` / `x?.p != null` on the true edge of an `if`. The body
+  check gained the `x?.p == literal` form too (it had `!= null` only), through the same
+  `null_check_narrowings` proof. The `x!!` and `assertTrue` shapes are byte-identical to kotlinc;
+  the two safe-call comparisons carry a pre-existing emission residue (krusty boxes the safe-call
+  result through `Boolean.valueOf`, a temp and a `checkcast` where kotlinc compares the unboxed
+  value under a `dup; ifnull`), untouched by the narrowing. Test:
+  `streaming_signature_tests::expression_body_narrows_after_a_not_null_assertion_a_boolean_contract_and_a_safe_call_test`,
+  `not_null_assert_e2e::inferred_signature_flow_facts_round_trip_through_a_dependency`
+  (default-on kotlinc dependency cross-check).
 - **Reference array literals** `arrayOf(a, b, c)`: lower to the same `Vararg` IR node `intArrayOf` uses,
   which the backend allocates as `T[]` and fills element-by-element (the element type is the array's
   erased element; a logical primitive element is boxed at the store boundary, so `arrayOf(1, 2)` is

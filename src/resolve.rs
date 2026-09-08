@@ -65647,6 +65647,26 @@ impl<'a> Checker<'a> {
                         self.null_branch_narrowings(scope, operand, &mut out);
                     }
                 } else if (op == BinOp::Eq) != for_else {
+                    // `x?.p == true` (or any non-null literal) holds only when every `?.` held:
+                    // the safe-call chain's receivers are non-null where the equality is known.
+                    let literal = |expression: ExprId| {
+                        matches!(
+                            self.file.expr(expression),
+                            Expr::BoolLit(_)
+                                | Expr::IntLit(_)
+                                | Expr::LongLit(_)
+                                | Expr::StringLit(_)
+                                | Expr::CharLit(_)
+                        )
+                    };
+                    let safe_call = match (self.file.expr(lhs), self.file.expr(rhs)) {
+                        (Expr::SafeCall { .. }, _) if literal(rhs) => Some(lhs),
+                        (_, Expr::SafeCall { .. }) if literal(lhs) => Some(rhs),
+                        _ => None,
+                    };
+                    if let Some(safe_call) = safe_call {
+                        self.null_check_narrowings(scope, safe_call, &mut out, declined);
+                    }
                     // When equality is known to hold, the compiler-known bound on either selected
                     // `equals` receiver proves the opposite stable operand has that classifier.
                     // Keep both directions: `typed == erased` and `erased == typed` select the

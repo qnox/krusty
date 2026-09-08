@@ -1276,6 +1276,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         value,
                         call,
                         argument,
+                        condition,
                     } => {
                         // The call statement is also a sequence effect ahead of this read, so its
                         // selection is memoized; a failed call narrows nothing and reports itself.
@@ -1286,7 +1287,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             evaluate_expression(semantics, value, graph, demand, memo, computing)?;
                         let proven = selected
                             && call_selection_origin(graph, call).is_some_and(|origin| {
-                                semantics.call_proves_argument_non_null(origin, argument)
+                                semantics.call_proves_argument_non_null(origin, argument, condition)
                             });
                         if proven {
                             semantics.make_non_nullable(value)
