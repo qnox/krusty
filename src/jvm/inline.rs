@@ -804,12 +804,24 @@ fn is_reified_type_bearing(insn: &Insn, src_cp: &[C]) -> bool {
 /// (`idx` must fit a byte, else the widening would shift offsets and break already-resolved branch
 /// targets — return `false` so the caller SKIPS the splice rather than miscompiling).
 fn set_reified_operand(insn: &mut Insn, idx: u16) -> bool {
-    if let Insn::Plain { op: 0x12, operands } = insn {
-        if idx > 0xff || operands.is_empty() {
-            return false;
+    if let Insn::Plain { op, operands } = insn {
+        if *op == 0x12 {
+            if operands.is_empty() {
+                return false;
+            }
+            if idx > 0xff {
+                // `ldc` carries a ONE-byte pool index, and the concrete type's index in the HOST
+                // class can be anything — a file with a few hundred constants pushes it past a
+                // byte. Widen to `ldc_w` (0x13), the identical-semantics 2-byte form, exactly as
+                // `relocate_insns` does for the same overflow. Branch targets and frames are keyed
+                // by instruction INDEX, not byte offset, so the size change is handled downstream.
+                *op = 0x13;
+                *operands = vec![(idx >> 8) as u8, (idx & 0xff) as u8];
+                return true;
+            }
+            operands[0] = idx as u8;
+            return true;
         }
-        operands[0] = idx as u8;
-        return true;
     }
     set_pool_operand(insn, idx);
     true
