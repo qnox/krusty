@@ -1231,3 +1231,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   by `attach_synth_debug_tables` for the ctor's first entry only. **The FIR pipeline transfers this
   line from the active stable declaration in `compiler.rs`, not from the legacy `ir_lower` path.**
   `tests/annotated_class_decl_line_e2e.rs`.
+- **The `@Serializable` `Companion`: `checkcast` at the `serializer()` return + `ACC_SYNTHETIC` in
+  `InnerClasses` (fix).** One companion is synthesized per `@Serializable` declaration, so this is the
+  most common generated class in a serialization-heavy program. Two divergences, both invisible to a
+  round-trip test because the program serializes correctly either way: (1) `serializer()` returned the
+  `$serializer` singleton without kotlinc's `checkcast` to `KSerializer` — the accessor is declared to
+  return `KSerializer<Foo>` while the singleton's type is `Foo$serializer`, and kotlinc narrows at the
+  return (the JVM verifies the method without it); (2) the `InnerClasses` entry for `$serializer` did
+  not carry `ACC_SYNTHETIC`, although the class's own access flags did — the entry is read
+  independently, so the two must agree, and javap does not render that bit in the table (a
+  disassembly-only assertion is blind to it; compare the parsed entries).
+  `tests/serialization_companion_byte_parity_e2e.rs`, whose reference is kotlinc running its own
+  serialization plugin from the same distribution (`common::disassemble_against_kotlinc_plugin`).
+  STILL differing on this class: `LineNumberTable`/`LocalVariableTable`, which the emitter gates on
+  `ir.fn_decl_lines` — a plugin-generated function has no source declaration line, so it gets neither.

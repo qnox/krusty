@@ -3472,6 +3472,160 @@ pub fn byte_diff_against_kotlinc_cp_target(
     cp_jars: &[PathBuf],
     jvm_target: Option<&str>,
 ) -> Option<Result<(), String>> {
+    byte_diff_against_kotlinc_full(name, src, class, cp_jars, jvm_target)
+}
+
+/// The newest `<artifact>-<version>.jar` Gradle has cached for `group:artifact` under `modules-2`,
+/// its dependency cache proper. Versions compare numerically, so 1.11.0 beats 1.9.0. Asking by
+/// COORDINATES matters: a first-hit walk of `~/.gradle` stops in whichever wrapper distribution
+/// readdir happens to list first, which is a different (often older) copy of the same artifact.
+#[allow(dead_code)]
+pub fn gradle_module_jar(group: &str, artifact: &str) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let artifact_dir = Path::new(&home)
+        .join(".gradle/caches/modules-2/files-2.1")
+        .join(group)
+        .join(artifact);
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for version in std::fs::read_dir(&artifact_dir).ok()?.flatten() {
+        let name = version.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let key = name
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let jar_name = format!("{artifact}-{name}.jar");
+        for hash in std::fs::read_dir(version.path()).ok()?.flatten() {
+            let jar = hash.path().join(&jar_name);
+            if jar.is_file() && best.as_ref().is_none_or(|(k, _)| key > *k) {
+                best = Some((key.clone(), jar));
+            }
+        }
+    }
+    best.map(|(_, jar)| jar)
+}
+
+/// Locate a compiler-plugin jar shipped in the SAME `lib/` as the reference kotlinc, by filename
+/// substring (`"kotlinx-serialization-compiler-plugin"`). Pinning it to the reference dist is the
+/// point: a plugin from another Kotlin version would emit a different reference to diff against.
+#[allow(dead_code)]
+pub fn kotlinc_plugin_jar(substring: &str) -> Option<PathBuf> {
+    let lib = kotlinc_lib_of(&kotlin_compiler_jar()?)?;
+    std::fs::read_dir(lib)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .find_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            (name.contains(substring) && name.ends_with(".jar")).then_some(path)
+        })
+}
+
+/// One class as built by the reference kotlinc and as built by krusty: its disassembly and its raw
+/// bytes from each side. Both are needed — javap does not render every fact a class file carries
+/// (the `InnerClasses` table's `ACC_SYNTHETIC`, for one), so a test that only reads the disassembly
+/// silently passes on a difference the bytes would show.
+#[allow(dead_code)]
+pub struct ReferenceComparison {
+    pub reference: String,
+    pub krusty: String,
+    pub reference_bytes: Vec<u8>,
+    pub krusty_bytes: Vec<u8>,
+}
+
+/// Build ONE class with the reference kotlinc and with krusty, for a fixture whose reference needs
+/// EXTRA kotlinc arguments (a `-Xplugin=` compiler plugin) and the classpath on both sides.
+///
+/// The byte-diff helpers deliberately keep `cp_jars` on the krusty side only — most fixtures need
+/// nothing beyond the stdlib kotlinc already has. A fixture whose REFERENCE needs the same
+/// dependency (anything a plugin compiles against its runtime) must give kotlinc the classpath too,
+/// or the reference build fails and there is nothing to compare.
+#[allow(dead_code)]
+pub fn disassemble_against_kotlinc_plugin(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    jvm_target: Option<&str>,
+    kotlinc_extra: &[String],
+) -> Option<ReferenceComparison> {
+    let dir = scratch_dir()?;
+    let kref = dir.join("ref");
+    let kout = dir.join("out");
+    std::fs::create_dir_all(&kref).ok()?;
+    std::fs::create_dir_all(&kout).ok()?;
+    let src_path = dir.join(format!("{name}.kt"));
+    std::fs::write(&src_path, src).ok()?;
+
+    let mut args = vec!["-d".to_string(), kref.to_string_lossy().into_owned()];
+    if let Some(target) = jvm_target {
+        args.push("-jvm-target".to_string());
+        args.push(target.to_string());
+    }
+    if !cp_jars.is_empty() {
+        args.push("-classpath".to_string());
+        args.push(
+            cp_jars
+                .iter()
+                .map(|jar| jar.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+    }
+    args.extend(kotlinc_extra.iter().cloned());
+    args.push(src_path.to_string_lossy().into_owned());
+    let (code, stderr) = kotlinc_compile(&args)?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+
+    let class_major = jvm_target.map(jvm_target_major);
+    let classes =
+        compile_in_process_metadata_cp_module_target(src, name, cp_jars, "main", class_major)
+            .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    for (n, bytes) in &classes {
+        let path = kout.join(format!("{n}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(path, bytes).ok()?;
+    }
+
+    let reference = javap(&["-p", "-c", "-v", "-cp", &kref.to_string_lossy(), class])?;
+    let krusty = javap(&["-p", "-c", "-v", "-cp", &kout.to_string_lossy(), class])?;
+    let reference_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
+    let krusty_bytes = std::fs::read(kout.join(format!("{class}.class"))).ok()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(ReferenceComparison {
+        reference,
+        krusty,
+        reference_bytes,
+        krusty_bytes,
+    })
+}
+
+/// kotlinc's `-jvm-target` → class-file major version (the CLI's table; the CLI crate is a binary,
+/// so the mapping is restated here).
+fn jvm_target_major(target: &str) -> u16 {
+    match target {
+        "1.6" | "6" => 50,
+        "1.7" | "7" => 51,
+        "1.8" | "8" => 52,
+        other => other
+            .parse::<u16>()
+            .ok()
+            .filter(|n| (9..=99).contains(n))
+            .map(|n| n + 44)
+            .unwrap_or_else(|| panic!("unknown -jvm-target {other}")),
+    }
+}
+
+fn byte_diff_against_kotlinc_full(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    jvm_target: Option<&str>,
+) -> Option<Result<(), String>> {
     let dir = scratch_dir()?;
     let kref = dir.join("ref");
     std::fs::create_dir_all(&kref).ok()?;

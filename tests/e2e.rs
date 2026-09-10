@@ -1194,6 +1194,8 @@ mod sealed_object_value_match_e2e;
 mod secondary_ctor_noprimary_e2e;
 #[path = "secondary_ctor_this_sibling_e2e.rs"]
 mod secondary_ctor_this_sibling_e2e;
+#[path = "serialization_companion_byte_parity_e2e.rs"]
+mod serialization_companion_byte_parity_e2e;
 #[path = "serialization_coverage_e2e.rs"]
 mod serialization_coverage_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
