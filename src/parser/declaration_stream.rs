@@ -52,7 +52,7 @@ fn finish_unit(file: &mut File, source: &str, features: &LangFeatures, diags: &m
     apply_file_features(file, features);
     hoist_local_classes(file, None);
     fixup_parenless_base_classes(file);
-    fill_class_decl_lines(file, source);
+    super::debug_lines::attach(file, source);
     expand_fun_type_aliases(file);
     if !diags.has_errors() {
         if let Err(error) = file.validate_integrity(source) {

@@ -1219,3 +1219,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   by instruction INDEX, not byte offset, so the size change is absorbed downstream. The size
   dependence is why this hid: every existing reified-splice fixture was small enough to stay under a
   byte. `tests/reified_splice_host_pool_wide_e2e.rs`.
+- **A primary constructor's `LineNumberTable` uses TWO different class lines (fix).** kotlinc maps the
+  `super()` call to where the DECLARATION starts — **annotations included** — and the ctor's trailing
+  `return` back to the class **HEADER** line. The two coincide for an unannotated class, so one line
+  (`ClassDecl::decl_line`, the header) served for both and every fixture stayed green; put `@Mark` on
+  the line above and kotlinc emits `line 5 → super()`, `line 6 → the property stores`, where krusty
+  emitted a single `line 6`. Moving `decl_line` to the annotation is wrong in the other direction —
+  the trailing `return` then lands on line 5 and kotlinc has no such entry (measured: an unannotated
+  multi-line header DOES get the trailing `line 3` entry, so the return really does go back to the
+  header). Fixed with a second line, `ClassDecl::decl_start_line` → `IrClass::decl_start_line`, read
+  by `attach_synth_debug_tables` for the ctor's first entry only. **The FIR pipeline transfers this
+  line from the active stable declaration in `compiler.rs`, not from the legacy `ir_lower` path.**
+  `tests/annotated_class_decl_line_e2e.rs`.

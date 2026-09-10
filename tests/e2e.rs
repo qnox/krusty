@@ -20,6 +20,8 @@ mod abstract_member_check_e2e;
 mod abstract_modifier_consistency_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
 mod adapted_callable_reference_equality_e2e;
+#[path = "annotated_class_decl_line_e2e.rs"]
+mod annotated_class_decl_line_e2e;
 #[path = "annotated_setter_parameter_e2e.rs"]
 mod annotated_setter_parameter_e2e;
 #[path = "annotation_array_literal_e2e.rs"]

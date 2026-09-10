@@ -7186,6 +7186,7 @@ fn build_continuation_class(
         is_value: false,
         is_data: false,
         decl_line: 0,
+        decl_start_line: 0,
         type_param_bounds: vec![],
         type_params: Vec::new(),
         captured_type_params: Vec::new(),
