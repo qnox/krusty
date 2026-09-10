@@ -790,6 +790,47 @@ impl ClassWriter {
         self.param_assertions = enabled;
     }
 
+    /// Whether one registered nested-class declaration belongs in this writer's final
+    /// `InnerClasses` table. Keep seeding and attribute construction on this one predicate: adding
+    /// constants for a rejected row changes byte identity, while omitting an annotation-only row
+    /// changes the class structure.
+    fn retains_inner_class(&self, spec: &InnerClassSpec) -> bool {
+        spec.outer.as_deref() == Some(self.internal_name.as_str())
+            || self.cp.has_class(&spec.inner)
+            || self.annotation_class_refs.contains(&spec.inner)
+            || self.descriptor_mentions(&spec.inner)
+    }
+
+    /// Seed the `InnerClasses` entries' outer-class refs and simple names at kotlinc's
+    /// post-metadata pool position, in the ORDER the finished table will list them (sorted by inner
+    /// internal name), and only for the entries that table will actually keep.
+    ///
+    /// kotlinc interns these as it visits the sorted table, so a class whose table has a sibling
+    /// sorting BEFORE its own row must intern that sibling's name first: `Foo$$serializer` sorts
+    /// ahead of `Foo$Companion` (`'$'` < `'C'`). Seeding only this class's own row put its name
+    /// first and left the two entries transposed in the pool — the class then matched kotlinc in
+    /// every other respect while still differing byte-wise.
+    pub(super) fn seed_inner_class_names(&mut self) {
+        // A referenced dependency nest may not be among the source file's registered candidates.
+        // Discover those rows before sorting; resolving them later from `finish` would intern their
+        // names after every source row and recreate the very order mismatch this seed prevents.
+        self.resolve_inner_classes();
+        let specs = self
+            .inner_class_candidates
+            .iter()
+            .filter(|spec| self.retains_inner_class(spec))
+            .cloned()
+            .collect::<Vec<_>>();
+        for spec in specs {
+            if let Some(outer) = &spec.outer {
+                self.cp.class(outer);
+            }
+            if let Some(name) = &spec.name {
+                self.cp.utf8(name);
+            }
+        }
+    }
+
     pub fn seed_class(&mut self, internal: &str) {
         self.cp.class(internal);
     }
@@ -2347,12 +2388,6 @@ impl ClassWriter {
                 let Some(details) = resolve(&inner) else {
                     continue;
                 };
-                if let Some(outer) = &details.outer {
-                    self.cp.class(outer);
-                }
-                if let Some(name) = &details.name {
-                    self.cp.utf8(name);
-                }
                 self.add_inner_class(InnerClassSpec {
                     inner,
                     outer: details.outer,
@@ -2384,20 +2419,13 @@ impl ClassWriter {
         // Every EMITTED `InnerClasses` entry's refs (outer Class, simple name) intern here — before
         // the `SourceFile` value and the attribute names (kotlinc visits the InnerClasses table
         // ahead of both; a nested class's own entry otherwise interned its outer at serialization,
-        // after everything else). Only candidates whose inner class is ALREADY a pool constant
-        // qualify — an unreferenced candidate emits no entry, and interning it here would falsely
-        // mark it referenced.
-        let referenced: std::collections::HashSet<String> =
-            self.cp.class_names().into_iter().collect();
+        // after everything else). Use the same retention predicate as early name seeding and final
+        // attribute construction: interning a rejected candidate here would falsely make it a
+        // referenced class.
         let inner_specs: Vec<(String, Option<String>, Option<String>)> = self
             .inner_class_candidates
             .iter()
-            .filter(|candidate| {
-                candidate.outer.as_deref() == Some(self.internal_name.as_str())
-                    || referenced.contains(&candidate.inner)
-                    || self.annotation_class_refs.contains(&candidate.inner)
-                    || self.descriptor_mentions(&candidate.inner)
-            })
+            .filter(|candidate| self.retains_inner_class(candidate))
             .map(|candidate| {
                 (
                     candidate.inner.clone(),
@@ -2614,16 +2642,10 @@ impl ClassWriter {
             // `getEnclosingClass`/`getDeclaringClass` when only one side carries the entry. The
             // reference filter below is right for every OTHER entry (a nested class this file merely
             // uses), and kotlinc emits both sides for its own nest too.
-            let own_member =
-                |spec: &InnerClassSpec| spec.outer.as_deref() == Some(self.internal_name.as_str());
             let referenced: Vec<InnerClassSpec> = self
                 .inner_class_candidates
                 .iter()
-                .filter(|s| {
-                    own_member(s)
-                        || self.cp.has_class(&s.inner)
-                        || self.descriptor_mentions(&s.inner)
-                })
+                .filter(|spec| self.retains_inner_class(spec))
                 .cloned()
                 .collect();
             (!referenced.is_empty()).then(|| {
@@ -4149,6 +4171,63 @@ mod tests {
         let info =
             crate::jvm::classreader::parse_class(&string_literal.finish()).expect("parse class");
         assert!(info.inner_classes.is_empty());
+    }
+
+    #[test]
+    fn inner_class_name_seeding_keeps_annotation_only_references() {
+        let nested = "dep/Outer$Nested";
+        let mut writer = ClassWriter::new("Use", "java/lang/Object");
+        writer.add_inner_class(InnerClassSpec {
+            inner: nested.to_owned(),
+            outer: Some("dep/Outer".to_owned()),
+            name: Some("Nested".to_owned()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        });
+        writer.set_runtime_annotations(&[crate::ir::AppliedAnnotation {
+            internal: crate::types::type_name(nested),
+            values: Vec::new(),
+        }]);
+        assert!(!writer.cp.has_class(nested));
+
+        writer.seed_inner_class_names();
+
+        assert!(writer.cp.has_class("dep/Outer"));
+        assert!(writer.cp.lookup_utf8("Nested").is_some());
+        let info = crate::jvm::classreader::parse_class(&writer.finish()).expect("parse class");
+        assert_eq!(info.inner_classes.len(), 1);
+        assert_eq!(info.inner_classes[0].inner, nested);
+    }
+
+    #[test]
+    fn inner_class_name_seeding_sorts_late_resolver_rows_with_source_rows() {
+        let resolver: InnerClassResolver = Rc::new(|internal| {
+            (internal == "aa/Outer$Alpha").then(|| InnerClassDetails {
+                outer: Some("aa/Outer".to_owned()),
+                name: Some("Alpha".to_owned()),
+                access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+            })
+        });
+        let mut writer = ClassWriter::new("zz/Use", "java/lang/Object");
+        writer.add_inner_class(InnerClassSpec {
+            inner: "zz/Use$Zulu".to_owned(),
+            outer: Some("zz/Use".to_owned()),
+            name: Some("Zulu".to_owned()),
+            access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+        });
+        writer.set_inner_class_resolver(Some(resolver));
+        writer.class_ref("aa/Outer$Alpha");
+
+        writer.seed_inner_class_names();
+
+        assert!(writer.cp.lookup_utf8("Alpha") < writer.cp.lookup_utf8("Zulu"));
+        let info = crate::jvm::classreader::parse_class(&writer.finish()).expect("parse class");
+        assert_eq!(
+            info.inner_classes
+                .iter()
+                .map(|entry| entry.inner.as_str())
+                .collect::<Vec<_>>(),
+            ["aa/Outer$Alpha", "zz/Use$Zulu"]
+        );
     }
 
     /// kotlinc emits an `InnerClasses` entry for a class's OWN member classes whether or not its code
