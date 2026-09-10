@@ -3320,6 +3320,12 @@ fn inner_class_access(ir: &IrFile, c: &IrClass) -> u16 {
     } else if !c.is_open {
         access |= FINAL;
     }
+    // A class the COMPILER invented (a `$$serializer`) is `ACC_SYNTHETIC` in its own access flags;
+    // kotlinc repeats that bit in the `InnerClasses` entry, and the two sides are read
+    // independently (reflection consults the entry, not the class file it names).
+    if ir.is_synthetic_class(c.fq_name_id()) {
+        access |= 0x1000;
+    }
     access
 }
 
@@ -6127,11 +6133,11 @@ fn emit_class(
     if is_abstract {
         access |= 0x0400;
     } // ABSTRACT
-    if ir.is_synthetic_class(&fq_name) {
+    if ir.is_synthetic_class(c.fq_name_id()) {
         access |= 0x1000;
     } // ACC_SYNTHETIC (a `$$serializer` object)
     cw.set_access(access);
-    if ir.is_deprecated_class(&fq_name) {
+    if ir.is_deprecated_class(c.fq_name_id()) {
         cw.set_deprecated();
     } // Deprecated attribute (a HIDDEN-deprecated `$$serializer` object)
     crate::trace_compiler!(

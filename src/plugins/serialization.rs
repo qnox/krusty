@@ -1824,12 +1824,13 @@ impl IrPlugin for SerializationPlugin {
                     unbox_params: Vec::new(),
                 },
             ];
-            ir.mark_synthetic_class(&ser_fq);
-            ir.mark_deprecated_class(&ser_fq);
+            let serializer_identity = ser.fq_name_id();
+            ir.mark_synthetic_class(serializer_identity);
+            ir.mark_deprecated_class(serializer_identity);
             let ser_id = ir.add_class(ser);
             if !serializer_type_parameters.is_empty() {
                 ir.insert_class_signature_name(
-                    type_name(&ser_fq),
+                    serializer_identity,
                     crate::ir::IrGenericSig {
                         type_params: serializer_type_parameters,
                         params: Vec::new(),
@@ -1987,6 +1988,15 @@ impl IrPlugin for SerializationPlugin {
                     owner: ser_id,
                     ty: ser_id,
                     field: "INSTANCE",
+                });
+                // The accessor is declared to return `KSerializer<Foo>` while the singleton's own
+                // type is `Foo$serializer`, and kotlinc narrows at the return with a `checkcast` to
+                // the interface. The JVM would verify the method without it — which is why this was
+                // invisible to every round-trip test — but the bytes differ from kotlinc's.
+                let inst = ir.add_expr(IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::Cast,
+                    arg: inst,
+                    type_operand: kserializer_of(serialized_ty),
                 });
                 let inst_ret = ir.add_expr(IrExpr::Return(Some(inst)));
                 (
@@ -3521,7 +3531,9 @@ mod tests {
             Some(fq_name) => assert_eq!(fq_name, KSERIALIZER_FQ),
             None => panic!("expected KSerializer, got {:?}", acc.ret),
         }
-        // Its body returns the $$serializer singleton (`return Foo$$serializer.INSTANCE`).
+        // Its body returns the $$serializer singleton NARROWED to the declared interface
+        // (`return (KSerializer) Foo$$serializer.INSTANCE`) — kotlinc's shape. The cast is not
+        // needed to verify, so only a byte comparison catches its absence.
         let ser_id = ir
             .classes
             .iter()
@@ -3533,7 +3545,20 @@ mod tests {
         let Some(IrExpr::Return(Some(v))) = stmts.first().map(|&s| ir.expr(s).clone()) else {
             panic!("accessor body does not return a value");
         };
-        match ir.expr(v) {
+        let IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } = ir.expr(v).clone()
+        else {
+            panic!("expected a narrowing cast, got {:?}", ir.expr(v));
+        };
+        assert_eq!(op, crate::ir::IrTypeOp::Cast);
+        match type_operand.non_null().obj_internal() {
+            Some(fq_name) => assert_eq!(fq_name, KSERIALIZER_FQ),
+            None => panic!("expected a cast to KSerializer, got {type_operand:?}"),
+        }
+        match ir.expr(arg) {
             IrExpr::StaticInstance { ty, field, .. } => {
                 assert_eq!(*ty, ser_id);
                 assert_eq!(*field, "INSTANCE");

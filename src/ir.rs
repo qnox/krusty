@@ -3361,24 +3361,20 @@ impl IrFile {
         })
     }
 
-    pub fn mark_synthetic_class(&mut self, internal: &str) {
-        self.synthetic_classes
-            .insert(crate::types::type_name(internal));
+    pub fn mark_synthetic_class(&mut self, internal: TypeName) {
+        self.synthetic_classes.insert(internal);
     }
 
-    pub fn is_synthetic_class(&self, internal: &str) -> bool {
-        self.synthetic_classes
-            .contains(&crate::types::type_name(internal))
+    pub fn is_synthetic_class(&self, internal: TypeName) -> bool {
+        self.synthetic_classes.contains(&internal)
     }
 
-    pub fn mark_deprecated_class(&mut self, internal: &str) {
-        self.deprecated_classes
-            .insert(crate::types::type_name(internal));
+    pub fn mark_deprecated_class(&mut self, internal: TypeName) {
+        self.deprecated_classes.insert(internal);
     }
 
-    pub fn is_deprecated_class(&self, internal: &str) -> bool {
-        self.deprecated_classes
-            .contains(&crate::types::type_name(internal))
+    pub fn is_deprecated_class(&self, internal: TypeName) -> bool {
+        self.deprecated_classes.contains(&internal)
     }
 
     pub fn mark_value_param_ctor(&mut self, internal: &str) {

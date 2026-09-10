@@ -1,0 +1,288 @@
+//! Structural parity for the `Companion` the serialization plugin synthesizes on a `@Serializable`
+//! class — the single most common generated class in a serialization-heavy program (one per
+//! `@Serializable` declaration), and small enough to be byte-identical outright.
+//!
+//! Two divergences from kotlinc, both invisible to a round-trip test because the program serializes
+//! correctly either way:
+//!
+//!   * `serializer()` returned the `$serializer` singleton with no `checkcast` to `KSerializer`. The
+//!     accessor is declared to return `KSerializer<Foo>` while the singleton's own type is
+//!     `Foo$serializer`, and kotlinc narrows at the return. The JVM verifies the method without it.
+//!   * the `InnerClasses` entry for `$serializer` did not carry `ACC_SYNTHETIC`. The class's OWN
+//!     access flags already had it; the entry is read independently (reflection consults the entry,
+//!     not the class file it names), so the two must agree.
+//!
+//! The reference is kotlinc running its own serialization plugin from the SAME distribution — a
+//! plugin from another Kotlin version would generate something else to diff against.
+//!
+//! The comparison drops `LineNumberTable`/`LocalVariableTable`: krusty emits neither for a
+//! plugin-generated member (both are gated on a source declaration line, which a synthesized
+//! function has none of). That is the remaining gap between this class and byte identity, and it is
+//! deliberately not asserted here rather than silently normalized away everywhere — see the filter.
+use std::path::PathBuf;
+
+use super::common;
+
+const SRC: &str = "import kotlinx.serialization.Serializable\n\
+                   @Serializable\n\
+                   data class Point(val x: Int, val y: String)\n";
+
+/// The newest `<artifact>-<version>.jar` Gradle cached for one exact module coordinate.
+fn gradle_module_jar(group: &str, artifact: &str) -> Option<PathBuf> {
+    let artifact_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)?
+        .join(".gradle/caches/modules-2/files-2.1")
+        .join(group)
+        .join(artifact);
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for version in std::fs::read_dir(&artifact_dir).ok()?.flatten() {
+        let name = version.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let key = name
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let jar_name = format!("{artifact}-{name}.jar");
+        for hash in std::fs::read_dir(version.path()).ok()?.flatten() {
+            let jar = hash.path().join(&jar_name);
+            if jar.is_file() && best.as_ref().is_none_or(|(current, _)| key > *current) {
+                best = Some((key.clone(), jar));
+            }
+        }
+    }
+    best.map(|(_, jar)| jar)
+}
+
+/// Locate a compiler-plugin jar shipped beside the provisioned reference compiler.
+fn kotlinc_plugin_jar(substring: &str) -> Option<PathBuf> {
+    let lib = common::kotlin_compiler_jar()?.parent()?.to_path_buf();
+    std::fs::read_dir(lib)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            (name.contains(substring) && name.ends_with(".jar")).then_some(path)
+        })
+}
+
+struct ReferenceComparison {
+    reference: String,
+    krusty: String,
+    reference_bytes: Vec<u8>,
+    krusty_bytes: Vec<u8>,
+}
+
+/// Build one class with the reference serialization plugin and with krusty.
+fn compare_with_kotlinc_plugin(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    jvm_target: &str,
+    kotlinc_extra: &[String],
+) -> Option<ReferenceComparison> {
+    let dir = common::scratch_dir()?;
+    let reference_dir = dir.join("ref");
+    let krusty_dir = dir.join("out");
+    std::fs::create_dir_all(&reference_dir).ok()?;
+    std::fs::create_dir_all(&krusty_dir).ok()?;
+    let source = dir.join(format!("{name}.kt"));
+    std::fs::write(&source, src).ok()?;
+
+    let mut arguments = vec![
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        jvm_target.to_string(),
+    ];
+    if !cp_jars.is_empty() {
+        arguments.push("-classpath".to_string());
+        arguments.push(
+            cp_jars
+                .iter()
+                .map(|jar| jar.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+    }
+    arguments.extend(kotlinc_extra.iter().cloned());
+    arguments.push(source.to_string_lossy().into_owned());
+    let (code, stderr) = common::kotlinc_compile(&arguments)?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+
+    let class_major = jvm_target
+        .parse::<u16>()
+        .ok()
+        .filter(|target| (9..=99).contains(target))
+        .map(|target| target + 44)
+        .unwrap_or_else(|| panic!("unknown -jvm-target {jvm_target}"));
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        src,
+        name,
+        cp_jars,
+        "main",
+        Some(class_major),
+    )
+    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    for (internal, bytes) in &classes {
+        let path = krusty_dir.join(format!("{internal}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(path, bytes).ok()?;
+    }
+
+    let reference = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &reference_dir.to_string_lossy(),
+        class,
+    ])?;
+    let krusty = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &krusty_dir.to_string_lossy(),
+        class,
+    ])?;
+    let reference_bytes = std::fs::read(reference_dir.join(format!("{class}.class"))).ok()?;
+    let krusty_bytes = std::fs::read(krusty_dir.join(format!("{class}.class"))).ok()?;
+    let _ = std::fs::remove_dir_all(dir);
+    Some(ReferenceComparison {
+        reference,
+        krusty,
+        reference_bytes,
+        krusty_bytes,
+    })
+}
+
+/// The serialization runtime the generated code links against, plus the plugin jar kotlinc needs in
+/// order to produce the reference at all. `None` when either is absent from the local caches.
+fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
+    let plugin = kotlinc_plugin_jar("kotlinx-serialization-compiler-plugin")?;
+    let core = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")?;
+    Some((plugin, vec![core, common::stdlib_jar()]))
+}
+
+/// javap output reduced to what this test asserts: member signatures, flags, instructions and the
+/// `InnerClasses` table, with constant-pool indices erased (they are an emission-order artifact) and
+/// the debug tables dropped.
+fn structure(disassembly: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for raw in disassembly.lines() {
+        let line = raw.trim_end();
+        let trimmed = line.trim();
+        // The constant pool is an emission-order artifact: same entries, different numbering, and
+        // the whole point of a structural comparison is not to depend on it.
+        if trimmed.starts_with("Constant pool:") || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with("LineNumberTable:") || trimmed.starts_with("LocalVariableTable:") {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            // A skipped block ends at the next line that is not one of its indented rows.
+            let indent = line.len() - line.trim_start().len();
+            if trimmed.is_empty() || indent <= 4 {
+                skipping = false;
+            } else {
+                continue;
+            }
+        }
+        if trimmed.is_empty()
+            || trimmed.starts_with("Classfile ")
+            || trimmed.starts_with("SHA-256")
+            || trimmed.starts_with("Last modified")
+            || trimmed.starts_with("Compiled from")
+        {
+            continue;
+        }
+        // `#21` / `#21,  2` are pool indices: identical structure, different numbering.
+        let mut normalized = String::with_capacity(trimmed.len());
+        let mut chars = trimmed.chars().peekable();
+        while let Some(c) = chars.next() {
+            normalized.push(c);
+            if c == '#' {
+                while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    chars.next();
+                }
+            }
+        }
+        out.push(normalized.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+    out
+}
+
+#[test]
+fn serializable_companion_matches_kotlinc_structure() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializableCompanion",
+        SRC,
+        "Point$Companion",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let (reference, krusty) = (built.reference.as_str(), built.krusty.as_str());
+    let (want, got) = (structure(reference), structure(krusty));
+    assert_eq!(
+        want.iter().filter(|l| l.contains("checkcast")).count(),
+        1,
+        "reference must contain the checkcast this test is about:\n{reference}"
+    );
+    assert!(
+        want.iter().any(|l| l.contains("InnerClasses")),
+        "reference must carry an InnerClasses table:\n{reference}"
+    );
+    if want != got {
+        let first = want
+            .iter()
+            .zip(got.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| want.len().min(got.len()));
+        panic!(
+            "Point$Companion structure differs from kotlinc at line {first}\n  kotlinc: {:?}\n  krusty:  {:?}\n\nfull kotlinc:\n{}\n\nfull krusty:\n{}",
+            want.get(first),
+            got.get(first),
+            want.join("\n"),
+            got.join("\n"),
+        );
+    }
+
+    // javap does not render `ACC_SYNTHETIC` in the `InnerClasses` table, so the disassembly above
+    // is blind to the second half of this fix — compare the parsed entries.
+    let want_inner = inner_classes(&built.reference_bytes);
+    let got_inner = inner_classes(&built.krusty_bytes);
+    assert!(
+        want_inner
+            .iter()
+            .any(|(inner, access)| inner.ends_with("$$serializer") && access & 0x1000 != 0),
+        "reference must mark the generated $serializer synthetic in InnerClasses: {want_inner:?}"
+    );
+    assert_eq!(got_inner, want_inner, "InnerClasses entries");
+}
+
+/// The class's `InnerClasses` entries as `(inner internal name, access flags)`.
+fn inner_classes(bytes: &[u8]) -> Vec<(String, u16)> {
+    krusty::jvm::classreader::parse_class(bytes)
+        .expect("emitted class parses")
+        .inner_classes
+        .iter()
+        .map(|entry| (entry.inner.clone(), entry.access))
+        .collect()
+}
