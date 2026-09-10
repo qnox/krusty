@@ -1207,3 +1207,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `"kotlin/String"` as `String`. (A plain String field read was already `Ty::String` via `ir_ty_to_jvm`,
   so only descriptor-typed values were affected.) `tests/string_concat_append_overload_e2e.rs`. Surfaced
   by `bytediff dataClasses/equals/intarray` (the IntArray data-class `toString`).
+- **A reified `inline` splice is declined once the HOST class's constant pool passes 255 (fix).** The
+  reified repoint rewrites the callee body's type-bearing instruction to name the concrete type. For
+  `T::class` (and any `ldc`-carried class constant) that instruction is `ldc`, whose pool operand is
+  ONE byte, and the concrete class's index is minted in the CALLING class's pool — so a caller with a
+  few hundred constants overflowed it and `set_reified_operand` returned `false`, failing the whole
+  splice. A reified callee has no legal direct-call fallback (its compiled body only throws
+  `throwUndefinedForReified`), so the emitter bailed and the file was dropped. `set_reified_operand`
+  now widens `ldc` to the identical-semantics 2-byte `ldc_w` (0x13), exactly as `relocate_insns`
+  already does for the same overflow on the source side; branch targets and stack-map frames are keyed
+  by instruction INDEX, not byte offset, so the size change is absorbed downstream. The size
+  dependence is why this hid: every existing reified-splice fixture was small enough to stay under a
+  byte. `tests/reified_splice_host_pool_wide_e2e.rs`.
