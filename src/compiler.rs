@@ -21,6 +21,7 @@ fn accept_active_debug_metadata(
         if let Some((_, classifier)) = active.class(file, declaration) {
             if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
                 ir.classes[class as usize].decl_line = classifier.decl_line;
+                ir.classes[class as usize].decl_start_line = classifier.decl_start_line;
                 if classifier.ctor_close_line != 0 {
                     ir.ctor_close_lines.insert(
                         ir.classes[class as usize].fq_name_id(),
