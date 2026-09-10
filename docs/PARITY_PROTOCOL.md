@@ -1264,6 +1264,8 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   program, which is why this one change took the real-world corpus from 73 to 2614 byte-identical
   classes. `ClassWriter::seed_inner_class_names` now seeds all RETAINED rows in sorted order, using
   the same retention rule `finish` applies (seeding a row `finish` would drop adds a constant
-  kotlinc never writes). It takes a table with TWO retained rows to observe: with one row the two
-  orders coincide, which is why the single-nested-class fixtures missed it.
+  kotlinc never writes). It resolves dependency-nest rows before sorting too; discovering those only
+  inside `finish` used to intern their outer/name after every source row. It takes a table with TWO
+  retained rows to observe: with one row the two orders coincide, which is why the
+  single-nested-class fixtures missed it.
   `tests/inner_class_name_pool_order_e2e.rs`.
