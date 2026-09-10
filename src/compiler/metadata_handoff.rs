@@ -8,9 +8,144 @@
 
 use crate::ast::File;
 use crate::fir::{
-    ActiveSourceDeclarations, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId,
+    ActiveSourceDeclarations, DeclarationFlags, DeclarationId, DeclarationKind,
+    ResolvedModuleIndex, SourceFileId,
 };
 use crate::ir::IrFile;
+
+fn attach_generated_declaration_lines(
+    class: crate::ir::ClassId,
+    functions: &[crate::ir::FunId],
+    line: u32,
+    ir: &mut IrFile,
+) {
+    ir.classes[class as usize].decl_line = line;
+    ir.classes[class as usize].decl_start_line = line;
+    for &function in functions {
+        ir.fn_decl_lines.insert(function, line);
+        ir.fn_sig_lines.insert(function, line);
+    }
+}
+
+/// Attach the annotated owner's source line to the exact companion and members that the frontend
+/// generated for a plugin. The stable declaration graph is the ownership contract: neither the
+/// plugin nor a backend needs to rediscover these declarations by name, class-vector scan, or an
+/// absent-line heuristic after bodies have been generated.
+fn attach_generated_companion_debug_metadata(
+    owner: DeclarationId,
+    owner_start_line: u32,
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+) {
+    if owner_start_line == 0 {
+        return;
+    }
+    let Some(companion) = index.companion_declaration(owner).filter(|declaration| {
+        index
+            .declaration_header(*declaration)
+            .is_some_and(|header| header.flags.has(DeclarationFlags::COMPILER_GENERATED))
+    }) else {
+        return;
+    };
+    let Some(class) = ir.checked_classifier_classes.get(&companion).copied() else {
+        return;
+    };
+    let functions = index
+        .owned_declarations(companion)
+        .iter()
+        .filter_map(|&declaration| {
+            let header = index.declaration_header(declaration)?;
+            if header.kind != DeclarationKind::Function
+                || !header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+            {
+                return None;
+            }
+            index
+                .callable_for_declaration(declaration)
+                .and_then(|callable| ir.checked_callable_functions.get(&callable.id))
+                .copied()
+        })
+        .collect::<Vec<_>>();
+    attach_generated_declaration_lines(class, &functions, owner_start_line, ir);
+}
+
+/// Transfer line-only output metadata while one bounded Pass-2 parser unit is live. This belongs
+/// to the stable metadata boundary rather than checked-FIR lowering: the lowerer never observes
+/// source syntax.
+pub(super) fn accept_active_debug_metadata(
+    index: &ResolvedModuleIndex,
+    file: &File,
+    active: &ActiveSourceDeclarations,
+    ir: &mut IrFile,
+) {
+    for declaration in active.stable_declarations() {
+        if let Some((_, classifier)) = active.class(file, declaration) {
+            if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
+                ir.classes[class as usize].decl_line = classifier.decl_line;
+                ir.classes[class as usize].decl_start_line = classifier.decl_start_line;
+                if classifier.ctor_close_line != 0 {
+                    ir.ctor_close_lines.insert(
+                        ir.classes[class as usize].fq_name_id(),
+                        classifier.ctor_close_line,
+                    );
+                }
+                attach_generated_companion_debug_metadata(
+                    declaration,
+                    classifier.decl_start_line,
+                    index,
+                    ir,
+                );
+            }
+        }
+
+        if let Some(function) = active.function(file, declaration) {
+            if let Some(ir_function) = index
+                .callable_for_declaration(declaration)
+                .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
+            {
+                ir.fn_decl_lines.insert(ir_function, function.decl_line);
+                ir.fn_sig_lines.insert(ir_function, function.sig_line);
+                if function.body_close_line != 0 {
+                    ir.fn_close_lines
+                        .insert(ir_function, function.body_close_line);
+                }
+            }
+        }
+
+        let property_line = active
+            .property(file, declaration)
+            .map(|property| property.decl_line)
+            .or_else(|| {
+                active
+                    .constructor_parameter(file, declaration)
+                    .map(|property| property.decl_line)
+            });
+        if let Some(line) = property_line.filter(|line| *line != 0) {
+            if let Some(property) = index.property_for_declaration(declaration) {
+                if let Some(property) = ir.checked_properties.get_mut(&property) {
+                    property.decl_line = line;
+                }
+            }
+        }
+
+        if let Some(entry) = active.enum_entry(file, declaration) {
+            if let Some(owner) = index
+                .declaration_anchor(declaration)
+                .and_then(|anchor| anchor.owner)
+                .and_then(|owner| ir.checked_classifier_classes.get(&owner))
+                .copied()
+            {
+                if let Some(ir_entry) = ir.classes[owner as usize]
+                    .enum_entries
+                    .iter_mut()
+                    .find(|candidate| candidate.name == entry.name)
+                {
+                    ir_entry.decl_line = entry.decl_line;
+                }
+            }
+        }
+    }
+}
 
 /// Attach declaration-only metadata for one already-bound source function. The stable declaration
 /// is the join key for top-level functions, class members, and enum-entry members alike; source
@@ -202,5 +337,41 @@ pub(super) fn attach_checked_declaration_metadata(
             continue;
         };
         attach_function_metadata(source_method, stable_method, info, index, ir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrClass, IrFunction};
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn generated_lines_update_only_the_selected_ir_identities() {
+        let mut ir = IrFile::default();
+        let selected_class = ir.add_class(IrClass::synthetic(type_name("x/Arbitrary")));
+        let untouched_class = ir.add_class(IrClass::synthetic(type_name("x/Unrelated")));
+        let function = || IrFunction {
+            name: "generated".to_owned(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: None,
+            is_static: false,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        };
+        let selected_function = ir.add_fun(function());
+        let untouched_function = ir.add_fun(function());
+
+        attach_generated_declaration_lines(selected_class, &[selected_function], 7, &mut ir);
+
+        assert_eq!(ir.classes[selected_class as usize].decl_line, 7);
+        assert_eq!(ir.classes[selected_class as usize].decl_start_line, 7);
+        assert_eq!(ir.classes[untouched_class as usize].decl_line, 0);
+        assert_eq!(ir.classes[untouched_class as usize].decl_start_line, 0);
+        assert_eq!(ir.fn_decl_lines.get(&selected_function), Some(&7));
+        assert_eq!(ir.fn_sig_lines.get(&selected_function), Some(&7));
+        assert!(!ir.fn_decl_lines.contains_key(&untouched_function));
+        assert!(!ir.fn_sig_lines.contains_key(&untouched_function));
     }
 }
