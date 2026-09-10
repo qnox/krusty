@@ -27,12 +27,145 @@ const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    @Serializable\n\
                    data class Point(val x: Int, val y: String)\n";
 
+/// The newest `<artifact>-<version>.jar` Gradle cached for one exact module coordinate.
+fn gradle_module_jar(group: &str, artifact: &str) -> Option<PathBuf> {
+    let artifact_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)?
+        .join(".gradle/caches/modules-2/files-2.1")
+        .join(group)
+        .join(artifact);
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for version in std::fs::read_dir(&artifact_dir).ok()?.flatten() {
+        let name = version.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let key = name
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let jar_name = format!("{artifact}-{name}.jar");
+        for hash in std::fs::read_dir(version.path()).ok()?.flatten() {
+            let jar = hash.path().join(&jar_name);
+            if jar.is_file() && best.as_ref().is_none_or(|(current, _)| key > *current) {
+                best = Some((key.clone(), jar));
+            }
+        }
+    }
+    best.map(|(_, jar)| jar)
+}
+
+/// Locate a compiler-plugin jar shipped beside the provisioned reference compiler.
+fn kotlinc_plugin_jar(substring: &str) -> Option<PathBuf> {
+    let lib = common::kotlin_compiler_jar()?.parent()?.to_path_buf();
+    std::fs::read_dir(lib)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            (name.contains(substring) && name.ends_with(".jar")).then_some(path)
+        })
+}
+
+struct ReferenceComparison {
+    reference: String,
+    krusty: String,
+    reference_bytes: Vec<u8>,
+    krusty_bytes: Vec<u8>,
+}
+
+/// Build one class with the reference serialization plugin and with krusty.
+fn compare_with_kotlinc_plugin(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    jvm_target: &str,
+    kotlinc_extra: &[String],
+) -> Option<ReferenceComparison> {
+    let dir = common::scratch_dir()?;
+    let reference_dir = dir.join("ref");
+    let krusty_dir = dir.join("out");
+    std::fs::create_dir_all(&reference_dir).ok()?;
+    std::fs::create_dir_all(&krusty_dir).ok()?;
+    let source = dir.join(format!("{name}.kt"));
+    std::fs::write(&source, src).ok()?;
+
+    let mut arguments = vec![
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        jvm_target.to_string(),
+    ];
+    if !cp_jars.is_empty() {
+        arguments.push("-classpath".to_string());
+        arguments.push(
+            cp_jars
+                .iter()
+                .map(|jar| jar.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+    }
+    arguments.extend(kotlinc_extra.iter().cloned());
+    arguments.push(source.to_string_lossy().into_owned());
+    let (code, stderr) = common::kotlinc_compile(&arguments)?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+
+    let class_major = jvm_target
+        .parse::<u16>()
+        .ok()
+        .filter(|target| (9..=99).contains(target))
+        .map(|target| target + 44)
+        .unwrap_or_else(|| panic!("unknown -jvm-target {jvm_target}"));
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        src,
+        name,
+        cp_jars,
+        "main",
+        Some(class_major),
+    )
+    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    for (internal, bytes) in &classes {
+        let path = krusty_dir.join(format!("{internal}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(path, bytes).ok()?;
+    }
+
+    let reference = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &reference_dir.to_string_lossy(),
+        class,
+    ])?;
+    let krusty = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &krusty_dir.to_string_lossy(),
+        class,
+    ])?;
+    let reference_bytes = std::fs::read(reference_dir.join(format!("{class}.class"))).ok()?;
+    let krusty_bytes = std::fs::read(krusty_dir.join(format!("{class}.class"))).ok()?;
+    let _ = std::fs::remove_dir_all(dir);
+    Some(ReferenceComparison {
+        reference,
+        krusty,
+        reference_bytes,
+        krusty_bytes,
+    })
+}
+
 /// The serialization runtime the generated code links against, plus the plugin jar kotlinc needs in
 /// order to produce the reference at all. `None` when either is absent from the local caches.
 fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
-    let plugin = common::kotlinc_plugin_jar("kotlinx-serialization-compiler-plugin")?;
-    let core =
-        common::gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")?;
+    let plugin = kotlinc_plugin_jar("kotlinx-serialization-compiler-plugin")?;
+    let core = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")?;
     Some((plugin, vec![core, common::stdlib_jar()]))
 }
 
@@ -94,12 +227,12 @@ fn serializable_companion_matches_kotlinc_structure() {
         return;
     };
     let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let Some(built) = common::disassemble_against_kotlinc_plugin(
+    let Some(built) = compare_with_kotlinc_plugin(
         "SerializableCompanion",
         SRC,
         "Point$Companion",
         &cp,
-        Some("25"),
+        "25",
         &extra,
     ) else {
         eprintln!("skipping: reference kotlinc or javap unavailable");

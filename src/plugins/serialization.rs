@@ -1824,12 +1824,13 @@ impl IrPlugin for SerializationPlugin {
                     unbox_params: Vec::new(),
                 },
             ];
-            ir.mark_synthetic_class(&ser_fq);
-            ir.mark_deprecated_class(&ser_fq);
+            let serializer_identity = ser.fq_name_id();
+            ir.mark_synthetic_class(serializer_identity);
+            ir.mark_deprecated_class(serializer_identity);
             let ser_id = ir.add_class(ser);
             if !serializer_type_parameters.is_empty() {
                 ir.insert_class_signature_name(
-                    type_name(&ser_fq),
+                    serializer_identity,
                     crate::ir::IrGenericSig {
                         type_params: serializer_type_parameters,
                         params: Vec::new(),
