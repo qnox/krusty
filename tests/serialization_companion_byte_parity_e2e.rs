@@ -15,10 +15,9 @@
 //! The reference is kotlinc running its own serialization plugin from the SAME distribution — a
 //! plugin from another Kotlin version would generate something else to diff against.
 //!
-//! The comparison drops `LineNumberTable`/`LocalVariableTable`: krusty emits neither for a
-//! plugin-generated member (both are gated on a source declaration line, which a synthesized
-//! function has none of). That is the remaining gap between this class and byte identity, and it is
-//! deliberately not asserted here rather than silently normalized away everywhere — see the filter.
+//! The comparison includes `LineNumberTable` and `LocalVariableTable`: a plugin-generated member
+//! carries both, mapped to the annotated owner's declaration line. Only constant-pool indices are
+//! erased because their numbering is an emission-order artifact rather than class structure.
 use std::path::PathBuf;
 
 use super::common;
@@ -169,12 +168,11 @@ fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
     Some((plugin, vec![core, common::stdlib_jar()]))
 }
 
-/// javap output reduced to what this test asserts: member signatures, flags, instructions and the
-/// `InnerClasses` table, with constant-pool indices erased (they are an emission-order artifact) and
-/// the debug tables dropped.
+/// javap output reduced to what this test asserts: member signatures, flags, instructions, debug
+/// tables, and the `InnerClasses` table, with constant-pool indices erased because their numbering
+/// is an emission-order artifact.
 fn structure(disassembly: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut skipping = false;
     for raw in disassembly.lines() {
         let line = raw.trim_end();
         let trimmed = line.trim();
@@ -182,19 +180,6 @@ fn structure(disassembly: &str) -> Vec<String> {
         // the whole point of a structural comparison is not to depend on it.
         if trimmed.starts_with("Constant pool:") || trimmed.starts_with('#') {
             continue;
-        }
-        if trimmed.starts_with("LineNumberTable:") || trimmed.starts_with("LocalVariableTable:") {
-            skipping = true;
-            continue;
-        }
-        if skipping {
-            // A skipped block ends at the next line that is not one of its indented rows.
-            let indent = line.len() - line.trim_start().len();
-            if trimmed.is_empty() || indent <= 4 {
-                skipping = false;
-            } else {
-                continue;
-            }
         }
         if trimmed.is_empty()
             || trimmed.starts_with("Classfile ")

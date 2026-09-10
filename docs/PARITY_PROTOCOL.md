@@ -1229,7 +1229,8 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   multi-line header DOES get the trailing `line 3` entry, so the return really does go back to the
   header). Fixed with a second line, `ClassDecl::decl_start_line` → `IrClass::decl_start_line`, read
   by `attach_synth_debug_tables` for the ctor's first entry only. **The FIR pipeline transfers this
-  line from the active stable declaration in `compiler.rs`, not from the legacy `ir_lower` path.**
+  line from the active stable declaration in `compiler/metadata_handoff.rs`, not from the legacy
+  `ir_lower` path.**
   `tests/annotated_class_decl_line_e2e.rs`.
 - **The `@Serializable` `Companion`: `checkcast` at the `serializer()` return + `ACC_SYNTHETIC` in
   `InnerClasses` (fix).** One companion is synthesized per `@Serializable` declaration, so this is the
@@ -1242,6 +1243,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   independently, so the two must agree, and javap does not render that bit in the table (a
   disassembly-only assertion is blind to it; compare the parsed entries).
   `tests/serialization_companion_byte_parity_e2e.rs`, whose reference is kotlinc running its own
-  serialization plugin from the same distribution (`common::disassemble_against_kotlinc_plugin`).
-  STILL differing on this class: `LineNumberTable`/`LocalVariableTable`, which the emitter gates on
-  `ir.fn_decl_lines` — a plugin-generated function has no source declaration line, so it gets neither.
+  serialization plugin from the same distribution.
+- **A frontend-generated plugin companion and accessor lacked debug tables (fix).** Their stable FIR
+  declarations have explicit `COMPILER_GENERATED` origin and exact owner/callable identities, but the
+  active-source metadata handoff previously transferred lines only for syntax-backed declarations.
+  It now projects the annotated owner's declaration-start line onto the exact generated companion
+  `ClassId` and generated member `FunId`s while that active unit is live. The JVM emitter receives
+  ordinary common-IR debug metadata; it does not scan classes, infer generation from `decl_line == 0`,
+  or retry by rendered name after plugin codegen. This supplies kotlinc's `LineNumberTable` and
+  `LocalVariableTable` for `Point$Companion` and `serializer()`. The exact structural comparison in
+  `tests/serialization_companion_byte_parity_e2e.rs` now includes both tables.
