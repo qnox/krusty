@@ -7437,15 +7437,11 @@ fn emit_class(
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
-    // Seed the nested OUTER class ref + simple name at kotlinc's post-metadata pool position
-    // (its `InnerClasses` visit interns the outer's Class entry, then the simple name). An
-    // ANONYMOUS class has neither — its entry is inner-only and its refs seed via the
-    // `EnclosingMethod` window in `finish`.
+    // Seed every retained `InnerClasses` row's outer-class ref and simple name at kotlinc's
+    // post-metadata pool position, in the table's sorted order. An ANONYMOUS class has neither for
+    // its own row; its enclosing refs use the `EnclosingMethod` window in `finish`.
     if !is_coroutine_state_machine(c) && !c.is_anonymous_object {
-        if let Some(pos) = fq_name.rfind('$') {
-            cw.seed_class(&fq_name[..pos]);
-            cw.seed_utf8(&fq_name[pos + 1..]);
-        }
+        cw.seed_inner_class_names();
     }
     cw.finish()
 }
