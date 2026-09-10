@@ -1143,6 +1143,11 @@ pub struct ClassDecl {
     /// kotlinc's synthesized members (ctor/accessors), which all map to the class's declaration line.
     /// 0 = unknown (no debug tables emitted). Filled by a parser post-pass.
     pub decl_line: u32,
+    /// 1-based source line where the DECLARATION starts, ANNOTATIONS INCLUDED (0 = unknown).
+    /// [`Self::decl_line`] is the class HEADER line; the two differ exactly when an annotation sits
+    /// on its own line above the header. kotlinc maps the primary constructor's `super()` call to
+    /// this line and its trailing `return` back to the header line, so both are needed.
+    pub decl_start_line: u32,
     /// AT PARSE: the byte offset of the primary constructor's closing `)`; the same parser
     /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
     /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.

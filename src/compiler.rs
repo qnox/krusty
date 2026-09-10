@@ -27,6 +27,18 @@ fn accept_active_debug_metadata(
                         classifier.ctor_close_line,
                     );
                 }
+                // Where the declaration STARTS, annotations included — kotlinc maps the primary
+                // constructor's `super()` call there, while its trailing `return` goes back to the
+                // header line above. Recorded only when the two differ (an annotation on its own
+                // line), so every unannotated class keeps the single-line table it had.
+                if classifier.decl_start_line != 0
+                    && classifier.decl_start_line != classifier.decl_line
+                {
+                    ir.class_decl_start_lines.insert(
+                        ir.classes[class as usize].fq_name_id(),
+                        classifier.decl_start_line,
+                    );
+                }
             }
         }
 

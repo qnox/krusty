@@ -793,6 +793,13 @@ fn lower_file_at_reporting_impl(
                     .ctor_close_lines
                     .insert(class_identity, c.ctor_close_line);
             }
+            // Where the declaration STARTS, annotations included — kotlinc's line for the primary
+            // constructor's `super()` call. Only recorded when it differs from the header line.
+            if c.decl_start_line != 0 && c.decl_start_line != c.decl_line {
+                lo.ir
+                    .class_decl_start_lines
+                    .insert(class_identity, c.decl_start_line);
+            }
             let mut ctor_fields: Vec<(String, Ty)> = anonymous_captures
                 .iter()
                 .map(|capture| (capture.name.clone(), capture.stored_ty()))
