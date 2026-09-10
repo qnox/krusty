@@ -1056,6 +1056,8 @@ mod path_smartcast_e2e;
 mod platform_call_assertions_e2e;
 #[path = "platform_classifier_identity_e2e.rs"]
 mod platform_classifier_identity_e2e;
+#[path = "platform_map_index_assign_e2e.rs"]
+mod platform_map_index_assign_e2e;
 #[path = "plugins_e2e.rs"]
 mod plugins_e2e;
 #[path = "postponed_bound_inference_e2e.rs"]
