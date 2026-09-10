@@ -7442,10 +7442,7 @@ fn emit_class(
     // ANONYMOUS class has neither — its entry is inner-only and its refs seed via the
     // `EnclosingMethod` window in `finish`.
     if !is_coroutine_state_machine(c) && !c.is_anonymous_object {
-        if let Some(pos) = fq_name.rfind('$') {
-            cw.seed_class(&fq_name[..pos]);
-            cw.seed_utf8(&fq_name[pos + 1..]);
-        }
+        cw.seed_inner_class_names();
     }
     cw.finish()
 }

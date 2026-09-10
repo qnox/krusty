@@ -1253,3 +1253,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   or retry by rendered name after plugin codegen. This supplies kotlinc's `LineNumberTable` and
   `LocalVariableTable` for `Point$Companion` and `serializer()`. The exact structural comparison in
   `tests/serialization_companion_byte_parity_e2e.rs` now includes both tables.
+- **`InnerClasses` simple names must be interned in the FINISHED table's order (fix).** kotlinc
+  interns an entry's outer-class ref and simple name as it VISITS the table, and it visits the table
+  sorted by inner internal name. krusty seeded only the class's OWN row at kotlinc's post-metadata
+  pool position and left `finish` to intern the rest, so its own name landed first. A class whose
+  table keeps a sibling row sorting BEFORE its own then had the two constants transposed —
+  byte-different from kotlinc while matching in every other respect (the differ reports it as
+  `POOL_ORDER`, same byte size). `Outer$Alpha` sorts ahead of `Outer$Companion`, and
+  `Foo$$serializer` ahead of `Foo$Companion` — the latter is every `@Serializable` class in a
+  program, which is why this one change took the real-world corpus from 73 to 2614 byte-identical
+  classes. `ClassWriter::seed_inner_class_names` now seeds all RETAINED rows in sorted order, using
+  the same retention rule `finish` applies (seeding a row `finish` would drop adds a constant
+  kotlinc never writes). It takes a table with TWO retained rows to observe: with one row the two
+  orders coincide, which is why the single-nested-class fixtures missed it.
+  `tests/inner_class_name_pool_order_e2e.rs`.

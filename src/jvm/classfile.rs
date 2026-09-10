@@ -790,6 +790,36 @@ impl ClassWriter {
         self.param_assertions = enabled;
     }
 
+    /// Seed the `InnerClasses` entries' outer-class refs and simple names at kotlinc's
+    /// post-metadata pool position, in the ORDER the finished table will list them (sorted by inner
+    /// internal name), and only for the entries that table will actually keep.
+    ///
+    /// kotlinc interns these as it visits the sorted table, so a class whose table has a sibling
+    /// sorting BEFORE its own row must intern that sibling's name first: `Foo$$serializer` sorts
+    /// ahead of `Foo$Companion` (`'$'` < `'C'`). Seeding only this class's own row put its name
+    /// first and left the two entries transposed in the pool — the class then matched kotlinc in
+    /// every other respect while still differing byte-wise.
+    pub fn seed_inner_class_names(&mut self) {
+        let mut specs = self.inner_class_candidates.clone();
+        specs.sort_by(|a, b| a.inner.cmp(&b.inner));
+        for spec in specs {
+            // The same retention rule `finish` applies; seeding a row it would drop would add a
+            // constant kotlinc never writes.
+            let retained = spec.outer.as_deref() == Some(self.internal_name.as_str())
+                || self.cp.has_class(&spec.inner)
+                || self.descriptor_mentions(&spec.inner);
+            if !retained {
+                continue;
+            }
+            if let Some(outer) = &spec.outer {
+                self.cp.class(outer);
+            }
+            if let Some(name) = &spec.name {
+                self.cp.utf8(name);
+            }
+        }
+    }
+
     pub fn seed_class(&mut self, internal: &str) {
         self.cp.class(internal);
     }
