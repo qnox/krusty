@@ -1227,8 +1227,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   emitted a single `line 6`. Moving `decl_line` to the annotation is wrong in the other direction —
   the trailing `return` then lands on line 5 and kotlinc has no such entry (measured: an unannotated
   multi-line header DOES get the trailing `line 3` entry, so the return really does go back to the
-  header). Fixed with a second line, `ClassDecl::decl_start_line` → `IrFile::class_decl_start_lines`
-  (a side map, recorded only when it differs from the header), read by `attach_synth_debug_tables` for
-  the ctor's first entry only. **The FIR pipeline back-fills these lines in `compiler.rs`
-  (`accept_active_debug_metadata`), NOT in `ir_lower`** — a line recorded only in the `ir_lower` class
-  loop never reaches the emitter on the CLI path. `tests/annotated_class_decl_line_e2e.rs`.
+  header). Fixed with a second line, `ClassDecl::decl_start_line` → `IrClass::decl_start_line`, read
+  by `attach_synth_debug_tables` for the ctor's first entry only. **The FIR pipeline transfers this
+  line from the active stable declaration in `compiler.rs`, not from the legacy `ir_lower` path.**
+  `tests/annotated_class_decl_line_e2e.rs`.

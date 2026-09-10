@@ -793,13 +793,6 @@ fn lower_file_at_reporting_impl(
                     .ctor_close_lines
                     .insert(class_identity, c.ctor_close_line);
             }
-            // Where the declaration STARTS, annotations included — kotlinc's line for the primary
-            // constructor's `super()` call. Only recorded when it differs from the header line.
-            if c.decl_start_line != 0 && c.decl_start_line != c.decl_line {
-                lo.ir
-                    .class_decl_start_lines
-                    .insert(class_identity, c.decl_start_line);
-            }
             let mut ctor_fields: Vec<(String, Ty)> = anonymous_captures
                 .iter()
                 .map(|capture| (capture.name.clone(), capture.stored_ty()))
@@ -1110,6 +1103,7 @@ fn lower_file_at_reporting_impl(
                 is_value: c.is_value,
                 is_data: c.is_data,
                 decl_line: c.decl_line,
+                decl_start_line: 0,
                 type_param_bounds: class_sig
                     .type_params()
                     .iter()
@@ -4598,6 +4592,7 @@ fn lower_file_at_reporting_impl(
                             is_value: false,
                             is_data: false,
                             decl_line: 0,
+                            decl_start_line: 0,
                             type_param_bounds: vec![],
                             type_params: Vec::new(),
                             captured_type_params: Vec::new(),
@@ -11477,6 +11472,7 @@ impl<'a> Lower<'a> {
             is_value: false,
             is_data: false,
             decl_line: 0,
+            decl_start_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -13741,6 +13737,7 @@ impl<'a> Lower<'a> {
             is_value: false,
             is_data: false,
             decl_line: 0,
+            decl_start_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -13893,6 +13890,7 @@ impl<'a> Lower<'a> {
             is_value: false,
             is_data: false,
             decl_line: 0,
+            decl_start_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -14144,6 +14142,7 @@ impl<'a> Lower<'a> {
             is_value: false,
             is_data: false,
             decl_line: 0,
+            decl_start_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -14859,6 +14858,7 @@ impl<'a> Lower<'a> {
             is_value: false,
             is_data: false,
             decl_line: 0,
+            decl_start_line: 0,
             type_param_bounds: vec![],
             type_params: Vec::new(),
             captured_type_params: Vec::new(),

@@ -21,22 +21,11 @@ fn accept_active_debug_metadata(
         if let Some((_, classifier)) = active.class(file, declaration) {
             if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
                 ir.classes[class as usize].decl_line = classifier.decl_line;
+                ir.classes[class as usize].decl_start_line = classifier.decl_start_line;
                 if classifier.ctor_close_line != 0 {
                     ir.ctor_close_lines.insert(
                         ir.classes[class as usize].fq_name_id(),
                         classifier.ctor_close_line,
-                    );
-                }
-                // Where the declaration STARTS, annotations included — kotlinc maps the primary
-                // constructor's `super()` call there, while its trailing `return` goes back to the
-                // header line above. Recorded only when the two differ (an annotation on its own
-                // line), so every unannotated class keeps the single-line table it had.
-                if classifier.decl_start_line != 0
-                    && classifier.decl_start_line != classifier.decl_line
-                {
-                    ir.class_decl_start_lines.insert(
-                        ir.classes[class as usize].fq_name_id(),
-                        classifier.decl_start_line,
                     );
                 }
             }

@@ -2861,11 +2861,11 @@ fn attach_synth_debug_tables(
     // kotlinc maps the `super()` call to where the DECLARATION starts — annotations included — and
     // the ctor's trailing `return` (pushed into `ctor_lines` by the emitter) back to the class
     // HEADER line. The two coincide unless an annotation sits on its own line above the header.
-    let ctor_start_line = ir
-        .class_decl_start_lines
-        .get(&c.fq_name_id())
-        .copied()
-        .unwrap_or(line);
+    let ctor_start_line = if c.decl_start_line == 0 {
+        line
+    } else {
+        c.decl_start_line
+    };
     cw.set_method_debug(
         "<init>",
         &ctor_desc,

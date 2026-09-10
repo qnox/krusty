@@ -1502,6 +1502,10 @@ pub struct IrClass {
     /// 1-based source line of the class declaration (0 = unknown). The emitter maps the
     /// `LineNumberTable` of synthesized members (ctor/accessors) to this line, as kotlinc does.
     pub decl_line: u32,
+    /// 1-based source line where the declaration starts, including annotations (0 = unknown).
+    /// kotlinc maps the primary constructor's `super()` call here and its trailing `return` to
+    /// [`Self::decl_line`]. These differ when an annotation precedes the class header.
+    pub decl_start_line: u32,
     /// Declared non-`Any` generic upper bounds (`<T: String>` → `("T", String)`), carried verbatim from
     /// the source. Platform-neutral metadata; the JVM value-class pass uses it to erase a value class's
     /// underlying type parameter to its bound (`value class S<T: String>` → `String`).
@@ -1961,6 +1965,7 @@ impl IrClass {
             is_value: false,
             is_data: false,
             decl_line: 0,
+            decl_start_line: 0,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -2068,6 +2073,7 @@ impl IrClass {
             is_value: flags.has(crate::fir::DeclarationFlags::VALUE),
             is_data: flags.has(crate::fir::DeclarationFlags::DATA),
             decl_line: 0,
+            decl_start_line: 0,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -2828,12 +2834,6 @@ pub struct IrFile {
     /// 1-based source line of a class's primary-ctor closing `)` — kotlinc maps the ctor
     /// `$default` overload's `return` to it. Absent = single-line/unknown (the one-entry table).
     pub ctor_close_lines: std::collections::HashMap<TypeName, u32>,
-    /// 1-based source line where a class's DECLARATION starts, ANNOTATIONS INCLUDED — kotlinc maps
-    /// the primary constructor's `super()` call there, while the trailing `return` goes back to the
-    /// class HEADER line (`IrClass::decl_line`). The two differ exactly when an annotation sits on
-    /// its own line above the header. Absent = same as the header line. A side map for the same
-    /// reason as `fn_decl_lines`: the `IrClass` construction sites stay untouched.
-    pub class_decl_start_lines: std::collections::HashMap<TypeName, u32>,
     /// Function ids of `internal` members — `@Metadata` `Function.flags` visibility 0 (the JVM
     /// method stays public; only metadata carries the module boundary). `private_methods` keeps
     /// its own set because privacy ALSO changes dispatch (`invokespecial`).
