@@ -201,7 +201,14 @@ fn direct_supertypes_from_classifier(
             // enclosing declaration. Apply only this classifier's arguments; erasing every other
             // symbolic variable loses the lexical type (`object : Converter<Box<T>, T>` became
             // `Converter<Box<Any>, Any>` during the hierarchy walk).
-            .map(|supertype| ty_subst_keep_unbound(*supertype, &bindings))
+            // `ty_subst_applied_arguments`, not `ty_subst_keep_unbound`: `ty`'s arguments were
+            // already validated against this classifier's bounds when the type was FORMED, so
+            // re-narrowing them here only loses information. It lost nullability in particular —
+            // a Java class's type parameters carry a non-null upper bound (a Java type variable
+            // has no nullability), so projecting `HashMap<String, Any?>` onto its `Map<K, V>`
+            // template produced `Map<String, Any>` and every member reached through the supertype
+            // then rejected a nullable argument.
+            .map(|supertype| ty_subst_applied_arguments(*supertype, &bindings))
             .collect::<Vec<_>>();
         crate::trace_compiler!(
             "supertype",
@@ -1592,7 +1599,9 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     }
 }
 
-pub(crate) use crate::types::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
+pub(crate) use crate::types::{
+    ty_subst, ty_subst_all, ty_subst_applied_arguments, ty_subst_keep_unbound,
+};
 
 /// Specialize the selected member's lambda-parameter slots from concrete non-lambda arguments.
 ///
