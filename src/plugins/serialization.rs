@@ -1199,20 +1199,76 @@ impl SerializationPlugin {
             dispatch_receiver: None,
             args: vec![],
         });
-        let enum_ser = ir.new_external(
-            "kotlinx/serialization/internal/EnumSerializer",
-            "(Ljava/lang/String;[Ljava/lang/Enum;)V",
-            vec![name, values],
-        );
-        let lazy = ir.add_expr(IrExpr::Call {
+        // The JVM would accept `[Le/Status;` where `[Ljava/lang/Enum;` is expected (arrays are
+        // covariant), but kotlinc still narrows with an explicit `checkcast` — so emit one.
+        let enums = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: values,
+            type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
+        });
+        // kotlinc builds the serializer through the static factory
+        // `EnumsKt.createSimpleEnumSerializer(name, values())`, not `new EnumSerializer(…)`; the
+        // entry array is widened to `[Ljava/lang/Enum;` at the call.
+        let enum_ser = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
-                owner: type_name("kotlin/LazyKt"),
-                name: "lazyOf".to_string(),
-                descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
+                owner: type_name("kotlinx/serialization/internal/EnumsKt"),
+                name: "createSimpleEnumSerializer".to_string(),
+                descriptor:
+                    "(Ljava/lang/String;[Ljava/lang/Enum;)Lkotlinx/serialization/KSerializer;"
+                        .to_string(),
                 inline: InlineKind::None,
             },
             dispatch_receiver: None,
-            args: vec![enum_ser],
+            args: vec![name, enums],
+        });
+        // kotlinc does not build the delegate eagerly with `lazyOf`. It compiles the initializer to
+        // a private static `_init_$_anonymous_()` holding `EnumSerializer(name, values())`, binds it
+        // with an `invokedynamic` `Function0`, and passes that to
+        // `LazyKt.lazy(LazyThreadSafetyMode.PUBLICATION, …)` — so the serializer is constructed on
+        // first use, and the class carries a `BootstrapMethods` attribute.
+        let anon_ret = ir.add_expr(IrExpr::Return(Some(enum_ser)));
+        let anon_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![anon_ret],
+            value: None,
+        });
+        let anonymous = ir.add_fun(IrFunction {
+            name: "_init_$_anonymous_".to_string(),
+            params: vec![],
+            ret: Ty::obj("kotlinx/serialization/KSerializer"),
+            body: Some(anon_body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        // kotlinc emits every standalone lambda impl `private static final` — reachable only through
+        // the same-class `invokedynamic`, never part of the public ABI.
+        ir.private_methods.insert(anonymous);
+        // Compiler-invented, like the companion's cached-serializer helper: ACC_SYNTHETIC, and
+        // therefore absent from `@Metadata`.
+        ir.synthetic_methods.insert(anonymous);
+        ir.classes[class_id as usize].methods.push(anonymous);
+        let block = ir.add_expr(IrExpr::Lambda {
+            impl_fn: anonymous,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        });
+        let mode = ir.add_expr(IrExpr::EnumEntry {
+            classifier: type_name("kotlin/LazyThreadSafetyMode"),
+            name: "PUBLICATION".into(),
+        });
+        let lazy = ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: type_name("kotlin/LazyKt"),
+                name: "lazy".to_string(),
+                descriptor:
+                    "(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;"
+                        .to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![mode, block],
         });
         ir.statics.push(crate::ir::IrStatic {
             name: "$cachedSerializer$delegate".to_string(),

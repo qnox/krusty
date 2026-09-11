@@ -1313,3 +1313,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   for the `@Serializable` enum-class shape (~1816 corpus classes), whose remaining pieces are the
   `Lazy` delegate built through an `invokedynamic` lambda (`_init_$_anonymous_`), the delegate
   field's `Signature`, and those two.
+- **A `@Serializable` enum builds its cached serializer LAZILY, through an `invokedynamic` (fix).**
+  kotlinc compiles the initializer to a private synthetic `_init_$_anonymous_()` that calls the static
+  factory `EnumsKt.createSimpleEnumSerializer(name, values())` — NOT `new EnumSerializer(…)` — binds it
+  with an `invokedynamic` `Function0`, and hands that to
+  `LazyKt.lazy(LazyThreadSafetyMode.PUBLICATION, …)`. krusty built it eagerly with `LazyKt.lazyOf`,
+  so it emitted no `BootstrapMethods`, no helper, and allocated the serializer during `<clinit>`.
+  Three details the reference pins: the factory (not the constructor); an explicit
+  `checkcast [Ljava/lang/Enum;` on `values()` that the JVM does NOT require (arrays are covariant) but
+  kotlinc emits; and the helper being `ACC_SYNTHETIC`, which also keeps it out of `@Metadata`.
+  This is the first `IrExpr::Lambda` the serialization plugin creates — the recipe is `add_fun`
+  (static) + `private_methods` + push onto the owner's `methods`, then `Lambda { impl_fn, arity: 0,
+  captures: [], sam: None, inline_body: None }`.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enum_builds_its_serializer_lazily`.
+  STILL differing on the enum class: the delegate field's `Signature` + `@NotNull`; `$values` must be
+  emitted BEFORE the plugin's methods; `LineNumberTable` on `_init_$_anonymous_` and
+  `access$get$cachedSerializer$delegate$cp` (which also carries a `@NotNull` kotlinc does not); and
+  `<clinit>` must initialize `Companion` BEFORE the delegate.
