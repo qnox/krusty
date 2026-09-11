@@ -205,6 +205,58 @@ fn structure(disassembly: &str) -> Vec<String> {
     out
 }
 
+/// A `@Serializable` enum's `$cachedSerializer$delegate` sits directly after `Companion` and BEFORE
+/// the entry constants — the same leading block the companion field is in, not the tail after
+/// `$VALUES`/`$ENTRIES`. Asserted as an ORDER because the enum class is not yet byte-identical (it
+/// still lacks the `invokedynamic` `Lazy` initializer and the field's `Signature`), so a byte
+/// assertion here would fail on those instead of on the ordering under test.
+#[test]
+fn a_serializable_enum_places_its_delegate_next_to_the_companion() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, INACTIVE }\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableEnumFields", src, "Status", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Field NAMES in emission order. `javap -v` prints plenty that also ends in `;` — constant-pool
+    // `Utf8` rows, `Signature:` attributes, `LocalVariableTable` rows — so anchor on a leading
+    // access modifier, and compare names rather than whole declarations: the delegate's rendered
+    // type still differs (krusty has no field `Signature` yet), which is a separate gap from the
+    // ORDER under test here.
+    let declarations = |text: &str| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.ends_with(';')
+                    && !line.contains('(')
+                    && !line.contains('{')
+                    && ["public ", "private ", "protected "]
+                        .iter()
+                        .any(|lead| line.starts_with(lead))
+            })
+            .filter_map(|line| line.split_whitespace().last())
+            .map(|name| name.trim_end_matches(';').to_string())
+            .collect::<Vec<_>>()
+    };
+    let want = declarations(&built.reference);
+    assert!(
+        want.iter()
+            .take(2)
+            .any(|line| line.contains("$cachedSerializer$delegate")),
+        "reference must place the delegate in the leading block:\n{}",
+        built.reference
+    );
+    assert_eq!(declarations(&built.krusty), want, "enum field order");
+}
+
 /// A `@Serializable` ENUM's companion. kotlinc does not inline the cached-serializer lookup into
 /// `serializer()`: it puts that body in a private, SYNTHETIC `get$cachedSerializer()` and has
 /// `serializer()` delegate to it with `invokespecial`. krusty inlined the lookup, so the companion
