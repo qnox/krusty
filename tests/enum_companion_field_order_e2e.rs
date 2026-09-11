@@ -170,3 +170,84 @@ fn an_enum_interns_its_pool_in_kotlincs_order() {
         );
     }
 }
+
+/// An enum constructor maps each property store to the PARAMETER's own line and the trailing
+/// `return` back to the class header — the same three-entry shape kotlinc gives an ordinary class,
+/// which the enum path did not share: it put every store on the header line and wrote no closing
+/// entry.
+///
+/// Only a parameter list spanning LINES can show it. Every enum fixture in the suite declared its
+/// parameters on the header line, where all three lines coincide and the entries dedupe to one.
+#[test]
+fn an_enum_constructor_maps_each_property_store_to_its_parameter_line() {
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skipping: no scratch dir");
+        return;
+    };
+    let source = dir.join("EnumCtorLines.kt");
+    let src = "enum class Shape(\n\
+               \x20   val sides: Int,\n\
+               \x20   val label: String,\n\
+               ) {\n\
+               \x20   TRIANGLE(3, \"tri\"),\n\
+               \x20   SQUARE(4, \"sq\"),\n\
+               }\n";
+    std::fs::write(&source, src).expect("write fixture");
+    let reference_dir = dir.join("ref");
+    std::fs::create_dir_all(&reference_dir).expect("reference output directory");
+    let Some((code, stderr)) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        source.to_string_lossy().into_owned(),
+    ]) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let _reference = std::fs::read(reference_dir.join("Shape.class")).expect("reference class");
+    let krusty_dir = dir.join("out");
+    std::fs::create_dir_all(&krusty_dir).expect("krusty output directory");
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        src,
+        "EnumCtorLines",
+        &[],
+        "main",
+        Some(69),
+    )
+    .expect("krusty compiles the fixture");
+    for (internal, bytes) in &classes {
+        std::fs::write(krusty_dir.join(format!("{internal}.class")), bytes)
+            .expect("write krusty class");
+    }
+    // The `line N: pc` rows of the constructor, which javap prints under its Code attribute.
+    let constructor_lines = |disassembly: &str| {
+        let start = disassembly
+            .find("Shape(java.lang.String, int")
+            .or_else(|| disassembly.find("Shape("))
+            .unwrap_or(0);
+        disassembly[start..]
+            .lines()
+            .skip_while(|line| !line.contains("LineNumberTable"))
+            .skip(1)
+            .take_while(|line| line.trim().starts_with("line "))
+            .map(|line| line.trim().to_string())
+            .collect::<Vec<_>>()
+    };
+    let Some(reference) =
+        common::javap(&["-p", "-v", "-cp", &reference_dir.to_string_lossy(), "Shape"])
+    else {
+        eprintln!("skipping: javap unavailable");
+        return;
+    };
+    let krusty = common::javap(&["-p", "-v", "-cp", &krusty_dir.to_string_lossy(), "Shape"])
+        .expect("javap reads krusty's output");
+    let want = constructor_lines(&reference);
+    assert!(
+        want.len() >= 3,
+        "reference must map more than the `super` call — the rule under test: {want:?}\n{reference}"
+    );
+    assert_eq!(constructor_lines(&krusty), want, "<init> LineNumberTable");
+    let _ = std::fs::remove_dir_all(&dir);
+}

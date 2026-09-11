@@ -10279,6 +10279,8 @@ fn emit_enum_class(
     // unless an annotation sits on its own line above the header, which is why an unannotated
     // fixture cannot tell them apart. Same rule the class path applies to a primary constructor.
     let ctor_body_pc = ctor.bytes.len() as u16;
+    // `(pc, line)` of each constructor-property store, for the `LineNumberTable` below.
+    let mut store_lines: Vec<(u16, u32)> = Vec::new();
     let mut max_locals = 1 + ctor_words;
     // When body-property initializers exist, the lowered `init_body` carries BOTH the property-param→
     // field stores AND the body inits (it set `explicit_param_stores`). Emit it through the standard IR
@@ -10302,6 +10304,14 @@ fn emit_enum_class(
         for (a, t) in c.ctor_args.iter().zip(&all_param_tys) {
             if a.is_field {
                 let name = &c.fields[field_i].name;
+                // kotlinc maps each property store to the PARAMETER's own source line, exactly as it
+                // does for an ordinary class's constructor — visible only when the parameter list
+                // spans lines.
+                if let Some(&line) = ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone())) {
+                    if line != 0 {
+                        store_lines.push((ctor.bytes.len() as u16, line));
+                    }
+                }
                 ctor.aload(0);
                 load(*t, slot, &mut ctor);
                 let fref = cw.fieldref(&fq, name, &type_descriptor(*t));
@@ -10311,6 +10321,8 @@ fn emit_enum_class(
             slot += slot_words(*t);
         }
     }
+    // The pc the trailing `return` starts at — kotlinc maps it back to the class HEADER line.
+    let ctor_return_pc = ctor.bytes.len() as u16;
     ctor.ret_void();
     ctor.ensure_locals(max_locals);
     ctor.link();
@@ -10346,7 +10358,16 @@ fn emit_enum_class(
             let stores_properties = ctor_body_pc < ctor.bytes.len() as u16 - 1;
             let mut entries = vec![(0u16, start)];
             if stores_properties {
-                entries.push((ctor_body_pc, header));
+                // Each store on its parameter's line, then the `return` back on the header's —
+                // kotlinc's three-entry shape for a multi-line parameter list. A store whose line
+                // the IR does not carry falls back to the header, which is where this mapped every
+                // store before.
+                if store_lines.is_empty() {
+                    entries.push((ctor_body_pc, header));
+                } else {
+                    entries.extend(store_lines.iter().copied());
+                    entries.push((ctor_return_pc, header));
+                }
             }
             // kotlinc never emits two consecutive entries for the same line.
             entries.dedup_by_key(|(_, l)| *l);
