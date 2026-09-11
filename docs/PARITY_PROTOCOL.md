@@ -1466,3 +1466,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   A one-level nest cannot show it — the single enclosing row is the outer that the enum's own row
   already interns — which is why every existing enum fixture missed it.
   `tests/enum_inner_class_chain_e2e.rs`.
+- **Joining `Nothing?` (fix).** A bare `null` GENERALIZES to `Nothing?` the moment it is inferred
+  into a type argument: `Pair(x, null)` is `Pair<T, Nothing?>`. The join knew `Nothing` and the
+  `null` literal's own type but not `Nothing?`, so joining the branches of
+  `if (c) Pair(s, s) else Pair(s, null)` failed outright, and a COVARIANT argument then fell back to
+  the declared bound — `Pair<String, out Any?>` where kotlinc infers `Pair<String, String?>`.
+  Expensive rather than cosmetic: every later member lookup on the widened argument is unresolved
+  (`parsed.third?.isNotBlank()`), so one bad join fails a whole file — it accounted for a cluster of
+  corpus `unresolved reference` errors that looked unrelated to each other.
+  An EXPECTED type hides it: `Pair(s, null)` checked against `Pair<String, String?>` infers from the
+  expectation and never joins. Only an inferred intermediate (`val parsed = when { … }`, or an
+  un-annotated return) reaches the join at all — which is why a fixture must leave the type out.
+  `tests/nothing_nullable_join_e2e.rs`.
