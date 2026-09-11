@@ -283,6 +283,74 @@ fn a_serializable_enum_builds_its_serializer_lazily() {
         built.reference
     );
     assert_eq!(initializer(&built.krusty), want, "_init_$_anonymous_ body");
+
+    // An enum initializes its companion before the lazy delegate that may read through it. Compare
+    // the complete `<clinit>` instruction stream: checking only that both stores exist would allow
+    // the old reversed order to return.
+    let clinit_instructions = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line == "static {};")
+            .expect("class initializer declaration");
+        body.into_iter()
+            .skip(start)
+            .take_while(|line| line != "}")
+            .filter(|line| {
+                line.split_once(": ").is_some_and(|(offset, _)| {
+                    !offset.is_empty() && offset.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let want_clinit = clinit_instructions(&built.reference);
+    let companion_store = want_clinit
+        .iter()
+        .position(|line| line.contains("Field Companion:"));
+    let delegate_store = want_clinit
+        .iter()
+        .position(|line| line.contains("Field $cachedSerializer$delegate:"));
+    assert!(
+        matches!((companion_store, delegate_store), (Some(companion), Some(delegate)) if companion < delegate),
+        "reference must initialize Companion before the serializer delegate:\n{}",
+        built.reference
+    );
+    assert_eq!(
+        clinit_instructions(&built.krusty),
+        want_clinit,
+        "<clinit> instruction order"
+    );
+
+    // These members are generated after the frontend line handoff. Their exact source line is the
+    // annotated declaration's START, not the later `enum class` keyword and not a fallback line.
+    let source_lines = |text: &str, start_marker: &str, end_marker: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains(start_marker))
+            .unwrap_or(body.len());
+        body.into_iter()
+            .skip(start)
+            .take_while(|line| !line.contains(end_marker))
+            .filter(|line| line.starts_with("line "))
+            .collect::<Vec<_>>()
+    };
+    for (start, end) in [
+        ("_init_$_anonymous_()", "access$get$cachedSerializer"),
+        ("access$get$cachedSerializer", "static {};"),
+    ] {
+        let want_lines = source_lines(&built.reference, start, end);
+        assert_eq!(
+            want_lines,
+            vec!["line 2: 0"],
+            "reference {start} line must be the @Serializable declaration start"
+        );
+        assert_eq!(
+            source_lines(&built.krusty, start, end),
+            want_lines,
+            "{start} LineNumberTable"
+        );
+    }
     for marker in ["BootstrapMethods", "LazyThreadSafetyMode", "invokedynamic"] {
         assert!(
             built.krusty.contains(marker),

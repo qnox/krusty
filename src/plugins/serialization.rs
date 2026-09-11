@@ -1247,6 +1247,16 @@ impl SerializationPlugin {
         // therefore absent from `@Metadata`.
         ir.synthetic_methods.insert(anonymous);
         ir.classes[class_id as usize].methods.push(anonymous);
+        // Generated in the BACKEND, past the frontend's declaration-line transfer, so the emitter
+        // would attach no debug tables without a line of its own. kotlinc maps it to the annotated
+        // owner's declaration line, which the class already carries by now.
+        // The ANNOTATED start line (the `@Serializable` line), not the `enum class` keyword's —
+        // kotlinc maps a generated member to where the declaration begins, annotations included.
+        let owner_line = ir.classes[class_id as usize].decl_start_line;
+        if owner_line != 0 {
+            ir.fn_decl_lines.insert(anonymous, owner_line);
+            ir.fn_sig_lines.insert(anonymous, owner_line);
+        }
         let block = ir.add_expr(IrExpr::Lambda {
             impl_fn: anonymous,
             arity: 0,
@@ -1301,6 +1311,10 @@ impl SerializationPlugin {
         });
         ir.synthetic_methods.insert(acc);
         ir.classes[class_id as usize].methods.push(acc);
+        if owner_line != 0 {
+            ir.fn_decl_lines.insert(acc, owner_line);
+            ir.fn_sig_lines.insert(acc, owner_line);
+        }
         // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
         let acc_call = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
