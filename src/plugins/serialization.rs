@@ -1302,7 +1302,7 @@ impl SerializationPlugin {
             owner: Some(type_name(class_fq)),
             visibility: crate::types::Visibility::Private,
             custom_accessor: true,
-            line: 0,
+            line: owner_line,
             source_order: u32::MAX,
         });
         // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
