@@ -205,6 +205,51 @@ fn structure(disassembly: &str) -> Vec<String> {
     out
 }
 
+/// A user annotation on an enum interns with the CLASS-ATTRIBUTE window, immediately before
+/// `@Metadata` — kotlinc's order. krusty queued it at the top of the emit, which put
+/// `Lkotlinx/serialization/Serializable;` near the head of the constant pool and shifted everything
+/// after it.
+#[test]
+fn a_serializable_enums_annotation_interns_with_the_class_attributes() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, INACTIVE }\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableEnumAnnPool", src, "Status", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Where the annotation descriptor lands, as a FRACTION of the pool — the absolute index still
+    // differs further down, but kotlinc puts it in the last quarter and krusty put it in the first.
+    let position = |text: &str| {
+        let rows: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('#') && line.contains(" = "))
+            .collect();
+        let at = rows
+            .iter()
+            .position(|line| line.contains("Lkotlinx/serialization/Serializable;"))?;
+        Some((at, rows.len()))
+    };
+    let (want_at, want_len) = position(&built.reference).expect("reference interns the annotation");
+    let (got_at, got_len) = position(&built.krusty).expect("krusty interns the annotation");
+    assert!(
+        want_at * 4 > want_len * 3,
+        "reference should intern it in the last quarter: {want_at} of {want_len}"
+    );
+    assert!(
+        got_at * 4 > got_len * 3,
+        "krusty interns the annotation at {got_at} of {got_len}; kotlinc at {want_at} of {want_len}"
+    );
+}
+
 /// `<clinit>`'s LineNumberTable steps back to the ANNOTATION line for the generated delegate's
 /// store, then returns to the entries' line (`0:6, 55:5, 69:6`). krusty emitted a single `0:6`.
 ///

@@ -10095,9 +10095,6 @@ fn emit_enum_class(
         access |= 0x0010;
     } // FINAL
     cw.set_access(access);
-    // A user annotation on an enum is emitted exactly as on a class — kotlinc writes it BEFORE the
-    // `@Metadata` entry, which is the order these queue in.
-    cw.set_class_annotations(&c.applied_annotations);
     // Every enum extends the generic `java.lang.Enum<Self>`, so kotlinc emits a class `Signature`
     // (`Ljava/lang/Enum<LSelf;>;` plus a raw `L<itf>;` for each superinterface). The erased
     // descriptor already names `java/lang/Enum`; the Signature carries the `<Self>` type argument.
@@ -10671,6 +10668,10 @@ fn emit_enum_class(
         if !clinit_lines.is_empty() {
             cw.set_method_lines("<clinit>", "()V", &clinit_lines);
         }
+        // A user annotation on an enum interns with the CLASS-ATTRIBUTE window, immediately
+        // before `@Metadata` — kotlinc's order. Queuing it at the top of the emit put its
+        // descriptor near the head of the constant pool instead.
+        cw.set_class_annotations(&c.applied_annotations);
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
     cw.finish()
