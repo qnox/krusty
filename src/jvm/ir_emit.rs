@@ -4937,12 +4937,6 @@ fn jvm_field_visibility(c: &crate::ir::IrClass, property: &str) -> Option<u16> {
         })
 }
 
-fn apply_field_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
-    if let Some(fa) = c.field_annotations.iter().find(|fa| fa.field == field) {
-        cw.set_last_field_annotations(&fa.annotations);
-    }
-}
-
 pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &Ty) -> bool {
         match t.non_null() {
@@ -10240,7 +10234,16 @@ fn emit_enum_class(
         // `<clinit>`'s `putstatic` for this entry resolves right after the field's own name, before
         // the next entry — kotlinc interleaves them rather than batching the Fieldrefs at the end.
         cw.fieldref(&fq, &entry.name, &self_desc);
-        apply_field_annotations(&mut cw, c, &entry.name);
+        // An entry's annotations are kept for the FIELD-TABLE window: kotlinc interns
+        // `Lkotlinx/serialization/SerialName;` beside the late fields' strings, not here beside the
+        // entry names. (This was the only caller of the eager `apply_field_annotations` helper.)
+        if let Some(annotations) = c
+            .field_annotations
+            .iter()
+            .find(|annotations| annotations.field == entry.name)
+        {
+            cw.set_last_field_annotations_deferred(&annotations.annotations);
+        }
     }
     cw.add_field(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
