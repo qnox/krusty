@@ -10243,12 +10243,6 @@ fn emit_enum_class(
         "$ENTRIES",
         "Lkotlin/enums/EnumEntries;",
     );
-    // `<clinit>`'s NAME interns before anything its body references (the `EnumEntriesKt.enumEntries`
-    // machinery), as kotlinc reaches a method's signature before its code.
-    cw.reserve_method_name("<clinit>");
-    // …with its descriptor, which kotlinc interns alongside the name and before the body's
-    // constants.
-    cw.reserve_descriptor("()V");
     // The owner-scoped statics the serialization plugin synthesized were emitted with the leading
     // fields above, next to `Companion`, where kotlinc puts them; this binding is the one `<clinit>`
     // below initializes.
@@ -10341,6 +10335,144 @@ fn emit_enum_class(
         );
     }
 
+    emit_declared_property_accessors(
+        ir,
+        c,
+        &mut cw,
+        &PropertyAccessorEmit {
+            fq_name: &fq,
+            facade,
+            formatter: &signature_formatter,
+            param_assertions: opts.param_assertions,
+            env,
+        },
+    );
+    let markers = property_annotation_marker_fids(ir, c);
+    // kotlinc's enum member order is `<init>`, the DECLARED members, then the synthesized
+    // `values`/`valueOf`/`getEntries`/`$values`, then anything a PLUGIN synthesized onto the class
+    // (`_init_$_anonymous_`, `access$…`), then `<clinit>`. So this runs twice around that
+    // machinery, split on whether the member was compiler-invented.
+    let emit_members = |cw: &mut ClassWriter, compiler_invented: bool| {
+        for &fid in &c.methods {
+            if ir.synthetic_methods.contains(&fid) != compiler_invented {
+                continue;
+            }
+            if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
+                continue; // already emitted beside its property's accessors
+            }
+            let f = &ir.functions[fid as usize];
+            if f.body.is_some() {
+                // Honor `is_static` (an extension-synthesized `static` member like serialization's
+                // `serializer()` accessor) — emitting it as an instance method breaks an `E.serializer()`
+                // static call (`IncompatibleClassChangeError`).
+                emit_method(ir, fid, &fq, facade, cw, !f.is_static, env);
+                if ir.function_reference_access_bridges.contains(&fid) {
+                    emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
+                }
+                // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
+                // separate path from `emit_class`, so a member declared `fun m(a: Int = 1)` on an enum
+                // silently had no stub at all — a call omitting the argument had nothing to dispatch to.
+                // Same call as the class path, so the super-call guard rides along: an enum IS
+                // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
+                if let Some(defaults) = ir.param_defaults(fid) {
+                    emit_default_stub(ir, fid, &fq, facade, cw, defaults, env, false);
+                }
+            } else {
+                // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
+                // entry subclasses override it.
+                cw.add_abstract_method_sig(
+                    0x0001 | 0x0400,
+                    &f.name,
+                    &ir_method_desc(&f.params, &f.ret),
+                    method_signature(&signature_formatter, ir, fid, f).as_deref(),
+                );
+            }
+        }
+    };
+    emit_members(&mut cw, false);
+    // values(): `$VALUES.clone()` cast back to the array type.
+    let mut vals = CodeBuilder::new(0);
+    let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
+    vals.getstatic(valref, 1);
+    // kotlinc invokes `clone()` via `java/lang/Object` (not the `[LE;` array type).
+    let clone_m = cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
+    vals.invokevirtual(clone_m, 0, 1);
+    let arr_cls = cw.class_ref(&arr_desc);
+    vals.checkcast(arr_cls);
+    vals.areturn();
+    finish_code::<0x0009>(&mut cw, "values", &format!("(){arr_desc}"), &mut vals, 0);
+
+    // valueOf(String): `Enum.valueOf(E.class, name)` cast to E.
+    let mut vof = CodeBuilder::new(1);
+    vof.ldc_class(&fq, &mut cw);
+    vof.aload(0);
+    let veo = cw.methodref(
+        "java/lang/Enum",
+        "valueOf",
+        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
+    );
+    vof.invokestatic(veo, 2, 1);
+    let cc = cw.class_ref(&fq);
+    vof.checkcast(cc);
+    vof.areturn();
+    finish_code::<0x0009>(
+        &mut cw,
+        "valueOf",
+        &format!("(Ljava/lang/String;){self_desc}"),
+        &mut vof,
+        1,
+    );
+
+    // getEntries(): the `entries` property accessor → `return $ENTRIES`. Carries the generic
+    // `Signature` `()Lkotlin/enums/EnumEntries<LSelf;>;` kotlinc emits.
+    let mut gent = CodeBuilder::new(0);
+    let entref = cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    gent.getstatic(entref, 1);
+    gent.areturn();
+    gent.ensure_locals(0);
+    gent.link();
+    cw.add_method_sig(
+        0x0009,
+        "getEntries",
+        "()Lkotlin/enums/EnumEntries;",
+        &gent,
+        Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
+    );
+    // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
+    // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
+    let mut vbuild = CodeBuilder::new(1);
+    vbuild.push_int(c.enum_entries.len() as i32, &mut cw);
+    let acls = cw.class_ref(&fq);
+    vbuild.anewarray(acls);
+    vbuild.astore(0);
+    for (i, entry) in c.enum_entries.iter().enumerate() {
+        vbuild.aload(0);
+        vbuild.push_int(i as i32, &mut cw);
+        let fref = cw.fieldref(&fq, &entry.name, &self_desc);
+        vbuild.getstatic(fref, 1);
+        vbuild.array_store(0x53, 1); // aastore
+    }
+    vbuild.aload(0);
+    vbuild.areturn();
+    vbuild.ensure_locals(1);
+    vbuild.link();
+    cw.add_method(
+        0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
+        "$values",
+        &format!("(){arr_desc}"),
+        &vbuild,
+    );
+
+    emit_members(&mut cw, true);
+    // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
+    // their names, descriptors and body constants between the entry constants and `<clinit>`, so
+    // building the initializer earlier claimed those pool slots first.
+    // `<clinit>`'s NAME interns before anything its body references (the `EnumEntriesKt.enumEntries`
+    // machinery), as kotlinc reaches a method's signature before its code.
+    cw.reserve_method_name("<clinit>");
+    // …with its descriptor, which kotlinc interns alongside the name and before the body's
+    // constants.
+    cw.reserve_descriptor("()V");
     // <clinit>: construct each entry, then `$VALUES = $values()` and
     // `$ENTRIES = EnumEntriesKt.enumEntries($VALUES)`. BUILT here but ADDED last (kotlinc orders it
     // after values/valueOf/getEntries/$values); the linked `CodeBuilder` is self-contained.
@@ -10501,136 +10633,6 @@ fn emit_enum_class(
         clinit
     };
 
-    emit_declared_property_accessors(
-        ir,
-        c,
-        &mut cw,
-        &PropertyAccessorEmit {
-            fq_name: &fq,
-            facade,
-            formatter: &signature_formatter,
-            param_assertions: opts.param_assertions,
-            env,
-        },
-    );
-    let markers = property_annotation_marker_fids(ir, c);
-    // kotlinc's enum member order is `<init>`, the DECLARED members, then the synthesized
-    // `values`/`valueOf`/`getEntries`/`$values`, then anything a PLUGIN synthesized onto the class
-    // (`_init_$_anonymous_`, `access$…`), then `<clinit>`. So this runs twice around that
-    // machinery, split on whether the member was compiler-invented.
-    let emit_members = |cw: &mut ClassWriter, compiler_invented: bool| {
-        for &fid in &c.methods {
-            if ir.synthetic_methods.contains(&fid) != compiler_invented {
-                continue;
-            }
-            if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
-                continue; // already emitted beside its property's accessors
-            }
-            let f = &ir.functions[fid as usize];
-            if f.body.is_some() {
-                // Honor `is_static` (an extension-synthesized `static` member like serialization's
-                // `serializer()` accessor) — emitting it as an instance method breaks an `E.serializer()`
-                // static call (`IncompatibleClassChangeError`).
-                emit_method(ir, fid, &fq, facade, cw, !f.is_static, env);
-                if ir.function_reference_access_bridges.contains(&fid) {
-                    emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
-                }
-                // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
-                // separate path from `emit_class`, so a member declared `fun m(a: Int = 1)` on an enum
-                // silently had no stub at all — a call omitting the argument had nothing to dispatch to.
-                // Same call as the class path, so the super-call guard rides along: an enum IS
-                // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
-                if let Some(defaults) = ir.param_defaults(fid) {
-                    emit_default_stub(ir, fid, &fq, facade, cw, defaults, env, false);
-                }
-            } else {
-                // An abstract enum member (`abstract fun t(): String`) — declared `ACC_ABSTRACT`, the
-                // entry subclasses override it.
-                cw.add_abstract_method_sig(
-                    0x0001 | 0x0400,
-                    &f.name,
-                    &ir_method_desc(&f.params, &f.ret),
-                    method_signature(&signature_formatter, ir, fid, f).as_deref(),
-                );
-            }
-        }
-    };
-    emit_members(&mut cw, false);
-    // values(): `$VALUES.clone()` cast back to the array type.
-    let mut vals = CodeBuilder::new(0);
-    let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
-    vals.getstatic(valref, 1);
-    // kotlinc invokes `clone()` via `java/lang/Object` (not the `[LE;` array type).
-    let clone_m = cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
-    vals.invokevirtual(clone_m, 0, 1);
-    let arr_cls = cw.class_ref(&arr_desc);
-    vals.checkcast(arr_cls);
-    vals.areturn();
-    finish_code::<0x0009>(&mut cw, "values", &format!("(){arr_desc}"), &mut vals, 0);
-
-    // valueOf(String): `Enum.valueOf(E.class, name)` cast to E.
-    let mut vof = CodeBuilder::new(1);
-    vof.ldc_class(&fq, &mut cw);
-    vof.aload(0);
-    let veo = cw.methodref(
-        "java/lang/Enum",
-        "valueOf",
-        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
-    );
-    vof.invokestatic(veo, 2, 1);
-    let cc = cw.class_ref(&fq);
-    vof.checkcast(cc);
-    vof.areturn();
-    finish_code::<0x0009>(
-        &mut cw,
-        "valueOf",
-        &format!("(Ljava/lang/String;){self_desc}"),
-        &mut vof,
-        1,
-    );
-
-    // getEntries(): the `entries` property accessor → `return $ENTRIES`. Carries the generic
-    // `Signature` `()Lkotlin/enums/EnumEntries<LSelf;>;` kotlinc emits.
-    let mut gent = CodeBuilder::new(0);
-    let entref = cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
-    gent.getstatic(entref, 1);
-    gent.areturn();
-    gent.ensure_locals(0);
-    gent.link();
-    cw.add_method_sig(
-        0x0009,
-        "getEntries",
-        "()Lkotlin/enums/EnumEntries;",
-        &gent,
-        Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
-    );
-    // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
-    // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
-    let mut vbuild = CodeBuilder::new(1);
-    vbuild.push_int(c.enum_entries.len() as i32, &mut cw);
-    let acls = cw.class_ref(&fq);
-    vbuild.anewarray(acls);
-    vbuild.astore(0);
-    for (i, entry) in c.enum_entries.iter().enumerate() {
-        vbuild.aload(0);
-        vbuild.push_int(i as i32, &mut cw);
-        let fref = cw.fieldref(&fq, &entry.name, &self_desc);
-        vbuild.getstatic(fref, 1);
-        vbuild.array_store(0x53, 1); // aastore
-    }
-    vbuild.aload(0);
-    vbuild.areturn();
-    vbuild.ensure_locals(1);
-    vbuild.link();
-    cw.add_method(
-        0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
-        "$values",
-        &format!("(){arr_desc}"),
-        &vbuild,
-    );
-
-    emit_members(&mut cw, true);
-
     // <clinit> is added LAST (built earlier), matching kotlinc's member order.
     cw.add_method(0x0008, "<clinit>", "()V", &clinit);
 
@@ -10669,6 +10671,9 @@ fn emit_enum_class(
             cw.set_method_lines("<clinit>", "()V", &clinit_lines);
         }
     }
+    // Deferred fields realize before class annotations: their generic signatures belong to the
+    // field-visit interning window even when Kotlin metadata emission is disabled.
+    cw.realize_late_fields();
     // A user annotation on an enum interns with the CLASS-ATTRIBUTE window, immediately before
     // `@Metadata` — kotlinc's order. It is independent of metadata emission: disabling Kotlin
     // metadata must not discard the class's declared annotations.

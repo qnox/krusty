@@ -1091,9 +1091,14 @@ impl ClassWriter {
         );
     }
 
-    /// Realize every [`LateField`] into the field table, interning name/descriptor/`ConstantValue`/
-    /// annotation NOW — called at the earliest class-attribute interning point (`set_kotlin_metadata`
-    /// or `finish`), so the entries land after the method windows like kotlinc's field visit.
+    /// Realize the deferred fields NOW rather than at `finish`. An enum's leading fields carry a
+    /// generic `Signature`, and kotlinc interns that string BEFORE the class's own annotation
+    /// descriptors — so the emitter forces the field visit before queuing those. Draining, so a
+    /// second call (from `finish`) is a no-op.
+    pub(super) fn realize_late_fields(&mut self) {
+        self.intern_late_fields();
+    }
+
     fn intern_late_fields(&mut self) {
         let mut lead_at = 0usize;
         for lf in std::mem::take(&mut self.late_fields) {
@@ -3020,6 +3025,10 @@ impl ClassWriter {
         // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
         // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
         let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
+        // `InnerClasses` precedes `Signature` — kotlinc's order for BOTH a generic class and an
+        // enum (verified against each). Writing the signature first left the two transposed on
+        // every class that has a nested member and a generic supertype.
+        ordered.extend(inner_classes_attr);
         if let Some(sig) = self.class_signature {
             let mut body = Vec::new();
             u2(&mut body, sig);
@@ -3027,7 +3036,6 @@ impl ClassWriter {
         }
         ordered.extend(
             [
-                inner_classes_attr,
                 enclosing_method_attr,
                 sourcefile_attr,
                 deprecated_attr,

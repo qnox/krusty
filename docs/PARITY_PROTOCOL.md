@@ -1402,3 +1402,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `access$…$cp` and the delegate field's strings) BETWEEN the entry constants and `<clinit>`; krusty
   interns them at their method emit, after `<clinit>`'s reserve.
   `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enums_annotation_interns_with_the_class_attributes`.
+- **`InnerClasses` precedes `Signature` in the CLASS attribute table, and `<clinit>` is built after
+  the plugin members (fix — completes the `@Serializable` enum class).** Three orderings, each
+  measured against kotlinc:
+  1. kotlinc writes `InnerClasses` BEFORE the class `Signature` — verified for a generic class AND an
+     enum, so this is general, not enum-specific. krusty always wrote `Signature` first, transposing
+     the two on every class carrying both a nested member and a generic supertype.
+  2. kotlinc interns the PLUGIN-generated members' names, descriptors and BODY constants between the
+     entry constants and `<clinit>`, so the enum emitter now RESERVES and BUILDS `<clinit>` after
+     `emit_members(.., true)` rather than up front.
+  3. the deferred leading fields must realize BEFORE the class annotations are encoded — the
+     delegate's generic `Signature` string interns ahead of `Lkotlinx/serialization/Serializable;`
+     (`ClassWriter::realize_late_fields`, which drains, so `finish`'s own call is then a no-op).
+  With these a `@Serializable` enum class AND its companion are BYTE-IDENTICAL to kotlinc.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enum_class_is_byte_identical`.
+  A plain `enum class` with a companion still differs in ONE place: its constructor's
+  `LineNumberTable` pc (kotlinc maps the line at pc 0, before the `super` call; krusty at pc 6).
