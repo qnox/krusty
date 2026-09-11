@@ -1506,6 +1506,10 @@ pub struct IrClass {
     /// kotlinc maps the primary constructor's `super()` call here and its trailing `return` to
     /// [`Self::decl_line`]. These differ when an annotation precedes the class header.
     pub decl_start_line: u32,
+    /// 1-based source line where the source declaration ends (0 = unknown). For a class body this
+    /// is its closing `}`. Backends use this stable source fact for synthesized fall-through code;
+    /// they must not recover it from source text.
+    pub decl_end_line: u32,
     /// Declared non-`Any` generic upper bounds (`<T: String>` → `("T", String)`), carried verbatim from
     /// the source. Platform-neutral metadata; the JVM value-class pass uses it to erase a value class's
     /// underlying type parameter to its bound (`value class S<T: String>` → `String`).
@@ -1966,6 +1970,7 @@ impl IrClass {
             is_data: false,
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             captured_type_params: Vec::new(),
@@ -2074,6 +2079,7 @@ impl IrClass {
             is_data: flags.has(crate::fir::DeclarationFlags::DATA),
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
             type_param_bounds: Vec::new(),
             type_params: Vec::new(),
             captured_type_params: Vec::new(),

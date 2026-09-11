@@ -126,6 +126,11 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     .min()
                     .unwrap_or(c.span.lo);
                 c.decl_start_line = line_at(start);
+                c.decl_end_line = if c.span.lo == 0 && c.span.hi == 0 {
+                    0
+                } else {
+                    line_at(c.span.hi.saturating_sub(1))
+                };
                 // The parser stored the primary ctor's `)` OFFSET here — rewrite it to the line.
                 if c.ctor_close_line != 0 {
                     c.ctor_close_line = line_at(c.ctor_close_line);
@@ -159,5 +164,46 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 p.decl_line = line_at(p.span.lo);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ast::Decl;
+    use crate::diag::DiagSink;
+
+    fn class_lines(source: &str, name: &str) -> (u32, u32, u32) {
+        let mut diagnostics = DiagSink::new();
+        let tokens = crate::lexer::lex(source, &mut diagnostics);
+        let file = crate::parser::parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "{}",
+            diagnostics.render("test", source)
+        );
+        file.decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Class(class) if class.name == name => {
+                    Some((class.decl_start_line, class.decl_line, class.decl_end_line))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} parsed"))
+    }
+
+    /// Annotation, header, and closing brace are distinct stable source facts.
+    #[test]
+    fn class_declaration_lines_cover_the_whole_annotated_body() {
+        let source =
+            "package a\n\n@Deprecated(\"old\")\nenum class Phase {\n    OPEN,\n    CLOSED,\n}\n";
+        assert_eq!(class_lines(source, "Phase"), (3, 4, 7));
+    }
+
+    /// A bodyless, unannotated declaration starts and ends on its header line.
+    #[test]
+    fn bodyless_class_declaration_lines_match_the_header() {
+        let source = "package a\n\ndata class Plain(val x: Int)\n";
+        assert_eq!(class_lines(source, "Plain"), (3, 3, 3));
     }
 }

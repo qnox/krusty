@@ -181,6 +181,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         ctor_close_line: 0,
         decl_line: 0,
         decl_start_line: 0,
+        decl_end_line: 0,
     }
 }
 
@@ -2655,6 +2656,7 @@ impl<'a> Parser<'a> {
             ctor_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
         };
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(nested_start, id);
@@ -3173,6 +3175,7 @@ impl<'a> Parser<'a> {
             ctor_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
         }
     }
 
@@ -4156,6 +4159,7 @@ impl<'a> Parser<'a> {
             ctor_close_line: ctor_close_lo,
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
         }
     }
 
@@ -4537,6 +4541,7 @@ impl<'a> Parser<'a> {
             ctor_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
         }
     }
 
@@ -4662,6 +4667,7 @@ impl<'a> Parser<'a> {
             ctor_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
         };
         let did = self.file.add_decl(Decl::Class(synth));
         self.file.decls.push(did);
@@ -4807,6 +4813,7 @@ impl<'a> Parser<'a> {
             ctor_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
+            decl_end_line: 0,
         }
     }
 
@@ -9453,51 +9460,6 @@ mod tests {
             d.render("test", src)
         );
         file.debug_tree()
-    }
-
-    /// kotlinc's primary-constructor `LineNumberTable` starts at the DECLARATION, annotations
-    /// included, and returns to the class HEADER line at the trailing `return` — so an annotation on
-    /// its own line makes the two lines differ, and both have to be recorded.
-    #[test]
-    fn class_declaration_start_line_includes_a_preceding_annotation() {
-        let src = "package a\n\nannotation class Mark\n\n@Mark\ndata class Pair2(val x: Int)\n";
-        let mut d = DiagSink::new();
-        let toks = lex(src, &mut d);
-        let file = parse(src, &toks, &mut d);
-        assert!(!d.has_errors(), "{}", d.render("test", src));
-        let class = file
-            .decl_arena
-            .iter()
-            .find_map(|decl| match decl {
-                Decl::Class(c) if c.name == "Pair2" => Some(c),
-                _ => None,
-            })
-            .expect("Pair2 parsed");
-        assert_eq!(class.decl_line, 6, "class header line");
-        assert_eq!(
-            class.decl_start_line, 5,
-            "declaration start (annotation) line"
-        );
-    }
-
-    /// With no annotation the two coincide, and nothing downstream should see a difference.
-    #[test]
-    fn class_declaration_start_line_matches_the_header_without_annotations() {
-        let src = "package a\n\ndata class Plain(val x: Int)\n";
-        let mut d = DiagSink::new();
-        let toks = lex(src, &mut d);
-        let file = parse(src, &toks, &mut d);
-        assert!(!d.has_errors(), "{}", d.render("test", src));
-        let class = file
-            .decl_arena
-            .iter()
-            .find_map(|decl| match decl {
-                Decl::Class(c) if c.name == "Plain" => Some(c),
-                _ => None,
-            })
-            .expect("Plain parsed");
-        assert_eq!(class.decl_line, 3);
-        assert_eq!(class.decl_start_line, 3);
     }
 
     fn script(src: &str) -> File {
