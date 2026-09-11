@@ -1437,3 +1437,9 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   line (`ctor_close_lines` is the CONSTRUCTOR's), so that entry currently reuses the first entry's
   line — correct only when the entries and the brace share a line.
   `tests/serialization_companion_byte_parity_e2e.rs`, `tests/enum_companion_field_order_e2e.rs`.
+- **A `$serializer`'s `getDescriptor` is EMITTED fourth, not first (fix).** kotlinc's member order is
+  `<init>`, `serialize`, `deserialize`, `getDescriptor`, `childSerializers`,
+  `typeParametersSerializers`, then the bridges. The plugin DECLARES `getDescriptor` first — the
+  descriptor field it returns is built in `<init>` — and wrote the class's member list in declaration
+  order, so it was emitted second. Declaration order and emission order are independent here; only
+  `ser.methods` decides the latter. `tests/serialization_companion_byte_parity_e2e.rs`.

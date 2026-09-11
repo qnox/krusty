@@ -262,6 +262,56 @@ fn an_annotated_enum_constructor_maps_super_and_stores_separately() {
     );
 }
 
+/// kotlinc's `$serializer` member order is `<init>`, `serialize`, `deserialize`, `getDescriptor`,
+/// `childSerializers`, `typeParametersSerializers`, then the bridges. krusty emitted `getDescriptor`
+/// second, because the plugin DECLARES it first — the descriptor field it returns is built in
+/// `<init>` — and the class's member list was written in declaration order.
+#[test]
+fn a_generated_serializer_emits_get_descriptor_after_deserialize() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerOrder",
+        src,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Member names in emission order. Anchor on a leading access modifier: `javap -v` also prints
+    // constant-pool rows and `LocalVariableTable` entries that end in `;` and carry no `(`, and an
+    // LVT row's last token is a descriptor that reads exactly like a member name here.
+    let members = |text: &str| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.ends_with(';')
+                    && ["public ", "private ", "protected "]
+                        .iter()
+                        .any(|lead| line.starts_with(lead))
+            })
+            .filter_map(|line| line.split('(').next()?.split_whitespace().last())
+            .map(|name| name.trim_end_matches(';').to_string())
+            .collect::<Vec<_>>()
+    };
+    let want = members(&built.reference);
+    let at = |names: &[String], name: &str| names.iter().position(|n| n == name);
+    assert!(
+        matches!((at(&want, "getDescriptor"), at(&want, "deserialize")), (Some(g), Some(d)) if g > d),
+        "reference must emit getDescriptor after deserialize: {want:?}"
+    );
+    assert_eq!(members(&built.krusty), want, "$serializer member order");
+}
+
 /// The whole `@Serializable` enum CLASS, byte for byte. Everything above builds to this: the lazy
 /// `invokedynamic` initializer, the member and field order, the delegate's attributes, the debug
 /// tables, the pool order, and the class-attribute order.
