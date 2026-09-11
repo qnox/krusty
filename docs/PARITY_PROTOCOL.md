@@ -1330,3 +1330,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   emitted BEFORE the plugin's methods; `LineNumberTable` on `_init_$_anonymous_` and
   `access$get$cachedSerializer$delegate$cp` (which also carries a `@NotNull` kotlinc does not); and
   `<clinit>` must initialize `Companion` BEFORE the delegate.
+- **An enum's MEMBER order, `<clinit>` order, and its generated members' lines (fix).** kotlinc's enum
+  member order is `<init>`, the DECLARED members, then the synthesized
+  `values`/`valueOf`/`getEntries`/`$values`, then anything a PLUGIN synthesized onto the class
+  (`_init_$_anonymous_`, `access$…$cp`), then `<clinit>`. krusty emitted the declared members after the
+  synthesized ones and the plugin's before `$values`, so the emitter now runs its member loop TWICE
+  around that machinery, split on `ir.synthetic_methods`. `<clinit>` likewise initializes `Companion`
+  BEFORE the serializer statics that read through it — the reverse of a plain class's order, matching
+  the leading field block. And a plugin-generated enum member takes the owner's **`decl_start_line`**
+  (the `@Serializable` line), NOT `decl_line` (the `enum class` keyword's): kotlinc maps generated
+  members to where the declaration begins, annotations included — the same distinction as the
+  primary-ctor `super()` rule above. `tests/enum_companion_field_order_e2e.rs`.
+  STILL differing on a `@Serializable` enum class: the delegate field's `Signature` and `@NotNull`,
+  a `@NotNull` krusty puts on `access$…$cp` that kotlinc omits, and `<clinit>`'s LineNumberTable
+  (kotlinc maps the delegate store back to the annotation line: `0:6, 55:5, 69:6`).
