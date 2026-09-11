@@ -205,6 +205,44 @@ fn structure(disassembly: &str) -> Vec<String> {
     out
 }
 
+/// The whole `@Serializable` enum CLASS, byte for byte. Everything above builds to this: the lazy
+/// `invokedynamic` initializer, the member and field order, the delegate's attributes, the debug
+/// tables, the pool order, and the class-attribute order.
+#[test]
+fn a_serializable_enum_class_is_byte_identical() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, INACTIVE }\n";
+    for class in ["Status", "Status$Companion"] {
+        let Some(built) =
+            compare_with_kotlinc_plugin("SerializableEnumBytes", src, class, &cp, "25", &extra)
+        else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        if built.krusty_bytes != built.reference_bytes {
+            let (want, got) = (structure(&built.reference), structure(&built.krusty));
+            let first = want
+                .iter()
+                .zip(got.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| want.len().min(got.len()));
+            panic!(
+                "{class} differs from kotlinc ({} B vs {} B); first structural difference at line {first}\n  kotlinc: {:?}\n  krusty:  {:?}",
+                built.krusty_bytes.len(),
+                built.reference_bytes.len(),
+                want.get(first),
+                got.get(first),
+            );
+        }
+    }
+}
+
 /// A user annotation on an enum interns with the CLASS-ATTRIBUTE window, immediately before
 /// `@Metadata` — kotlinc's order. krusty queued it at the top of the emit, which put
 /// `Lkotlinx/serialization/Serializable;` near the head of the constant pool and shifted everything
