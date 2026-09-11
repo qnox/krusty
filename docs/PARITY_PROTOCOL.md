@@ -1375,3 +1375,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the property field strings AND their `NameAndType`/`Fieldref`, then the ctor's LVT names, then the
   DECLARED accessors, and only then `values`/`valueOf`/`$VALUES`; krusty's reserve block front-loads
   the synthesized machinery. `tests/serialization_companion_byte_parity_e2e.rs`.
+- **An enum's CONSTANT-POOL visit order (fix).** kotlinc interns, in this order: the class and
+  supertype; the constructor's names and descriptors and its `super(name, ordinal)` `Methodref`; the
+  property backing fields WITH their `NameAndType`/`Fieldref` (not later, at the ctor's `putfield`);
+  the constructor's `LocalVariableTable` strings; the DECLARED accessors (`getTag`, its descriptor,
+  its `@NotNull`); then `values`/`valueOf`/`getEntries`/`$VALUES`/`$ENTRIES`/`$values`; then the entry
+  constants; then `<clinit>` **and its `()V` descriptor**; then the `<clinit>` body's constants. The
+  `Companion` field and the plugin's statics LEAD the field TABLE but intern LATE, with the field
+  visit (`add_field_late_leading`, and a new `add_field_late_leading_sig` carrying the delegate's
+  `Signature` + `@NotNull`).
+  krusty front-loaded the fields and the synthesized machinery, which shifted nearly the whole pool
+  even where every member already matched — 80 of 107 entries on a plain `enum class` with a
+  companion. With this that fixture's pool is EXACT; the class's one remaining difference is its
+  constructor's `LineNumberTable` pc (kotlinc `0:3`, krusty `6:3` — it maps the line at pc 0, before
+  the `super` call), which is a separate, pre-existing gap.
+  `tests/enum_companion_field_order_e2e.rs::an_enum_interns_its_pool_in_kotlincs_order`.
+  A `@Serializable` enum still diverges earlier: krusty interns the class annotation descriptor
+  (`Lkotlinx/serialization/Serializable;`) before the constructor, kotlinc later.

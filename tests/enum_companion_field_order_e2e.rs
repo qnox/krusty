@@ -22,7 +22,7 @@ fn members(disassembly: &str) -> Vec<String> {
     disassembly
         .lines()
         .map(str::trim)
-        .filter(|line| line.ends_with(';') && !line.contains('{'))
+        .filter(|line| declaration_row(line) && !line.contains('{'))
         .filter_map(|line| {
             let name = line.split('(').next()?.split_whitespace().last()?;
             Some(name.trim_end_matches(';').to_string())
@@ -35,9 +35,16 @@ fn fields(disassembly: &str) -> Vec<String> {
     disassembly
         .lines()
         .map(str::trim)
-        .filter(|line| line.ends_with(';') && !line.contains('('))
+        .filter(|line| declaration_row(line) && !line.contains('('))
         .map(str::to_string)
         .collect()
+}
+
+/// Whether a `javap -v` line is a member DECLARATION. Plenty else ends in `;`: constant-pool `Utf8`
+/// rows (which start with `#`), `Signature:`/`descriptor:` attribute lines and `LocalVariableTable`
+/// rows (which carry a `:`).
+fn declaration_row(line: &str) -> bool {
+    line.ends_with(';') && !line.starts_with('#') && !line.contains(':')
 }
 
 /// Compile the fixture with the reference kotlinc and with krusty; returns both disassemblies.
@@ -75,8 +82,8 @@ fn build_both() -> Option<(String, String)> {
         std::fs::write(path, bytes).expect("write krusty class");
     }
 
-    let reference = common::javap(&["-p", "-cp", &reference_dir.to_string_lossy(), "Plain"])?;
-    let krusty = common::javap(&["-p", "-cp", &krusty_dir.to_string_lossy(), "Plain"])
+    let reference = common::javap(&["-p", "-v", "-cp", &reference_dir.to_string_lossy(), "Plain"])?;
+    let krusty = common::javap(&["-p", "-v", "-cp", &krusty_dir.to_string_lossy(), "Plain"])
         .expect("javap reads krusty's output");
     let _ = std::fs::remove_dir_all(&dir);
     Some((reference, krusty))
@@ -113,4 +120,53 @@ fn an_enum_emits_declared_members_before_its_synthesized_ones() {
         "reference must declare getTag before values():\n{reference}"
     );
     assert_eq!(members(&krusty), want, "member order");
+}
+
+/// kotlinc's constant-pool visit order for an enum: the class and supertype, the constructor's names
+/// and descriptors and its `super(name, ordinal)` reference, the property backing fields WITH their
+/// `NameAndType`/`Fieldref`, the constructor's LocalVariableTable strings, the DECLARED accessors,
+/// then `values`/`valueOf`/`getEntries`/`$VALUES`/`$ENTRIES`, then `<clinit>` AND its descriptor,
+/// then the entry constants. The `Companion` field leads the field TABLE but interns late, with the
+/// field visit.
+///
+/// krusty front-loaded the fields and the synthesized machinery, which shifted almost the whole pool
+/// even where every member already matched.
+#[test]
+fn an_enum_interns_its_pool_in_kotlincs_order() {
+    let Some((reference, krusty)) = build_both() else {
+        return;
+    };
+    let pool = |text: &str| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('#') && line.contains(" = "))
+            .map(|line| {
+                // Drop the index; keep the entry's kind and payload.
+                line.split_once(" = ")
+                    .map(|(_, rest)| rest.to_string())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = pool(&reference);
+    assert!(
+        want.len() > 40,
+        "reference pool should be substantial:\n{reference}"
+    );
+    let got = pool(&krusty);
+    if got != want {
+        let first = want
+            .iter()
+            .zip(got.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| want.len().min(got.len()));
+        panic!(
+            "constant pool diverges at entry {}\n  kotlinc: {:?}\n  krusty:  {:?}\n  ({} of {} entries differ)",
+            first + 1,
+            want.get(first),
+            got.get(first),
+            want.iter().zip(got.iter()).filter(|(a, b)| a != b).count(),
+            want.len(),
+        );
+    }
 }
