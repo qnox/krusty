@@ -44957,6 +44957,18 @@ pub(crate) fn semantic_common_supertype_inner(
     if b == Ty::Nothing {
         return Some(a);
     }
+    // `Nothing?` is the type a bare `null` GENERALIZES to once it has been inferred into a type
+    // argument: `Pair(x, null)` is `Pair<T, Nothing?>`, not `Pair<T, Null>`. Its only inhabitant is
+    // `null`, so it joins exactly as the literal does — contributing nullability and nothing else.
+    // Without this the join failed outright, and a covariant argument fell back to the declared
+    // bound: `if (c) Pair(s, s) else Pair(s, null)` came out `Pair<String, out Any?>` instead of
+    // `Pair<String, String?>`.
+    let nothing_nullable = Ty::nullable(Ty::Nothing);
+    let a = if a == nothing_nullable { Ty::Null } else { a };
+    let b = if b == nothing_nullable { Ty::Null } else { b };
+    if a == b {
+        return Some(a);
+    }
     // Nullability changes a TYPE-PARAMETER OCCURRENCE, not its declared upper bound. `T` joined
     // with `null` is `T?`; widening through `T`'s bound first would turn `T : Enum<T>` into
     // `Enum<T>?` and reject the ordinary reified `enumValueOf<T>` safe-wrapper idiom.
