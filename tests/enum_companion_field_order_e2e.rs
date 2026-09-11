@@ -17,6 +17,19 @@ const SRC: &str = "enum class Plain(val tag: String) {\n\
                    \x20   companion object { fun first(): Plain = A }\n\
                    }\n";
 
+/// The member names javap prints, in emission order — fields and methods alike.
+fn members(disassembly: &str) -> Vec<String> {
+    disassembly
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(';') && !line.contains('{'))
+        .filter_map(|line| {
+            let name = line.split('(').next()?.split_whitespace().last()?;
+            Some(name.trim_end_matches(';').to_string())
+        })
+        .collect()
+}
+
 /// The field declarations javap prints for `class`, in emission order.
 fn fields(disassembly: &str) -> Vec<String> {
     disassembly
@@ -27,12 +40,9 @@ fn fields(disassembly: &str) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn an_enum_emits_its_companion_field_first() {
-    let Some(dir) = common::scratch_dir() else {
-        eprintln!("skipping: no scratch directory");
-        return;
-    };
+/// Compile the fixture with the reference kotlinc and with krusty; returns both disassemblies.
+fn build_both() -> Option<(String, String)> {
+    let dir = common::scratch_dir()?;
     let reference_dir = dir.join("ref");
     let krusty_dir = dir.join("out");
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
@@ -40,16 +50,13 @@ fn an_enum_emits_its_companion_field_first() {
     let source = dir.join("EnumCompanionFieldOrder.kt");
     std::fs::write(&source, SRC).expect("write fixture");
 
-    let Some((code, stderr)) = common::kotlinc_compile(&[
+    let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         "-jvm-target".to_string(),
         "25".to_string(),
         source.to_string_lossy().into_owned(),
-    ]) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    ])?;
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
 
     let classes = common::compile_in_process_metadata_cp_module_target(
@@ -68,15 +75,19 @@ fn an_enum_emits_its_companion_field_first() {
         std::fs::write(path, bytes).expect("write krusty class");
     }
 
-    let Some(reference) = common::javap(&["-p", "-cp", &reference_dir.to_string_lossy(), "Plain"])
-    else {
-        eprintln!("skipping: javap unavailable");
-        return;
-    };
+    let reference = common::javap(&["-p", "-cp", &reference_dir.to_string_lossy(), "Plain"])?;
     let krusty = common::javap(&["-p", "-cp", &krusty_dir.to_string_lossy(), "Plain"])
         .expect("javap reads krusty's output");
     let _ = std::fs::remove_dir_all(&dir);
+    Some((reference, krusty))
+}
 
+#[test]
+fn an_enum_emits_its_companion_field_first() {
+    let Some((reference, krusty)) = build_both() else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
     let want = fields(&reference);
     assert!(
         want.first()
@@ -84,4 +95,22 @@ fn an_enum_emits_its_companion_field_first() {
         "reference must put the companion field first — that is the rule under test:\n{reference}"
     );
     assert_eq!(fields(&krusty), want, "field order");
+}
+
+/// kotlinc's enum member order: `<init>`, the DECLARED members, then the synthesized
+/// `values`/`valueOf`/`getEntries`/`$values`, then `<clinit>`. krusty emitted the declared members
+/// AFTER the synthesized ones, so a property accessor landed past `$values`.
+#[test]
+fn an_enum_emits_declared_members_before_its_synthesized_ones() {
+    let Some((reference, krusty)) = build_both() else {
+        return;
+    };
+    let want = members(&reference);
+    let values = want.iter().position(|name| name == "values");
+    let accessor = want.iter().position(|name| name == "getTag");
+    assert!(
+        matches!((accessor, values), (Some(a), Some(v)) if a < v),
+        "reference must declare getTag before values():\n{reference}"
+    );
+    assert_eq!(members(&krusty), want, "member order");
 }
