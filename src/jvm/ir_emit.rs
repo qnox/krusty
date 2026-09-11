@@ -10119,6 +10119,11 @@ fn emit_enum_class(
     let enum_field_acc = |f: &IrField| {
         (if f.is_private() { 0x0002 } else { 0x0001 }) | if f.is_final() { 0x0010 } else { 0 }
     };
+    // kotlinc emits an ENUM's `Companion` field FIRST — ahead of the constructor properties, the
+    // entry constants and `$VALUES`/`$ENTRIES` — unlike an ordinary class, where it follows the
+    // instance fields. Emitting it last also interned its name and descriptor late, so the class
+    // differed in constant-pool order even where every member matched.
+    add_companion_field(&mut cw, c);
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
         cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
     }
@@ -10191,10 +10196,9 @@ fn emit_enum_class(
     // `<clinit>`'s NAME interns before anything its body references (the `EnumEntriesKt.enumEntries`
     // machinery), as kotlinc reaches a method's signature before its code.
     cw.reserve_method_name("<clinit>");
-    // A `@Serializable enum`'s serializer machinery: a `public static final Companion` field + any
-    // owner-scoped statics the serialization plugin synthesized (`$cachedSerializer$delegate`), both
-    // initialized in `<clinit>` below.
-    add_companion_field(&mut cw, c);
+    // A `@Serializable enum`'s serializer machinery: the owner-scoped statics the serialization
+    // plugin synthesized (`$cachedSerializer$delegate`), initialized in `<clinit>` below. The
+    // `Companion` field itself was emitted with the leading fields above, where kotlinc puts it.
     let owner_statics: Vec<&crate::ir::IrStatic> =
         ir.statics.iter().filter(|s| s.owner_matches(&fq)).collect();
     for s in &owner_statics {
