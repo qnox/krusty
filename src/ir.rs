@@ -14,6 +14,7 @@
 //! `u32` ids (no `Box`/`Rc` graphs; bulk-freeable). Lowering (`ast → ir`) and the JVM backend
 //! consuming IR are the next phases; today this module defines the node set + a builder + a printer.
 
+use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{Ty, TypeName, TypeNameList};
 
@@ -2448,6 +2449,11 @@ pub struct IrFile {
     /// Stable checked-FIR classifier declaration to its common-IR class realization. Member bodies
     /// attach through this edge; neither the sink nor a backend searches by rendered class name.
     pub checked_classifier_classes: std::collections::HashMap<crate::fir::DeclarationId, ClassId>,
+    /// Qualified Kotlin source name for each source-declared class, keyed by its exact IR identity.
+    /// This is an external-name boundary fact for metadata/plugins (for example a serialization wire
+    /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from
+    /// a JVM `$` spelling, where a backticked `$` is indistinguishable from a physical separator.
+    class_source_qualified_names: std::collections::HashMap<ClassId, KtString>,
     /// Stable `(classifier declaration, interface-delegation ordinal)` to its generated storage
     /// field. Common lowering predeclares this source-ordered layout once and both checked
     /// constructor initializers and forwarding-plan materialization consume the exact coordinate.
@@ -3243,6 +3249,23 @@ pub struct IrFunctionOverride {
 }
 
 impl IrFile {
+    pub(crate) fn record_class_source_qualified_name(
+        &mut self,
+        class: ClassId,
+        name: impl Into<String>,
+    ) {
+        assert!(
+            self.class_source_qualified_names
+                .insert(class, KtString::from(name.into()))
+                .is_none(),
+            "a source classifier has one qualified declaration name"
+        );
+    }
+
+    pub(crate) fn class_source_qualified_name(&self, class: ClassId) -> Option<KtString> {
+        self.class_source_qualified_names.get(&class).cloned()
+    }
+
     pub(crate) fn expr_diverges_by(
         &self,
         expression: ExprId,

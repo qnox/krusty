@@ -1256,6 +1256,16 @@ fn lower_file_at_reporting_impl(
                         .unwrap_or(crate::ir::AnnoRetention::Default)
                 }),
             });
+            let source_qualified_name = match file
+                .package
+                .as_deref()
+                .filter(|package| !package.is_empty())
+            {
+                Some(package) => format!("{package}.{}", c.name),
+                None => c.name.clone(),
+            };
+            lo.ir
+                .record_class_source_qualified_name(id, source_qualified_name);
             // Record a LOCAL class's captures against its IR id, so every construction supplies
             // them (`emit_new`). An anonymous object is not recorded: its single construction site
             // has its own lowering, which already carries them.
