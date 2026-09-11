@@ -2289,11 +2289,7 @@ impl JvmLibraries {
             // `MutableMap!`, so `bindings["k"] = v` resolves. What must not carry the mutable face
             // is a COLLECTION FACE itself — `java/util/List` and the Kotlin read-only builtin that
             // realizes it.
-            let is_collection_face =
-                super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal_name).is_some()
-                    || super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal_name)
-                        .is_some()
-                    || internal_name.render().starts_with("kotlin/collections/");
+            let is_collection_face = super::jvm_class_map::is_mapped_collection_face(internal_name);
             if !ci.is_interface() || !is_collection_face {
                 for m in std::iter::once(internal_name)
                     .chain(supertypes.iter_ids())
