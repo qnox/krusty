@@ -1436,3 +1436,9 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the class's closing brace without backend source recovery. With these a plain `enum class` with a
   companion and a `@Serializable` enum (with and without properties) are byte-identical.
   `tests/serialization_companion_byte_parity_e2e.rs`, `tests/enum_companion_field_order_e2e.rs`.
+- **A `$serializer`'s `getDescriptor` is EMITTED fourth, not first (fix).** kotlinc's member order is
+  `<init>`, `serialize`, `deserialize`, `getDescriptor`, `childSerializers`,
+  `typeParametersSerializers`, then the bridges. The plugin DECLARES `getDescriptor` first — the
+  descriptor field it returns is built in `<init>` — and wrote the class's member list in declaration
+  order, so it was emitted second. Declaration order and emission order are independent here; only
+  `ser.methods` decides the latter. `tests/serialization_companion_byte_parity_e2e.rs`.

@@ -1927,7 +1927,11 @@ impl IrPlugin for SerializationPlugin {
                     check: None,
                 })
                 .collect();
-            ser.methods = vec![descriptor, serialize, deserialize, child, type_params_ser];
+            // kotlinc's `$serializer` member order is `<init>`, `serialize`, `deserialize`,
+            // `getDescriptor`, `childSerializers`, `typeParametersSerializers`, then the bridges.
+            // `getDescriptor` is DECLARED first — the descriptor field it returns is built in
+            // `<init>` — but EMITTED fourth.
+            ser.methods = vec![serialize, deserialize, descriptor, child, type_params_ser];
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
             // and delegates to the concrete `Foo`-typed override.
@@ -3627,12 +3631,14 @@ mod tests {
             .iter()
             .map(|&fid| ir.functions[fid as usize].name.as_str())
             .collect();
+        // kotlinc's emission order — `getDescriptor` is DECLARED first (the descriptor field it
+        // returns is built in `<init>`) but EMITTED after `deserialize`.
         assert_eq!(
             names,
             vec![
-                "getDescriptor",
                 "serialize",
                 "deserialize",
+                "getDescriptor",
                 "childSerializers",
                 "typeParametersSerializers"
             ]
