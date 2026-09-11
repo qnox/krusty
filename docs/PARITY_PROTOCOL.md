@@ -1269,3 +1269,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   retained rows to observe: with one row the two orders coincide, which is why the
   single-nested-class fixtures missed it.
   `tests/inner_class_name_pool_order_e2e.rs`.
+- **The InnerClasses seed's retained set is a FIXPOINT (fix, follow-up to the seed-order entry).**
+  Interning one row's OUTER class ref can be what makes an ENCLOSING row referenced, so filtering the
+  candidates once up front is not enough. A table spanning a nesting chain shows it: for
+  `A$B$Companion` the rows are `A$B`, `A$B$Alpha`, `A$B$Companion`, and the `A$B` row is retained only
+  once `Class(A$B)` is in the pool — which seeding the companion row is what puts there. Filtering
+  once dropped that row from the seed and left `finish` to intern its refs afterwards, transposing the
+  pool. Seeding also has to run in TWO passes — every retained row's class entry, then every simple
+  name — because kotlinc interns the table's class entries first and its names second; interleaving
+  per row is indistinguishable only while all rows share one outer, which is exactly the flat
+  `Foo$$serializer`/`Foo$Companion` shape the first fix was measured on.
+  `tests/inner_class_name_pool_order_e2e.rs` (`a_nesting_chain_interns_every_class_entry_before_any_name`).
+  Corpus: 2618 → 3898 of 28059 classes byte-identical, with the compile state unchanged (19 modules /
+  76 errors).

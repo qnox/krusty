@@ -815,15 +815,35 @@ impl ClassWriter {
         // Discover those rows before sorting; resolving them later from `finish` would intern their
         // names after every source row and recreate the very order mismatch this seed prevents.
         self.resolve_inner_classes();
-        let specs = self
-            .inner_class_candidates
-            .iter()
-            .filter(|spec| self.retains_inner_class(spec))
-            .cloned()
-            .collect::<Vec<_>>();
-        for spec in specs {
-            if let Some(outer) = &spec.outer {
-                self.cp.class(outer);
+        let specs = self.inner_class_candidates.clone();
+        // Retention is a FIXPOINT, not a single filter pass: interning one row's outer ref can be
+        // what makes an ENCLOSING row referenced. A table spanning a nesting chain is the case —
+        // for `A$B$Companion` the `A$B` row is kept only once `Class(A$B)` is in the pool, which
+        // seeding the companion row is what puts there. Filtering once up front dropped that row
+        // here and left `finish` to intern its refs afterwards, out of order.
+        let mut retained = vec![false; specs.len()];
+        loop {
+            let mut grew = false;
+            for (index, spec) in specs.iter().enumerate() {
+                if retained[index] || !self.retains_inner_class(spec) {
+                    continue;
+                }
+                retained[index] = true;
+                grew = true;
+                if let Some(outer) = &spec.outer {
+                    self.cp.class(outer);
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        // Names only after EVERY retained row's outer ref. kotlinc interns the table's class
+        // entries first and its simple names second, so interleaving them per row transposes the
+        // two as soon as the table spans more than one outer.
+        for (spec, keep) in specs.iter().zip(&retained) {
+            if !keep {
+                continue;
             }
             if let Some(name) = &spec.name {
                 self.cp.utf8(name);
