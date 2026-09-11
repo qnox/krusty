@@ -221,6 +221,7 @@ fn blank_class(fq: &str) -> IrClass {
         is_data: false,
         decl_line: 0,
         decl_start_line: 0,
+        decl_end_line: 0,
         type_param_bounds: Vec::new(),
         type_params: Vec::new(),
         captured_type_params: Vec::new(),

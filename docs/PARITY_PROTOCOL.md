@@ -1418,3 +1418,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enum_class_is_byte_identical`.
   A plain `enum class` with a companion still differs in ONE place: its constructor's
   `LineNumberTable` pc (kotlinc maps the line at pc 0, before the `super` call; krusty at pc 6).
+- **An enum's generated static sits AFTER the constructor properties, and its ctor takes the two-line
+  rule (fix).** Two shapes a single-property-free fixture cannot distinguish, both found by testing a
+  `@Serializable` enum WITH a constructor property:
+  1. FIELD ORDER is `Companion, <ctor properties>, $cachedSerializer$delegate, <entries>, $VALUES,
+     $ENTRIES` — the delegate follows the properties, it does NOT sit beside `Companion`. A fixture
+     with no properties reads the same either way, which is how the wrong order shipped. The writer
+     uses `LateFieldPlacement::At` so a late field can name its table position instead of only
+     "first", without contradictory placement state.
+  2. the enum constructor takes the same two-line rule the class path applies to a primary ctor:
+     `super(name, ordinal)` maps to the DECLARATION start (annotations included), the property stores
+     that follow to the class HEADER line. The second entry exists ONLY when the ctor stores
+     something — an enum with no constructor properties gets the `super()` entry alone. A single-line
+     enum dedupes the two, so only an ANNOTATED, multi-line fixture shows the rule.
+  The parser records the declaration END line while syntax is live and common IR carries that
+  stable source fact to emission. A multi-line enum's `<clinit>` trailing `return` therefore maps to
+  the class's closing brace without backend source recovery. With these a plain `enum class` with a
+  companion and a `@Serializable` enum (with and without properties) are byte-identical.
+  `tests/serialization_companion_byte_parity_e2e.rs`, `tests/enum_companion_field_order_e2e.rs`.

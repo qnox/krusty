@@ -21,6 +21,7 @@ fn attach_generated_declaration_lines(
 ) {
     ir.classes[class as usize].decl_line = line;
     ir.classes[class as usize].decl_start_line = line;
+    ir.classes[class as usize].decl_end_line = line;
     for &function in functions {
         ir.fn_decl_lines.insert(function, line);
         ir.fn_sig_lines.insert(function, line);
@@ -83,6 +84,7 @@ pub(super) fn accept_active_debug_metadata(
             if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
                 ir.classes[class as usize].decl_line = classifier.decl_line;
                 ir.classes[class as usize].decl_start_line = classifier.decl_start_line;
+                ir.classes[class as usize].decl_end_line = classifier.decl_end_line;
                 if classifier.ctor_close_line != 0 {
                     ir.ctor_close_lines.insert(
                         ir.classes[class as usize].fq_name_id(),
