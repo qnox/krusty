@@ -1148,6 +1148,10 @@ pub struct ClassDecl {
     /// on its own line above the header. kotlinc maps the primary constructor's `super()` call to
     /// this line and its trailing `return` back to the header line, so both are needed.
     pub decl_start_line: u32,
+    /// 1-based source line where the declaration ends (0 = unknown). For a class body this is the
+    /// closing `}`; for a bodyless declaration it is the line containing the final header token.
+    /// Filled by the same parser post-pass as [`Self::decl_line`].
+    pub decl_end_line: u32,
     /// AT PARSE: the byte offset of the primary constructor's closing `)`; the same parser
     /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
     /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.

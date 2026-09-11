@@ -548,9 +548,7 @@ struct FieldInfo {
 /// `const val`'s name + `ConstantValue`, a facade backing field) interns AFTER every method window.
 /// Realized into a [`FieldInfo`] (appended after the eagerly-added fields) by `intern_late_fields`.
 struct LateField {
-    /// Explicit index in the finished field table, for a leading field that is NOT first: an enum's
-    /// `$cachedSerializer$delegate` follows the constructor properties while still interning late.
-    lead_index: Option<usize>,
+    placement: LateFieldPlacement,
     access: u16,
     name: String,
     desc: String,
@@ -564,9 +562,15 @@ struct LateField {
     /// before the class's own `@Metadata`, not after the methods.
     user_visible: Vec<crate::ir::AppliedAnnotation>,
     user_invisible: Vec<crate::ir::AppliedAnnotation>,
-    /// `true` ⇒ the realized field LEADS the field table (before the eagerly-added fields) — the
-    /// `Companion` field's position — while its pool entries still intern late.
-    lead: bool,
+}
+
+/// Position in the finished field table, independent from the constant-pool interning window.
+/// Keeping this as one value prevents contradictory "leading at an explicit index" states.
+enum LateFieldPlacement {
+    Trailing,
+    Leading,
+    /// An enum's generated serializer delegate follows its eagerly-added constructor properties.
+    At(usize),
 }
 
 impl LateField {
@@ -577,10 +581,10 @@ impl LateField {
         signature: Option<&str>,
         const_value: Option<crate::ir::IrConst>,
         ann: Option<&str>,
-        lead: bool,
+        placement: LateFieldPlacement,
     ) -> Self {
         Self {
-            lead_index: None,
+            placement,
             access,
             name: name.to_string(),
             desc: desc.to_string(),
@@ -589,7 +593,6 @@ impl LateField {
             ann: ann.map(str::to_string),
             user_visible: Vec::new(),
             user_invisible: Vec::new(),
-            lead,
         }
     }
 }
@@ -1062,39 +1065,45 @@ impl ClassWriter {
             signature,
             const_value,
             ann,
-            false,
+            LateFieldPlacement::Trailing,
         ));
     }
 
-    /// [`add_field_late_leading`] carrying a generic `Signature` and a nullability annotation — an
-    /// enum's `$cachedSerializer$delegate` leads the field table beside `Companion`, and kotlinc
-    /// gives it both.
-    pub fn add_field_late_leading_sig(
+    /// Add a deferred field at an explicit position in the finished field table, carrying an
+    /// optional generic `Signature` and nullability annotation.
+    pub fn add_field_late_at_sig(
         &mut self,
         access: u16,
         name: &str,
         desc: &str,
         signature: Option<&str>,
         ann: Option<&str>,
-        at: Option<usize>,
+        at: usize,
     ) {
-        let mut field = LateField::new(access, name, desc, signature, None, ann, true);
-        field.lead_index = at;
-        self.late_fields.push(field);
+        self.late_fields.push(LateField::new(
+            access,
+            name,
+            desc,
+            signature,
+            None,
+            ann,
+            LateFieldPlacement::At(at),
+        ));
     }
 
     /// [`add_field_late`], but the realized field LEADS the field table (kotlinc puts a class's
     /// `Companion` field before the instance fields, while interning it with the field visit).
     pub fn add_field_late_leading(&mut self, access: u16, name: &str, desc: &str) {
         // The `Companion` field is a non-null reference — kotlinc annotates it.
-        self.add_field_late_leading_sig(
+        self.late_fields.push(LateField::new(
             access,
             name,
             desc,
             None,
-            Some("Lorg/jetbrains/annotations/NotNull;"),
             None,
-        );
+            Some("Lorg/jetbrains/annotations/NotNull;"),
+            LateFieldPlacement::Leading,
+        ));
     }
 
     /// Realize the deferred fields NOW rather than at `finish`. An enum's leading fields carry a
@@ -1151,14 +1160,13 @@ impl ClassWriter {
                 visible_anns,
                 invisible_anns,
             };
-            if let Some(at) = lf.lead_index {
-                let at = at.min(self.fields.len());
-                self.fields.insert(at, info);
-            } else if lf.lead {
-                self.fields.insert(lead_at, info);
-                lead_at += 1;
-            } else {
-                self.fields.push(info);
+            match lf.placement {
+                LateFieldPlacement::Trailing => self.fields.push(info),
+                LateFieldPlacement::Leading => {
+                    self.fields.insert(lead_at, info);
+                    lead_at += 1;
+                }
+                LateFieldPlacement::At(at) => self.fields.insert(at.min(self.fields.len()), info),
             }
         }
     }

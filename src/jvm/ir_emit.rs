@@ -10153,13 +10153,13 @@ fn emit_enum_class(
         // cannot tell that apart from "directly after Companion", which is why this needs the
         // explicit index rather than the plain leading form.
         let at = usize::from(c.companion_class.is_some()) + c.fields.len();
-        cw.add_field_late_leading_sig(
+        cw.add_field_late_at_sig(
             acc,
             &s.name,
             &ir_type_desc(&s.ty),
             signatures.field.as_deref(),
             ann,
-            Some(at),
+            at,
         );
     }
     // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
@@ -10636,7 +10636,7 @@ fn emit_enum_class(
         // the same precedence the leading field block uses.
         emit_companion_init(e.cw, &mut clinit, &fq, c);
         // A generated static's store gets its OWN `<clinit>` line entry, the way each entry's
-        // construction does, and the trailing `return` maps back to the first line. `<clinit>`'s
+        // construction does, and the trailing `return` maps to the class's closing line. `<clinit>`'s
         // table is CURATED through `set_method_lines` — `add_method` DROPS a `<clinit>` builder's
         // line marks — so pushing entries here is the only thing that reaches the attribute.
         let mut stepped_away = false;
@@ -10650,17 +10650,13 @@ fn emit_enum_class(
         // The trailing `return` is mapped back only when a store STEPPED AWAY from the entries'
         // line. An enum with no generated statics has a single-entry table, and adding a closing
         // entry there is four bytes kotlinc does not write.
-        if stepped_away {
-            // kotlinc maps the trailing `return` to the declaration's CLOSING BRACE line. The IR
-            // records no class-close line (`ctor_close_lines` is the CONSTRUCTOR's), so this uses
-            // the first entry's line, which coincides for an enum whose entries and closing brace
-            // share a line — true of the single-line shape, not of a multi-line one, where the
-            // entry is still off by the distance to the brace.
-            if let Some(&(_, first)) = clinit_lines.first() {
-                if clinit_lines.last().map(|&(_, l)| l) != Some(first) {
-                    clinit_lines.push((clinit.bytes.len() as u16, first));
-                }
-            }
+        if stepped_away
+            && c.decl_end_line != 0
+            && clinit_lines.last().map(|&(_, line)| line) != Some(c.decl_end_line)
+        {
+            // The frontend records the source declaration's end while syntax is available; the
+            // backend consumes that checked source fact instead of guessing from entry lines.
+            clinit_lines.push((clinit.bytes.len() as u16, c.decl_end_line));
         }
         clinit.ret_void();
         // `max_locals` is exactly what the body allocated — entry-arg spills bump `next_slot`, and a

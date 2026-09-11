@@ -210,10 +210,10 @@ fn structure(disassembly: &str) -> Vec<String> {
 /// DECLARATION starts and the property stores that follow to the HEADER line — two entries. krusty
 /// emitted one, at the stores' pc.
 ///
-/// A single-line enum cannot show this: both lines coincide and the entries dedupe to one, which is
-/// also why the second entry must be omitted when the constructor stores nothing.
+/// Its `<clinit>` also returns on the closing-brace line. A single-line enum cannot show either
+/// distinction because all source lines coincide.
 #[test]
-fn an_annotated_enum_constructor_maps_super_and_stores_separately() {
+fn an_annotated_enum_maps_constructor_and_clinit_lines() {
     let Some((plugin, cp)) = plugin_and_runtime() else {
         eprintln!("skipping: serialization plugin or runtime jar not available locally");
         return;
@@ -239,7 +239,7 @@ fn an_annotated_enum_constructor_maps_super_and_stores_separately() {
             .position(|line| {
                 line.starts_with("private Phase(") || line.contains(" Phase(java.lang.String);")
             })
-            .unwrap_or(0);
+            .expect("enum constructor");
         rows.into_iter()
             .skip(at)
             .skip_while(|line| !line.starts_with("LineNumberTable"))
@@ -259,6 +259,40 @@ fn an_annotated_enum_constructor_maps_super_and_stores_separately() {
         ctor_lines(&built.krusty),
         want,
         "constructor LineNumberTable"
+    );
+
+    let clinit_lines = |text: &str| {
+        let rows: Vec<&str> = text.lines().map(str::trim).collect();
+        let at = rows
+            .iter()
+            .position(|line| *line == "static {};")
+            .expect("enum has <clinit>");
+        rows.into_iter()
+            .skip(at)
+            .skip_while(|line| !line.starts_with("LineNumberTable"))
+            .skip(1)
+            .take_while(|line| line.starts_with("line "))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let want = clinit_lines(&built.reference);
+    let closing_line = want.last().and_then(|entry| {
+        entry
+            .strip_prefix("line ")?
+            .split_once(':')?
+            .0
+            .parse::<u32>()
+            .ok()
+    });
+    assert_eq!(
+        closing_line,
+        Some(7),
+        "reference returns on the closing brace"
+    );
+    assert_eq!(
+        clinit_lines(&built.krusty),
+        want,
+        "<clinit> LineNumberTable"
     );
 }
 
