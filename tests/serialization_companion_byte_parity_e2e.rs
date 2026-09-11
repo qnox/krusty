@@ -205,6 +205,61 @@ fn structure(disassembly: &str) -> Vec<String> {
     out
 }
 
+/// A `@Serializable` ENUM's companion. kotlinc does not inline the cached-serializer lookup into
+/// `serializer()`: it puts that body in a private, SYNTHETIC `get$cachedSerializer()` and has
+/// `serializer()` delegate to it with `invokespecial`. krusty inlined the lookup, so the companion
+/// had one method where kotlinc has two.
+///
+/// Being synthetic is what carries the rest of the shape: `ACC_SYNTHETIC`, exclusion from
+/// `@Metadata` (a compiler-invented member is not a declaration reflection should see), and — since
+/// the helper is created in the backend, past the frontend's generated-declaration line transfer —
+/// a declaration line copied from the companion so the debug tables get attached at all.
+///
+/// This asserts full BYTE equality rather than structure: every one of those facts has to hold at
+/// once for the class to match, and they are individually easy to get right while still differing.
+#[test]
+fn serializable_enum_companion_is_byte_identical() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, INACTIVE }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializableEnumCompanion",
+        src,
+        "Status$Companion",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert!(
+        built.reference.contains("get$cachedSerializer"),
+        "reference must carry the helper this test is about:\n{}",
+        built.reference
+    );
+    if built.krusty_bytes != built.reference_bytes {
+        let (want, got) = (structure(&built.reference), structure(&built.krusty));
+        let first = want
+            .iter()
+            .zip(got.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| want.len().min(got.len()));
+        panic!(
+            "Status$Companion differs from kotlinc ({} B vs {} B); first structural difference at line {first}\n  kotlinc: {:?}\n  krusty:  {:?}",
+            built.krusty_bytes.len(),
+            built.reference_bytes.len(),
+            want.get(first),
+            got.get(first),
+        );
+    }
+}
+
 #[test]
 fn serializable_companion_matches_kotlinc_structure() {
     let Some((plugin, cp)) = plugin_and_runtime() else {

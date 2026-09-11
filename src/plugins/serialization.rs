@@ -195,16 +195,14 @@ fn complete_frontend_serializer_accessor(
     ir: &mut IrFile,
     owner: crate::types::TypeName,
     body: ExprId,
-) -> bool {
-    let Some(function) = frontend_serializer_accessor(ir, owner) else {
-        return false;
-    };
+) -> Option<u32> {
+    let function = frontend_serializer_accessor(ir, owner)?;
     let accessor = &mut ir.functions[function as usize];
     assert!(
         accessor.body.replace(body).is_none(),
         "a frontend plugin declaration may receive one generated body"
     );
-    true
+    Some(function)
 }
 
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
@@ -219,10 +217,10 @@ fn place_serializer_accessor(
     params: Vec<Ty>,
     ret: Ty,
     body: ExprId,
-) {
+) -> u32 {
     let comp_fq = companion_fq(class_fq);
-    if complete_frontend_serializer_accessor(ir, type_name(&comp_fq), body) {
-        return;
+    if let Some(accessor) = complete_frontend_serializer_accessor(ir, type_name(&comp_fq), body) {
+        return accessor;
     }
     let accessor = ir.add_fun(IrFunction {
         name: "serializer".to_string(),
@@ -247,6 +245,7 @@ fn place_serializer_accessor(
         ir.add_class(comp);
         ir.classes[class_id as usize].companion_class = Some(crate::types::type_name(&comp_fq));
     }
+    accessor
 }
 
 /// Emit a call to `class_fq.serializer(args)` routed through its `Companion` — `getstatic
@@ -1161,7 +1160,7 @@ impl SerializationPlugin {
         } else {
             type_name(&companion_fq(class_fq))
         };
-        if complete_frontend_serializer_accessor(ir, frontend_owner, body) {
+        if complete_frontend_serializer_accessor(ir, frontend_owner, body).is_some() {
             return;
         }
         // A custom-serializer / enum / sealed class keeps `serializer()` as a STATIC on the class for
@@ -1274,18 +1273,75 @@ impl SerializationPlugin {
             type_operand: Ty::obj("kotlinx/serialization/KSerializer"),
         });
         let sret = ir.add_expr(IrExpr::Return(Some(cast)));
-        let sbody = ir.add_expr(IrExpr::Block {
+        let cached_body = ir.add_expr(IrExpr::Block {
             stmts: vec![sret],
             value: None,
         });
-        place_serializer_accessor(
+        // kotlinc does NOT inline the cached lookup into `serializer()`: it puts that body in a
+        // private `get$cachedSerializer()` on the companion and has `serializer()` delegate to it.
+        // The helper's descriptor is the RAW `KSerializer` (no generic Signature); only the public
+        // `serializer()` carries the type argument.
+        let comp_fq = companion_fq(class_fq);
+        let cached = ir.add_fun(IrFunction {
+            name: "get$cachedSerializer".to_string(),
+            params: vec![],
+            ret: Ty::obj("kotlinx/serialization/KSerializer"),
+            body: Some(cached_body),
+            is_static: false,
+            dispatch_receiver: Some(type_name(&comp_fq)),
+            param_checks: Vec::new(),
+        });
+        // `private` makes the emitter mark it ACC_PRIVATE and reach it with `invokespecial` — which
+        // is what the delegating call has to become. That dispatch decision reads a RESOLVED
+        // `IrExpr::MethodCall` (class + member index), so the delegation below cannot be a
+        // by-name `Callee::Virtual`: that form emits `invokevirtual` and never consults the set.
+        ir.private_methods.insert(cached);
+        // kotlinc marks the helper ACC_SYNTHETIC, which also keeps it OUT of `@Metadata`: it is a
+        // compiler-invented member, not a declaration the reflection layer should see.
+        ir.synthetic_methods.insert(cached);
+        // The accessor is placed first so the companion exists and `serializer()` precedes the
+        // helper — kotlinc's member order is `<init>`, `serializer()`, `get$cachedSerializer()`,
+        // then the synthetic marker ctor the emitter appends. Its body is rewritten below, once
+        // the helper's member index is known.
+        let accessor = place_serializer_accessor(
             ir,
             class_id,
             class_fq,
             vec![],
             kserializer_of(class_ty(class_fq)),
-            sbody,
+            cached_body,
         );
+        let Some(comp_id) = ir
+            .classes
+            .iter()
+            .position(|candidate| candidate.fq_name_matches(&comp_fq))
+        else {
+            return;
+        };
+        let cached_index = ir.classes[comp_id].methods.len() as u32;
+        ir.classes[comp_id].methods.push(cached);
+        // The helper exists only here, in the backend, so the frontend's generated-declaration line
+        // transfer never sees it — and the emitter attaches neither debug table without a line.
+        // The companion itself already carries the annotated owner's line by this point, which is
+        // the line kotlinc maps every one of its generated members to.
+        let companion_line = ir.classes[comp_id].decl_line;
+        if companion_line != 0 {
+            ir.fn_decl_lines.insert(cached, companion_line);
+            ir.fn_sig_lines.insert(cached, companion_line);
+        }
+        let this = ir.add_expr(IrExpr::GetValue(0));
+        let delegate = ir.add_expr(IrExpr::MethodCall {
+            class: comp_id as u32,
+            index: cached_index,
+            receiver: this,
+            args: vec![],
+        });
+        let dret = ir.add_expr(IrExpr::Return(Some(delegate)));
+        let sbody = ir.add_expr(IrExpr::Block {
+            stmts: vec![dret],
+            value: None,
+        });
+        ir.functions[accessor as usize].body = Some(sbody);
     }
 
     /// `getOrCreateKotlinClass(<internal>.class)` — a `KClass` literal for an internal class name.
@@ -1371,7 +1427,9 @@ impl SerializationPlugin {
             stmts: vec![ret],
             value: None,
         });
-        if complete_frontend_serializer_accessor(ir, type_name(&companion_fq(class_fq)), body) {
+        if complete_frontend_serializer_accessor(ir, type_name(&companion_fq(class_fq)), body)
+            .is_some()
+        {
             return;
         }
         // Sealed keeps `serializer()` STATIC on the class (Companion relocation is data-class-only for now).
@@ -2011,7 +2069,9 @@ impl IrPlugin for SerializationPlugin {
             // classes, including generic ones, complete the exact companion member contributed to
             // frontend resolution.
             if ir.classes[class_id as usize].is_object {
-                if !complete_frontend_serializer_accessor(ir, type_name(&class_fq), acc_body) {
+                if complete_frontend_serializer_accessor(ir, type_name(&class_fq), acc_body)
+                    .is_none()
+                {
                     let accessor = ir.add_fun(IrFunction {
                         name: "serializer".to_string(),
                         params: acc_params,
