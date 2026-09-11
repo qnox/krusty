@@ -1282,3 +1282,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/inner_class_name_pool_order_e2e.rs` (`a_nesting_chain_interns_every_class_entry_before_any_name`).
   Corpus: 2618 → 3898 of 28059 classes byte-identical, with the compile state unchanged (19 modules /
   76 errors).
+- **A `@Serializable` ENUM's companion delegates to a private synthetic `get$cachedSerializer()`
+  (fix).** kotlinc does not inline the cached-serializer lookup into `serializer()`: it puts that body
+  (`access$get$cachedSerializer$delegate$cp()` → `Lazy.getValue()` → `checkcast KSerializer`) in a
+  private `get$cachedSerializer()` on the companion and has `serializer()` delegate with
+  `aload_0; invokespecial`. krusty inlined it, so the companion held one method where kotlinc holds
+  two. Three facts travel with the helper, each independently easy to miss: it is `ACC_SYNTHETIC`;
+  being synthetic keeps it OUT of `@Metadata` (a compiler-invented member is not a declaration
+  reflection should see); and because it is created in the BACKEND plugin — past the frontend's
+  generated-declaration line transfer (see the generated-companion entry above) — it needs a
+  declaration line copied from the companion, or the emitter attaches neither debug table.
+  **The delegating call must be a RESOLVED `IrExpr::MethodCall` (class + member index), not a by-name
+  `Callee::Virtual`**: the private-dispatch decision reads the resolved form, so the by-name shape
+  emits `invokevirtual` and silently never consults `private_methods`.
+  `tests/serialization_companion_byte_parity_e2e.rs` (`serializable_enum_companion_is_byte_identical`).
+  The enum CLASS itself still differs (kotlinc builds the `Lazy` delegate through an `invokedynamic`
+  lambda; krusty does not) — that is a separate, larger shape.
