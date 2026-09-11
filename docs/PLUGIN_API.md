@@ -30,13 +30,14 @@ Kotlin never exposes the parse tree (PSI) to generation/transform plugins; every
 backend IR, KSP, APT) works on a *resolved* representation. A plugin must reason about a field's
 type, a class's supertypes, whether a function is `@Composable` — none of that exists pre-resolution.
 
-krusty's pipeline `parse → collect signatures (global) → typecheck → ir_lower → IR passes → emit`
+krusty's pipeline `stream headers → resolve stable signatures → check bounded bodies → checked FIR
+→ common lowering → IR passes → emit`
 gives two hooks that map to FIR's phase split:
 
 | Plugin job | Hook | Level | Why this level |
 |---|---|---|---|
-| declaration + supertype generation (symbols user code references) | signature phase (pre-typecheck, global) | signature/AST model | generated symbols must exist *before* typecheck so references resolve |
-| body generation / expression rewrite | IR pass (post-`ir_lower`) | `IrFile` | needs resolved types + descriptors; feeds the backend directly |
+| declaration + supertype generation (symbols user code references) | signature phase (pre-typecheck, global) | stable signature model | generated symbols must exist *before* typecheck so references resolve |
+| body generation / expression rewrite | IR pass (post-common-lowering) | `IrFile` | needs resolved types and checked operations; feeds the backend directly |
 
 The forcing constraint: a class introduced only at IR level (post-typecheck) cannot have been
 type-checked against by user code in the same module. `value_classes` is IR-only **only because** it
@@ -51,7 +52,7 @@ straddle: read a resolved view, emit source that re-enters at the parser.
 ## World 1 — native IR plugins (`IrPlugin`)
 
 A native plugin is a pass over `IrFile`, exactly like `jvm::value_classes::lower_value_classes`. It
-runs after `ir_lower` and before backend emit. The trait mirrors Kotlin's **three** real extension
+runs after checked-FIR common lowering and before backend emit. The trait mirrors Kotlin's **three** real extension
 points so a port maps method-for-method:
 
 | `IrPlugin` method | Kotlin extension point | Job |
@@ -84,17 +85,9 @@ nothing stops `generate_declarations` from rewriting a body. This mirrors kotlin
 also get broad access) and is deliberate — the phase ordering, not a capability sandbox, is the
 contract. A future tightening could pass a phase-scoped facade instead of raw `&mut IrFile`.
 
-`PluginContext` carries the annotation index (`ClassId → applied annotation FqNames`). In this PoC
-it is a **side table** because `IrClass` does not yet store applied annotations (only known-flag
-bools like `is_data`). The production integration is one field:
-
-```rust
-// src/ir.rs — IrClass
-pub annotations: Vec<String>,   // applied annotation FqNames, populated by ir_lower
-```
-
-...populated from the AST in `ir_lower`, after which `PluginContext` reads it directly. Kept out of
-this PoC to avoid editing every `IrClass` struct-literal site (the gate stays `0 FAIL`).
+`PluginContext` builds its annotation index (`ClassId → resolved TypeName identities`) from checked
+common IR. `IrClass::applied_annotations` already carries the resolved identities and folded
+arguments, so plugins do not inspect parser syntax or compare annotation strings.
 
 ### Reference plugin — `serialization`
 
@@ -294,6 +287,10 @@ Every plugin is validated the krusty way: differential harness vs real `kotlinc`
 diffing ABI signatures / bytecode.
 
 ## Implementation status (rounds 1–6) and honest gap to the conformance bar
+
+The dated entries below are an implementation history. References there to `ir_lower`, `TypeInfo`,
+or parser-keyed symbol tables describe the code at the date of the entry; the current ownership
+boundaries are the ones documented above and in `ARCHITECTURE.md`.
 
 Landed on `master`, each round reviewed (cavecrew-reviewer), TDD:
 
