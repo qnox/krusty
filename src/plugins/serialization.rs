@@ -1184,8 +1184,24 @@ impl SerializationPlugin {
     /// `public static final Lazy access$get$cachedSerializer$delegate$cp()` accessor. Matches kotlinc's
     /// member set (Companion class + `Companion` field + the accessor; no static `serializer()`).
     fn add_enum_serializer_companion(ir: &mut IrFile, class_id: u32, class_fq: &str) {
-        let lazy_ty = class_ty("kotlin/Lazy");
-        // `$cachedSerializer$delegate = LazyKt.lazyOf(new EnumSerializer(<name>, E.values()))`.
+        // The ANNOTATED start line (the `@Serializable` line), not the `enum class` keyword's —
+        // kotlinc maps every generated member, and the delegate's `<clinit>` store, to where the
+        // declaration begins, annotations included.
+        let owner_line = ir.classes[class_id as usize].decl_start_line;
+        // The delegate's DECLARED type carries its arguments so the field gets kotlinc's generic
+        // `Signature` (`Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`);
+        // the descriptor still erases to `Lkotlin/Lazy;`.
+        let lazy_ty = Ty::obj_args(
+            "kotlin/Lazy",
+            &[Ty::obj_args(
+                "kotlinx/serialization/KSerializer",
+                // `kotlin/Any`, not `java/lang/Object`: the checked-symbol validation only knows
+                // Kotlin classifiers, and the signature formatter maps this to `Ljava/lang/Object;`.
+                &[class_ty("kotlin/Any")],
+            )],
+        );
+        // `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION) { EnumsKt
+        //     .createSimpleEnumSerializer(<name>, E.values()) }`.
         let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
             class_fq.replace('/', "."),
         ))));
@@ -1250,9 +1266,6 @@ impl SerializationPlugin {
         // Generated in the BACKEND, past the frontend's declaration-line transfer, so the emitter
         // would attach no debug tables without a line of its own. kotlinc maps it to the annotated
         // owner's declaration line, which the class already carries by now.
-        // The ANNOTATED start line (the `@Serializable` line), not the `enum class` keyword's —
-        // kotlinc maps a generated member to where the declaration begins, annotations included.
-        let owner_line = ir.classes[class_id as usize].decl_start_line;
         if owner_line != 0 {
             ir.fn_decl_lines.insert(anonymous, owner_line);
             ir.fn_sig_lines.insert(anonymous, owner_line);
@@ -1303,7 +1316,9 @@ impl SerializationPlugin {
         let acc = ir.add_fun(IrFunction {
             name: "access$get$cachedSerializer$delegate$cp".to_string(),
             params: vec![],
-            ret: lazy_ty,
+            // RAW `Lazy` on purpose: the FIELD carries the generic `Signature`, the synthetic
+            // accessor does not — kotlinc gives this bridge neither a `Signature` nor nullability.
+            ret: class_ty("kotlin/Lazy"),
             body: Some(acc_body),
             is_static: true,
             dispatch_receiver: None,

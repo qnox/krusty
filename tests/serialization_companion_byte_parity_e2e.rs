@@ -362,9 +362,8 @@ fn a_serializable_enum_builds_its_serializer_lazily() {
 
 /// A `@Serializable` enum's `$cachedSerializer$delegate` sits directly after `Companion` and BEFORE
 /// the entry constants — the same leading block the companion field is in, not the tail after
-/// `$VALUES`/`$ENTRIES`. Asserted as an ORDER because the enum class is not yet byte-identical (it
-/// still lacks the `invokedynamic` `Lazy` initializer and the field's `Signature`), so a byte
-/// assertion here would fail on those instead of on the ordering under test.
+/// `$VALUES`/`$ENTRIES`. Its complete declaration carries the same generic `Signature` and `@NotNull`
+/// as kotlinc, while the generated raw-`Lazy` access bridge carries neither attribute.
 #[test]
 fn a_serializable_enum_places_its_delegate_next_to_the_companion() {
     let Some((plugin, cp)) = plugin_and_runtime() else {
@@ -381,11 +380,8 @@ fn a_serializable_enum_places_its_delegate_next_to_the_companion() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    // Field NAMES in emission order. `javap -v` prints plenty that also ends in `;` — constant-pool
-    // `Utf8` rows, `Signature:` attributes, `LocalVariableTable` rows — so anchor on a leading
-    // access modifier, and compare names rather than whole declarations: the delegate's rendered
-    // type still differs (krusty has no field `Signature` yet), which is a separate gap from the
-    // ORDER under test here.
+    // Field names in emission order remain an independent contract: comparing only the delegate's
+    // attributes would not catch it drifting back behind the enum entries.
     let declarations = |text: &str| {
         text.lines()
             .map(str::trim)
@@ -410,6 +406,60 @@ fn a_serializable_enum_places_its_delegate_next_to_the_companion() {
         built.reference
     );
     assert_eq!(declarations(&built.krusty), want, "enum field order");
+
+    let member_block = |text: &str, start: &str, end: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.ends_with(start))
+            .expect("member declaration");
+        body.into_iter()
+            .skip(start)
+            .take_while(|line| !line.ends_with(end))
+            .collect::<Vec<_>>()
+    };
+    let reference_delegate =
+        member_block(&built.reference, "$cachedSerializer$delegate;", "ACTIVE;");
+    assert!(
+        reference_delegate.iter().any(|line| {
+            line.contains("Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;")
+        }),
+        "reference delegate must carry its complete generic Signature: {reference_delegate:?}"
+    );
+    assert!(
+        reference_delegate
+            .iter()
+            .any(|line| line.contains("org.jetbrains.annotations.NotNull")),
+        "reference delegate must carry @NotNull: {reference_delegate:?}"
+    );
+    assert_eq!(
+        member_block(&built.krusty, "$cachedSerializer$delegate;", "ACTIVE;",),
+        reference_delegate,
+        "delegate declaration and attributes"
+    );
+
+    let reference_bridge = member_block(
+        &built.reference,
+        "access$get$cachedSerializer$delegate$cp();",
+        "static {};",
+    );
+    assert!(
+        reference_bridge.iter().all(|line| {
+            !line.starts_with("Signature:")
+                && !line.contains("org.jetbrains.annotations.NotNull")
+                && !line.contains("org.jetbrains.annotations.Nullable")
+        }),
+        "reference raw-Lazy bridge must carry neither a Signature nor nullability: {reference_bridge:?}"
+    );
+    assert_eq!(
+        member_block(
+            &built.krusty,
+            "access$get$cachedSerializer$delegate$cp();",
+            "static {};",
+        ),
+        reference_bridge,
+        "raw-Lazy bridge declaration and attributes"
+    );
 }
 
 /// A `@Serializable` ENUM's companion. kotlinc does not inline the cached-serializer lookup into
