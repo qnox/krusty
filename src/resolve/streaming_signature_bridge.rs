@@ -1852,16 +1852,31 @@ impl ProductionSignatureSemantics<'_> {
         let extra_admitted = |first: usize, extra: usize| {
             Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
         };
-        let slots = if requires_mapping {
-            Self::mapped_call_slots(
-                candidates,
-                &names,
-                arguments.len(),
-                trailing_lambda,
-                &extra_admitted,
-            )?
-        } else {
-            (0..arguments.len()).map(Some).collect()
+        let mapped = requires_mapping
+            .then(|| {
+                Self::mapped_call_slots(
+                    candidates,
+                    &names,
+                    arguments.len(),
+                    trailing_lambda,
+                    &extra_admitted,
+                )
+            })
+            .flatten();
+        let slots = match mapped {
+            Some(slots) => slots,
+            // Overloads can disagree about WHICH parameter a trailing lambda occupies — one takes
+            // `(block)`, the other `(flag = false, block)` — and `mapped_call_slots` then yields no
+            // single agreed mapping. With no NAMED argument the caller's own order is still
+            // unambiguous, so probe positionally rather than give up: this phase only supplies
+            // contextual types, and the per-candidate shapes it feeds are reconciled afterwards
+            // (a genuine disagreement about the argument's type still produces no expectation).
+            // Giving up here left the lambda unshaped, which declined the enclosing call and made
+            // an inferred property built from it publish `Error`.
+            None if !requires_mapping || names.iter().all(Option::is_none) => {
+                (0..arguments.len()).map(Some).collect()
+            }
+            None => return None,
         };
         let kinds = slots
             .iter()
