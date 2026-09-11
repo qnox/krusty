@@ -820,3 +820,58 @@ fn inner_classes(bytes: &[u8]) -> Vec<(String, u16)> {
         .map(|entry| (entry.inner.clone(), entry.access))
         .collect()
 }
+
+/// A `@Serializable` declaration's SERIAL NAME is its qualified Kotlin name, with the package
+/// separator AND the nesting separator both written as dots. krusty built it from the JVM internal
+/// name and replaced only `/`, so a nested declaration got `Outer$Middle$Phase` where kotlinc writes
+/// `Outer.Middle.Phase` — the serial form a peer decoder reads, and invisible to any top-level
+/// fixture.
+///
+/// Both generated carriers are checked: an enum's `createSimpleEnumSerializer(<name>, …)` and a
+/// class's `PluginGeneratedSerialDescriptor(<name>, …)`.
+#[test]
+fn a_nested_serializable_declaration_spells_its_serial_name_with_dots() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               class Outer {\n\
+               \x20   class Middle {\n\
+               \x20       @Serializable\n\
+               \x20       enum class Phase(val value: String) { UNKNOWN(\"unknown\") }\n\
+               \x20\n\
+               \x20       @Serializable\n\
+               \x20       data class Point(val x: Int)\n\
+               \x20   }\n\
+               }\n";
+    // The enum carries its own serial name; a class's lives on the generated `$serializer`.
+    for (class, expected) in [
+        ("Outer$Middle$Phase", "Outer.Middle.Phase"),
+        ("Outer$Middle$Point$$serializer", "Outer.Middle.Point"),
+    ] {
+        let Some(built) =
+            compare_with_kotlinc_plugin("NestedSerialName", src, class, &cp, "25", &extra)
+        else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        // The string PAYLOADS only: a generated body's instruction offsets are a separate parity
+        // question, and pinning them here would fail this test for something it does not test.
+        let names = |disassembly: &str| {
+            disassembly
+                .lines()
+                .filter_map(|line| line.split_once("// String Outer"))
+                .map(|(_, name)| format!("Outer{}", name.trim()))
+                .collect::<Vec<_>>()
+        };
+        let want = names(&built.reference);
+        assert!(
+            want.iter().any(|line| line.ends_with(expected)),
+            "reference must load the dotted serial name {expected} — the rule under test:\n{}",
+            built.reference
+        );
+        assert_eq!(names(&built.krusty), want, "{class}: serial name constants");
+    }
+}

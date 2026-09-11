@@ -205,6 +205,14 @@ fn complete_frontend_serializer_accessor(
     Some(function)
 }
 
+/// The `@Serializable` SERIAL NAME for a class: its qualified Kotlin name, with BOTH the package
+/// separator and the NESTING separator written as dots. An internal name spells nesting with `$`
+/// (`a/B$C`), and leaving that in produced `a.B$C` where kotlinc writes `a.B.C` — visible only on a
+/// NESTED declaration, which is why a top-level fixture never caught it.
+fn serial_name(class_fq: &str) -> String {
+    class_fq.replace(['/', '$'], ".")
+}
+
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
 /// companion, or synthesizing a `Foo$Companion` (`is_companion`: the emitter gives it a private ctor +
 /// a `(DefaultConstructorMarker)` accessor, and `companion_class` on the outer class emits the
@@ -1202,9 +1210,9 @@ impl SerializationPlugin {
         );
         // `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION) { EnumsKt
         //     .createSimpleEnumSerializer(<name>, E.values()) }`.
-        let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
-            class_fq.replace('/', "."),
-        ))));
+        let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(serial_name(
+            class_fq,
+        )))));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: type_name(class_fq),
@@ -1465,9 +1473,9 @@ impl SerializationPlugin {
             })
             .collect();
 
-        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
-            class_fq.replace('/', "."),
-        ))));
+        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(serial_name(
+            class_fq,
+        )))));
         let base_kclass = Self::kclass_literal(ir, class_fq);
         let sub_kclasses: Vec<ExprId> = subs
             .iter()
@@ -2011,7 +2019,7 @@ impl IrPlugin for SerializationPlugin {
                 // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
                 // <Underlying>Serializer.INSTANCE)` — `isInline == true`, one element (the underlying).
                 let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
-                    class_fq.replace('/', "."),
+                    serial_name(&class_fq),
                 ))));
                 let under_ser = foo_fields
                     .first()
@@ -2039,7 +2047,7 @@ impl IrPlugin for SerializationPlugin {
                 })];
             } else {
                 let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
-                    class_fq.replace('/', "."),
+                    serial_name(&class_fq),
                 ))));
                 // Pass `this` (the `$serializer`, a `GeneratedSerializer`) so the descriptor can derive
                 // element descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
