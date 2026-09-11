@@ -22,12 +22,18 @@ fn diagnostics(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
+fn assert_kotlinc_accepts(tag: &str, src: &str) {
+    let (code, diagnostics) = common::kotlinc_source_result(tag, src);
+    assert_eq!(code, 0, "kotlinc rejected {tag}: {diagnostics}");
+}
+
 #[test]
 fn a_nullable_value_stores_into_a_java_map_subclass() {
     const SRC: &str = "import java.util.Properties\n\
         fun store(p: Properties, v: String?) {\n\
         \x20 p[\"k\"] = v\n\
         }\n";
+    assert_kotlinc_accepts("JavaMapSubclassNullableStore", SRC);
     assert_eq!(diagnostics(SRC), Vec::<String>::new());
 }
 
@@ -35,6 +41,7 @@ fn a_nullable_value_stores_into_a_java_map_subclass() {
 fn a_java_map_subclass_widens_to_a_nullable_kotlin_map() {
     const SRC: &str = "import java.util.Properties\n\
         fun widen(p: Properties): MutableMap<Any?, Any?> = p\n";
+    assert_kotlinc_accepts("JavaMapSubclassNullableWiden", SRC);
     assert_eq!(diagnostics(SRC), Vec::<String>::new());
 }
 
@@ -53,6 +60,7 @@ fn the_stored_value_round_trips_through_the_java_map() {
         \x20 store(p, \"OK\")\n\
         \x20 return p[\"k\"] as? String ?: \"missing\"\n\
         }\n";
+    assert_kotlinc_accepts("JavaMapSubclassNullableRuntime", SRC);
     assert_eq!(
         common::compile_and_run_with_stdlib(SRC, "Main").expect("java map store runs"),
         "OK"
