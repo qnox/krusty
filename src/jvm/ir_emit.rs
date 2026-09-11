@@ -10191,12 +10191,10 @@ fn emit_enum_class(
     // descriptor, its `@NotNull`) before any of the synthesized machinery below. Emitting them only
     // at their method visit left those strings after `values`/`$VALUES` and shifted the pool.
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        {
-            cw.reserve_method_name(&property_getter_name(&f.name));
-            cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-            if field_nullability_kind(ir, &fq, &f.name, *t) == 1 {
-                cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
-            }
+        cw.reserve_method_name(&property_getter_name(&f.name));
+        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
+        if field_nullability_kind(ir, &fq, &f.name, *t) == 1 {
+            cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
         }
     }
     // …then the synthesized members, in kotlinc's visit order, each with the entries its body

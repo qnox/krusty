@@ -566,6 +566,30 @@ struct LateField {
     lead: bool,
 }
 
+impl LateField {
+    fn new(
+        access: u16,
+        name: &str,
+        desc: &str,
+        signature: Option<&str>,
+        const_value: Option<crate::ir::IrConst>,
+        ann: Option<&str>,
+        lead: bool,
+    ) -> Self {
+        Self {
+            access,
+            name: name.to_string(),
+            desc: desc.to_string(),
+            signature: signature.map(str::to_string),
+            const_value,
+            ann: ann.map(str::to_string),
+            user_visible: Vec::new(),
+            user_invisible: Vec::new(),
+            lead,
+        }
+    }
+}
+
 /// Partition retained declaration annotations into the two class-file attributes the JVM splits them
 /// across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then `RuntimeInvisibleAnnotations`
 /// (BINARY). Common IR carries one list per declaration; this boundary is the only place the split
@@ -1027,17 +1051,15 @@ impl ClassWriter {
         const_value: Option<crate::ir::IrConst>,
         ann: Option<&str>,
     ) {
-        self.late_fields.push(LateField {
+        self.late_fields.push(LateField::new(
             access,
-            name: name.to_string(),
-            desc: desc.to_string(),
-            user_visible: Vec::new(),
-            user_invisible: Vec::new(),
-            signature: signature.map(str::to_string),
+            name,
+            desc,
+            signature,
             const_value,
-            ann: ann.map(str::to_string),
-            lead: false,
-        });
+            ann,
+            false,
+        ));
     }
 
     /// [`add_field_late_leading`] carrying a generic `Signature` and a nullability annotation — an
@@ -1051,34 +1073,22 @@ impl ClassWriter {
         signature: Option<&str>,
         ann: Option<&str>,
     ) {
-        self.late_fields.push(LateField {
-            access,
-            name: name.to_string(),
-            desc: desc.to_string(),
-            user_visible: Vec::new(),
-            user_invisible: Vec::new(),
-            signature: signature.map(str::to_string),
-            const_value: None,
-            ann: ann.map(str::to_string),
-            lead: true,
-        });
+        self.late_fields.push(LateField::new(
+            access, name, desc, signature, None, ann, true,
+        ));
     }
 
     /// [`add_field_late`], but the realized field LEADS the field table (kotlinc puts a class's
     /// `Companion` field before the instance fields, while interning it with the field visit).
     pub fn add_field_late_leading(&mut self, access: u16, name: &str, desc: &str) {
-        self.late_fields.push(LateField {
+        // The `Companion` field is a non-null reference — kotlinc annotates it.
+        self.add_field_late_leading_sig(
             access,
-            name: name.to_string(),
-            desc: desc.to_string(),
-            signature: None,
-            const_value: None,
-            // The `Companion` field is a non-null reference — kotlinc annotates it.
-            ann: Some("Lorg/jetbrains/annotations/NotNull;".to_string()),
-            user_visible: Vec::new(),
-            user_invisible: Vec::new(),
-            lead: true,
-        });
+            name,
+            desc,
+            None,
+            Some("Lorg/jetbrains/annotations/NotNull;"),
+        );
     }
 
     /// Realize every [`LateField`] into the field table, interning name/descriptor/`ConstantValue`/
