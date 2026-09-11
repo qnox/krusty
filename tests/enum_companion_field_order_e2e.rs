@@ -171,27 +171,12 @@ fn an_enum_interns_its_pool_in_kotlincs_order() {
     }
 }
 
-/// An enum constructor maps each property store to the PARAMETER's own line and the trailing
-/// `return` back to the class header — the same three-entry shape kotlinc gives an ordinary class,
-/// which the enum path did not share: it put every store on the header line and wrote no closing
-/// entry.
-///
-/// Only a parameter list spanning LINES can show it. Every enum fixture in the suite declared its
-/// parameters on the header line, where all three lines coincide and the entries dedupe to one.
-#[test]
-fn an_enum_constructor_maps_each_property_store_to_its_parameter_line() {
+fn assert_enum_constructor_lines(tag: &str, src: &str, expected_entries: usize) {
     let Some(dir) = common::scratch_dir() else {
         eprintln!("skipping: no scratch dir");
         return;
     };
-    let source = dir.join("EnumCtorLines.kt");
-    let src = "enum class Shape(\n\
-               \x20   val sides: Int,\n\
-               \x20   val label: String,\n\
-               ) {\n\
-               \x20   TRIANGLE(3, \"tri\"),\n\
-               \x20   SQUARE(4, \"sq\"),\n\
-               }\n";
+    let source = dir.join(format!("{tag}.kt"));
     std::fs::write(&source, src).expect("write fixture");
     let reference_dir = dir.join("ref");
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
@@ -206,17 +191,11 @@ fn an_enum_constructor_maps_each_property_store_to_its_parameter_line() {
         return;
     };
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
-    let _reference = std::fs::read(reference_dir.join("Shape.class")).expect("reference class");
     let krusty_dir = dir.join("out");
     std::fs::create_dir_all(&krusty_dir).expect("krusty output directory");
-    let classes = common::compile_in_process_metadata_cp_module_target(
-        src,
-        "EnumCtorLines",
-        &[],
-        "main",
-        Some(69),
-    )
-    .expect("krusty compiles the fixture");
+    let classes =
+        common::compile_in_process_metadata_cp_module_target(src, tag, &[], "main", Some(69))
+            .expect("krusty compiles the fixture");
     for (internal, bytes) in &classes {
         std::fs::write(krusty_dir.join(format!("{internal}.class")), bytes)
             .expect("write krusty class");
@@ -224,9 +203,8 @@ fn an_enum_constructor_maps_each_property_store_to_its_parameter_line() {
     // The `line N: pc` rows of the constructor, which javap prints under its Code attribute.
     let constructor_lines = |disassembly: &str| {
         let start = disassembly
-            .find("Shape(java.lang.String, int")
-            .or_else(|| disassembly.find("Shape("))
-            .unwrap_or(0);
+            .find("private Shape(int, java.lang.String);")
+            .expect("javap must contain the enum constructor signature");
         disassembly[start..]
             .lines()
             .skip_while(|line| !line.contains("LineNumberTable"))
@@ -244,10 +222,43 @@ fn an_enum_constructor_maps_each_property_store_to_its_parameter_line() {
     let krusty = common::javap(&["-p", "-v", "-cp", &krusty_dir.to_string_lossy(), "Shape"])
         .expect("javap reads krusty's output");
     let want = constructor_lines(&reference);
-    assert!(
-        want.len() >= 3,
-        "reference must map more than the `super` call — the rule under test: {want:?}\n{reference}"
+    assert_eq!(
+        want.len(),
+        expected_entries,
+        "reference constructor line shape changed: {want:?}\n{reference}"
     );
     assert_eq!(constructor_lines(&krusty), want, "<init> LineNumberTable");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An enum constructor maps each property store to the PARAMETER's own line and the trailing
+/// `return` back to the class header — the same four-entry shape kotlinc gives an ordinary class.
+/// Only a parameter list spanning lines can distinguish the stores from the header.
+#[test]
+fn an_enum_constructor_maps_each_property_store_to_its_parameter_line() {
+    let src = "enum class Shape(\n\
+               \x20   val sides: Int,\n\
+               \x20   val label: String,\n\
+               ) {\n\
+               \x20   TRIANGLE(3, \"tri\"),\n\
+               \x20   SQUARE(4, \"sq\"),\n\
+               }\n";
+    assert_enum_constructor_lines("EnumCtorLines", src, 4);
+}
+
+/// A body-property initializer makes lowering put BOTH constructor-parameter stores and the body
+/// store in `init_body` (`explicit_param_stores`). The enum path must retain each statement's line
+/// instead of silently replacing the entire block with one header entry.
+#[test]
+fn an_enum_init_body_keeps_parameter_and_body_property_lines() {
+    let src = "enum class Shape(\n\
+               \x20   val sides: Int,\n\
+               \x20   val label: String,\n\
+               ) {\n\
+               \x20   TRIANGLE(3, \"tri\"),\n\
+               \x20   SQUARE(4, \"sq\");\n\
+               \x20\n\
+               \x20   val summary: String = \"shape\"\n\
+               }\n";
+    assert_enum_constructor_lines("EnumCtorInitBodyLines", src, 5);
 }

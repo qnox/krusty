@@ -6515,12 +6515,10 @@ fn emit_class(
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
-                            if let Some(&pl) =
-                                ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone()))
+                            if let Some(line) =
+                                crate::jvm::constructor_debug::property_line(ir, c, name)
                             {
-                                if pl != 0 {
-                                    ctor_lines.push((pc, pl));
-                                }
+                                ctor_lines.push((pc, line));
                             }
                             ctor.aload(0);
                             load(*t, slot, &mut ctor);
@@ -6534,36 +6532,7 @@ fn emit_class(
                 }
             }
             if let Some(init_body) = c.init_body.filter(|_| !static_storage(ir, c)) {
-                // kotlinc gives the ctor one LineNumberTable entry per body-property initializer, on
-                // that property's own source line. Emit the initializer statements one at a time so
-                // each one's real start pc is known; only for a pure list of `SetField` stores (the
-                // desugared `val y: Int = 2` shape) — anything else keeps the whole-block emit.
-                let stmts: Option<Vec<crate::ir::ExprId>> = match ir.expr(init_body) {
-                    crate::ir::IrExpr::Block { stmts, value } if value.is_none() => stmts
-                        .iter()
-                        .all(|&st| matches!(ir.expr(st), crate::ir::IrExpr::SetField { .. }))
-                        .then(|| stmts.clone()),
-                    _ => None,
-                };
-                match stmts {
-                    Some(stmts) => {
-                        for st in stmts {
-                            let pc = ctor.bytes.len() as u16;
-                            if let crate::ir::IrExpr::SetField { index, .. } = ir.expr(st) {
-                                let name = &c.fields[*index as usize].name;
-                                if let Some(&pl) =
-                                    ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone()))
-                                {
-                                    if pl != 0 {
-                                        ctor_lines.push((pc, pl));
-                                    }
-                                }
-                            }
-                            e.emit(st, &mut ctor);
-                        }
-                    }
-                    None => e.emit(init_body, &mut ctor),
-                }
+                e.emit_constructor_init_body(c, init_body, &mut ctor, &mut ctor_lines);
                 init_diverges = e.diverges(init_body);
             }
             max_slot = e.next_slot;
@@ -10274,20 +10243,36 @@ fn emit_enum_class(
     load(Ty::Int, 2, &mut ctor);
     let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     ctor.invokespecial(super_init, 2, 0);
-    // kotlinc maps the `super(name, ordinal)` call to where the DECLARATION starts — annotations
-    // included — and the property stores that follow to the class HEADER line. The two coincide
-    // unless an annotation sits on its own line above the header, which is why an unannotated
-    // fixture cannot tell them apart. Same rule the class path applies to a primary constructor.
-    let ctor_body_pc = ctor.bytes.len() as u16;
+    // kotlinc maps the `super(name, ordinal)` call to where the declaration starts (annotations
+    // included), then maps each property store to that property's own declaration line.
     // `(pc, line)` of each constructor-property store, for the `LineNumberTable` below.
     let mut store_lines: Vec<(u16, u32)> = Vec::new();
     let mut max_locals = 1 + ctor_words;
-    // When body-property initializers exist, the lowered `init_body` carries BOTH the property-param→
-    // field stores AND the body inits (it set `explicit_param_stores`). Emit it through the standard IR
-    // emitter, mapping value ids onto the enum's slot layout — `this` at 0, then EVERY user param at
-    // slots 3+ (after the synthetic `name`/`ordinal`), in declaration order. Otherwise hand-store just
-    // the property-param fields (a plain param has no field), reading each at its own slot.
-    if let Some(init_body) = c.init_body.filter(|_| c.fields.len() > n_params) {
+    // Store constructor-property parameters unless lowering already represented those stores in the
+    // init body. The existence of a body property is not that contract: legacy lowering can emit an
+    // init body containing only the body-property stores while leaving `explicit_param_stores` false.
+    if !c.explicit_param_stores {
+        let mut slot = 3u16;
+        let mut field_i = 0usize;
+        for (argument, ty) in c.ctor_args.iter().zip(&all_param_tys) {
+            if argument.is_field {
+                let name = &c.fields[field_i].name;
+                if let Some(line) = crate::jvm::constructor_debug::property_line(ir, c, name) {
+                    store_lines.push((ctor.bytes.len() as u16, line));
+                }
+                ctor.aload(0);
+                load(*ty, slot, &mut ctor);
+                let field = cw.fieldref(&fq, name, &type_descriptor(*ty));
+                ctor.putfield(field, slot_words(*ty) as i32);
+                field_i += 1;
+            }
+            slot += slot_words(*ty);
+        }
+    }
+    // Emit body-property stores and `init` statements through the standard IR emitter, mapping value
+    // ids onto the enum's slot layout: `this` at 0, then every user parameter at slots 3+ after the
+    // synthetic name and ordinal. A pure SetField block retains each store's source line.
+    if let Some(init_body) = c.init_body {
         let mut e = Emitter::new(ir, &mut cw, env, &fq, facade, Ty::Unit, [init_body]);
         e.next_slot = 1 + ctor_words;
         e.slots.insert(0, (0, Ty::obj(&fq)));
@@ -10296,30 +10281,8 @@ fn emit_enum_class(
             e.slots.insert(i as u32 + 1, (s, *t));
             s += slot_words(*t);
         }
-        e.emit(init_body, &mut ctor);
+        e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
         max_locals = max_locals.max(e.next_slot);
-    } else {
-        let mut slot = 3u16;
-        let mut field_i = 0usize;
-        for (a, t) in c.ctor_args.iter().zip(&all_param_tys) {
-            if a.is_field {
-                let name = &c.fields[field_i].name;
-                // kotlinc maps each property store to the PARAMETER's own source line, exactly as it
-                // does for an ordinary class's constructor — visible only when the parameter list
-                // spans lines.
-                if let Some(&line) = ir.prop_decl_lines.get(&(c.fq_name_id(), name.clone())) {
-                    if line != 0 {
-                        store_lines.push((ctor.bytes.len() as u16, line));
-                    }
-                }
-                ctor.aload(0);
-                load(*t, slot, &mut ctor);
-                let fref = cw.fieldref(&fq, name, &type_descriptor(*t));
-                ctor.putfield(fref, slot_words(*t) as i32);
-                field_i += 1;
-            }
-            slot += slot_words(*t);
-        }
     }
     // The pc the trailing `return` starts at — kotlinc maps it back to the class HEADER line.
     let ctor_return_pc = ctor.bytes.len() as u16;
@@ -10352,22 +10315,12 @@ fn emit_enum_class(
             c.decl_start_line
         };
         if header != 0 {
-            // The header entry marks the property STORES. An enum with no constructor properties
-            // has none, and kotlinc emits the single `super()` entry — adding a second there is an
-            // entry it never writes.
-            let stores_properties = ctor_body_pc < ctor.bytes.len() as u16 - 1;
             let mut entries = vec![(0u16, start)];
-            if stores_properties {
-                // Each store on its parameter's line, then the `return` back on the header's —
-                // kotlinc's three-entry shape for a multi-line parameter list. A store whose line
-                // the IR does not carry falls back to the header, which is where this mapped every
-                // store before.
-                if store_lines.is_empty() {
-                    entries.push((ctor_body_pc, header));
-                } else {
-                    entries.extend(store_lines.iter().copied());
-                    entries.push((ctor_return_pc, header));
-                }
+            if !store_lines.is_empty() {
+                // Each retained store maps to its property's source line; the trailing `return`
+                // maps back to the class header. A missing line is not reconstructed in the backend.
+                entries.extend(store_lines.iter().copied());
+                entries.push((ctor_return_pc, header));
             }
             // kotlinc never emits two consecutive entries for the same line.
             entries.dedup_by_key(|(_, l)| *l);
@@ -14608,6 +14561,32 @@ impl<'a> Emitter<'a> {
             i += if wide { 2 } else { 1 };
         }
         out
+    }
+
+    /// Emit a constructor's lowered initializer block while retaining the start pc and declared
+    /// source line of each property store. Lowering represents both explicit constructor-parameter
+    /// stores and body-property initializers as a pure `SetField` block when it can preserve this
+    /// correspondence; a mixed block is emitted atomically and contributes no reconstructed lines.
+    fn emit_constructor_init_body(
+        &mut self,
+        class: &crate::ir::IrClass,
+        init_body: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+        lines: &mut Vec<(u16, u32)>,
+    ) {
+        let Some(stores) =
+            crate::jvm::constructor_debug::initializer_property_stores(self.ir, class, init_body)
+        else {
+            self.emit(init_body, code);
+            return;
+        };
+        for store in stores {
+            let pc = code.bytes.len() as u16;
+            if let Some(line) = store.line {
+                lines.push((pc, line));
+            }
+            self.emit(store.expression, code);
+        }
     }
 
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {

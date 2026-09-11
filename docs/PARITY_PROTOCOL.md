@@ -1548,4 +1548,9 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   lines coincide and the entries dedupe to one, which every enum fixture in the suite happened to be,
   and which is why a generated-code corpus (where the generator wraps every parameter) shows it on
   thousands of classes while the suite showed nothing.
-  `tests/enum_companion_field_order_e2e.rs::an_enum_constructor_maps_each_property_store_to_its_parameter_line`.
+  A body-property initializer exposed a deeper version of the same split: the enum path used
+  `fields.len() > ctor_param_count` as a proxy for `explicit_param_stores`, selected an `init_body`
+  that contained only the body store, and omitted every constructor-parameter store. The emitter now
+  follows the explicit lowering contract and shares the ordinary-class SetField/line operation;
+  missing source lines are not reconstructed with a header fallback.
+  `tests/enum_companion_field_order_e2e.rs::{an_enum_constructor_maps_each_property_store_to_its_parameter_line,an_enum_init_body_keeps_parameter_and_body_property_lines}`.
