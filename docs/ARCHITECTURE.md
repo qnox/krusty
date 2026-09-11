@@ -239,8 +239,10 @@ boundary.
 The front end is not yet fully decoupled. The concrete blockers, in priority order:
 
 1. **`types::Ty` still conflates Kotlin semantic identity with target/runtime shape.** JVM descriptor
-   formatting has moved out of `Ty`, but `Ty::Obj(&str)` still stores names that are sometimes Kotlin
-   builtins and sometimes JVM/internal runtime classes (`java/lang/String`, `kotlin/jvm/functions/*`).
+   formatting has moved out of `Ty`, but `Ty::Obj(TypeName, …)` still stores names that are sometimes
+   Kotlin builtins and sometimes JVM/internal runtime classes (`java/lang/String`, `java/lang/Object`).
+   Function-type supertypes now retain semantic `kotlin/FunctionN`; their
+   `kotlin/jvm/functions/FunctionN` carrier is owned exclusively by the JVM backend.
    Some non-backend code also still reasons about boxed primitives, nullable scalar wrappers, and
    value-class representation. *Target:* `Ty` references a Kotlin class-id; each backend maps it to its
    own ABI and runtime names.

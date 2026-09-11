@@ -42324,6 +42324,16 @@ fun box(): String {
             Some(Ty::fun_with_shape(vec![Ty::Int], Ty::Unit, 0, true, false,)),
             "source function supertype lost its receiver/function shape"
         );
+        assert_eq!(
+            class.interfaces.iter_ids().collect::<Vec<_>>(),
+            [type_name("kotlin/Function1")],
+            "class hierarchy must retain the semantic function classifier identity"
+        );
+        assert_eq!(
+            class.interface_type_args,
+            [vec![Ty::Int, Ty::Unit]],
+            "class hierarchy must retain the function classifier arguments"
+        );
         for function in ["arrayTest", "charArrayTest", "call"] {
             let signature = symbols
                 .single_fun(function)
