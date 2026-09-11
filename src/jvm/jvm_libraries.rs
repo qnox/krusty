@@ -2284,7 +2284,13 @@ impl JvmLibraries {
             // read-only `List` (which reaches `java/util/List` in its supertypes) spuriously satisfy a
             // `MutableCollection.plusAssign`. A concrete class is genuinely mutable, so its `MutableList`/
             // `MutableSet`/`MutableMap` face is sound (derived from the java.util interface it implements).
-            if !ci.is_interface() {
+            // …and an ordinary Java INTERFACE that extends one (`javax.script.Bindings : Map`) is
+            // mutable in exactly the same way a class is: kotlinc sees it as the flexible
+            // `MutableMap!`, so `bindings["k"] = v` resolves. What must not carry the mutable face
+            // is a COLLECTION FACE itself — `java/util/List` and the Kotlin read-only builtin that
+            // realizes it.
+            let is_collection_face = super::jvm_class_map::is_mapped_collection_face(internal_name);
+            if !ci.is_interface() || !is_collection_face {
                 for m in std::iter::once(internal_name)
                     .chain(supertypes.iter_ids())
                     .filter_map(super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name)

@@ -1489,8 +1489,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   A Java class with its OWN type parameters cannot show it (`HashMap<K, V> implements Map<K, V>`
   passes variables through, and the arguments are then whatever the use site wrote); it takes a
   supertype instantiated at a concrete Java type.
-  Still open on this path: a Java INTERFACE that extends a java.util collection
-  (`javax.script.Bindings : Map`) gets the read-only Kotlin face but not the mutable one — the
-  mutable face is withheld from every interface, which is right only for the collection interfaces
-  themselves.
   `tests/java_supertype_type_arguments_e2e.rs`.
+- **A Java INTERFACE that extends a java.util collection carries the MUTABLE face too (fix).** The
+  mutable face was withheld from every interface. That rule is right only for the collection
+  interfaces THEMSELVES — `java/util/List` is the shared realization of both `List` and
+  `MutableList`, so tagging it mutable would let a read-only `List` satisfy a `MutableList`
+  parameter — and wrong for an ordinary Java interface that happens to extend one
+  (`interface Bag extends Map<String, Object>`), which kotlinc sees as `MutableMap!`.
+  The read-only face was already published, which is what made it hard to see: the type resolved and
+  members were found; only a MUTATING use failed. The guard now tests the classifier itself for
+  being a collection face rather than testing `is_interface`.
+  `tests/java_interface_mutable_collection_face_e2e.rs`, which keeps the read-only-List refusal as an
+  explicit second assertion.

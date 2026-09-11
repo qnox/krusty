@@ -780,6 +780,8 @@ mod java_ctor_sam_conversion_e2e;
 mod java_flexible_collection_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
+#[path = "java_interface_mutable_collection_face_e2e.rs"]
+mod java_interface_mutable_collection_face_e2e;
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
 #[path = "java_source_interop_e2e.rs"]

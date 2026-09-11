@@ -637,6 +637,15 @@ pub fn jvm_collection_to_kotlin_mutable_type_name(internal: TypeName) -> Option<
     builtin_ids().coll_to_kotlin_mutable.get(&internal).copied()
 }
 
+/// Whether this exact resolved identity is one of the JVM/Kotlin faces in a mapped collection
+/// erasure group. A class merely declared under either package is not a collection face; the shared
+/// erasure table is the semantic source of truth.
+pub(super) fn is_mapped_collection_face(internal: TypeName) -> bool {
+    let jvm = to_jvm_type_name(internal);
+    jvm_collection_to_kotlin_type_name(jvm).is_some()
+        && jvm_collection_to_kotlin_mutable_type_name(jvm).is_some()
+}
+
 /// The read-only upper face of a Java collection platform type. The classpath provider exposes
 /// this resolved relation to common inference; consumers never compare collection spellings or
 /// depend on JVM erasure groups directly.
@@ -888,11 +897,12 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_kotlin_collection_type_name, jvm_collection_to_kotlin_type_name,
-        jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
-        mapped_builtin_has_authoritative_kotlin_scope, mapped_scope_keeps_jvm_method,
-        platform_flexible_upper_bound, to_jvm_internal, to_jvm_type_name, to_kotlin_internal,
-        wrapper_internal, wrapper_to_kotlin_prim_name, MAPPED_VISIBLE_METHODS,
+        is_kotlin_collection_type_name, is_mapped_collection_face,
+        jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_name,
+        kotlin_prim_to_wrapper, mapped_builtin_has_authoritative_kotlin_scope,
+        mapped_scope_keeps_jvm_method, platform_flexible_upper_bound, to_jvm_internal,
+        to_jvm_type_name, to_kotlin_internal, wrapper_internal, wrapper_to_kotlin_prim_name,
+        MAPPED_VISIBLE_METHODS,
     };
     use crate::types::{type_name, Ty};
 
@@ -989,6 +999,25 @@ mod tests {
         assert!(!is_kotlin_collection_type_name(type_name("java/util/List")));
         assert!(!is_kotlin_collection_type_name(type_name("kotlin/String")));
         assert!(!is_kotlin_collection_type_name(type_name("demo/Foo")));
+        for face in [
+            "java/lang/Iterable",
+            "java/util/List",
+            "kotlin/collections/List",
+            "kotlin/collections/MutableList",
+            "kotlin/collections/Map.Entry",
+        ] {
+            assert!(is_mapped_collection_face(type_name(face)), "{face}");
+        }
+        for not_a_face in [
+            "java/util/ArrayList",
+            "kotlin/collections/UserList",
+            "demo/Bag",
+        ] {
+            assert!(
+                !is_mapped_collection_face(type_name(not_a_face)),
+                "{not_a_face}"
+            );
+        }
     }
 
     #[test]
