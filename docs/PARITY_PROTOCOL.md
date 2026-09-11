@@ -1478,3 +1478,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   expectation and never joins. Only an inferred intermediate (`val parsed = when { … }`, or an
   un-annotated return) reaches the join at all — which is why a fixture must leave the type out.
   `tests/nothing_nullable_join_e2e.rs`.
+- **A Java class's SUPERTYPE arguments are flexible (fix).** Member signatures already went through
+  the Java-nullability pass; the supertype templates did not, so a supertype instantiated at a
+  concrete Java type hardened to non-null: `class Properties extends Hashtable<Object, Object>`
+  published `MutableMap<Any, Any>` where kotlinc sees `MutableMap<Any!, Any!>`. Every member reached
+  THROUGH the supertype then rejected a nullable argument while the class's own `put` accepted one.
+  It surfaced as index assignment — `p["k"] = maybeNull` resolves through `MutableMap.set`, whose
+  `V` is that argument — and reported "not an array (cannot index-assign)", naming neither the cause
+  nor the real type.
+  A Java class with its OWN type parameters cannot show it (`HashMap<K, V> implements Map<K, V>`
+  passes variables through, and the arguments are then whatever the use site wrote); it takes a
+  supertype instantiated at a concrete Java type.
+  Still open on this path: a Java INTERFACE that extends a java.util collection
+  (`javax.script.Bindings : Map`) gets the read-only Kotlin face but not the mutable one — the
+  mutable face is withheld from every interface, which is right only for the collection interfaces
+  themselves.
+  `tests/java_supertype_type_arguments_e2e.rs`.
