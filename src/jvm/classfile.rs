@@ -795,8 +795,19 @@ impl ClassWriter {
     /// constants for a rejected row changes byte identity, while omitting an annotation-only row
     /// changes the class structure.
     fn retains_inner_class(&self, spec: &InnerClassSpec) -> bool {
+        self.retains_inner_class_with_presence(spec, self.cp.has_class(&spec.inner))
+    }
+
+    /// Evaluate the shared retention predicate against an explicit view of the constant pool.
+    /// Seeding uses a hypothetical presence bit while it computes the retained-set fixpoint;
+    /// attribute construction passes the real pool state through `retains_inner_class`.
+    fn retains_inner_class_with_presence(
+        &self,
+        spec: &InnerClassSpec,
+        inner_present: bool,
+    ) -> bool {
         spec.outer.as_deref() == Some(self.internal_name.as_str())
-            || self.cp.has_class(&spec.inner)
+            || inner_present
             || self.annotation_class_refs.contains(&spec.inner)
             || self.descriptor_mentions(&spec.inner)
     }
@@ -816,34 +827,45 @@ impl ClassWriter {
         // names after every source row and recreate the very order mismatch this seed prevents.
         self.resolve_inner_classes();
         let specs = self.inner_class_candidates.clone();
-        // Retention is a FIXPOINT, not a single filter pass: interning one row's outer ref can be
-        // what makes an ENCLOSING row referenced. A table spanning a nesting chain is the case —
-        // for `A$B$Companion` the `A$B` row is kept only once `Class(A$B)` is in the pool, which
-        // seeding the companion row is what puts there. Filtering once up front dropped that row
-        // here and left `finish` to intern its refs afterwards, out of order.
+        // kotlinc interns PER ROW, in the attribute's own field order: the inner class, then the
+        // outer class, then the simple name. Interning every row's classes first and every name
+        // second matches only when no row's INNER class needs interning — true for a flat table
+        // (`Foo$$serializer`/`Foo$Companion`, whose inners the class already references) and for a
+        // single chain, but wrong as soon as an enclosing row's inner is not otherwise referenced:
+        // `A$B$C$Companion` interns `Class(A$B)` at its own row, between two other rows' entries.
+        //
+        // Retention is still a FIXPOINT, and it has to be computed WITHOUT interning: a row is kept
+        // once its inner class is present, and seeding an enclosing row is what puts it there. So
+        // decide the set against a hypothetical pool first, then intern in row order.
         let mut retained = vec![false; specs.len()];
+        let mut seeded: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
             let mut grew = false;
             for (index, spec) in specs.iter().enumerate() {
-                if retained[index] || !self.retains_inner_class(spec) {
+                if retained[index] {
                     continue;
                 }
-                retained[index] = true;
-                grew = true;
-                if let Some(outer) = &spec.outer {
-                    self.cp.class(outer);
+                let present = self.cp.has_class(&spec.inner) || seeded.contains(&spec.inner);
+                if self.retains_inner_class_with_presence(spec, present) {
+                    retained[index] = true;
+                    grew = true;
+                    seeded.insert(spec.inner.clone());
+                    if let Some(outer) = &spec.outer {
+                        seeded.insert(outer.clone());
+                    }
                 }
             }
             if !grew {
                 break;
             }
         }
-        // Names only after EVERY retained row's outer ref. kotlinc interns the table's class
-        // entries first and its simple names second, so interleaving them per row transposes the
-        // two as soon as the table spans more than one outer.
         for (spec, keep) in specs.iter().zip(&retained) {
             if !keep {
                 continue;
+            }
+            self.cp.class(&spec.inner);
+            if let Some(outer) = &spec.outer {
+                self.cp.class(outer);
             }
             if let Some(name) = &spec.name {
                 self.cp.utf8(name);

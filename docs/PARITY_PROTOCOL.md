@@ -1269,19 +1269,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   retained rows to observe: with one row the two orders coincide, which is why the
   single-nested-class fixtures missed it.
   `tests/inner_class_name_pool_order_e2e.rs`.
-- **The InnerClasses seed's retained set is a FIXPOINT (fix, follow-up to the seed-order entry).**
-  Interning one row's OUTER class ref can be what makes an ENCLOSING row referenced, so filtering the
-  candidates once up front is not enough. A table spanning a nesting chain shows it: for
-  `A$B$Companion` the rows are `A$B`, `A$B$Alpha`, `A$B$Companion`, and the `A$B` row is retained only
-  once `Class(A$B)` is in the pool — which seeding the companion row is what puts there. Filtering
-  once dropped that row from the seed and left `finish` to intern its refs afterwards, transposing the
-  pool. Seeding also has to run in TWO passes — every retained row's class entry, then every simple
-  name — because kotlinc interns the table's class entries first and its names second; interleaving
-  per row is indistinguishable only while all rows share one outer, which is exactly the flat
-  `Foo$$serializer`/`Foo$Companion` shape the first fix was measured on.
-  `tests/inner_class_name_pool_order_e2e.rs` (`a_nesting_chain_interns_every_class_entry_before_any_name`).
-  Corpus: 2618 → 3898 of 28059 classes byte-identical, with the compile state unchanged (19 modules /
-  76 errors).
+- **The InnerClasses seed interns PER ROW — inner class, outer class, then simple name — and its
+  retained set is a FIXPOINT.** Two corrections to the seed-order entry above. (1) kotlinc interns in
+  the attribute's own field order, one row at a time; "every row's classes, then every row's names"
+  coincides with it ONLY while no row's INNER class needs interning, which is true of a flat table
+  (`Foo$$serializer`/`Foo$Companion`, whose inners the class already references) and of a single
+  chain, and false as soon as an enclosing row's inner is unreferenced — `A$B$C$Companion` interns
+  `Class(A$B)` at its own row, between two other rows' entries. (2) Retention must be a fixpoint AND
+  must be decided WITHOUT interning: a row is kept once its inner class is present, and seeding an
+  enclosing row is what puts it there, so the set is computed against a hypothetical pool first and
+  the interning then runs in row order. `tests/inner_class_name_pool_order_e2e.rs` covers the flat,
+  chain and four-level shapes.
 - **A `@Serializable` ENUM's companion delegates to a private synthetic `get$cachedSerializer()`
   (fix).** kotlinc does not inline the cached-serializer lookup into `serializer()`: it puts that body
   (`access$get$cachedSerializer$delegate$cp()` → `Lazy.getValue()` → `checkcast KSerializer`) in a

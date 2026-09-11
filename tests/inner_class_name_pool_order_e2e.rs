@@ -24,6 +24,32 @@ const SRC: &str = "class Outer {\n\
                    \x20   }\n\
                    }\n";
 
+/// A table whose ENCLOSING row's inner class is not otherwise referenced by the class — a companion
+/// nested four levels deep. kotlinc interns PER ROW in the attribute's own field order (inner class,
+/// outer class, simple name), so `Class(Api$Domains)` lands between two other rows' entries. Seeding
+/// every row's classes first and every name second gets this wrong; it coincides with kotlinc only
+/// while no row's inner class needs interning, which is exactly the flat and single-chain shapes.
+#[test]
+fn a_deep_nest_interns_each_row_inner_outer_then_name() {
+    let src = "class Api {\n\
+               \x20   class Domains {\n\
+               \x20       class Inbound {\n\
+               \x20           class Alpha\n\
+               \x20\n\
+               \x20           companion object { fun make(): Alpha = Alpha() }\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    for class in ["Api$Domains$Inbound$Companion", "Api$Domains$Inbound$Alpha"] {
+        let Some(result) = common::byte_diff_against_kotlinc("InnerNameDeepNest", src, class)
+        else {
+            eprintln!("skipping: reference kotlinc unavailable");
+            return;
+        };
+        result.unwrap_or_else(|e| panic!("{class} byte-identical to kotlinc: {e}"));
+    }
+}
+
 /// A table spanning a NESTING CHAIN — `A$B`, `A$B$Alpha`, `A$B$Companion`, whose rows carry two
 /// different outers. Two things have to hold here that a flat table cannot show: every row's class
 /// entry is interned before ANY simple name (interleaving per row transposes them once the outers
