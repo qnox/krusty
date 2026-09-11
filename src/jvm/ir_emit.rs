@@ -10136,7 +10136,19 @@ fn emit_enum_class(
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
         };
-        cw.add_field(acc, &s.name, &ir_type_desc(&s.ty));
+        // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
+        // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
+        // annotation — the same treatment the class and facade field tables give their statics.
+        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
+        cw.add_field_sig(
+            acc,
+            &s.name,
+            &ir_type_desc(&s.ty),
+            signatures.field.as_deref(),
+        );
+        if field_nullability_kind(ir, &fq, &s.name, s.ty) == 1 {
+            cw.set_field_nullability(&s.name, "Lorg/jetbrains/annotations/NotNull;");
+        }
     }
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
         cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
@@ -11784,8 +11796,11 @@ fn emit_method_inner_with_holder(
     // neither `@NotNull` nor `@Nullable`; a PRIVATE method (declared, or a data class's `copy`
     // under `DataClassCopyRespectsConstructorVisibility`) likewise gets none — the annotations
     // exist for Java interop, which cannot see it.
-    let nullability_annotated =
-        !declared_annotations.deprecated_hidden() && !ir.private_methods.contains(&fid);
+    // kotlinc annotates DECLARED methods. A compiler-invented accessor (`access$…$cp`) gets no
+    // nullability annotation, the same way it gets no generic `Signature`.
+    let nullability_annotated = !declared_annotations.deprecated_hidden()
+        && !ir.private_methods.contains(&fid)
+        && !ir.synthetic_methods.contains(&fid);
     // The USER annotations on this function's parameters. kotlinc's writer visits the method's own
     // annotations, then the whole `RuntimeVisibleParameterAnnotations` attribute, then
     // `RuntimeInvisible…`, interning each type as it writes it. `reserve_method_pool_with_annotations`
