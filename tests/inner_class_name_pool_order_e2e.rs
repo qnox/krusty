@@ -24,6 +24,31 @@ const SRC: &str = "class Outer {\n\
                    \x20   }\n\
                    }\n";
 
+/// A table spanning a NESTING CHAIN — `A$B`, `A$B$Alpha`, `A$B$Companion`, whose rows carry two
+/// different outers. Two things have to hold here that a flat table cannot show: every row's class
+/// entry is interned before ANY simple name (interleaving per row transposes them once the outers
+/// differ), and the retained set has to be a FIXPOINT, because interning one row's outer ref is
+/// what makes the enclosing row referenced and therefore kept.
+#[test]
+fn a_nesting_chain_interns_every_class_entry_before_any_name() {
+    let src = "class Outer {\n\
+               \x20   class Middle {\n\
+               \x20       class Alpha\n\
+               \x20\n\
+               \x20       companion object {\n\
+               \x20           fun make(): Alpha = Alpha()\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    for class in ["Outer$Middle$Companion", "Outer$Middle$Alpha"] {
+        let Some(result) = common::byte_diff_against_kotlinc("InnerNameChain", src, class) else {
+            eprintln!("skipping: reference kotlinc unavailable");
+            return;
+        };
+        result.unwrap_or_else(|e| panic!("{class} byte-identical to kotlinc: {e}"));
+    }
+}
+
 #[test]
 fn companion_interns_a_sibling_inner_name_first() {
     let Some(result) = common::byte_diff_against_kotlinc("InnerNameOrder", SRC, "Outer$Companion")
