@@ -2563,6 +2563,29 @@ impl JvmLibraries {
                         .map(|(_, _, supertypes)| supertypes)
                 })
                 .unwrap_or_default();
+            // A JAVA class's supertype ARGUMENTS carry Java's flexible nullability, exactly as its
+            // member signatures do: `class Document implements Map<String, Object>` exposes
+            // `MutableMap<String!, Any!>`, so `doc["k"] = null` is legal. Read verbatim they hardened
+            // to non-null, and every member reached THROUGH the supertype then rejected a nullable
+            // argument — `set(String, Any)` refused `Long?` while the class's own `put` accepted it.
+            // A Kotlin class states its own nullability in `@Metadata` and must keep it.
+            let declared_supertype_templates: Vec<Ty> = if has_kotlin_metadata {
+                declared_supertype_templates
+            } else {
+                declared_supertype_templates
+                    .into_iter()
+                    .map(|template| match template {
+                        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+                            name,
+                            &arguments
+                                .iter()
+                                .map(|argument| java_type_argument_nullability(*argument))
+                                .collect::<Vec<_>>(),
+                        ),
+                        other => other,
+                    })
+                    .collect()
+            };
             let mut callable_signatures = declared_supertype_templates
                 .iter()
                 .copied()
