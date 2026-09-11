@@ -1298,3 +1298,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/serialization_companion_byte_parity_e2e.rs` (`serializable_enum_companion_is_byte_identical`).
   The enum CLASS itself still differs (kotlinc builds the `Lazy` delegate through an `invokedynamic`
   lambda; krusty does not) — that is a separate, larger shape.
+- **An ENUM emits its `Companion` field FIRST (fix).** kotlinc puts it ahead of the constructor
+  properties, the entry constants and `$VALUES`/`$ENTRIES` — unlike an ordinary class, where the
+  companion field follows the instance fields (which is why the plain-class fixtures never caught
+  this). krusty emitted it last on the enum path, and since `add_field` interns the field's name and
+  descriptor, emitting it late also interned those strings late: the class differed in constant-pool
+  order even where every member matched. Verified against kotlinc for a plain `enum class` with a
+  companion AND for a `@Serializable` enum, whose order is
+  `Companion, <ctor props>, $cachedSerializer$delegate, <entries>, $VALUES, $ENTRIES`.
+  `tests/enum_companion_field_order_e2e.rs`. NOTE this flips no class to byte-identical ON ITS OWN —
+  an enum with a companion still differs in METHOD order and `LineNumberTable`; it is a prerequisite
+  for the `@Serializable` enum-class shape (~1816 corpus classes), whose remaining pieces are the
+  `Lazy` delegate built through an `invokedynamic` lambda (`_init_$_anonymous_`), the delegate
+  field's `Signature`, and those two.

@@ -500,6 +500,8 @@ mod engine_declaration_types_e2e;
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
 mod enum_class_signature_e2e;
+#[path = "enum_companion_field_order_e2e.rs"]
+mod enum_companion_field_order_e2e;
 #[path = "enum_constant_annotation_e2e.rs"]
 mod enum_constant_annotation_e2e;
 #[path = "enum_constant_annotation_emit_e2e.rs"]
