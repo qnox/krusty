@@ -10123,7 +10123,21 @@ fn emit_enum_class(
     // entry constants and `$VALUES`/`$ENTRIES` — unlike an ordinary class, where it follows the
     // instance fields. Emitting it last also interned its name and descriptor late, so the class
     // differed in constant-pool order even where every member matched.
+    let owner_statics: Vec<&crate::ir::IrStatic> =
+        ir.statics.iter().filter(|s| s.owner_matches(&fq)).collect();
     add_companion_field(&mut cw, c);
+    // A `@Serializable enum`'s `$cachedSerializer$delegate` sits directly after `Companion` and
+    // BEFORE the constructor properties and entry constants — the same leading block, not the tail.
+    for s in ir.statics.iter().filter(|s| s.owner_matches(&fq)) {
+        // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path).
+        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
+        let acc = if s.visibility.is_private() {
+            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
+        } else {
+            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
+        };
+        cw.add_field(acc, &s.name, &ir_type_desc(&s.ty));
+    }
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
         cw.add_field(enum_field_acc(f), &f.name, &type_descriptor(*t));
     }
@@ -10196,22 +10210,9 @@ fn emit_enum_class(
     // `<clinit>`'s NAME interns before anything its body references (the `EnumEntriesKt.enumEntries`
     // machinery), as kotlinc reaches a method's signature before its code.
     cw.reserve_method_name("<clinit>");
-    // A `@Serializable enum`'s serializer machinery: the owner-scoped statics the serialization
-    // plugin synthesized (`$cachedSerializer$delegate`), initialized in `<clinit>` below. The
-    // `Companion` field itself was emitted with the leading fields above, where kotlinc puts it.
-    let owner_statics: Vec<&crate::ir::IrStatic> =
-        ir.statics.iter().filter(|s| s.owner_matches(&fq)).collect();
-    for s in &owner_statics {
-        // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path).
-        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
-        let acc = if s.visibility.is_private() {
-            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
-        } else {
-            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        };
-        cw.add_field(acc, &s.name, &ir_type_desc(&s.ty));
-    }
-
+    // The owner-scoped statics the serialization plugin synthesized were emitted with the leading
+    // fields above, next to `Companion`, where kotlinc puts them; this binding is the one `<clinit>`
+    // below initializes.
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
     // property params / run the body-property initializers. The user params are ALL primary-ctor params
     // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope

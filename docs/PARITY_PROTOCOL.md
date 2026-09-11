@@ -1304,7 +1304,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   order even where every member matched. Verified against kotlinc for a plain `enum class` with a
   companion AND for a `@Serializable` enum, whose order is
   `Companion, <ctor props>, $cachedSerializer$delegate, <entries>, $VALUES, $ENTRIES`.
-  `tests/enum_companion_field_order_e2e.rs`. NOTE this flips no class to byte-identical ON ITS OWN —
+  A `@Serializable` enum's `$cachedSerializer$delegate` belongs in that SAME leading block, directly
+  after `Companion` and before the entry constants — not in the tail after `$VALUES`/`$ENTRIES`.
+  `tests/enum_companion_field_order_e2e.rs` +
+  `serialization_companion_byte_parity_e2e.rs::a_serializable_enum_places_its_delegate_next_to_the_companion`.
+  NOTE this flips no class to byte-identical ON ITS OWN —
   an enum with a companion still differs in METHOD order and `LineNumberTable`; it is a prerequisite
   for the `@Serializable` enum-class shape (~1816 corpus classes), whose remaining pieces are the
   `Lazy` delegate built through an `invokedynamic` lambda (`_init_$_anonymous_`), the delegate
