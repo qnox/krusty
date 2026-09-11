@@ -10100,6 +10100,11 @@ fn emit_enum_class(
     // descriptor already names `java/lang/Enum`; the Signature carries the `<Self>` type argument.
     // (The class `Signature` came with the writer, from the recorded signature — a hand-rolled one
     // here would erase the type arguments of every implemented interface.)
+    // The file's whole nest, as every other classifier path registers it: `finish` keeps only the
+    // rows this class references. Without it an enum's table was built from resolver lookups alone,
+    // which see only the classes already in the pool — so a nested enum listed its own row and its
+    // `Companion`'s, but not the ENCLOSING row kotlinc writes for the class that contains it.
+    register_inner_classes(&mut cw, ir);
     // Interfaces the enum implements (`enum class E : I`) — without these the JVM rejects an
     // interface-typed call with `IncompatibleClassChangeError`.
     for itf in c.interfaces.iter_rendered() {
@@ -10718,6 +10723,9 @@ fn emit_enum_class(
     if let Some(m) = class_metadata {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
+    // Each retained row's outer-class ref and simple name intern at kotlinc's post-metadata window,
+    // in the finished table's sorted order — the same seeding every other classifier path does.
+    cw.seed_inner_class_names();
     cw.finish()
 }
 
