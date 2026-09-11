@@ -684,7 +684,28 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish function override edges once"
             );
+            // Serialization/metadata external names use Kotlin's declaration spelling, where both
+            // package and lexical-class boundaries are dots. Capture it while the stable owner/name
+            // graph is available; common IR must not reconstruct those boundaries from a JVM `$`.
+            let source_qualified_name = if let Some(name) = index.declaration_name(declaration) {
+                let package = index
+                    .source_package(anchor.source)
+                    .ok_or(FirFileLoweringFailure::MissingSourcePackage(anchor.source))?
+                    .render()
+                    .replace('/', ".");
+                Some(if package.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{package}.{name}")
+                })
+            } else {
+                None
+            };
             let class = self.ir.add_class(class);
+            if let Some(source_qualified_name) = source_qualified_name {
+                self.ir
+                    .record_class_source_qualified_name(class, source_qualified_name);
+            }
             assert!(
                 self.ir
                     .checked_classifier_classes
