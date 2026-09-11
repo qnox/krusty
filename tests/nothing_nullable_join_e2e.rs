@@ -19,12 +19,18 @@ fn diagnostics(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
+fn assert_kotlinc_accepts(tag: &str, source: &str) {
+    let (code, diagnostics) = common::kotlinc_source_result(tag, source);
+    assert_eq!(code, 0, "kotlinc rejected {tag}: {diagnostics}");
+}
+
 #[test]
 fn a_null_branch_joins_into_the_other_branchs_nullable_type() {
     const SRC: &str = "fun pick(s: String, c: Boolean): Pair<String, String?> {\n\
         \x20 val p = if (c) Pair(s, s) else Pair(s, null)\n\
         \x20 return p\n\
         }\n";
+    assert_kotlinc_accepts("NothingNullablePairJoin", SRC);
     assert_eq!(diagnostics(SRC), Vec::<String>::new());
 }
 
@@ -45,6 +51,7 @@ fn a_widened_join_argument_would_lose_its_members() {
         \x20 require(parsed.third?.isNotBlank() ?: true)\n\
         \x20 return parsed\n\
         }\n";
+    assert_kotlinc_accepts("NothingNullableTripleJoin", SRC);
     assert_eq!(diagnostics(SRC), Vec::<String>::new());
 }
 
@@ -62,6 +69,7 @@ fn the_joined_value_keeps_both_branches_at_runtime() {
         \x20 if (no.second != null) return \"null branch: ${no.second}\"\n\
         \x20 return yes.second?.take(2) ?: \"missing\"\n\
         }\n";
+    assert_kotlinc_accepts("NothingNullableRuntimeJoin", SRC);
     assert_eq!(
         common::compile_and_run_with_stdlib(SRC, "Main").expect("joined pair runs"),
         "OK"
