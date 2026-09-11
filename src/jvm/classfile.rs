@@ -548,6 +548,9 @@ struct FieldInfo {
 /// `const val`'s name + `ConstantValue`, a facade backing field) interns AFTER every method window.
 /// Realized into a [`FieldInfo`] (appended after the eagerly-added fields) by `intern_late_fields`.
 struct LateField {
+    /// Explicit index in the finished field table, for a leading field that is NOT first: an enum's
+    /// `$cachedSerializer$delegate` follows the constructor properties while still interning late.
+    lead_index: Option<usize>,
     access: u16,
     name: String,
     desc: String,
@@ -577,6 +580,7 @@ impl LateField {
         lead: bool,
     ) -> Self {
         Self {
+            lead_index: None,
             access,
             name: name.to_string(),
             desc: desc.to_string(),
@@ -1072,10 +1076,11 @@ impl ClassWriter {
         desc: &str,
         signature: Option<&str>,
         ann: Option<&str>,
+        at: Option<usize>,
     ) {
-        self.late_fields.push(LateField::new(
-            access, name, desc, signature, None, ann, true,
-        ));
+        let mut field = LateField::new(access, name, desc, signature, None, ann, true);
+        field.lead_index = at;
+        self.late_fields.push(field);
     }
 
     /// [`add_field_late`], but the realized field LEADS the field table (kotlinc puts a class's
@@ -1088,6 +1093,7 @@ impl ClassWriter {
             desc,
             None,
             Some("Lorg/jetbrains/annotations/NotNull;"),
+            None,
         );
     }
 
@@ -1145,7 +1151,10 @@ impl ClassWriter {
                 visible_anns,
                 invisible_anns,
             };
-            if lf.lead {
+            if let Some(at) = lf.lead_index {
+                let at = at.min(self.fields.len());
+                self.fields.insert(at, info);
+            } else if lf.lead {
                 self.fields.insert(lead_at, info);
                 lead_at += 1;
             } else {

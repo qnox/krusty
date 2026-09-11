@@ -205,6 +205,63 @@ fn structure(disassembly: &str) -> Vec<String> {
     out
 }
 
+/// An enum whose declaration spans lines: the annotation on one, the header on the next, and a
+/// constructor property. kotlinc maps the constructor's `super(name, ordinal)` to where the
+/// DECLARATION starts and the property stores that follow to the HEADER line — two entries. krusty
+/// emitted one, at the stores' pc.
+///
+/// A single-line enum cannot show this: both lines coincide and the entries dedupe to one, which is
+/// also why the second entry must be omitted when the constructor stores nothing.
+#[test]
+fn an_annotated_enum_constructor_maps_super_and_stores_separately() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               \n\
+               @Serializable\n\
+               enum class Phase(val value: String) {\n\
+               \x20   UNKNOWN(\"unknown\"),\n\
+               \x20   PENDING(\"pending\"),\n\
+               }\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableEnumCtorLines", src, "Phase", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let ctor_lines = |text: &str| {
+        let rows: Vec<&str> = text.lines().map(str::trim).collect();
+        let at = rows
+            .iter()
+            .position(|line| {
+                line.starts_with("private Phase(") || line.contains(" Phase(java.lang.String);")
+            })
+            .unwrap_or(0);
+        rows.into_iter()
+            .skip(at)
+            .skip_while(|line| !line.starts_with("LineNumberTable"))
+            .skip(1)
+            .take_while(|line| line.starts_with("line "))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let want = ctor_lines(&built.reference);
+    assert_eq!(
+        want.len(),
+        2,
+        "reference maps super() and the stores separately: {want:?}\n{}",
+        built.reference
+    );
+    assert_eq!(
+        ctor_lines(&built.krusty),
+        want,
+        "constructor LineNumberTable"
+    );
+}
+
 /// The whole `@Serializable` enum CLASS, byte for byte. Everything above builds to this: the lazy
 /// `invokedynamic` initializer, the member and field order, the delegate's attributes, the debug
 /// tables, the pool order, and the class-attribute order.

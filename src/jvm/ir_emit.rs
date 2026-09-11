@@ -10148,12 +10148,18 @@ fn emit_enum_class(
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         let ann = (field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
             .then_some("Lorg/jetbrains/annotations/NotNull;");
+        // The delegate follows the CONSTRUCTOR PROPERTIES and precedes the entry constants —
+        // `Companion, value, $cachedSerializer$delegate, <entries>`. A fixture with no properties
+        // cannot tell that apart from "directly after Companion", which is why this needs the
+        // explicit index rather than the plain leading form.
+        let at = usize::from(c.companion_class.is_some()) + c.fields.len();
         cw.add_field_late_leading_sig(
             acc,
             &s.name,
             &ir_type_desc(&s.ty),
             signatures.field.as_deref(),
             ann,
+            Some(at),
         );
     }
     // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
@@ -10263,6 +10269,11 @@ fn emit_enum_class(
     load(Ty::Int, 2, &mut ctor);
     let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     ctor.invokespecial(super_init, 2, 0);
+    // kotlinc maps the `super(name, ordinal)` call to where the DECLARATION starts — annotations
+    // included — and the property stores that follow to the class HEADER line. The two coincide
+    // unless an annotation sits on its own line above the header, which is why an unannotated
+    // fixture cannot tell them apart. Same rule the class path applies to a primary constructor.
+    let ctor_body_pc = ctor.bytes.len() as u16;
     let mut max_locals = 1 + ctor_words;
     // When body-property initializers exist, the lowered `init_body` carries BOTH the property-param→
     // field stores AND the body inits (it set `explicit_param_stores`). Emit it through the standard IR
@@ -10316,6 +10327,27 @@ fn emit_enum_class(
         s
     };
     cw.add_method_sig(base_ctor_acc, "<init>", &ctor_desc, &ctor, Some(&ctor_sig));
+    {
+        let header = c.decl_line;
+        let start = if c.decl_start_line == 0 {
+            header
+        } else {
+            c.decl_start_line
+        };
+        if header != 0 {
+            // The header entry marks the property STORES. An enum with no constructor properties
+            // has none, and kotlinc emits the single `super()` entry — adding a second there is an
+            // entry it never writes.
+            let stores_properties = ctor_body_pc < ctor.bytes.len() as u16 - 1;
+            let mut entries = vec![(0u16, start)];
+            if stores_properties {
+                entries.push((ctor_body_pc, header));
+            }
+            // kotlinc never emits two consecutive entries for the same line.
+            entries.dedup_by_key(|(_, l)| *l);
+            cw.set_method_lines("<init>", &ctor_desc, &entries);
+        }
+    }
     if let Some(defaults) = ir
         .class_ctor_defaults(&fq)
         .filter(|defaults| defaults.iter().any(Option::is_some))
@@ -10619,6 +10651,11 @@ fn emit_enum_class(
         // line. An enum with no generated statics has a single-entry table, and adding a closing
         // entry there is four bytes kotlinc does not write.
         if stepped_away {
+            // kotlinc maps the trailing `return` to the declaration's CLOSING BRACE line. The IR
+            // records no class-close line (`ctor_close_lines` is the CONSTRUCTOR's), so this uses
+            // the first entry's line, which coincides for an enum whose entries and closing brace
+            // share a line — true of the single-line shape, not of a multi-line one, where the
+            // entry is still off by the distance to the brace.
             if let Some(&(_, first)) = clinit_lines.first() {
                 if clinit_lines.last().map(|&(_, l)| l) != Some(first) {
                     clinit_lines.push((clinit.bytes.len() as u16, first));
