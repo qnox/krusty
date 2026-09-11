@@ -946,7 +946,7 @@ fn an_enum_entrys_serial_name_reaches_its_serializer() {
         let start = body
             .iter()
             .position(|line| line.contains("_init_$_anonymous_"))
-            .unwrap_or(0);
+            .expect("generated enum serializer initializer is present");
         body.into_iter()
             .skip(start)
             .take_while(|line| !line.starts_with("public") && !line.starts_with("private static ["))
@@ -978,7 +978,7 @@ fn an_enum_serializer_reports_the_entrys_serial_name() {
         "{SERIAL_NAME_ENUM}\
          fun box(): String {{\n\
          \x20 val descriptor = Status.serializer().descriptor\n\
-         \x20 return descriptor.getElementName(0) + \",\" + descriptor.getElementName(1)\n\
+         \x20 return descriptor.getElementName(0) + \",\" + descriptor.getElementName(1) + \",\" + descriptor.getElementName(2)\n\
          }}\n"
     );
     let jdk = common::jdk_modules();
@@ -992,11 +992,12 @@ fn an_enum_serializer_reports_the_entrys_serial_name() {
     };
     assert_eq!(
         common::run_box(&classes, "EnumSerialNameRunKt", &cp).expect("box runner"),
-        "active,warning"
+        "active,warning,PLAIN"
     );
 }
 
-/// Two entries, both annotated: one entry alone cannot show that the names are passed IN ORDER.
+/// Two annotated entries prove order; the trailing plain entry proves the factory receives a null
+/// slot and falls back to the constant spelling only for that entry.
 const SERIAL_NAME_ENUM: &str = "import kotlinx.serialization.SerialName\n\
                                 import kotlinx.serialization.Serializable\n\
                                 @Serializable\n\
@@ -1006,4 +1007,6 @@ const SERIAL_NAME_ENUM: &str = "import kotlinx.serialization.SerialName\n\
                                 \x20\n\
                                 \x20   @SerialName(\"warning\")\n\
                                 \x20   WARNING(\"warning\"),\n\
+                                \x20\n\
+                                \x20   PLAIN(\"plain\"),\n\
                                 }\n";

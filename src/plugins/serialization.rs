@@ -11,6 +11,8 @@
 //! `serializer()` accessor. `transform_bodies` fills descriptor, serializer-list, serialize, and
 //! deserialize bodies.
 
+mod enum_serializer;
+
 use crate::ir::{
     Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
 };
@@ -39,10 +41,6 @@ fn field_serializer_of(
 ) -> Option<String> {
     ctx.property_annotation_class_literal_internal(ir, class_id, property, "Serializable")
 }
-
-/// `EnumsKt.createAnnotatedEnumSerializer(name, values, serialNames, entryAnnotations, classAnnotations)`
-/// — the factory kotlinc uses for an enum whose constants carry annotations.
-const ANNOTATED_ENUM_SERIALIZER_DESCRIPTOR: &str = "(Ljava/lang/String;[Ljava/lang/Enum;[Ljava/lang/String;[[Ljava/lang/annotation/Annotation;[Ljava/lang/annotation/Annotation;)Lkotlinx/serialization/KSerializer;";
 
 fn serial_name_of(
     ctx: &PluginContext<'_>,
@@ -1232,107 +1230,7 @@ impl SerializationPlugin {
             arg: values,
             type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
         });
-        // An entry's `@SerialName` is the name the format reads and writes for that constant. It
-        // lives on the entry's static FIELD (an enum entry has no property of its own), and it
-        // selects a DIFFERENT factory: `createSimpleEnumSerializer` derives every name from the
-        // constant's own spelling, so with `@SerialName("active") ACTIVE` it would serialize
-        // `"ACTIVE"` — silently wrong data, not a byte difference.
-        let entry_serial_names: Vec<Option<KtString>> = {
-            let class = &ir.classes[class_id as usize];
-            class
-                .enum_entries
-                .iter()
-                .map(|entry| {
-                    class
-                        .field_annotations
-                        .iter()
-                        .find(|annotations| annotations.field == entry.name)
-                        .and_then(|annotations| {
-                            annotations
-                                .annotations
-                                .applications()
-                                .find(|applied| applied.internal.segment() == "SerialName")
-                        })
-                        .and_then(|applied| applied.values.first())
-                        .and_then(|(_, value)| match value {
-                            crate::ir::AnnoValue::Const(IrConst::String(name)) => {
-                                Some(name.clone())
-                            }
-                            _ => None,
-                        })
-                })
-                .collect()
-        };
-        // kotlinc builds the serializer through a static factory, not `new EnumSerializer(…)`; the
-        // entry array is widened to `[Ljava/lang/Enum;` at the call.
-        let enum_ser = if entry_serial_names.iter().all(Option::is_none) {
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name("kotlinx/serialization/internal/EnumsKt"),
-                    name: "createSimpleEnumSerializer".to_string(),
-                    descriptor:
-                        "(Ljava/lang/String;[Ljava/lang/Enum;)Lkotlinx/serialization/KSerializer;"
-                            .to_string(),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![name, enums],
-            })
-        } else {
-            // `createAnnotatedEnumSerializer(name, values(), names, entryAnnotations, classAnnotations)`.
-            // A `null` name element means "use the constant's own spelling"; the annotation arrays
-            // carry the entries' OTHER runtime annotations, which are not modelled here — `null`
-            // each, and `null` for the class's.
-            let names: Vec<ExprId> = entry_serial_names
-                .iter()
-                .map(|name| {
-                    ir.add_expr(IrExpr::Const(match name {
-                        Some(name) => IrConst::String(name.clone()),
-                        None => IrConst::Null,
-                    }))
-                })
-                .collect();
-            let names_array = ir.add_expr(IrExpr::Vararg {
-                array_type: Ty::obj_args(
-                    "kotlin/Array",
-                    &[Ty::nullable(class_ty("kotlin/String"))],
-                ),
-                spreads: vec![false; names.len()],
-                elements: names,
-            });
-            let entry_annotations: Vec<ExprId> = entry_serial_names
-                .iter()
-                .map(|_| ir.add_expr(IrExpr::Const(IrConst::Null)))
-                .collect();
-            let entry_annotations_array = ir.add_expr(IrExpr::Vararg {
-                array_type: Ty::obj_args(
-                    "kotlin/Array",
-                    &[Ty::nullable(Ty::obj_args(
-                        "kotlin/Array",
-                        &[class_ty("kotlin/Annotation")],
-                    ))],
-                ),
-                spreads: vec![false; entry_annotations.len()],
-                elements: entry_annotations,
-            });
-            let class_annotations = ir.add_expr(IrExpr::Const(IrConst::Null));
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name("kotlinx/serialization/internal/EnumsKt"),
-                    name: "createAnnotatedEnumSerializer".to_string(),
-                    descriptor: ANNOTATED_ENUM_SERIALIZER_DESCRIPTOR.to_string(),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: vec![
-                    name,
-                    enums,
-                    names_array,
-                    entry_annotations_array,
-                    class_annotations,
-                ],
-            })
-        };
+        let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
         // kotlinc does not build the delegate eagerly with `lazyOf`. It compiles the initializer to
         // a private static `_init_$_anonymous_()` holding `EnumSerializer(name, values())`, binds it
         // with an `invokedynamic` `Function0`, and passes that to
