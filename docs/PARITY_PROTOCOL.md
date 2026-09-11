@@ -1442,3 +1442,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   descriptor field it returns is built in `<init>` — and wrote the class's member list in declaration
   order, so it was emitted second. Declaration order and emission order are independent here; only
   `ser.methods` decides the latter. `tests/serialization_companion_byte_parity_e2e.rs`.
+- **A nested `@Serializable` declaration's SERIAL NAME (fix).** The serial name is the declaration's
+  qualified KOTLIN name — package separator and nesting separator both dots. krusty derived it from
+  the JVM internal name and replaced only `/`, so a nested class serialized as `p.Outer$Middle$Phase`
+  where kotlinc writes `p.Outer.Middle.Phase`. It is not cosmetic: the name is the wire form a peer
+  decoder matches on, so the two compilers' outputs would not interoperate.
+  Found on a corpus enum, not on a fixture: every serialization fixture in the suite declared its
+  `@Serializable` type at TOP LEVEL, where the two spellings coincide. Both generated carriers had
+  it — an enum's `createSimpleEnumSerializer(<name>, …)` and a class's
+  `PluginGeneratedSerialDescriptor(<name>, …)`, plus the `@JvmInline`/sealed descriptor sites.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_nested_serializable_declaration_spells_its_serial_name_with_dots`.
