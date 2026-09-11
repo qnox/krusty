@@ -1392,3 +1392,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/enum_companion_field_order_e2e.rs::an_enum_interns_its_pool_in_kotlincs_order`.
   A `@Serializable` enum still diverges earlier: krusty interns the class annotation descriptor
   (`Lkotlinx/serialization/Serializable;`) before the constructor, kotlinc later.
+- **A user annotation on an ENUM interns with the class-attribute window (fix).** kotlinc interns the
+  annotation's descriptor immediately before `@Metadata` — at position 119 of 143 on a `@Serializable`
+  enum — while krusty queued `set_class_annotations` at the TOP of the enum emit, putting it at
+  position 5 and shifting everything after it. Moved to just before `set_kotlin_metadata`.
+  With this a `@Serializable` enum's pool matches for its first 50 entries (was: diverging at 6);
+  69 of 144 still differ further down. NEXT: kotlinc interns the PLUGIN-generated members' names,
+  descriptors AND body constants (`_init_$_anonymous_`, its `createSimpleEnumSerializer` chain, then
+  `access$…$cp` and the delegate field's strings) BETWEEN the entry constants and `<clinit>`; krusty
+  interns them at their method emit, after `<clinit>`'s reserve.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enums_annotation_interns_with_the_class_attributes`.

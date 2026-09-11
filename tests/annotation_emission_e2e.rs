@@ -186,6 +186,34 @@ fn compile_both_with(
     Some((krusty_dir, kotlinc_dir))
 }
 
+/// Compile through the shipping CLI with Kotlin metadata explicitly disabled. User annotations are
+/// independent class-file attributes and must survive this diagnostic switch.
+fn compile_without_class_metadata(name: &str, file: &str, src: &str, class: &str) -> Vec<u8> {
+    let base =
+        std::env::temp_dir().join(format!("krusty_anno_no_meta_{name}_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let output = base.join("out");
+    fs::create_dir_all(&output).expect("create no-metadata output directory");
+    let source = base.join(file);
+    fs::write(&source, src).expect("write no-metadata annotation fixture");
+    let result = std::process::Command::new(common::krusty_binary())
+        .env("KRUSTY_NO_CLASS_METADATA", "1")
+        .args(["-d", output.to_str().expect("UTF-8 output path")])
+        .arg(&source)
+        .output()
+        .expect("run krusty without class metadata");
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{name}: krusty failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let bytes = fs::read(output.join(format!("{class}.class")))
+        .unwrap_or_else(|error| panic!("{name}: read emitted {class}.class: {error}"));
+    let _ = fs::remove_dir_all(base);
+    bytes
+}
+
 fn assert_compiled_annotations(
     name: &str,
     class: &str,
@@ -1430,6 +1458,35 @@ fn class_parameter_annotations_reach_metadata() {
             "package p\n\n{MARK}\nclass C(@Mark val x: Int) {{\n    fun f(@Mark a: Int): Int = a\n}}\n"
         ),
     );
+}
+
+/// `KRUSTY_NO_CLASS_METADATA` suppresses only `@kotlin.Metadata`. Moving enum annotations beside
+/// metadata must not make them conditional on that switch.
+#[test]
+fn enum_annotations_survive_disabled_kotlin_metadata() {
+    let bytes = compile_without_class_metadata(
+        "enum_annotation_without_metadata",
+        "E.kt",
+        "annotation class Marker\n@Marker enum class E { A }\n",
+        "E",
+    );
+    let dir = common::scratch_dir().expect("allocate javap fixture");
+    let class_file = dir.join("E.class");
+    fs::write(&class_file, bytes).expect("write javap fixture");
+    let disassembly = common::javap(&["-v", "-p", &class_file.to_string_lossy()])
+        .expect("pooled javap unavailable");
+    let (_, annotations) = disassembly
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .unwrap_or_else(|| panic!("enum lost its RuntimeVisibleAnnotations:\n{disassembly}"));
+    assert!(
+        annotations.lines().any(|line| line.trim() == "Marker"),
+        "enum lost @Marker:\n{annotations}"
+    );
+    assert!(
+        !annotations.contains("kotlin.Metadata"),
+        "metadata diagnostic switch was ignored:\n{annotations}"
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 /// An annotation with a `KClass` member can be INSTANTIATED and read back.
