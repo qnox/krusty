@@ -1344,3 +1344,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   STILL differing on a `@Serializable` enum class: the delegate field's `Signature` and `@NotNull`,
   a `@NotNull` krusty puts on `access$…$cp` that kotlinc omits, and `<clinit>`'s LineNumberTable
   (kotlinc maps the delegate store back to the annotation line: `0:6, 55:5, 69:6`).
+- **The `@Serializable` enum's delegate field attributes, and what a SYNTHETIC member must not carry
+  (fix).** The `$cachedSerializer$delegate` field takes its generic `Signature`
+  (`Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`) and kotlinc's `@NotNull`,
+  so the enum's leading static block now emits both — the treatment the class and facade field tables
+  already gave their statics. **Spell the type argument `kotlin/Any`, never `java/lang/Object`:** the
+  checked-symbol validation only knows Kotlin classifiers and rejects the emit with
+  `internal: JVM signature references classifier 'java/lang/Object' absent from checked symbols`. The
+  local enum fixture did NOT catch that — only the full suite did.
+  Conversely the `access$…$cp` bridge carries NEITHER: keep its declared return the RAW `Lazy` (the
+  FIELD is the parameterized one) and exclude `ir.synthetic_methods` from `nullability_annotated`, so
+  a compiler-invented accessor gets no `@NotNull` — the same principle as it getting no `Signature`.
+  ONE difference remains on this class: `<clinit>`'s LineNumberTable. kotlinc emits `0:6, 55:5, 69:6`
+  (stepping back to the ANNOTATION line for the delegate store, then returning); krusty emits only
+  `0:6`. Enum `<clinit>` tables are curated after method construction, so the remaining fix belongs
+  in that exact entry builder rather than in discarded inline `CodeBuilder` marks.
