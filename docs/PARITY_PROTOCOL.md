@@ -1454,3 +1454,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   it — an enum's `createSimpleEnumSerializer(<name>, …)` and a class's
   `PluginGeneratedSerialDescriptor(<name>, …)`, plus the `@JvmInline`/sealed descriptor sites.
   `tests/serialization_companion_byte_parity_e2e.rs::a_nested_serializable_declaration_spells_its_serial_name_with_dots`.
+- **A nested enum's `InnerClasses` CHAIN (fix).** kotlinc lists every class on the nesting chain,
+  not only the class actually referenced: `Outer.Middle.Phase`'s table carries a row for
+  `Outer$Middle` beside its own. The enum emit path returns before the classifier path's
+  `register_inner_classes`, so its table came from constant-pool resolver lookups alone — which see
+  the enum and its `Companion`, never an enclosing class no member names. Registering the file's
+  nest (the retention filter then keeps exactly the referenced rows) and seeding the retained rows'
+  names at the post-metadata window closes it; with the class-attribute order fix, a nested enum's
+  only remaining difference is its OUTER class's `@Metadata` nested-name order, which is a separate
+  gap.
+  A one-level nest cannot show it — the single enclosing row is the outer that the enum's own row
+  already interns — which is why every existing enum fixture missed it.
+  `tests/enum_inner_class_chain_e2e.rs`.
