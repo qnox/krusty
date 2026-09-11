@@ -205,6 +205,53 @@ fn structure(disassembly: &str) -> Vec<String> {
     out
 }
 
+/// `<clinit>`'s LineNumberTable steps back to the ANNOTATION line for the generated delegate's
+/// store, then returns to the entries' line (`0:6, 55:5, 69:6`). krusty emitted a single `0:6`.
+///
+/// Marking the store on the builder does NOT reach the attribute: `add_method` DROPS a
+/// `<clinit>`/`<init>` builder's line marks because those tables are curated afterwards through
+/// `set_method_lines`. The entry has to be pushed into that curated list.
+#[test]
+fn a_serializable_enum_maps_its_delegate_store_to_the_annotation_line() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, INACTIVE }\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableEnumClinit", src, "Status", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The `line N: pc` rows of the LAST method javap prints — `<clinit>` is emitted last.
+    let clinit_lines = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .rposition(|line| line.contains("static {}"))
+            .unwrap_or(0);
+        body.into_iter()
+            .skip(start)
+            .filter(|line| line.starts_with("line "))
+            .collect::<Vec<_>>()
+    };
+    let want = clinit_lines(&built.reference);
+    assert!(
+        want.len() > 1,
+        "reference must map more than one line in <clinit>:\n{}",
+        built.reference
+    );
+    assert_eq!(
+        clinit_lines(&built.krusty),
+        want,
+        "<clinit> LineNumberTable"
+    );
+}
+
 /// kotlinc does not build a `@Serializable` enum's cached serializer eagerly. It compiles the
 /// initializer to a private synthetic `_init_$_anonymous_()` calling the static factory
 /// `EnumsKt.createSimpleEnumSerializer(name, values())`, binds that with an `invokedynamic`

@@ -1359,3 +1359,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   (stepping back to the ANNOTATION line for the delegate store, then returning); krusty emits only
   `0:6`. Enum `<clinit>` tables are curated after method construction, so the remaining fix belongs
   in that exact entry builder rather than in discarded inline `CodeBuilder` marks.
+- **A generated static's `<clinit>` line entry, and why marking it on the builder does nothing (fix).**
+  kotlinc gives a `@Serializable` enum's `$cachedSerializer$delegate` store its OWN `<clinit>`
+  LineNumberTable entry on the ANNOTATION line, then maps the trailing `return` back to the entries'
+  line (`0:6, 55:5, 69:6`); krusty emitted a single `0:6`. **`add_method` DROPS a `<init>`/`<clinit>`
+  builder's line marks** — those tables are curated afterwards through `set_method_lines` — so
+  `code.mark_line(…)` inside `emit_static_initializer_store` reaches nothing. The entry has to be
+  pushed into the curated `clinit_lines` list at the store's pc, and `IrStatic::line` carries the line
+  (the plugin stamps the owner's `decl_start_line` on it).
+  **The closing entry is conditional**: only when a store actually STEPPED AWAY from the entries'
+  line. An enum with no generated statics has a single-entry table, and a closing entry there is four
+  bytes kotlinc does not write — which regressed an existing byte-identity fixture until scoped.
+  With this, a `@Serializable` enum class differs from kotlinc ONLY in constant-pool ORDER; all nine
+  semantic facts now match. The pool divergence is mapped: kotlinc interns the ctor machinery, then
+  the property field strings AND their `NameAndType`/`Fieldref`, then the ctor's LVT names, then the
+  DECLARED accessors, and only then `values`/`valueOf`/`$VALUES`; krusty's reserve block front-loads
+  the synthesized machinery. `tests/serialization_companion_byte_parity_e2e.rs`.

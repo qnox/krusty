@@ -10444,8 +10444,27 @@ fn emit_enum_class(
         // it (`$cachedSerializer$delegate`) — the reverse of a plain class's `<clinit>` order, and
         // the same precedence the leading field block uses.
         emit_companion_init(e.cw, &mut clinit, &fq, c);
+        // A generated static's store gets its OWN `<clinit>` line entry, the way each entry's
+        // construction does, and the trailing `return` maps back to the first line. `<clinit>`'s
+        // table is CURATED through `set_method_lines` — `add_method` DROPS a `<clinit>` builder's
+        // line marks — so pushing entries here is the only thing that reaches the attribute.
+        let mut stepped_away = false;
         for s in &owner_statics {
+            if s.line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(s.line) {
+                clinit_lines.push((clinit.bytes.len() as u16, s.line));
+                stepped_away = true;
+            }
             e.emit_static_initializer_store(&fq, s, &mut clinit);
+        }
+        // The trailing `return` is mapped back only when a store STEPPED AWAY from the entries'
+        // line. An enum with no generated statics has a single-entry table, and adding a closing
+        // entry there is four bytes kotlinc does not write.
+        if stepped_away {
+            if let Some(&(_, first)) = clinit_lines.first() {
+                if clinit_lines.last().map(|&(_, l)| l) != Some(first) {
+                    clinit_lines.push((clinit.bytes.len() as u16, first));
+                }
+            }
         }
         clinit.ret_void();
         // `max_locals` is exactly what the body allocated — entry-arg spills bump `next_slot`, and a
