@@ -2009,6 +2009,29 @@ fn build_class_metadata(
         .then(|| format!("({0}){0}", desc(c.fields[0].ty)));
     // `Class.enumEntry` (f13) — the builder has always accepted these; only the caller withheld them.
     let enum_entry_names: Vec<String> = c.enum_entries.iter().map(|e| e.name.clone()).collect();
+    // An enum constant's annotations live on its FIELD — the constant has no property — and kotlinc
+    // records them on the entry, so a `@SerialName("active") ACTIVE` stays identifiable through
+    // metadata alone.
+    let enum_entry_annotations: Vec<Vec<crate::ir::AppliedAnnotation>> = enum_entry_names
+        .iter()
+        .map(|name| {
+            c.field_annotations
+                .iter()
+                .find(|annotations| &annotations.field == name)
+                .map(|annotations| annotations.annotations.applications().cloned().collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    let enum_entry_meta: Vec<crate::metadata::class_builder::EnumEntryMeta<'_>> = enum_entry_names
+        .iter()
+        .zip(&enum_entry_annotations)
+        .map(
+            |(name, annotations)| crate::metadata::class_builder::EnumEntryMeta {
+                name,
+                annotations,
+            },
+        )
+        .collect();
     // Metadata keeps nested declarations ordered and sealed subclasses sorted.
     // Every DECLARED direct nested classifier joins `Class.nestedClassName` (f7) — kotlinc records
     // them all, not only sealed subtypes. Declaration origin and the exact identity-tree relation
@@ -2159,7 +2182,7 @@ fn build_class_metadata(
         vc_ctor_desc.as_deref().unwrap_or(&ctor_desc),
         &props,
         &methods,
-        &enum_entry_names,
+        &enum_entry_meta,
         &ClassTail {
             spellings: class_spellings,
             supertype_spellings: &supertype_spellings,

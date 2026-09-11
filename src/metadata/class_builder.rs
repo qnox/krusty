@@ -606,13 +606,23 @@ impl Default for ClassTail<'_> {
     }
 }
 
+/// One `enum` constant as `@Metadata` records it: its name and the annotations applied to it.
+///
+/// An enum constant has no property of its own, so its annotations live on the entry itself —
+/// `@SerialName("active") ACTIVE` is `EnumEntry { name, annotation }`, and dropping the annotation
+/// leaves metadata that describes a differently-named constant to every reflective reader.
+pub struct EnumEntryMeta<'a> {
+    pub name: &'a str,
+    pub annotations: &'a [crate::ir::AppliedAnnotation],
+}
+
 pub fn build_class(
     class_internal: &str,
     ctor_params: &[(String, Ty)],
     ctor_desc: &str,
     props: &[PropMeta],
     methods: &[FnMeta],
-    enum_entries: &[String],
+    enum_entries: &[EnumEntryMeta<'_>],
     tail: &ClassTail,
 ) -> (Vec<u8>, Vec<String>) {
     let class_flags = tail.flags;
@@ -1194,12 +1204,17 @@ pub fn build_class(
         .map(|message| message.expect("every type-alias metadata record is built"))
         .collect();
 
-    // f13 = enum entries (`EnumEntry { name = f1 }`).
+    // f13 = enum entries (`EnumEntry { name = f1, annotation = f2 }`). The entry's NAME interns
+    // before its annotations, and each annotation's own strings follow it — kotlinc's `d2` order.
     let enum_msgs: Vec<Pb> = enum_entries
         .iter()
         .map(|entry| {
             let mut ee = Pb::new();
-            ee.field_varint(1, st.local(entry) as u64);
+            ee.field_varint(1, st.local(entry.name) as u64);
+            for annotation in entry.annotations {
+                let encoded = crate::metadata::builder::annotation_pb(&mut st, annotation);
+                ee.repeated_message(2, &encoded);
+            }
             ee
         })
         .collect();
