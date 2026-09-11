@@ -89,6 +89,12 @@ pub(super) fn accept_active_debug_metadata(
                         classifier.ctor_close_line,
                     );
                 }
+                if classifier.body_close_line != 0 {
+                    ir.class_close_lines.insert(
+                        ir.classes[class as usize].fq_name_id(),
+                        classifier.body_close_line,
+                    );
+                }
                 attach_generated_companion_debug_metadata(
                     declaration,
                     classifier.decl_start_line,

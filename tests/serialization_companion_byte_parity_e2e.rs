@@ -875,3 +875,58 @@ fn a_nested_serializable_declaration_spells_its_serial_name_with_dots() {
         assert_eq!(names(&built.krusty), want, "{class}: serial name constants");
     }
 }
+
+/// The trailing `return` of a generated `<clinit>` maps to the class BODY's closing brace, not back
+/// to the first entry's line. krusty carried no class-close line at all — `ctor_close_lines` is the
+/// CONSTRUCTOR's `)` — and reused the first entry's, which coincides only when the entries and the
+/// closing brace share a line. Every enum fixture in the suite was written on one line, so the two
+/// spellings agreed and the gap stayed invisible.
+#[test]
+fn a_serializable_enums_clinit_returns_on_the_closing_brace_line() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    // Entries and closing brace on DIFFERENT lines — the shape the one-line fixtures cannot show.
+    let src = "import kotlinx.serialization.Serializable\n\
+               \n\
+               @Serializable\n\
+               enum class Status {\n\
+               \x20   ACTIVE,\n\
+               \x20   INACTIVE,\n\
+               }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializableEnumClinitClose",
+        src,
+        "Status",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The `line N: pc` rows of the LAST method javap prints — `<clinit>` is emitted last.
+    let clinit_lines = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .rposition(|line| line.contains("static {}"))
+            .unwrap_or(0);
+        body.into_iter()
+            .skip(start)
+            .filter(|line| line.starts_with("line "))
+            .collect::<Vec<_>>()
+    };
+    let want = clinit_lines(&built.reference);
+    assert!(
+        want.last() != want.first() && want.len() > 2,
+        "reference must close <clinit> on a line of its own — the rule under test: {want:?}"
+    );
+    assert_eq!(
+        clinit_lines(&built.krusty),
+        want,
+        "<clinit> LineNumberTable"
+    );
+}

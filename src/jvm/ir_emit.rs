@@ -10656,14 +10656,19 @@ fn emit_enum_class(
         // line. An enum with no generated statics has a single-entry table, and adding a closing
         // entry there is four bytes kotlinc does not write.
         if stepped_away {
-            // kotlinc maps the trailing `return` to the declaration's CLOSING BRACE line. The IR
-            // records no class-close line (`ctor_close_lines` is the CONSTRUCTOR's), so this uses
-            // the first entry's line, which coincides for an enum whose entries and closing brace
-            // share a line — true of the single-line shape, not of a multi-line one, where the
-            // entry is still off by the distance to the brace.
-            if let Some(&(_, first)) = clinit_lines.first() {
-                if clinit_lines.last().map(|&(_, l)| l) != Some(first) {
-                    clinit_lines.push((clinit.bytes.len() as u16, first));
+            // kotlinc maps the trailing `return` to the declaration's CLOSING BRACE line. Falling
+            // back to the FIRST entry's line — as this did while the IR carried no class-close line
+            // — is right only for an enum whose entries and closing brace share a line (the
+            // single-line shape); on any multi-line declaration it is off by the distance to the
+            // brace.
+            let close = ir
+                .class_close_lines
+                .get(&c.fq_name_id())
+                .copied()
+                .or_else(|| clinit_lines.first().map(|&(_, line)| line));
+            if let Some(close) = close {
+                if clinit_lines.last().map(|&(_, l)| l) != Some(close) {
+                    clinit_lines.push((clinit.bytes.len() as u16, close));
                 }
             }
         }

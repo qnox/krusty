@@ -2834,6 +2834,10 @@ pub struct IrFile {
     /// 1-based source line of a class's primary-ctor closing `)` — kotlinc maps the ctor
     /// `$default` overload's `return` to it. Absent = single-line/unknown (the one-entry table).
     pub ctor_close_lines: std::collections::HashMap<TypeName, u32>,
+    /// 1-based source line of a class BODY's closing `}` — kotlinc maps a generated `<clinit>`'s
+    /// trailing `return` there. Distinct from `ctor_close_lines`, which is the CONSTRUCTOR's `)`;
+    /// the two coincide only on a declaration written entirely on one line. Absent = unknown.
+    pub class_close_lines: std::collections::HashMap<TypeName, u32>,
     /// Function ids of `internal` members — `@Metadata` `Function.flags` visibility 0 (the JVM
     /// method stays public; only metadata carries the module boundary). `private_methods` keeps
     /// its own set because privacy ALSO changes dispatch (`invokespecial`).

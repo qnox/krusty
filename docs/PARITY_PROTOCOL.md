@@ -1465,3 +1465,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   A one-level nest cannot show it — the single enclosing row is the outer that the enum's own row
   already interns — which is why every existing enum fixture missed it.
   `tests/enum_inner_class_chain_e2e.rs`.
+- **A generated `<clinit>`'s trailing `return` maps to the class's CLOSING BRACE (fix).** krusty
+  reused the FIRST entry's line, because the IR carried no class-close line at all — `ctor_close_lines`
+  is the primary constructor's `)`, a different position. The two coincide only on a declaration
+  whose entries and closing brace share a line, which every enum fixture in the suite happened to be.
+  `ClassDecl` now carries `body_close_line` (the parser's debug-line post-pass rewrites the span's
+  `hi` to a line, as it already does for the ctor's `)`), plumbed to `IrFile::class_close_lines`
+  through BOTH lowering paths.
+  With this a nested `@Serializable` enum CLASS is byte-identical to kotlinc; what remains on such a
+  declaration is its generated `$serializer`.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enums_clinit_returns_on_the_closing_brace_line`.

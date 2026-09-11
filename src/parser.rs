@@ -179,6 +179,7 @@ fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
         type_aliases: Vec::new(),
         span,
         ctor_close_line: 0,
+        body_close_line: 0,
         decl_line: 0,
         decl_start_line: 0,
     }
@@ -2653,6 +2654,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            body_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
         };
@@ -3171,6 +3173,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            body_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
         }
@@ -4154,6 +4157,7 @@ impl<'a> Parser<'a> {
             type_aliases,
             span: Span::new(start.lo, end.hi),
             ctor_close_line: ctor_close_lo,
+            body_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
         }
@@ -4535,6 +4539,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            body_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
         }
@@ -4660,6 +4665,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(span.lo, end.hi),
             ctor_close_line: 0,
+            body_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
         };
@@ -4805,6 +4811,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
             ctor_close_line: 0,
+            body_close_line: 0,
             decl_line: 0,
             decl_start_line: 0,
         }

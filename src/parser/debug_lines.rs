@@ -130,6 +130,9 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 if c.ctor_close_line != 0 {
                     c.ctor_close_line = line_at(c.ctor_close_line);
                 }
+                // The class BODY's closing `}` — where kotlinc maps a generated `<clinit>`'s
+                // trailing `return`. The span's `hi` is the offset PAST the brace.
+                c.body_close_line = line_at(c.span.hi.saturating_sub(1));
                 // A class's methods live INSIDE the class decl, not in `decl_arena` — walk them too,
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {

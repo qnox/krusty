@@ -1152,6 +1152,10 @@ pub struct ClassDecl {
     /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
     /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.
     pub ctor_close_line: u32,
+    /// 1-based source line of the class BODY's closing `}` (0 = unknown), filled by the same parser
+    /// post-pass. kotlinc maps a generated `<clinit>`'s trailing `return` there — which is the class
+    /// declaration's last line, not the constructor's ([`Self::ctor_close_line`]).
+    pub body_close_line: u32,
 }
 
 #[derive(Clone, Debug)]
