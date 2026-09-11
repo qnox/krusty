@@ -205,6 +205,93 @@ fn structure(disassembly: &str) -> Vec<String> {
     out
 }
 
+/// kotlinc does not build a `@Serializable` enum's cached serializer eagerly. It compiles the
+/// initializer to a private synthetic `_init_$_anonymous_()` calling the static factory
+/// `EnumsKt.createSimpleEnumSerializer(name, values())`, binds that with an `invokedynamic`
+/// `Function0`, and hands it to `LazyKt.lazy(LazyThreadSafetyMode.PUBLICATION, …)` — so the
+/// serializer is constructed on first use and the class carries `BootstrapMethods`.
+///
+/// krusty built it eagerly with `LazyKt.lazyOf(new EnumSerializer(…))`: no indy, no bootstrap
+/// methods, no helper, and the serializer allocated during `<clinit>`.
+///
+/// Note the explicit `checkcast [Ljava/lang/Enum;` on `values()`. The JVM does not need it — arrays
+/// are covariant — but kotlinc emits it, so byte parity does too.
+#[test]
+fn a_serializable_enum_builds_its_serializer_lazily() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, INACTIVE }\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableEnumLazy", src, "Status", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let helper_signature = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains("_init_$_anonymous_()"))
+            .expect("initializer helper declaration");
+        body.into_iter().skip(start).take(3).collect::<Vec<_>>()
+    };
+    let want_signature = helper_signature(&built.reference);
+    assert_eq!(
+        want_signature.get(2).map(String::as_str),
+        Some("flags: (0x101a) ACC_PRIVATE, ACC_STATIC, ACC_FINAL, ACC_SYNTHETIC"),
+        "reference initializer helper flags"
+    );
+    assert_eq!(
+        helper_signature(&built.krusty),
+        want_signature,
+        "_init_$_anonymous_ declaration, descriptor, and flags"
+    );
+    // The helper's own instruction sequence, pool indices erased.
+    let initializer = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains("_init_$_anonymous_()"))
+            .unwrap_or(body.len());
+        body.into_iter()
+            .skip(start)
+            .take_while(|line| !line.contains("access$get$cachedSerializer"))
+            // Instruction rows only (`8: invokestatic …`). `descriptor:`, `flags:` and the debug
+            // tables also carry a colon, and the tables are a separate gap from the body shape.
+            .filter(|line| {
+                line.split_once(": ").is_some_and(|(offset, _)| {
+                    !offset.is_empty() && offset.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = initializer(&built.reference);
+    assert!(
+        want.iter()
+            .any(|line| line.contains("createSimpleEnumSerializer")),
+        "reference must build through the static factory:\n{}",
+        built.reference
+    );
+    assert!(
+        want.iter().any(|line| line.contains("checkcast")),
+        "reference must narrow values() to [Ljava/lang/Enum;:\n{}",
+        built.reference
+    );
+    assert_eq!(initializer(&built.krusty), want, "_init_$_anonymous_ body");
+    for marker in ["BootstrapMethods", "LazyThreadSafetyMode", "invokedynamic"] {
+        assert!(
+            built.krusty.contains(marker),
+            "krusty must emit {marker}:\n{}",
+            built.krusty
+        );
+    }
+}
+
 /// A `@Serializable` enum's `$cachedSerializer$delegate` sits directly after `Companion` and BEFORE
 /// the entry constants — the same leading block the companion field is in, not the tail after
 /// `$VALUES`/`$ENTRIES`. Asserted as an ORDER because the enum class is not yet byte-identical (it
