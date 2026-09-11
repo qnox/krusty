@@ -1040,6 +1040,30 @@ impl ClassWriter {
         });
     }
 
+    /// [`add_field_late_leading`] carrying a generic `Signature` and a nullability annotation — an
+    /// enum's `$cachedSerializer$delegate` leads the field table beside `Companion`, and kotlinc
+    /// gives it both.
+    pub fn add_field_late_leading_sig(
+        &mut self,
+        access: u16,
+        name: &str,
+        desc: &str,
+        signature: Option<&str>,
+        ann: Option<&str>,
+    ) {
+        self.late_fields.push(LateField {
+            access,
+            name: name.to_string(),
+            desc: desc.to_string(),
+            user_visible: Vec::new(),
+            user_invisible: Vec::new(),
+            signature: signature.map(str::to_string),
+            const_value: None,
+            ann: ann.map(str::to_string),
+            lead: true,
+        });
+    }
+
     /// [`add_field_late`], but the realized field LEADS the field table (kotlinc puts a class's
     /// `Companion` field before the instance fields, while interning it with the field visit).
     pub fn add_field_late_leading(&mut self, access: u16, name: &str, desc: &str) {
