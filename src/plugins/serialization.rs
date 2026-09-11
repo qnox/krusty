@@ -205,12 +205,12 @@ fn complete_frontend_serializer_accessor(
     Some(function)
 }
 
-/// The `@Serializable` SERIAL NAME for a class: its qualified Kotlin name, with BOTH the package
-/// separator and the NESTING separator written as dots. An internal name spells nesting with `$`
-/// (`a/B$C`), and leaving that in produced `a.B$C` where kotlinc writes `a.B.C` — visible only on a
-/// NESTED declaration, which is why a top-level fixture never caught it.
-fn serial_name(class_fq: &str) -> String {
-    class_fq.replace(['/', '$'], ".")
+/// The `@Serializable` serial name is the declaration's qualified Kotlin source name. Common
+/// lowering records it from stable declaration ownership while that information is available; the
+/// plugin must not reinterpret `$` in a JVM/internal name because it is also a legal identifier.
+fn serial_name(ir: &IrFile, class: ClassId) -> KtString {
+    ir.class_source_qualified_name(class)
+        .expect("a serializable source classifier has a qualified declaration name")
 }
 
 /// Place `serializer()` as an INSTANCE method on `class_fq`'s `Companion` — reusing an existing user
@@ -1210,9 +1210,7 @@ impl SerializationPlugin {
         );
         // `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION) { EnumsKt
         //     .createSimpleEnumSerializer(<name>, E.values()) }`.
-        let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(serial_name(
-            class_fq,
-        )))));
+        let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: type_name(class_fq),
@@ -1473,9 +1471,7 @@ impl SerializationPlugin {
             })
             .collect();
 
-        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(serial_name(
-            class_fq,
-        )))));
+        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
         let base_kclass = Self::kclass_literal(ir, class_fq);
         let sub_kclasses: Vec<ExprId> = subs
             .iter()
@@ -2018,9 +2014,7 @@ impl IrPlugin for SerializationPlugin {
             if is_value {
                 // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
                 // <Underlying>Serializer.INSTANCE)` — `isInline == true`, one element (the underlying).
-                let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
-                    serial_name(&class_fq),
-                ))));
+                let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
                 let under_ser = foo_fields
                     .first()
                     .and_then(|(_, t)| builtin_element_serializer(t));
@@ -2046,9 +2040,8 @@ impl IrPlugin for SerializationPlugin {
                     named: false,
                 })];
             } else {
-                let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
-                    serial_name(&class_fq),
-                ))));
+                let pgsd_name =
+                    ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
                 // Pass `this` (the `$serializer`, a `GeneratedSerializer`) so the descriptor can derive
                 // element descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
                 let pgsd_self = ir.add_expr(IrExpr::GetValue(0));
@@ -3477,6 +3470,7 @@ mod tests {
             .collect();
         c.ctor_param_count = field_types.len() as u32;
         let id = ir.add_class(c);
+        ir.record_class_source_qualified_name(id, name.replace('/', "."));
         let mut ctx = plugin_context();
         ctx.class_annotations
             .insert(id, vec![SERIALIZABLE_FQ.to_string()].into());
@@ -3567,6 +3561,7 @@ mod tests {
         )];
         inner.ctor_param_count = 1;
         let inner_id = ir.add_class(inner);
+        ir.record_class_source_qualified_name(inner_id, "Inner");
         let mut outer = synthetic_class("Outer");
         outer.fields = vec![
             crate::ir::IrField::new("inner".to_string(), Ty::nullable(Ty::obj("Inner"))),
@@ -3574,6 +3569,7 @@ mod tests {
         ];
         outer.ctor_param_count = 2;
         let outer_id = ir.add_class(outer);
+        ir.record_class_source_qualified_name(outer_id, "Outer");
         let mut ctx = plugin_context();
         ctx.class_annotations
             .insert(inner_id, vec![SERIALIZABLE_FQ.to_string()].into());
@@ -3737,6 +3733,7 @@ mod tests {
         )];
         c.ctor_param_count = 1;
         let id = ir.add_class(c);
+        ir.record_class_source_qualified_name(id, "demo.Box");
         let mut ctx = plugin_context();
         ctx.class_annotations
             .insert(id, vec![SERIALIZABLE_FQ.to_string()].into());
@@ -3840,6 +3837,7 @@ mod tests {
                 .map(|i| crate::ir::IrField::new(format!("f{i}"), class_ty("kotlin/Int")))
                 .collect();
             let id = ir.add_class(c);
+            ir.record_class_source_qualified_name(id, name.replace('/', "."));
             ctx.class_annotations
                 .insert(id, vec![SERIALIZABLE_FQ.to_string()].into());
         }

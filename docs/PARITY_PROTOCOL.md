@@ -1446,7 +1446,9 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   qualified KOTLIN name — package separator and nesting separator both dots. krusty derived it from
   the JVM internal name and replaced only `/`, so a nested class serialized as `p.Outer$Middle$Phase`
   where kotlinc writes `p.Outer.Middle.Phase`. It is not cosmetic: the name is the wire form a peer
-  decoder matches on, so the two compilers' outputs would not interoperate.
+  decoder matches on, so the two compilers' outputs would not interoperate. Common lowering records
+  the qualified Kotlin source name from stable declaration ownership before syntax is discarded;
+  the plugin consumes that fact rather than replacing `$`, so a backticked `$` remains literal.
   Found on a corpus enum, not on a fixture: every serialization fixture in the suite declared its
   `@Serializable` type at TOP LEVEL, where the two spellings coincide. Both generated carriers had
   it — an enum's `createSimpleEnumSerializer(<name>, …)` and a class's

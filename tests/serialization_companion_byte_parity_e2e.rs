@@ -862,7 +862,8 @@ fn inner_classes(bytes: &[u8]) -> Vec<(String, u16)> {
 /// fixture.
 ///
 /// Both generated carriers are checked: an enum's `createSimpleEnumSerializer(<name>, …)` and a
-/// class's `PluginGeneratedSerialDescriptor(<name>, …)`.
+/// class's `PluginGeneratedSerialDescriptor(<name>, …)`. A backticked nested name also proves that
+/// a declared `$` is preserved rather than mistaken for another nesting boundary.
 #[test]
 fn a_nested_serializable_declaration_spells_its_serial_name_with_dots() {
     let Some((plugin, cp)) = plugin_and_runtime() else {
@@ -878,12 +879,19 @@ fn a_nested_serializable_declaration_spells_its_serial_name_with_dots() {
                \x20\n\
                \x20       @Serializable\n\
                \x20       data class Point(val x: Int)\n\
+               \x20\n\
+               \x20       @Serializable\n\
+               \x20       data class `Dollar$Point`(val x: Int)\n\
                \x20   }\n\
                }\n";
     // The enum carries its own serial name; a class's lives on the generated `$serializer`.
     for (class, expected) in [
         ("Outer$Middle$Phase", "Outer.Middle.Phase"),
         ("Outer$Middle$Point$$serializer", "Outer.Middle.Point"),
+        (
+            "Outer$Middle$Dollar$Point$$serializer",
+            "Outer.Middle.Dollar$Point",
+        ),
     ] {
         let Some(built) =
             compare_with_kotlinc_plugin("NestedSerialName", src, class, &cp, "25", &extra)
