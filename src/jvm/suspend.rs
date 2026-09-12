@@ -6536,6 +6536,17 @@ fn collect_cond_susp_temp_bindings(
     }
 }
 
+/// The line control reaches FIRST when a `when` arm runs: a block arm enters on its first
+/// statement's line, not on the brace that opens it.
+fn branch_entry_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
+    if let IrExpr::Block { stmts, value } = &ir.exprs[expr as usize] {
+        if let Some(&first) = stmts.first().or(value.as_ref()) {
+            return branch_entry_line(ir, first);
+        }
+    }
+    execution_start_line(ir, expr)
+}
+
 fn direct_expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
     ir.expr_source_lines
         .get(&expr)
@@ -6663,7 +6674,19 @@ fn collect_suspension_lines(
                         out,
                     );
                 }
-                collect_suspension_lines(ir, *body, suspend_set, fall_through, out);
+                // A suspension in an ARM resumes on the line of whatever the arm falls into: the
+                // next branch (its condition, or the `else` arm's own body), and for the LAST arm
+                // the `when`'s own line — every arm converges on the `when`'s merge, which kotlinc
+                // attributes to the expression itself, not to the statement after it.
+                let next_branch = branches[index + 1..]
+                    .iter()
+                    .find_map(|(condition, body)| {
+                        condition
+                            .and_then(|c| expression_source_line(ir, c))
+                            .or_else(|| branch_entry_line(ir, *body))
+                    })
+                    .or_else(|| direct_expression_source_line(ir, expr));
+                collect_suspension_lines(ir, *body, suspend_set, next_branch.or(fall_through), out);
             }
         }
         IrExpr::While {
