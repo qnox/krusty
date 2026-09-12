@@ -21,6 +21,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod enum_metadata;
 mod vararg;
 
 struct InlineStaticTarget<'a> {
@@ -2007,8 +2008,7 @@ fn build_class_metadata(
     let vc_ctor_desc = c
         .is_value
         .then(|| format!("({0}){0}", desc(c.fields[0].ty)));
-    // `Class.enumEntry` (f13) — the builder has always accepted these; only the caller withheld them.
-    let enum_entry_names: Vec<String> = c.enum_entries.iter().map(|e| e.name.clone()).collect();
+    let enum_entry_meta = enum_metadata::entries(c);
     // Metadata keeps nested declarations ordered and sealed subclasses sorted.
     // Every DECLARED direct nested classifier joins `Class.nestedClassName` (f7) — kotlinc records
     // them all, not only sealed subtypes. Declaration origin and the exact identity-tree relation
@@ -2159,7 +2159,7 @@ fn build_class_metadata(
         vc_ctor_desc.as_deref().unwrap_or(&ctor_desc),
         &props,
         &methods,
-        &enum_entry_names,
+        &enum_entry_meta,
         &ClassTail {
             spellings: class_spellings,
             supertype_spellings: &supertype_spellings,

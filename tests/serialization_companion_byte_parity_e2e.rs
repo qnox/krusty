@@ -1063,3 +1063,50 @@ fn an_enum_entrys_annotation_type_interns_with_the_field_table() {
         "entry-annotation descriptor position in the constant pool"
     );
 }
+
+/// With the entry's serial name in its `@Metadata` and its annotation type interned in the field
+/// window, a `@Serializable` enum whose constants carry `@SerialName` is byte-identical to kotlinc.
+///
+/// This is the assertion the individual ones cannot make: each of the three facts — the factory
+/// call, the metadata record, the pool position — leaves the class differing on its own, so only
+/// the whole-class comparison shows the shape is finished.
+#[test]
+fn a_serializable_enum_with_entry_serial_names_is_byte_identical() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "EnumSerialNameBytes",
+        SERIAL_NAME_ENUM,
+        "Status",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    if built.krusty_bytes != built.reference_bytes {
+        let at = built
+            .krusty_bytes
+            .iter()
+            .zip(&built.reference_bytes)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| built.krusty_bytes.len().min(built.reference_bytes.len()));
+        let (want, got) = (structure(&built.reference), structure(&built.krusty));
+        let first = want
+            .iter()
+            .zip(got.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| want.len().min(got.len()));
+        panic!(
+            "bytes differ at offset {at} (krusty {} B, kotlinc {} B)\n  kotlinc: {:?}\n  krusty:  {:?}",
+            built.krusty_bytes.len(),
+            built.reference_bytes.len(),
+            want.get(first),
+            got.get(first),
+        );
+    }
+}
