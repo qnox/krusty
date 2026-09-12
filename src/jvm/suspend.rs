@@ -6852,8 +6852,23 @@ fn build_get_or_create(
             type_operand: cont_ty.clone(),
         },
     );
+    // kotlinc casts the completion ONCE, into a local, and every later read of the reused
+    // continuation loads that local. Re-casting per use — the shape this built before — repeated
+    // `aload; checkcast` four times in a prologue every suspend function carries.
+    let reused = max_value_index(ir) + 1;
+    let cast_once = cast(ir);
+    let bind_reused = k(
+        ir,
+        IrExpr::Variable {
+            index: reused,
+            ty: *cont_ty,
+            init: Some(cast_once),
+            named: false,
+        },
+    );
+    let reused_value = |ir: &mut IrFile| ir.add_expr(IrExpr::GetValue(reused));
     // (label & MIN_VALUE) != 0
-    let c1 = cast(ir);
+    let c1 = reused_value(ir);
     let lbl1 = label_of(ir, c1);
     let min1 = k(ir, IrExpr::Const(IrConst::Int(I32_MIN)));
     let masked = k(
@@ -6874,8 +6889,8 @@ fn build_get_or_create(
         },
     );
     // reuse: cont.label -= MIN_VALUE; yield cont
-    let c_recv = cast(ir);
-    let c_read = cast(ir);
+    let c_recv = reused_value(ir);
+    let c_read = reused_value(ir);
     let old = label_of(ir, c_read);
     let min2 = k(ir, IrExpr::Const(IrConst::Int(I32_MIN)));
     let newl = k(
@@ -6895,7 +6910,7 @@ fn build_get_or_create(
             value: newl,
         },
     );
-    let cval = cast(ir);
+    let cval = reused_value(ir);
     let reuse = k(
         ir,
         IrExpr::Block {
@@ -6910,11 +6925,20 @@ fn build_get_or_create(
             branches: vec![(Some(bit_set), reuse), (None, new1)],
         },
     );
+    // The binding belongs INSIDE the `instanceof` branch: casting an unrelated completion would
+    // throw.
+    let reused_branch = k(
+        ir,
+        IrExpr::Block {
+            stmts: vec![bind_reused],
+            value: Some(inner),
+        },
+    );
     let new2 = new_cont(ir);
     k(
         ir,
         IrExpr::When {
-            branches: vec![(Some(is_inst), inner), (None, new2)],
+            branches: vec![(Some(is_inst), reused_branch), (None, new2)],
         },
     )
 }
