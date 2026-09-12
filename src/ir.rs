@@ -2516,6 +2516,10 @@ pub struct IrFile {
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:
         std::collections::HashMap<(ClassId, IrSecondaryConstructorRole), u32>,
+    /// Exact `New` expressions targeting a generated secondary constructor. This call-site edge
+    /// preserves the selected declaration through target representation passes.
+    generated_secondary_constructor_calls:
+        std::collections::HashMap<ExprId, (ClassId, IrSecondaryConstructorRole, u32)>,
     /// Source type aliases declared directly in a classifier, keyed by that classifier's semantic
     /// identity. These are pending-free declaration headers copied by common lowering; they carry
     /// no body, parser identity, source range, or backend representation.
@@ -3285,6 +3289,30 @@ impl IrFile {
     ) -> Option<u32> {
         self.generated_secondary_constructors
             .get(&(class, role))
+            .copied()
+    }
+
+    pub(crate) fn record_generated_secondary_constructor_call(
+        &mut self,
+        expression: ExprId,
+        class: ClassId,
+        role: IrSecondaryConstructorRole,
+        ordinal: u32,
+    ) {
+        assert!(
+            self.generated_secondary_constructor_calls
+                .insert(expression, (class, role, ordinal))
+                .is_none(),
+            "a constructor expression has one selected generated declaration"
+        );
+    }
+
+    pub(crate) fn generated_secondary_constructor_call(
+        &self,
+        expression: ExprId,
+    ) -> Option<(ClassId, IrSecondaryConstructorRole, u32)> {
+        self.generated_secondary_constructor_calls
+            .get(&expression)
             .copied()
     }
 

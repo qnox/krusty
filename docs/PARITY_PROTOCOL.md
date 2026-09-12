@@ -1717,6 +1717,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   reads; 32+ fields validate every mask through `throwArrayMissingFieldException` (including the
   extra zero word at an exact 32-field boundary); and optional fields evaluate their retained,
   lowered constructor-default expression rather than only supporting constants.
-  krusty's OWN `deserialize` still calls the primary constructor — passing these masks is the next
-  migration step.
+  The matching `deserialize` call-site migration is recorded immediately below.
   `tests/serialization_companion_byte_parity_e2e.rs::{deserialization_constructor_checks_every_mask_shape_exactly,deserialization_constructor_uses_the_lowered_default_expression}`.
+- **`deserialize` records which elements arrived and constructs through the synthetic ctor (fix).**
+  kotlinc's `deserialize` keeps a bitmask — one bit per element, `ior`ed in as the element is decoded
+  — and builds the instance through `<init>(int seen, …, SerializationConstructorMarker)`. That is
+  what turns an absent required element into `MissingFieldException` and an absent optional one into
+  its declared default. krusty decoded into locals and called the PRIMARY constructor, so a missing
+  element silently became the type's zero value (an omitted `String` decoded to `""`) and a declared
+  default was reachable only through the local's own initializer.
+  Every constructor ABI shape uses the exact producer-recorded `(class, secondary ordinal)` identity:
+  one or many mask words, generic classes, and boxed value-class fields. Unsupported element
+  serializers leave the explicit plugin placeholder intact so emission declines cleanly; there is no
+  primary-constructor/default-object fallback. Field locals start at JVM zero, so a default expression
+  is evaluated only by the constructor when its bit is absent.
+  `tests/serialization_companion_byte_parity_e2e.rs::deserialize_passes_every_seen_mask_to_the_exact_constructor`.
