@@ -8,7 +8,7 @@ use crate::types::Ty;
 use super::{BodyLowering, FirLoweringFailure};
 
 impl BodyLowering<'_> {
-    fn local_value_is_mutable(&self, value: crate::fir::LocalValueId) -> bool {
+    pub(super) fn local_value_is_mutable(&self, value: crate::fir::LocalValueId) -> bool {
         (0..self.body.statement_count()).any(|raw| {
             let statement = self
                 .body
