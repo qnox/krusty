@@ -1675,3 +1675,46 @@ fn an_element_typed_by_a_classpath_serializable_class_uses_its_serializer() {
         built.krusty
     );
 }
+
+/// The same shape ACROSS FILES of one module: `Outer` in one file, the `@Serializable` `Inner` it
+/// stores in another. krusty compiles a file at a time, so `Inner`'s `$serializer` is neither in this
+/// file's IR nor yet on the classpath — it is generated as that other file compiles. The element
+/// serializer is still `Inner$$serializer.INSTANCE`, and every generated API client is shaped this
+/// way: one declaration per file, each storing its siblings.
+#[test]
+fn an_element_declared_in_another_file_of_the_module_uses_its_serializer() {
+    let Some((_, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let sources = [
+        (
+            "Inner.kt",
+            "package model\n\
+             import kotlinx.serialization.Serializable\n\
+             @Serializable\n\
+             data class Inner(val a: Int, val b: String)\n",
+        ),
+        (
+            "Outer.kt",
+            "package model\n\
+             import kotlinx.serialization.Serializable\n\
+             @Serializable\n\
+             data class Outer(val inner: Inner, val items: List<Inner>)\n",
+        ),
+    ];
+    let classes = common::compile_in_process_files(&sources, &cp, None)
+        .expect("krusty compiles both files of the module");
+    let serializer = classes
+        .iter()
+        .find(|(internal, _)| internal.ends_with("Outer$$serializer"))
+        .map(|(_, bytes)| bytes.clone())
+        .expect("the outer class's generated serializer is emitted");
+    // The dependency's serializer is named in the constant pool as an ordinary class reference; a
+    // derived-nothing serializer names it nowhere.
+    let pool = String::from_utf8_lossy(&serializer).into_owned();
+    assert!(
+        pool.contains("model/Inner$$serializer"),
+        "krusty must reference the sibling file's generated serializer"
+    );
+}
