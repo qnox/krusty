@@ -1820,6 +1820,11 @@ impl IrPlugin for SerializationPlugin {
                 .collect::<Vec<_>>();
 
             // Member signatures; bodies are filled in `transform_bodies`.
+            // Every generated member maps to the ANNOTATED declaration's start line — the
+            // `@Serializable` line, which is where kotlinc points each one. Without a line the
+            // emitter attaches NO debug tables at all, so each generated member lost both its
+            // `LineNumberTable` and its `LocalVariableTable`.
+            let owner_line = ir.classes[class_id as usize].decl_start_line;
             let descriptor = Self::add_method(
                 ir,
                 &ser_fq,
@@ -1985,6 +1990,14 @@ impl IrPlugin for SerializationPlugin {
                     unbox_params: Vec::new(),
                 },
             ];
+            if owner_line != 0 {
+                // `getDescriptor` is excluded on purpose: kotlinc gives it a `LocalVariableTable`
+                // but NO `LineNumberTable` — the body is a bare field read that maps to no
+                // statement. The other three map to the annotated declaration's line.
+                for generated in [serialize, deserialize, child] {
+                    ir.fn_decl_lines.insert(generated, owner_line);
+                }
+            }
             let serializer_identity = ser.fq_name_id();
             ir.mark_synthetic_class(serializer_identity);
             ir.mark_deprecated_class(serializer_identity);

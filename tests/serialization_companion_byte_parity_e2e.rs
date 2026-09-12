@@ -1158,3 +1158,87 @@ fn serialize_delegates_its_element_writes_to_write_self() {
         "write$Self body"
     );
 }
+
+/// Every member of a generated `$serializer` carries debug tables mapped to the ANNOTATED
+/// declaration's line — the `@Serializable` line, which is where kotlinc points all of them.
+///
+/// The emitter attaches a member's `LineNumberTable` and `LocalVariableTable` only when the IR
+/// carries a declaration line for it, and the plugin recorded none: every generated member lost
+/// BOTH tables, which is most of what `ATTR_MISSING:LineNumberTable` counted on a serialization
+/// corpus. The line is asserted rather than the pcs — the prologue those pcs sit after is a
+/// separate fix, and pinning them here would make this test about that instead. Only the FIRST
+/// mapped line is compared for the same reason: kotlinc's `serialize` adds a second entry for the
+/// property writes, which is its own piece of work.
+#[test]
+fn a_generated_serializer_members_carry_debug_tables() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    // `@Serializable` on line 2, so every generated member must report line 2.
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerDebugTables",
+        src,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Per member: whether javap printed each table, and the lines its LineNumberTable names.
+    let tables = |text: &str, member: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains(member))
+            .unwrap_or_else(|| panic!("{member} must be present:\n{text}"));
+        let rest: Vec<String> = body
+            .into_iter()
+            .skip(start + 1)
+            .take_while(|line| !line.contains("public ") && !line.contains("private "))
+            .collect();
+        let lines = rest
+            .iter()
+            .filter_map(|line| line.strip_prefix("line "))
+            .filter_map(|line| line.split_once(':').map(|(number, _)| number.to_string()))
+            .collect::<Vec<_>>();
+        (
+            rest.iter().any(|line| line.starts_with("LineNumberTable")),
+            rest.iter()
+                .any(|line| line.starts_with("LocalVariableTable")),
+            lines,
+        )
+    };
+    for member in ["void serialize(", "deserialize(", "childSerializers("] {
+        let want = tables(&built.reference, member);
+        assert!(
+            want.0 && want.1,
+            "the reference must carry both tables on {member} — the rule under test"
+        );
+        let got = tables(&built.krusty, member);
+        assert_eq!(
+            (got.0, got.1, got.2.first().cloned()),
+            (want.0, want.1, want.2.first().cloned()),
+            "{member}: debug tables and first mapped line"
+        );
+    }
+    // `getDescriptor` is the counter-case: kotlinc gives it a `LocalVariableTable` but NO
+    // `LineNumberTable`, because its body is a bare field read that maps to no statement. Handing
+    // it a line would produce a table kotlinc does not write, so it must NOT get one.
+    let (reference_lnt, reference_lvt, _) = tables(&built.reference, "getDescriptor(");
+    assert!(
+        !reference_lnt && reference_lvt,
+        "the reference must give getDescriptor a LocalVariableTable and no LineNumberTable"
+    );
+    let (krusty_lnt, _, _) = tables(&built.krusty, "getDescriptor(");
+    assert!(
+        !krusty_lnt,
+        "getDescriptor must not gain a LineNumberTable kotlinc does not write"
+    );
+}

@@ -1541,3 +1541,27 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   for. Emitting the delegation there produced a `getfield` on the wrong owner and the verifier
   rejected it; the krusty-only generic serializer tests caught that within the same change.
   `tests/serialization_companion_byte_parity_e2e.rs::serialize_delegates_its_element_writes_to_write_self`.
+- **An enum CONSTANT's annotation type interns in the field-table window (fix).** kotlinc interns
+  `Lkotlinx/serialization/SerialName;` beside the deferred fields' `Signature` strings, immediately
+  before the class's own annotation descriptors — not where the constant's field was added. krusty
+  encoded it at `add_field`, which put it right after the first entry name and shifted every later
+  index; the class matched kotlinc in every other respect and still differed byte-wise.
+  The entry FIELDS cannot themselves be deferred — their `<clinit>` `putstatic` references interleave
+  with the entry names, which is kotlinc's order too — so only the ANNOTATION encoding moves:
+  `set_last_field_annotations_deferred` keeps the applications unencoded on the eager field, and
+  `intern_late_fields` encodes them in the same window it realizes the late fields.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_enum_entrys_annotation_type_interns_with_the_field_table`.
+- **A generated `$serializer`'s members carry debug tables (fix).** The emitter attaches a member's
+  `LineNumberTable` AND `LocalVariableTable` only when the IR carries a declaration line for it
+  (`record_locals` is gated on the same map), and the plugin recorded none — so every generated
+  member lost both tables. They map to the ANNOTATED declaration's start line, which is where
+  kotlinc points all of them.
+  `getDescriptor` is deliberately excluded: kotlinc gives it a `LocalVariableTable` and NO
+  `LineNumberTable`, because its body is a bare field read that maps to no statement. Handing it a
+  line would write a table kotlinc does not — so it keeps neither, and its missing LVT stays open:
+  separating the two tables means giving the emitter a "record locals" fact independent of the line,
+  which this does not do.
+  Also still open: `serialize`'s SECOND line entry (kotlinc maps the property writes to the class
+  header line) and the `<init>` tables.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_members_carry_debug_tables`,
+  whose `getDescriptor` assertion pins the non-overshoot.
