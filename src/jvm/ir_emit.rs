@@ -22,6 +22,7 @@ use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod enum_metadata;
+mod operand_stack;
 mod vararg;
 mod when;
 
@@ -19172,30 +19173,6 @@ impl<'a> Emitter<'a> {
         box_prim_free(self.cw, code, ty);
     }
 
-    /// Emit `e` as a value while `held` operand-stack entries (bottom-first) are ALREADY pushed below
-    /// it — the array being filled element-wise by a `Vararg`, the `SpreadBuilder` an element is
-    /// `add`ed to, the receiver+index of an `Array.set`. Those positions can't spill to a temp the way
-    /// `emit_operands` does (the store instruction needs its operands underneath), so the held entries
-    /// are handed to `frame` through `pending_stack` instead: a stack-map frame must type the FULL
-    /// operand stack the verifier sees, not just what the sub-expression itself leaves.
-    ///
-    /// Without this a branchy element (`listOf(x == y, x != y)`) records `stack = []` at its merge
-    /// label while the verifier sees `[array, array, int]` there. The class file is emitted fine and
-    /// only fails at link time with "Inconsistent stackmap frames at branch target N".
-    fn emit_value_over(&mut self, e: u32, held: &[VerifType], code: &mut CodeBuilder) {
-        if held.is_empty() || !self.records_frame(e) {
-            self.emit_value(e, code);
-            return;
-        }
-        // Preserve an outer held-operand context exactly. Nested emission may itself use this helper;
-        // restoring a saved depth makes the scope rule explicit and cannot accidentally retain or
-        // remove entries based on the nested call's final length.
-        let outer_depth = self.pending_stack.len();
-        self.pending_stack.extend_from_slice(held);
-        self.emit_value(e, code);
-        self.pending_stack.truncate(outer_depth);
-    }
-
     /// The two `[receiver, receiver]` stack entries a `dup`-then-call sequence holds. The receiver
     /// must already be INITIALIZED — right after `new C; dup` the verification type is
     /// `Uninitialized(offset)`, not the class, so this is wrong for that position.
@@ -19467,7 +19444,7 @@ impl<'a> Emitter<'a> {
                 self.slots.remove(&key);
             }
             BitAnd | BitOr | BitXor => {
-                self.emit_operands(&[lhs, rhs], code);
+                self.emit_binary_operands_over_frames(lhs, rhs, lt, code);
                 match lt {
                     Ty::Long => match op {
                         BitAnd => code.land(),
