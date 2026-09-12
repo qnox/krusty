@@ -4937,9 +4937,9 @@ fn jvm_field_visibility(c: &crate::ir::IrClass, property: &str) -> Option<u16> {
         })
 }
 
-fn apply_field_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
-    if let Some(fa) = c.field_annotations.iter().find(|fa| fa.field == field) {
-        cw.set_last_field_annotations(&fa.annotations);
+fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
+    if let Some(annotations) = c.field_annotations.iter().find(|a| a.field == field) {
+        cw.set_last_field_annotations_deferred(&annotations.annotations);
     }
 }
 
@@ -10240,7 +10240,7 @@ fn emit_enum_class(
         // `<clinit>`'s `putstatic` for this entry resolves right after the field's own name, before
         // the next entry — kotlinc interleaves them rather than batching the Fieldrefs at the end.
         cw.fieldref(&fq, &entry.name, &self_desc);
-        apply_field_annotations(&mut cw, c, &entry.name);
+        apply_enum_entry_annotations(&mut cw, c, &entry.name);
     }
     cw.add_field(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
