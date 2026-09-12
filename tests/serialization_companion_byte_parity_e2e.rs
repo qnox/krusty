@@ -1215,3 +1215,58 @@ fn a_generated_serializer_carries_the_hidden_deprecated_marker() {
         "deprecated-marker suffix in the generated serializer's @Metadata d2"
     );
 }
+
+/// A generated `$serializer` always carries a class `Signature`: even with no type parameters of its
+/// own, the interface it implements is generic (`GeneratedSerializer<Point>`), and that
+/// instantiation exists only in the signature — the descriptor erases it.
+///
+/// krusty wrote the attribute only for a GENERIC serializer, and wrote the wrong supertype there:
+/// `KSerializer<Box<T>>` (the semantic supertype) instead of the `GeneratedSerializer<Box<T>>` the
+/// class actually implements. Both shapes are checked because they failed differently — one was
+/// missing the attribute, the other had it with the wrong interface.
+#[test]
+fn a_generated_serializer_carries_its_class_signature() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let generic = "import kotlinx.serialization.Serializable\n\
+                   @Serializable\n\
+                   data class Box<T>(val value: T, val tag: String)\n";
+    for (name, src, class) in [
+        ("SerializerSignature", SRC, "Point$$serializer"),
+        ("SerializerSignatureGeneric", generic, "Box$$serializer"),
+    ] {
+        let Some(built) = compare_with_kotlinc_plugin(name, src, class, &cp, "25", &extra) else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        // The CLASS `Signature` javap prints — the one at column 0. A MEMBER's signature is
+        // indented under its declaration, and `structure` trims indentation, so the raw text is
+        // what distinguishes them. Pool indices are erased; their numbering is emission order.
+        let signature = |text: &str| {
+            text.lines()
+                .find(|line| line.starts_with("Signature: "))
+                .map(|line| {
+                    line.split_once("// ")
+                        .map_or_else(|| line.to_string(), |(_, value)| value.to_string())
+                })
+        };
+        let want = signature(&built.reference).unwrap_or_else(|| {
+            panic!(
+                "{class}: reference must carry a class Signature:\n{}",
+                built.reference
+            )
+        });
+        assert!(
+            want.contains("GeneratedSerializer<"),
+            "{class}: the reference signature must name the implemented interface: {want}"
+        );
+        assert_eq!(
+            signature(&built.krusty),
+            Some(want),
+            "{class}: class Signature"
+        );
+    }
+}
