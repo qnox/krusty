@@ -302,7 +302,7 @@ pub fn to_jvm_internal(internal: &str) -> &str {
         .strip_prefix("kotlin/Function")
         .and_then(|n| n.parse::<usize>().ok())
     {
-        return crate::types::FUNCTION_N_INTERNAL
+        return super::names::FUNCTION_N_INTERNAL
             .get(arity)
             .copied()
             .unwrap_or("kotlin/jvm/functions/FunctionN");
@@ -1018,6 +1018,22 @@ mod tests {
                 "{not_a_face}"
             );
         }
+    }
+
+    #[test]
+    fn semantic_function_classifier_erases_only_at_jvm_boundary() {
+        assert_eq!(
+            to_jvm_internal("kotlin/Function0"),
+            "kotlin/jvm/functions/Function0"
+        );
+        assert_eq!(
+            to_jvm_internal("kotlin/Function22"),
+            "kotlin/jvm/functions/Function22"
+        );
+        assert_eq!(
+            to_jvm_internal("kotlin/Function23"),
+            "kotlin/jvm/functions/FunctionN"
+        );
     }
 
     #[test]
