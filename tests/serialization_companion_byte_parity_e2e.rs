@@ -1446,3 +1446,139 @@ fn serialize_delegates_its_element_writes_to_write_self() {
         "write$Self body"
     );
 }
+
+/// Every generated serializer member carries kotlinc's exact debug-table projection. The bare
+/// descriptor getter deliberately has locals only; the four executable plugin bodies also map to
+/// the annotated declaration's start line.
+#[test]
+fn generated_serializer_members_carry_their_complete_debug_tables() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerDebugTables",
+        SRC,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+
+    fn projection(text: &str, member: &str) -> (Vec<String>, Vec<String>) {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains(member))
+            .unwrap_or_else(|| panic!("{member} must be present:\n{text}"));
+        let section = body
+            .iter()
+            .skip(start + 1)
+            .take_while(|line| !line.starts_with("public ") && !line.starts_with("private "));
+        let mut lines = Vec::new();
+        let mut locals = Vec::new();
+        let mut table = None;
+        for row in section {
+            match row.as_str() {
+                "LineNumberTable:" => table = Some(false),
+                "LocalVariableTable:" => table = Some(true),
+                _ if row.ends_with(':') => table = None,
+                _ => match table {
+                    Some(false) if row.starts_with("line ") => lines.push(
+                        row.split_once(':')
+                            .map_or_else(|| row.clone(), |(line, _)| line.to_string()),
+                    ),
+                    Some(true)
+                        if row.split_whitespace().next().is_some_and(|value| {
+                            value.bytes().all(|byte| byte.is_ascii_digit())
+                        }) =>
+                    {
+                        locals.push(row.split_whitespace().skip(2).collect::<Vec<_>>().join(" "));
+                    }
+                    _ => {}
+                },
+            }
+        }
+        (lines, locals)
+    }
+
+    for member in [
+        "void serialize(",
+        "Point deserialize(",
+        "getDescriptor(",
+        "childSerializers(",
+        "typeParametersSerializers(",
+    ] {
+        assert_eq!(
+            projection(&built.krusty, member),
+            projection(&built.reference, member),
+            "{member}: complete LineNumberTable + LocalVariableTable projection"
+        );
+    }
+}
+
+/// `serialize` opens on the annotated declaration and maps its trailing return back to the class
+/// header. Comparing the complete line table keeps the second entry on the return rather than the
+/// preceding `endStructure` call.
+#[test]
+fn serialize_maps_its_return_to_the_class_header_line() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let lines = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains("void serialize("))
+            .expect("serialize must be present");
+        body.into_iter()
+            .skip(start)
+            .skip_while(|line| !line.starts_with("LineNumberTable"))
+            .skip(1)
+            .take_while(|line| line.starts_with("line "))
+            .collect::<Vec<_>>()
+    };
+    let generic = "import kotlinx.serialization.Serializable\n\
+                   @Serializable\n\
+                   data class Box<T>(val value: T)\n";
+    for (name, source, class, exact_offsets) in [
+        ("SerializeReturnLine", SRC, "Point$$serializer", true),
+        (
+            "GenericSerializeReturnLine",
+            generic,
+            "Box$$serializer",
+            false,
+        ),
+    ] {
+        let Some(built) = compare_with_kotlinc_plugin(name, source, class, &cp, "25", &extra)
+        else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        let got = lines(&built.krusty);
+        let want = lines(&built.reference);
+        if exact_offsets {
+            assert_eq!(got, want, "{class}: complete serialize LineNumberTable");
+        } else {
+            let source_lines = |rows: Vec<String>| {
+                rows.into_iter()
+                    .map(|row| {
+                        row.split_once(':')
+                            .map_or(row.clone(), |(line, _)| line.into())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                source_lines(got),
+                source_lines(want),
+                "{class}: serialize source-line sequence"
+            );
+        }
+    }
+}
