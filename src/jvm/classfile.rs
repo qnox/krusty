@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod control_flow;
+
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
 pub const ACC_PROTECTED: u16 = 0x0004;
@@ -3194,6 +3196,10 @@ pub struct CodeBuilder {
     cur_stack: i32,
     labels: Vec<usize>, // label id -> bound byte offset (usize::MAX until bound)
     fixups: Vec<(usize, Label)>, // (operand position, destination) to patch in link()
+    /// Switch branch operands: `(operand position, opcode position, destination)`. A switch's offsets
+    /// are FOUR bytes and are measured from the OPCODE rather than from the operand, so they cannot
+    /// share the two-byte `fixups` list.
+    switch_fixups: Vec<(usize, usize, Label)>,
     /// Exception-table entries by label: `(start, end, handler, catch_type)`, resolved in `link()`.
     exceptions: Vec<(Label, Label, Label, u16)>,
     /// Whether this method creates a lambda object (new $ClassName$lambda$N). When true, we must
@@ -3246,6 +3252,7 @@ impl CodeBuilder {
             cur_stack: 0,
             labels: Vec::new(),
             fixups: Vec::new(),
+            switch_fixups: Vec::new(),
             exceptions: Vec::new(),
             needs_stackmap: false,
             frames: Vec::new(),
@@ -3589,169 +3596,6 @@ impl CodeBuilder {
         if n > self.max_stack {
             self.max_stack = n;
         }
-    }
-
-    // ---- branches & labels ----
-    pub fn new_label(&mut self) -> Label {
-        let id = self.labels.len() as u32;
-        self.labels.push(usize::MAX);
-        self.dead_bound.push(false);
-        Label {
-            builder: self.id,
-            index: id,
-        }
-    }
-    /// Bind `l` here. Inside a dropped dead region this revives emission only if control can actually
-    /// arrive: some branch to `l` was ALREADY EMITTED (it recorded a fixup). A branch emitted while
-    /// dead was itself dropped and left no fixup, so its target stays dead and the rest of that
-    /// construct is dropped with it. A backward target (a loop head) is bound before its back-edge and
-    /// so never revives — correct, because reaching the head while dead means the whole loop is
-    /// unreachable. For an entry point control reaches WITHOUT a branch, see [`Self::bind_handler`].
-    pub fn bind(&mut self, l: Label) {
-        let index = self.label_index(l);
-        self.labels[index] = self.bytes.len();
-        if self.dead {
-            if self.fixups.iter().any(|&(_, target)| target == l) {
-                self.dead = false;
-            } else {
-                self.dead_bound[index] = true;
-            }
-        }
-    }
-    /// Bind `l` as an EXCEPTION HANDLER entry guarding `protects` (`[start, end)` label pairs, already
-    /// bound). A handler is reached over the exception edge rather than by a branch, so `bind` can't
-    /// see that control arrives; it revives whenever some guarded range actually holds live emitted
-    /// bytes. That is the `try` whose body diverges — the stream is dead exactly at the handler, yet
-    /// the handler runs. A range that is empty, or whose start was itself bound inside a dropped
-    /// region, guards nothing: the whole `try` was dead code and the handler goes with it.
-    pub fn bind_handler(&mut self, l: Label, protects: &[(Label, Label)]) {
-        let index = self.label_index(l);
-        self.labels[index] = self.bytes.len();
-        let guards_live_code = protects.iter().any(|&(s, e)| {
-            let (s_index, e_index) = (self.label_index(s), self.label_index(e));
-            let (s_off, e_off) = (self.labels[s_index], self.labels[e_index]);
-            s_off != usize::MAX && s_off < e_off && !self.is_dead_bound(s.index)
-        });
-        if guards_live_code {
-            self.dead = false;
-        } else if self.dead {
-            self.dead_bound[index] = true;
-        }
-    }
-    /// Bind a label at an explicit byte offset (used to attach a relocated StackMapTable frame to a
-    /// position inside a spliced inline body, which is appended as raw bytes). While dead the splice
-    /// itself is dropped ([`Self::splice_inline`]), so the label is left UNBOUND: every consumer
-    /// (`resolved_frames`, `build_stackmap`, `resolved_exceptions`) drops entries for an unbound
-    /// label, which is exactly the right outcome for a frame or handler inside dropped bytes.
-    pub fn bind_at(&mut self, l: Label, offset: usize) {
-        if self.dead {
-            return;
-        }
-        let index = self.label_index(l);
-        self.labels[index] = offset;
-    }
-    fn branch(&mut self, opcode: u8, l: Label, delta: i32) {
-        if self.dead {
-            self.adjust(delta); // dropped dead code; height bookkeeping stays as it was
-            return;
-        }
-        self.bytes.push(opcode);
-        let pos = self.bytes.len();
-        self.fixups.push((pos, l));
-        self.bytes.extend_from_slice(&[0, 0]);
-        self.adjust(delta);
-    }
-    pub fn goto(&mut self, l: Label) {
-        self.branch(0xa7, l, 0);
-        self.dead = true; // unconditional transfer: what follows is unreachable
-    }
-    pub fn ifeq(&mut self, l: Label) {
-        self.branch(0x99, l, -1);
-    }
-    pub fn ifne(&mut self, l: Label) {
-        self.branch(0x9a, l, -1);
-    }
-    pub fn if_icmpeq(&mut self, l: Label) {
-        self.branch(0x9f, l, -2);
-    }
-    pub fn if_icmpne(&mut self, l: Label) {
-        self.branch(0xa0, l, -2);
-    }
-    pub fn if_icmplt(&mut self, l: Label) {
-        self.branch(0xa1, l, -2);
-    }
-    pub fn if_icmpge(&mut self, l: Label) {
-        self.branch(0xa2, l, -2);
-    }
-    pub fn if_icmpgt(&mut self, l: Label) {
-        self.branch(0xa3, l, -2);
-    }
-    pub fn if_icmple(&mut self, l: Label) {
-        self.branch(0xa4, l, -2);
-    }
-    pub fn lcmp(&mut self) {
-        self.op(0x94, -3);
-    }
-    pub fn dcmpg(&mut self) {
-        self.op(0x98, -3);
-    }
-    pub fn dcmpl(&mut self) {
-        self.op(0x97, -3);
-    }
-    pub fn ifnull(&mut self, l: Label) {
-        self.branch(0xc6, l, -1);
-    }
-    pub fn ifnonnull(&mut self, l: Label) {
-        self.branch(0xc7, l, -1);
-    }
-    pub fn iflt(&mut self, l: Label) {
-        self.branch(0x9b, l, -1);
-    }
-    pub fn ifge(&mut self, l: Label) {
-        self.branch(0x9c, l, -1);
-    }
-    pub fn ifgt(&mut self, l: Label) {
-        self.branch(0x9d, l, -1);
-    }
-    pub fn ifle(&mut self, l: Label) {
-        self.branch(0x9e, l, -1);
-    }
-
-    /// Resolve all branch offsets. Call once after the method body is built.
-    pub fn link_local_branches(&mut self) {
-        for &(pos, label) in &self.fixups {
-            if label.builder != self.id {
-                continue;
-            }
-            let target = self.labels[label.index as usize];
-            debug_assert!(target != usize::MAX, "unbound label {}", label.index);
-            let off = target as i64 - (pos - 1) as i64; // opcode is 1 byte before operand
-            let b = (off as i16).to_be_bytes();
-            self.bytes[pos] = b[0];
-            self.bytes[pos + 1] = b[1];
-        }
-    }
-
-    /// Branch operands whose destinations belong to an enclosing bytecode builder. Inline-body
-    /// assembly carries these across each nested splice and lets the final owner patch them.
-    pub fn external_branches(&self) -> Vec<(usize, Label)> {
-        self.fixups
-            .iter()
-            .filter(|(_, label)| label.builder != self.id)
-            .copied()
-            .collect()
-    }
-
-    /// Resolve every branch in a completed method. A foreign destination here means an inline
-    /// splice failed to transfer its branch ownership to the enclosing builder.
-    pub fn link(&mut self) {
-        assert!(
-            self.fixups
-                .iter()
-                .all(|(_, label)| label.builder == self.id),
-            "an external inline branch reached final method linking"
-        );
-        self.link_local_branches();
     }
 
     /// Ensure the local-variable table is at least `n` slots.

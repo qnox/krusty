@@ -23,6 +23,7 @@ use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod enum_metadata;
 mod vararg;
+mod when;
 
 struct InlineStaticTarget<'a> {
     owner: &'a str,
@@ -19964,6 +19965,17 @@ impl<'a> Emitter<'a> {
         } else {
             self.verif_stack(result_ty)
         };
+        // A `when` comparing ONE Int local against constants is a JVM switch in kotlinc, not a chain
+        // of comparisons. Everything above (the result type, the statement/value decision, the entry
+        // height) applies unchanged; only the dispatch differs.
+        if let Some(plan) = self.int_switch_plan(branches) {
+            self.emit_int_switch(
+                &plan,
+                when::Emission::new(is_stmt, result_ty, &result_stack, entry_height, end),
+                code,
+            );
+            return;
+        }
         // `end` is reachable if any branch falls through to it (i.e. doesn't return/throw). A
         // no-`else` statement always has the implicit no-match fallthrough.
         let mut end_reachable = !has_else && exhaustive_result.is_none();
@@ -20320,63 +20332,6 @@ impl<'a> Emitter<'a> {
     /// The element `Ty` of an array-typed IR expression.
     fn array_elem(&self, e: u32) -> Ty {
         self.value_ty(e).array_elem().unwrap_or(Ty::Error)
-    }
-
-    fn value_ty_of_when(&self, branches: &[(Option<u32>, u32)]) -> Ty {
-        // No `else` → the `when` is a Unit statement.
-        if !branches.iter().any(|(c, _)| c.is_none()) {
-            return Ty::Unit;
-        }
-        // The value type comes from a branch that *falls through* — a diverging branch (`else ->
-        // return …`/`throw`) contributes nothing to the merge, so its `Unit`/`Nothing` must not make
-        // the whole `when` look like a statement.
-        let last = branches
-            .iter()
-            .rev()
-            .find(|(_, b)| !self.diverges(*b))
-            .map(|(_, b)| self.value_ty(*b))
-            .unwrap_or(Ty::Unit);
-        // A `null`/`Nothing` branch carries no concrete type and would verify-type the merge stack as
-        // `top`; use a concrete fall-through branch type instead (`null` is assignable to any reference).
-        if matches!(last, Ty::Null | Ty::Nothing | Ty::Error) {
-            for (_, b) in branches {
-                if self.diverges(*b) {
-                    continue;
-                }
-                let t = self.value_ty(*b);
-                if !matches!(t, Ty::Null | Ty::Nothing | Ty::Error) {
-                    return t;
-                }
-            }
-        }
-        // When the falling-through branches are references of DIFFERENT classes (`if (c) Foo() else Bar()`,
-        // joined by the checker to `Any`), the merge-point stack type must be a common supertype — krusty
-        // uses `Object`. Each branch value is a subtype, so the merge frame (`Object`) verifies; the last
-        // branch's own (more specific) class would mismatch the other predecessor's value (a VerifyError).
-        if last.is_reference() {
-            // Compare by the JVM internal name (`String` and `Obj("java/lang/String")` are the same type
-            // but distinct `Ty` values), so only a genuinely differing class triggers the `Object` merge.
-            let internal = |t: &Ty| -> Option<String> {
-                match *t {
-                    Ty::String => Some("java/lang/String".to_string()),
-                    _ if t.is_array() => Some(type_descriptor(*t)),
-                    Ty::Obj(n, _) => Some(n.to_string()),
-                    _ => None,
-                }
-            };
-            let mut names = branches
-                .iter()
-                .filter(|(_, b)| !self.diverges(*b))
-                .map(|(_, b)| self.value_ty(*b))
-                .filter(|t| !matches!(t, Ty::Null | Ty::Nothing | Ty::Error))
-                .filter_map(|t| internal(&t));
-            if let Some(first) = names.next() {
-                if names.any(|n| n != first) {
-                    return Ty::obj("kotlin/Any");
-                }
-            }
-        }
-        last
     }
 
     fn frame(&mut self, label: Label, stack: Vec<VerifType>, code: &mut CodeBuilder) {
