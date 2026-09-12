@@ -1754,3 +1754,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   use `u32::MAX` and their producer-recorded identity/placement; `ACC_SYNTHETIC` remains only a JVM
   representation flag.
   `tests/secondary_constructor_member_order_e2e.rs::{a_source_secondary_constructor_is_interleaved_with_declared_members,a_value_class_secondary_constructor_keeps_its_source_order_after_realization}`.
+- **An unnamed temporary live across a suspension consumes its spill position (fix).** kotlinc gives a
+  suspending loop's ITERATOR its own `L$N` field, so the loop variable declared after it takes the NEXT
+  number: `for (name in names)` inside a suspend function records `s=["L$0","L$1","L$3"]` for
+  `names`/`out`/`name`, with `L$2` holding the unnamed iterator.
+  krusty's `@DebugMetadata` walker kept only NAMED variables, so the positions compacted and every
+  suspending loop reported `L$2` for a variable kotlinc puts in `L$3`. The temp now participates when
+  it is still read past the suspension — the same liveness test the temps-only machine already used —
+  and contributes no name, exactly as kotlinc's arrays show.
+  `tests/suspend_debug_metadata_e2e.rs::continuation_metadata_numbers_spills_in_declaration_order`.
