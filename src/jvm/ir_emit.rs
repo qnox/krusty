@@ -270,6 +270,8 @@ pub struct EmitEnv<'a> {
     /// JVM-only realizations for already-resolved current-module property operations. Kept beside
     /// the emitter rather than on common IR so a backend field/accessor choice cannot leak into FIR.
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
+    inner_classes: crate::jvm::inner_classes::InnerClasses,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -2035,11 +2037,14 @@ fn build_class_metadata(
     // subtype relationships for every class, but kotlinc writes the field for sealed ones alone
     // (a plain interface with implementors carries none).
     let sealed_sorted = if c.is_sealed {
-        sorted_sealed_subclasses(c)
+        sorted_sealed_subclass_ids(c)
     } else {
         Vec::new()
     };
-    let sealed_descs: Vec<String> = sealed_sorted.iter().map(|s| format!("L{s};")).collect();
+    let sealed_descs: Vec<String> = sealed_sorted
+        .iter()
+        .map(|subclass| format!("L{};", subclass.render()))
+        .collect();
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
     let sealed_refs: Vec<&str> = sealed_descs.iter().map(String::as_str).collect();
     let class_type_parameters = ir
@@ -3284,51 +3289,6 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     }
 }
 
-/// Register the file's nested-class `InnerClasses` candidates on `cw`; the writer's `finish` keeps only
-/// the entries it references as a class constant (kotlinc's rule). Covers the `@Serializable` model
-/// shape — a class's `$$serializer` (inner name `$serializer`) and its `Companion`, both `public static
-/// final` — emitted in kotlinc's order ($serializer before Companion). Anonymous nested classes (the
-/// suspend continuations) are not yet registered (they also need an `EnclosingMethod` attribute).
-fn inner_class_access(ir: &IrFile, c: &IrClass) -> u16 {
-    const PUBLIC: u16 = 0x0001;
-    const STATIC: u16 = 0x0008;
-    const FINAL: u16 = 0x0010;
-    const INTERFACE: u16 = 0x0200;
-    const ABSTRACT: u16 = 0x0400;
-    const ANNOTATION: u16 = 0x2000;
-    const ENUM: u16 = 0x4000;
-
-    // Inner/static nesting is a source-level class property, not a consequence of a field spelling.
-    // In particular, another synthetic class may conventionally call an ordinary capture `this$0`.
-    let is_inner = c.is_inner_class;
-    // The InnerClasses access carries the SOURCE visibility (`protected class Category` reads
-    // `protected static final` there), unlike the class's own access flags.
-    let visibility = match ir.class_visibilities.get(&c.fq_name_id()) {
-        Some(crate::types::Visibility::Protected) => 0x0004,
-        Some(crate::types::Visibility::Private) => 0x0002,
-        _ => PUBLIC,
-    };
-    let mut access = visibility | if is_inner { 0 } else { STATIC };
-    if c.is_annotation {
-        access |= INTERFACE | ABSTRACT | ANNOTATION;
-    } else if c.is_interface {
-        access |= INTERFACE | ABSTRACT;
-    } else if !c.enum_entries.is_empty() {
-        access |= FINAL | ENUM;
-    } else if c.is_sealed || c.is_abstract {
-        access |= ABSTRACT;
-    } else if !c.is_open {
-        access |= FINAL;
-    }
-    // A class the COMPILER invented (a `$$serializer`) is `ACC_SYNTHETIC` in its own access flags;
-    // kotlinc repeats that bit in the `InnerClasses` entry, and the two sides are read
-    // independently (reflection consults the entry, not the class file it names).
-    if ir.is_synthetic_class(c.fq_name_id()) {
-        access |= 0x1000;
-    }
-    access
-}
-
 fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
     let Some(companion) = class.companion_class else {
         return;
@@ -3495,105 +3455,12 @@ fn emit_singleton_instance_clinit(cw: &mut ClassWriter, class: &str) {
     finish_code::<0x0008>(cw, "<clinit>", "()V", &mut code, 0);
 }
 
-fn register_inner_classes(cw: &mut ClassWriter, ir: &IrFile) {
-    use crate::jvm::classfile::InnerClassSpec;
-    for c in &ir.classes {
-        let fq = c.fq_name();
-        if let Some(outer) = fq.strip_suffix("$$serializer") {
-            cw.add_inner_class(InnerClassSpec {
-                inner: fq.clone(),
-                outer: Some(outer.to_string()),
-                name: Some("$serializer".to_string()),
-                access: inner_class_access(ir, c),
-            });
-        }
-    }
-    for c in &ir.classes {
-        if let Some(comp) = c.companion_class() {
-            cw.add_inner_class(InnerClassSpec {
-                inner: comp,
-                outer: Some(c.fq_name()),
-                name: c
-                    .companion_class
-                    .map(|companion| companion.nested_segment_ref().to_string()),
-                access: c
-                    .companion_class
-                    .and_then(|name| {
-                        ir.classes
-                            .iter()
-                            .find(|candidate| candidate.fq_name_id() == name)
-                    })
-                    .map_or(0x0019, |candidate| inner_class_access(ir, candidate)),
-            });
-        }
-    }
-    // `finish` retains only nested classes referenced by this classfile.
-    for c in &ir.classes {
-        let fq = c.fq_name();
-        if fq.ends_with("$$serializer") {
-            continue; // handled above (special inner name `$serializer`)
-        }
-        if c.is_anonymous_object {
-            cw.add_inner_class(InnerClassSpec {
-                inner: fq,
-                outer: None,
-                name: None,
-                access: 0x0019,
-            });
-            continue;
-        }
-        // Where the OUTER class ends is not the last `$`: a backticked declaration may carry `$` in
-        // its own simple name (`class \`Nested$With$Dollars\``), and splitting there named an outer
-        // class that does not exist — the loader then failed with `NoClassDefFoundError` on the
-        // invented name. The boundary is the longest proper prefix that is ITSELF a class of this
-        // file; only when no declared class is a prefix does the textual split stand in (an outer
-        // this file does not declare).
-        let Some(pos) = ir
-            .classes
-            .iter()
-            .map(IrClass::fq_name)
-            .filter(|outer| {
-                outer.len() < fq.len()
-                    && fq.starts_with(outer.as_str())
-                    && fq.as_bytes()[outer.len()] == b'$'
-            })
-            .map(|outer| outer.len())
-            .max()
-            .or_else(|| fq.rfind('$'))
-        else {
-            continue; // top-level class — not nested
-        };
-        let name = &fq[pos + 1..];
-        if c.is_companion {
-            continue; // handled above
-        }
-        let anonymous = is_coroutine_state_machine(c);
-        // A LOCAL class is not a member of anything: its name is qualified by the DECLARATION it
-        // was written in, so the text before the last `$` names no class. The JVM spells that with
-        // `outer_class_info_index = 0` and a non-zero `inner_name_index` — which is also what
-        // reflection reads back as `simpleName`. Treating the prefix as an outer class makes the
-        // loader look for a class that does not exist. An ANONYMOUS class carries neither outer nor
-        // simple name (kotlinc's inner-only entry, access `public static final`).
-        let member = !anonymous && !c.is_local_class;
-        cw.add_inner_class(InnerClassSpec {
-            inner: fq.clone(),
-            outer: member.then(|| fq[..pos].to_string()),
-            name: (!anonymous).then(|| name.to_string()),
-            access: if anonymous {
-                0x0008 | 0x0010
-            } else {
-                inner_class_access(ir, c)
-            },
-        });
-    }
-}
-
-fn sorted_sealed_subclasses(c: &IrClass) -> Vec<String> {
-    let mut subclasses: Vec<String> = c.sealed_subclasses.iter_rendered().collect();
+fn sorted_sealed_subclass_ids(c: &IrClass) -> Vec<TypeName> {
+    let mut subclasses: Vec<TypeName> = c.sealed_subclasses.iter_ids().collect();
     subclasses.sort_by(|a, b| {
-        let a_simple = a.rsplit(['$', '/']).next().unwrap_or(a);
-        let b_simple = b.rsplit(['$', '/']).next().unwrap_or(b);
-        a_simple.cmp(b_simple).then_with(|| a.cmp(b))
+        a.nested_segment_ref()
+            .cmp(b.nested_segment_ref())
+            .then_with(|| a.path_cmp(*b))
     });
     subclasses
 }
@@ -3606,31 +3473,39 @@ fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit
     if !c.is_sealed {
         return;
     }
-    let self_fq = c.fq_name();
-    let subs = sorted_sealed_subclasses(c);
+    let self_identity = c.fq_name_id();
+    let subs = sorted_sealed_subclass_ids(c);
     if subs.is_empty() {
         return;
     }
-    for sub in &subs {
-        if let Some(name) = sub.strip_prefix(&format!("{self_fq}$")) {
-            cw.seed_class(sub);
+    for &sub in &subs {
+        if sub != self_identity && sub.same_or_nested_within(self_identity) {
+            let rendered = sub.render();
+            cw.seed_class(&rendered);
             cw.add_inner_class(InnerClassSpec {
-                inner: sub.clone(),
-                outer: Some(self_fq.clone()),
-                name: Some(name.to_string()),
+                inner: rendered,
+                outer: Some(self_identity.render()),
+                name: Some(
+                    sub.nested_segment_within(self_identity)
+                        .expect("a nested sealed subtype must have a relative segment")
+                        .to_string(),
+                ),
                 access: ir
                     .classes
                     .iter()
-                    .find(|candidate| candidate.fq_name_matches(sub))
-                    .map_or(0x0019, |candidate| inner_class_access(ir, candidate)),
+                    .find(|candidate| candidate.fq_name_id() == sub)
+                    .map_or(0x0019, |candidate| {
+                        crate::jvm::inner_classes::class_access(ir, candidate)
+                    }),
             });
         }
     }
     if emit_permitted {
-        for sub in &subs {
+        let rendered: Vec<String> = subs.iter().map(|subclass| subclass.render()).collect();
+        for sub in &rendered {
             cw.seed_class(sub);
         }
-        cw.set_permitted_subclasses(subs);
+        cw.set_permitted_subclasses(rendered);
     }
 }
 
@@ -3921,6 +3796,7 @@ pub fn emit_all(
         jvm_default: JvmDefaultMode::default(),
         lambda_modes: LambdaModes::default(),
         property_realizations: &property_realizations,
+        inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
     emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
         None
@@ -4033,6 +3909,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
         property_realizations,
+        inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
     emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
 }
@@ -4325,7 +4202,7 @@ fn emit_pass(
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
     // `IncompatibleClassChangeError` when only one carries the entry. kotlinc emits it here too.
-    register_inner_classes(&mut cw, ir);
+    env.inner_classes.register(&mut cw);
     // PRIVATE facade functions a CLASS body calls (`Callee::Local` from a lambda impl, a
     // continuation class, or any class member): a cross-class private invokestatic is illegal, so
     // kotlinc emits a `public static final synthetic access$<name>` forwarding bridge on the facade
@@ -6063,7 +5940,7 @@ fn emit_class(
         let descriptor = ir_method_desc(&function.params, &function.ret);
         cw.set_enclosing_method(&owner, &function.name, &descriptor);
     }
-    register_inner_classes(&mut cw, ir);
+    env.inner_classes.register(&mut cw);
     // The class HEADER's interface refs intern BEFORE any member entry (kotlinc visits the header
     // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
     // ahead of the pool seeding below.
@@ -9775,7 +9652,7 @@ fn emit_interface_class(
         c,
         opts.class_major.unwrap_or(MAJOR_JAVA8) >= 61,
     );
-    register_inner_classes(&mut cw, ir);
+    env.inner_classes.register(&mut cw);
     let mut default_impls: Option<ClassWriter> = None;
     // Whether this compilation publishes the `<Iface>$DefaultImpls` compatibility holder at all.
     let emits_default_impls = opts.jvm_default != JvmDefaultMode::NoCompatibility;
@@ -10073,7 +9950,7 @@ fn emit_enum_class(
     // rows this class references. Without it an enum's table was built from resolver lookups alone,
     // which see only the classes already in the pool — so a nested enum listed its own row and its
     // `Companion`'s, but not the ENCLOSING row kotlinc writes for the class that contains it.
-    register_inner_classes(&mut cw, ir);
+    env.inner_classes.register(&mut cw);
     // Interfaces the enum implements (`enum class E : I`) — without these the JVM rejects an
     // interface-typed call with `IncompatibleClassChangeError`.
     for itf in c.interfaces.iter_rendered() {
