@@ -1565,3 +1565,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   header line) and the `<init>` tables.
   `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_members_carry_debug_tables`,
   whose `getDescriptor` assertion pins the non-overshoot.
+- **`serialize` maps its trailing `return` to the class HEADER line (fix).** kotlinc's table has TWO
+  entries — the body opens on the ANNOTATED declaration's line, the `return` goes back to the header
+  — the same two-line shape a constructor gets. The two differ exactly when the annotation sits on
+  its own line above the declaration, which is how `@Serializable` is always written, so krusty's
+  table stopped one entry short on EVERY generated serializer.
+  The second entry belongs on the RETURN, past the closing `endStructure` call: attaching it to that
+  call put it eight bytes early. A plugin-built body carries no statement lines of its own, so the
+  first entry comes from `expr_lines` on the opening statement and the second from `fn_close_lines`,
+  which the emitter marks at the implicit return.
+  With this, `serialize` matches kotlinc completely — code, guards and line table.
+  `tests/serialization_companion_byte_parity_e2e.rs::serialize_maps_its_return_to_the_class_header_line`.

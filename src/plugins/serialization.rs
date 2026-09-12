@@ -2962,6 +2962,22 @@ impl IrPlugin for SerializationPlugin {
                                 dispatch_receiver: Some(cend),
                                 args: vec![dend],
                             });
+                            // kotlinc's `serialize` table has TWO entries: the body opens on the
+                            // ANNOTATED declaration's line, and the closing `endStructure` +
+                            // `return` map back to the class HEADER line — the same two-line shape a
+                            // constructor gets. The two differ exactly when the annotation sits on
+                            // its own line above the declaration, which is how `@Serializable` is
+                            // always written.
+                            let header_line = ir.classes[class_id as usize].decl_line;
+                            let start_line = ir.classes[class_id as usize].decl_start_line;
+                            if start_line != 0 {
+                                ir.expr_lines.insert(dvar, start_line);
+                            }
+                            if header_line != 0 {
+                                // On the trailing `return`, not on `endStructure`: kotlinc's second
+                                // entry sits at the return's pc, past the closing call.
+                                ir.fn_close_lines.insert(fid, header_line);
+                            }
                             let body = ir.add_expr(IrExpr::Block {
                                 stmts: vec![dvar, cvar, call_write_self, end],
                                 value: None,

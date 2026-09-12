@@ -1242,3 +1242,52 @@ fn a_generated_serializer_members_carry_debug_tables() {
         "getDescriptor must not gain a LineNumberTable kotlinc does not write"
     );
 }
+
+/// `serialize`'s `LineNumberTable` has TWO entries, the same two-line shape a constructor gets: the
+/// body opens on the ANNOTATED declaration's line, and the trailing `return` maps back to the class
+/// HEADER line. The two differ exactly when the annotation sits on its own line above the
+/// declaration — which is how `@Serializable` is always written — so krusty's table stopped one
+/// entry short on every generated serializer.
+///
+/// The second entry belongs on the RETURN, past the closing `endStructure` call: attaching it to
+/// that call instead put it eight bytes early.
+#[test]
+fn serialize_maps_its_return_to_the_class_header_line() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializeReturnLine",
+        SRC,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The `line N: pc` rows of `serialize`.
+    let lines = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains("void serialize("))
+            .expect("serialize must be present");
+        body.into_iter()
+            .skip(start)
+            .skip_while(|line| !line.starts_with("LineNumberTable"))
+            .skip(1)
+            .take_while(|line| line.starts_with("line "))
+            .collect::<Vec<_>>()
+    };
+    let want = lines(&built.reference);
+    assert_eq!(
+        want.len(),
+        2,
+        "the reference must map two lines in serialize — the rule under test: {want:?}"
+    );
+    assert_eq!(lines(&built.krusty), want, "serialize LineNumberTable");
+}
