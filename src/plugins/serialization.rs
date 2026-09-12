@@ -11,6 +11,8 @@
 //! `serializer()` accessor. `transform_bodies` fills descriptor, serializer-list, serialize, and
 //! deserialize bodies.
 
+mod enum_serializer;
+
 use crate::ir::{
     Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
 };
@@ -1228,21 +1230,7 @@ impl SerializationPlugin {
             arg: values,
             type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
         });
-        // kotlinc builds the serializer through the static factory
-        // `EnumsKt.createSimpleEnumSerializer(name, values())`, not `new EnumSerializer(…)`; the
-        // entry array is widened to `[Ljava/lang/Enum;` at the call.
-        let enum_ser = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
-                owner: type_name("kotlinx/serialization/internal/EnumsKt"),
-                name: "createSimpleEnumSerializer".to_string(),
-                descriptor:
-                    "(Ljava/lang/String;[Ljava/lang/Enum;)Lkotlinx/serialization/KSerializer;"
-                        .to_string(),
-                inline: InlineKind::None,
-            },
-            dispatch_receiver: None,
-            args: vec![name, enums],
-        });
+        let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
         // kotlinc does not build the delegate eagerly with `lazyOf`. It compiles the initializer to
         // a private static `_init_$_anonymous_()` holding `EnumSerializer(name, values())`, binds it
         // with an `invokedynamic` `Function0`, and passes that to
