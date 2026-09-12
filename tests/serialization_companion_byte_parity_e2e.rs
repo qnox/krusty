@@ -1759,3 +1759,48 @@ fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
         built.krusty
     );
 }
+
+/// A contextual element INSIDE a collection. `@file:UseContextualSerialization(T::class)` makes every
+/// `T` in the file serialize through a `ContextualSerializer`, and krusty applied that rule to a
+/// PROPERTY of type `T` only — a `List<T>` names no such property, so its element serializer was
+/// underivable and the file was declined. Generated clients use exactly this to carry loosely-typed
+/// JSON maps.
+#[test]
+fn a_contextual_element_inside_a_collection_is_derivable() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "@file:UseContextualSerialization(Flexible.FlexibleMap::class)\n\
+               import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.UseContextualSerialization\n\
+               object Flexible {\n\
+               \x20   class FlexibleMap\n\
+               }\n\
+               @Serializable\n\
+               data class Options(val tiers: List<Flexible.FlexibleMap>? = null)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ContextualCollectionElement",
+        src,
+        "Options",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The wrap lives on the SERIALIZED class: kotlinc caches an allocated element serializer in that
+    // class's `$childSerializers`, not on the generated serializer.
+    assert!(
+        built.reference.contains("ContextualSerializer"),
+        "reference must wrap the element contextually — that is the rule under test:\n{}",
+        built.reference
+    );
+    assert!(
+        built.krusty.contains("ContextualSerializer"),
+        "krusty must wrap the collection's element contextually:\n{}",
+        built.krusty
+    );
+}
