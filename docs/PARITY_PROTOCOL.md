@@ -1680,3 +1680,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   serializers and companions use their exact interned child identities. The focused registry and name
   tree tests pin candidate order, names, access flags, and the embedded-dollar boundary without adding
   a machine-timing-dependent 24-second test to the suite.
+- **A `when` over `Int` constants compiles to a switch (fix).** krusty emitted a chain of `if_icmpne`
+  comparisons for every `when`, whatever its subject; kotlinc dispatches through `tableswitch` or
+  `lookupswitch`. No class containing a constant `when` could match its code array.
+  kotlinc's choice rule, measured against the reference compiler: with two or more distinct keys it
+  table-switches when the key range spans at most TWICE the number of keys (`0,1,2,7` → `tableswitch
+  0 to 7`; `0,1,2,8` → `lookupswitch`), and looks up otherwise. One key is a plain comparison.
+  The backend had no switch opcodes at all. A switch's operand table is four-byte aligned from the
+  START of the code array and its offsets are four bytes measured from the OPCODE, so they need their
+  own fixup list — `link_local_branches` patched two-byte offsets relative to the operand. `bind` also
+  had to learn that a switch target counts as an arrival, or the case bodies would be dropped as dead
+  code after the switch ends the straight-line stream.
+  The case bodies emit in source order, each jumping to the merge, with the `else` last falling
+  through — kotlinc's layout, so a `when` whose subject is a parameter now matches it instruction for
+  instruction apart from the subject temporary krusty still materializes.
+  `tests/int_when_switch_e2e.rs::a_when_over_int_constants_switches_the_way_kotlinc_does`.
