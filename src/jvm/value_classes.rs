@@ -2265,6 +2265,14 @@ pub fn lower_value_classes(
     //    Inside a value-class member body, an `is X`/`(X)other` whose type IS a value class must stay
     //    the BOXED class (the synthesized `equals` checks/casts the box) — keep it; everything else
     //    (including field-value operations over a nested value-class underlying) erases normally.
+    let serialization_constructor_calls = (0..ir.exprs.len() as u32)
+        .filter(|expression| {
+            ir.generated_secondary_constructor_call(*expression)
+                .is_some_and(|(_, role, _)| {
+                    role == crate::ir::IrSecondaryConstructorRole::SerializationDeserialization
+                })
+        })
+        .collect::<HashSet<_>>();
     let mut erased_variable_defaults = Vec::new();
     for (i, e) in ir.exprs.iter_mut().enumerate() {
         let keep_box = vc_body_exprs.contains(&(i as u32));
@@ -2299,7 +2307,9 @@ pub fn lower_value_classes(
             IrExpr::New {
                 ctor_params: Some(ps),
                 ..
-            } => ps.iter_mut().for_each(|p| *p = erase(p, &under)),
+            } if !serialization_constructor_calls.contains(&(i as u32)) => {
+                ps.iter_mut().for_each(|p| *p = erase(p, &under));
+            }
             // A function value's `invoke` returns its declared type through the `FunctionN` generic slot — a
             // REFERENCE. A value-class return is therefore the BOXED value class (an `X` object): keep it as
             // `X` (do NOT erase to the underlying) so emit does `checkcast X` and a `.field` on the result
@@ -2496,6 +2506,26 @@ pub fn lower_value_classes(
             ..
         } = &ir.exprs[i]
         {
+            if serialization_constructor_calls.contains(&id) {
+                for (&argument, &parameter) in args.iter().zip(
+                    ctor_params
+                        .as_deref()
+                        .expect("generated constructor call retains its exact parameters"),
+                ) {
+                    let Some(value_class) = parameter
+                        .non_null()
+                        .obj_internal()
+                        .filter(|classifier| under.contains_key(classifier))
+                    else {
+                        continue;
+                    };
+                    if repr_ctx.unboxed_value_class(argument, &under) == Some(value_class) {
+                        value_member_constructor_ops
+                            .push((argument, repr_ctx.box_op(argument, value_class)));
+                    }
+                }
+                continue;
+            }
             let fields;
             let params: &[Ty] = match cls_by_name.get(internal) {
                 Some(&class) if !orig_fields[class].is_empty() => {
@@ -3907,22 +3937,26 @@ pub fn lower_value_classes(
                     default_prefix_count,
                     ..
                 } => {
-                    let fields;
-                    let targets: &[Ty] = match cls_by_name.get(internal) {
-                        Some(&c) if !orig_fields[c].is_empty() => {
-                            fields = orig_fields[c].clone();
-                            &fields
-                        }
-                        _ => ctor_params.as_deref().unwrap_or(&[]),
-                    };
-                    args.iter()
-                        .zip(supplied_constructor_parameters(
-                            targets,
-                            defaults,
-                            *default_prefix_count,
-                        ))
-                        .map(|(a, p)| (*a, p.clone()))
-                        .collect()
+                    if serialization_constructor_calls.contains(&id) {
+                        Vec::new()
+                    } else {
+                        let fields;
+                        let targets: &[Ty] = match cls_by_name.get(internal) {
+                            Some(&c) if !orig_fields[c].is_empty() => {
+                                fields = orig_fields[c].clone();
+                                &fields
+                            }
+                            _ => ctor_params.as_deref().unwrap_or(&[]),
+                        };
+                        args.iter()
+                            .zip(supplied_constructor_parameters(
+                                targets,
+                                defaults,
+                                *default_prefix_count,
+                            ))
+                            .map(|(a, p)| (*a, p.clone()))
+                            .collect()
+                    }
                 }
                 IrExpr::Call { callee, args, .. } if callee.source_function().is_some() => {
                     let function = callee

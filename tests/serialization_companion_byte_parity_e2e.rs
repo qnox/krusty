@@ -1583,7 +1583,8 @@ fn serialize_maps_its_return_to_the_class_header_line() {
     }
 }
 
-/// Instruction rows for one method, with constant-pool indices erased and javap comments dropped.
+/// Instruction rows for one method, with only constant-pool indices erased. javap comments retain
+/// the exact selected owner/member/descriptor identity.
 fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut inside = false;
@@ -1615,9 +1616,6 @@ fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
             continue;
         }
         let code = rest
-            .split("//")
-            .next()
-            .unwrap_or(rest)
             .split_whitespace()
             .map(|token| if token.starts_with('#') { "#" } else { token })
             .collect::<Vec<_>>()
@@ -1625,6 +1623,62 @@ fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
         out.push(format!("{}: {code}", pc.trim()));
     }
     out
+}
+
+fn instruction_text(row: &str) -> &str {
+    row.split_once(": ")
+        .map_or(row, |(_, instruction)| instruction)
+}
+
+/// Ordered, duplicate-free `(mask word, bit instruction)` projection from deserialize. kotlinc
+/// writes each bit in both its sequential and indexed branches; krusty currently has only the
+/// indexed branch, so the ABI fact is the stable unique sequence rather than branch duplication.
+fn deserialize_mask_updates(instructions: &[String]) -> Vec<(usize, String)> {
+    let local = |instruction: &str, opcode: &str| -> Option<u32> {
+        let instruction = instruction.strip_prefix(opcode)?;
+        let slot = instruction
+            .strip_prefix('_')
+            .unwrap_or(instruction.trim_start())
+            .split_whitespace()
+            .next()?;
+        slot.parse().ok()
+    };
+    let mut mask_slots = Vec::new();
+    let mut updates = Vec::new();
+    for (index, row) in instructions.iter().enumerate() {
+        if instruction_text(row) != "ior" || index < 2 || index + 1 >= instructions.len() {
+            continue;
+        }
+        let load = instruction_text(&instructions[index - 2]);
+        let bit = instruction_text(&instructions[index - 1]);
+        let store = instruction_text(&instructions[index + 1]);
+        let loaded = local(load, "iload").expect("seen-mask update loads an int local");
+        let stored = local(store, "istore").expect("seen-mask update stores an int local");
+        assert_eq!(loaded, stored, "seen-mask update writes its loaded word");
+        let word = if let Some(word) = mask_slots.iter().position(|slot| *slot == loaded) {
+            word
+        } else {
+            mask_slots.push(loaded);
+            mask_slots.len() - 1
+        };
+        let update = (word, bit.to_string());
+        if !updates.contains(&update) {
+            updates.push(update);
+        }
+    }
+    updates
+}
+
+fn deserialization_constructor_target(instructions: &[String]) -> String {
+    instructions
+        .iter()
+        .map(|row| instruction_text(row))
+        .find(|instruction| {
+            instruction.starts_with("invokespecial")
+                && instruction.contains("SerializationConstructorMarker")
+        })
+        .expect("deserialize calls its deserialization constructor")
+        .to_string()
 }
 
 fn many_fields_source(class: &str, count: usize) -> String {
@@ -1728,4 +1782,61 @@ fn deserialization_constructor_uses_the_lowered_default_expression() {
         method_instructions(&built.reference, "SerializationConstructorMarker)"),
         "complete non-constant-default constructor instructions"
     );
+}
+
+/// `deserialize` owns one seen-mask local per constructor mask word and calls the exact constructor
+/// identity recorded by its producer. Complete instructions pin ordinary, generic, exact-word,
+/// multi-word, and value-class-marker shapes; substring checks could accept the old primary-ctor
+/// fallback or an unrelated synthetic constructor.
+#[test]
+fn deserialize_passes_every_seen_mask_to_the_exact_constructor() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let generic = "import kotlinx.serialization.Serializable\n\
+                   @Serializable\n\
+                   data class Generic<T>(val required: T, val optional: Int = 7)\n"
+        .to_string();
+    let value_class = "import kotlinx.serialization.Serializable\n\
+                       @JvmInline @Serializable value class Count(val value: Int)\n\
+                       @Serializable data class Holder(val count: Count)\n"
+        .to_string();
+    let cases = [
+        ("DeserializeSmall", SRC.to_string(), "Point".to_string()),
+        ("DeserializeGeneric", generic, "Generic".to_string()),
+        (
+            "Deserialize32",
+            many_fields_source("Fields32", 32),
+            "Fields32".to_string(),
+        ),
+        (
+            "Deserialize33",
+            many_fields_source("Fields33", 33),
+            "Fields33".to_string(),
+        ),
+        ("DeserializeValueClass", value_class, "Holder".to_string()),
+    ];
+    for (tag, source, class) in cases {
+        let serializer = format!("{class}$$serializer");
+        let Some(built) = compare_with_kotlinc_plugin(tag, &source, &serializer, &cp, "25", &extra)
+        else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        let marker = " deserialize(kotlinx.serialization.encoding.Decoder);";
+        let got = method_instructions(&built.krusty, marker);
+        let want = method_instructions(&built.reference, marker);
+        assert_eq!(
+            deserialize_mask_updates(&got),
+            deserialize_mask_updates(&want),
+            "{class}: ordered mask-word/bit updates"
+        );
+        assert_eq!(
+            deserialization_constructor_target(&got),
+            deserialization_constructor_target(&want),
+            "{class}: exact constructor owner and descriptor"
+        );
+    }
 }
