@@ -1763,3 +1763,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   it is still read past the suspension — the same liveness test the temps-only machine already used —
   and contributes no name, exactly as kotlinc's arrays show.
   `tests/suspend_debug_metadata_e2e.rs::continuation_metadata_numbers_spills_in_declaration_order`.
+- **A continuation's pool follows kotlinc's visit order (fix).** Three orderings were wrong at once on
+  every suspend function's continuation class: `@DebugMetadata` was built BEFORE the field table, so
+  the subset of `L$N` names its `s` array happens to mention interned ahead of the fields that own
+  them; and `result`, `this$0` and `label` were declared eagerly with the spill fields, while kotlinc
+  first names them where they are USED — `this$0` in the constructor's `putfield`, the other two in
+  `invokeSuspend`.
+  Neither changes what the class SAYS, and both shift every pool entry after them, which is why a
+  continuation could match kotlinc member for member and still differ byte for byte. The spill fields
+  keep their eager visit (their names and the one shared `Ljava/lang/Object;` descriptor intern with
+  the table, as kotlinc's do); the annotation now follows them, and the three remaining fields are
+  deferred to their first use.
+  Still open on this class: kotlinc interns the constructor's descriptor and `LocalVariableTable`
+  names with the constructor's own header, where krusty leaves them to the body.
+  `tests/suspend_debug_metadata_e2e.rs::continuation_pool_interns_spills_then_metadata_then_used_fields`.

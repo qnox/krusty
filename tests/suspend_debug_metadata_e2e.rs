@@ -947,3 +947,82 @@ fn continuation_metadata_numbers_spills_in_declaration_order() {
         );
     }
 }
+
+/// A continuation's constant pool follows kotlinc's VISIT order: the spill fields' names and their
+/// one shared descriptor intern with the field table, `@DebugMetadata` after them — its `s` array
+/// names those very fields — and `result`/`this$0`/`label` only where they are first USED, in the
+/// constructor and `invokeSuspend`.
+///
+/// krusty built the annotation before the fields, so the subset of `L$N` names the array mentions
+/// interned ahead of the table, and it declared all three remaining fields eagerly, which pushed the
+/// constructor's own strings down. Neither changes what the class says, and both shift every entry
+/// after them — a class that matches kotlinc member for member still differs byte for byte.
+#[test]
+fn continuation_pool_interns_spills_then_metadata_then_used_fields() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun find(name: String): String? = name\n\
+        suspend fun load(names: List<String>): List<String> {\n\
+        \x20 val out = ArrayList<String>()\n\
+        \x20 for (name in names) {\n\
+        \x20   val found = find(name)\n\
+        \x20   if (found != null) out.add(found)\n\
+        \x20 }\n\
+        \x20 return out\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("PoolOrder", source)],
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile the suspending loop");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/PoolOrderKt$load$1").then_some(bytes))
+        .expect("load continuation");
+    let text = disassemble(&javap, bytes, "PoolOrderKt$load$1.class", "pool_order");
+    // The pool entries, in order, reduced to their payload.
+    let pool: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('#') && line.contains(" = "))
+        .filter_map(|line| line.split_once(" = ").map(|(_, rest)| rest.to_string()))
+        .collect();
+    let at = |needle: &str| {
+        pool.iter()
+            .position(|entry| entry.split_whitespace().nth(1) == Some(needle))
+            .unwrap_or_else(|| panic!("{needle:?} is not in the pool:\n{text}"))
+    };
+    let spills = at("L$0");
+    let metadata = at("Lkotlin/coroutines/jvm/internal/DebugMetadata;");
+    let constructor = at("<init>");
+    for (earlier, later, rule) in [
+        (
+            spills,
+            metadata,
+            "the spill fields intern before @DebugMetadata",
+        ),
+        (
+            metadata,
+            constructor,
+            "@DebugMetadata interns before the constructor",
+        ),
+        (
+            constructor,
+            at("result"),
+            "the constructor interns before result",
+        ),
+        (
+            constructor,
+            at("label"),
+            "the constructor interns before label",
+        ),
+    ] {
+        assert!(earlier < later, "{rule}:\n{text}");
+    }
+}
