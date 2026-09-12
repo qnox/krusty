@@ -1270,3 +1270,99 @@ fn a_generated_serializer_carries_its_class_signature() {
         );
     }
 }
+
+/// A generated `$serializer`'s members are public API — a Java caller can pass `null` — so kotlinc
+/// guards their non-null reference parameters at entry exactly as it guards a user-written
+/// function: `Intrinsics.checkNotNullParameter(encoder, "encoder")`. krusty emitted the body with
+/// no prologue at all, so every `serialize`/`deserialize` differed from the first instruction on.
+///
+/// The generated-parameter record also pins the names in Kotlin Metadata to
+/// `encoder`/`value`/`decoder` rather than positional placeholders.
+#[test]
+fn a_generated_serializer_guards_its_parameters() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerParamGuards",
+        SRC,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Read the names through stable neighboring type entries. Member order and unrelated parts of
+    // kotlinc's string table still differ, so comparing all of `d2` would over-couple this test.
+    let metadata_parameter_names = |text: &str| {
+        let d2 = text
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("d2=["))
+            .unwrap_or_else(|| panic!("generated serializer metadata string table:\n{text}"));
+        let strings = d2.split('"').skip(1).step_by(2).collect::<Vec<_>>();
+        let encoder_type = strings
+            .iter()
+            .position(|value| *value == "Lkotlinx/serialization/encoding/Encoder;")
+            .expect("Encoder metadata type");
+        let decoder_type = strings
+            .iter()
+            .position(|value| *value == "Lkotlinx/serialization/encoding/Decoder;")
+            .expect("Decoder metadata type");
+        vec![
+            strings[encoder_type - 1].to_string(),
+            strings[encoder_type + 1].to_string(),
+            strings[decoder_type - 1].to_string(),
+        ]
+    };
+    let metadata_names = metadata_parameter_names(&built.reference);
+    assert_eq!(metadata_names, ["encoder", "value", "decoder"]);
+    assert_eq!(
+        metadata_parameter_names(&built.krusty),
+        metadata_names,
+        "generated member parameter names in @Metadata.d2"
+    );
+    // Instructions from method entry through the last guard. The following body still has
+    // independent parity differences and is outside this regression.
+    let prologue = |text: &str, member: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains(member))
+            .unwrap_or_else(|| panic!("{member} must be present:\n{text}"));
+        let instructions = body
+            .into_iter()
+            .skip(start)
+            .skip_while(|line| !line.starts_with("0: "))
+            // Stop at this member: a later erased bridge guards its parameters too.
+            .take_while(|line| {
+                line.split_once(':')
+                    .is_some_and(|(pc, _)| !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .collect::<Vec<_>>();
+        let last_guard = instructions
+            .iter()
+            .rposition(|line| line.contains("checkNotNullParameter"));
+        match last_guard {
+            Some(at) => instructions[..=at].to_vec(),
+            None => Vec::new(),
+        }
+    };
+    for member in ["void serialize(", "deserialize("] {
+        let want = prologue(&built.reference, member);
+        assert!(
+            want.iter()
+                .any(|line| line.contains("checkNotNullParameter")),
+            "the reference must guard {member} — the rule under test: {want:?}"
+        );
+        assert_eq!(
+            prologue(&built.krusty, member),
+            want,
+            "{member} entry guards"
+        );
+    }
+}
