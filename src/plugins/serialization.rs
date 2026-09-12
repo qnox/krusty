@@ -11,6 +11,7 @@
 //! `serializer()` accessor. `transform_bodies` fills descriptor, serializer-list, serialize, and
 //! deserialize bodies.
 
+mod deserialization_constructor;
 mod enum_serializer;
 mod generated_members;
 mod serialize_body;
@@ -26,6 +27,7 @@ use crate::plugins::{
     FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty, TypeName};
+use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use generated_members::{add_serializer_members, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
@@ -2184,76 +2186,38 @@ impl IrPlugin for SerializationPlugin {
                 ir.classes[class_id as usize].methods.push(marker);
             }
 
-            // ABI-only deserialization ctor `G(int seqMask, <fields…>, SerializationConstructorMarker)`
-            // (krusty's `deserialize()` uses the primary ctor): a Super-delegate secondary ctor whose body
-            // sets each field from its arg (fields start at param 2, after the seq-mask). kotlinc marks it
-            // `ACC_SYNTHETIC`. A value-class field is stored UNBOXED, so its param + `putfield` use the
-            // underlying type.
             if plain_data_class {
-                // A value-class field unboxes to its underlying in the deser ctor ONLY when that underlying
-                // is NON-nullable; a nullable-underlying value class (`VC(val s: String?)`) stays BOXED
-                // (its marker-style synthetic ctor can't unbox — kotlinc keeps the `VC` type).
-                let deser_field_tys: Vec<Ty> = foo_fields
-                    .iter()
-                    .map(|(_, ty)| match value_class_underlying(ir, ty) {
-                        Some(u) if !u.is_nullable() => u,
-                        _ => *ty,
-                    })
-                    .collect();
-                // kotlinc always emits one seen-mask slot past the last full 32-field group.
-                let n_masks = foo_fields.len() / 32 + 1;
-                let mut deser_params = vec![Ty::Int; n_masks];
-                deser_params.extend(deser_field_tys.iter().cloned());
-                deser_params.push(class_ty(
-                    "kotlinx/serialization/internal/SerializationConstructorMarker",
-                ));
-                // A value-class field is stored unboxed, so kotlinc treats the deser ctor as a
-                // value-class-param ctor and appends a trailing `DefaultConstructorMarker` (its ABI
-                // disambiguator — mirrors the primary ctor's `value_param_ctors` marker accessor).
-                let has_value_field = foo_fields
-                    .iter()
-                    .any(|(_, ty)| value_class_underlying(ir, ty).is_some());
-                if has_value_field {
-                    deser_params.push(class_ty("kotlin/jvm/internal/DefaultConstructorMarker"));
-                }
-                let this = ir.add_expr(IrExpr::GetValue(0));
-                let mut deser_stmts = Vec::with_capacity(foo_fields.len());
-                for i in 0..foo_fields.len() {
-                    // `this` at 0, the `n_masks` seq-mask ints at 1..=n_masks, then the field params.
-                    let arg = ir.add_expr(IrExpr::GetValue(i as u32 + 1 + n_masks as u32));
-                    deser_stmts.push(ir.add_expr(IrExpr::SetField {
-                        receiver: this,
-                        class: class_id,
-                        index: i as u32,
-                        value: arg,
-                    }));
-                }
-                let deser_body = ir.add_expr(IrExpr::Block {
-                    stmts: deser_stmts,
-                    value: None,
-                });
-                let super_owner = ir.classes[class_id as usize].superclass;
-                ir.classes[class_id as usize]
-                    .secondary_ctors
-                    .push(crate::ir::IrSecondaryCtor {
-                        annotations: crate::ir::DeclarationAnnotations::default(),
-                        prefix_params: Vec::new(),
-                        vararg_index: None,
-                        params: deser_params,
-                        named_params: Vec::new(),
-                        defaults: vec![],
-                        delegate_prelude: vec![],
-                        delegate_args: vec![],
-                        default_parameters: Vec::new(),
-                        body: Some(deser_body),
-                        delegate: crate::ir::CtorDelegateTarget::Super {
-                            owner: super_owner,
-                            target_params: vec![],
-                            default_masks: vec![],
-                        },
-                        synthetic: true,
-                        vc_params: false,
-                    });
+                let field_types = foo_fields.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+                let cached_descriptor = if is_generic {
+                    let elements = foo_fields
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (name, _))| {
+                            (
+                                serial_name_of(ctx, ir, class_id, name)
+                                    .unwrap_or_else(|| KtString::from(name.clone())),
+                                foo_optional[index],
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let descriptor_name = serial_name(ir, class_id);
+                    let descriptor_owner = ir.classes[class_id as usize].fq_name_id();
+                    Some(add_cached_descriptor(
+                        ir,
+                        descriptor_owner,
+                        descriptor_name,
+                        &elements,
+                    ))
+                } else {
+                    None
+                };
+                add_deserialization_constructor(
+                    ir,
+                    class_id,
+                    ser_id,
+                    &field_types,
+                    cached_descriptor,
+                );
             }
 
             // `$childSerializers` cache — a `private static final Lazy[]` + the public synthetic

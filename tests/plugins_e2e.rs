@@ -261,10 +261,10 @@ fn serializable_enum_relocates_serializer_to_companion() {
 }
 
 #[test]
-fn deser_ctor_appends_marker_for_value_class_field() {
-    // A `@Serializable` data class with a value-class-typed field: kotlinc appends a trailing
-    // `DefaultConstructorMarker` to the synthetic deserialization ctor (its value-class-param ABI
-    // disambiguator), on top of the usual `SerializationConstructorMarker`.
+fn deser_ctor_retains_the_value_class_parameter_and_serialization_marker() {
+    // A `@Serializable` data class with a value-class-typed field keeps the semantic value-class
+    // parameter on its private deserialization ctor. The JVM value-class pass emits the separate
+    // public `DefaultConstructorMarker` accessor; that marker is not part of this constructor.
     let Some((_file, mut ir)) =
         lower("@JvmInline value class V(val s: String)\nclass D(val v: V, val n: Int)")
     else {
@@ -289,20 +289,19 @@ fn deser_ctor_appends_marker_for_value_class_field() {
         .iter()
         .find(|sc| sc.synthetic)
         .expect("synthetic deserialization ctor synthesized");
-    let last_two: Vec<Option<String>> = deser
-        .params
-        .iter()
-        .rev()
-        .take(2)
-        .map(|t| t.obj_internal().map(|n| n.render()))
-        .collect();
     assert_eq!(
-        last_two,
+        deser.params,
         vec![
-            Some("kotlin/jvm/internal/DefaultConstructorMarker".to_string()),
-            Some("kotlinx/serialization/internal/SerializationConstructorMarker".to_string()),
+            krusty::types::Ty::Int,
+            krusty::types::Ty::obj("V"),
+            krusty::types::Ty::Int,
+            krusty::types::Ty::obj("kotlinx/serialization/internal/SerializationConstructorMarker",),
         ],
-        "deser ctor ends with SerializationConstructorMarker then DefaultConstructorMarker"
+        "deserialization ctor has the exact mask, fields, and serialization marker shape"
+    );
+    assert!(
+        deser.vc_params,
+        "the backend must emit the separate value-class constructor accessor"
     );
 }
 

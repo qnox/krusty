@@ -2093,8 +2093,16 @@ pub fn lower_value_classes(
     //    that erased to a non-reference (a value-class ctor arg `a: Na` → `int` can't be null-checked).
     // A NON-value class whose primary ctor has a value-class-typed param gets kotlinc's private-primary +
     // synthetic marker accessor ABI — recorded BEFORE erasure loses the value-class identity of the param.
+    let serialization_deserialization_ctors = (0..ir.classes.len())
+        .map(|class| {
+            ir.generated_secondary_constructor(
+                class as crate::ir::ClassId,
+                crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
+            )
+        })
+        .collect::<Vec<_>>();
     let mut value_param_ctors: Vec<(TypeName, Vec<Ty>)> = Vec::new();
-    for c in &mut ir.classes {
+    for (class, c) in ir.classes.iter_mut().enumerate() {
         if !c.is_value
             && !c.is_object
             && !c.is_interface
@@ -2133,7 +2141,7 @@ pub fn lower_value_classes(
         // A regular class's secondary-`<init>` value-class params erase too (`Test(x: String, s: S)` →
         // `(String, String)`); a value class's own secondary ctors were already consumed into static
         // `constructor-impl`s by `synth_value_members`, so this only touches regular classes.
-        for sc in &mut c.secondary_ctors {
+        for (constructor, sc) in c.secondary_ctors.iter_mut().enumerate() {
             // Record the value-class fact BEFORE erasure: it drives kotlinc's private+marker ABI for
             // this constructor (a synthetic marker-disambiguated ctor keeps its own convention).
             if !sc.synthetic && sc.params.iter().any(is_vc_ty) {
@@ -2142,11 +2150,13 @@ pub fn lower_value_classes(
             for parameter in &mut sc.prefix_params {
                 *parameter = erase(parameter, &under);
             }
+            let serialization_deserialization =
+                serialization_deserialization_ctors[class] == Some(constructor as u32);
             for p in &mut sc.params {
                 // A SYNTHETIC marker ctor (the serialization deser ctor, disambiguated by a trailing
-                // `DefaultConstructorMarker` rather than `-<hash>` mangling) keeps a nullable-underlying
-                // value-class param BOXED — kotlinc can't unbox it there without the mangling.
-                if sc.synthetic && vc_underlying_nullable(p, &under) {
+                // `SerializationConstructorMarker`) keeps every value-class parameter BOXED. Its
+                // exact producer-recorded role distinguishes it from unrelated synthetic ctors.
+                if serialization_deserialization && is_vc_ty(p) {
                     continue;
                 }
                 *p = erase(p, &under);
