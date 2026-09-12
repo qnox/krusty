@@ -36,7 +36,7 @@ mod signatures;
 
 use annotations::{
     custom_serializer_of, field_serializer_of, generated_serializer_annotations,
-    property_is_contextual, serial_name_of,
+    property_is_contextual, serial_name_of, type_is_contextual,
 };
 use signatures::generated_serializer_signature;
 
@@ -804,6 +804,13 @@ fn element_serializer_expr(ir: &mut IrFile, ctx: &PluginContext, ty: &Ty) -> Opt
             vec![],
         ));
     }
+    // An element whose TYPE the file declares contextual (`@file:UseContextualSerialization`)
+    // serializes through a `ContextualSerializer`, exactly as a property of that type would. The
+    // property-level rule cannot see this one: the contextual type appears only as a collection's
+    // element (`List<FlexibleMap>`).
+    if type_is_contextual(ctx, ir, fq_name) {
+        return Some(build_contextual_serializer(ir, &fq_internal));
+    }
     // A `@Serializable` ENUM element has no `$serializer` class of its own: kotlinc's accessor builds
     // the serializer at run time (`createSimpleEnumSerializer`/`createAnnotatedEnumSerializer`), so an
     // element reads it through the enum's own `serializer()` — `Level.Companion.serializer()`. The
@@ -1024,6 +1031,10 @@ fn can_derive_element_serializer(ir: &IrFile, ctx: &PluginContext, ty: &Ty) -> b
         .any(|c| c.fq_name_id() == fq_name && c.is_sealed)
         && generated_serializer_accessor(ir, fq_name, 0).is_some()
     {
+        return true;
+    }
+    // A file-declared contextual element (mirrors `element_serializer_expr`).
+    if type_is_contextual(ctx, ir, fq_name) {
         return true;
     }
     // A `@Serializable` ENUM (mirrors `element_serializer_expr`): derivable through its own accessor.

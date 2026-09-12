@@ -1739,3 +1739,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   clients are full of enum-typed fields.
   The accessor's presence is what proves the enum is `@Serializable`; a plain enum still bails.
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_serializable_enum_uses_its_accessor`.
+- **A contextual element INSIDE a collection is derivable (fix).**
+  `@file:UseContextualSerialization(T::class)` makes every `T` in the file serialize through a
+  `ContextualSerializer`, and krusty applied that rule to a PROPERTY of type `T` only. A
+  `List<T>` names no such property, so the collection's element serializer was underivable and the
+  file was declined — the shape generated clients use to carry loosely-typed JSON maps.
+  The same file annotation now answers for an element type, which is what the recursive element
+  derivation needed. With the classpath, sibling-file and enum shapes, the digitalocean and kubernetes
+  httpclient modules compile again.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_contextual_element_inside_a_collection_is_derivable`.

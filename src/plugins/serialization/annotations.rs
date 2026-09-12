@@ -64,6 +64,22 @@ pub(super) fn property_is_contextual(
         })
 }
 
+/// Whether a TYPE is named by the file's `@UseContextualSerialization`. This is the ELEMENT form of
+/// the property rule above: `List<FlexibleMap>` serializes its ELEMENTS contextually, so the
+/// collection's element serializer is a `ContextualSerializer` even though no property of that type
+/// exists.
+pub(super) fn type_is_contextual(
+    ctx: &PluginContext,
+    ir: &IrFile,
+    internal: crate::types::TypeName,
+) -> bool {
+    ctx.file_annotation_mentions_canonical_type(
+        ir,
+        type_name(USE_CONTEXTUAL_SERIALIZATION_FQ),
+        internal,
+    )
+}
+
 /// kotlinc hides the generated `$serializer` implementation from source resolution while keeping
 /// it callable by compiler-generated code.
 pub(super) fn generated_serializer_annotations() -> DeclarationAnnotations {
