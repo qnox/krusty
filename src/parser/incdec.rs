@@ -6,6 +6,64 @@
 use super::*;
 
 impl Parser<'_> {
+    /// Build the store half shared by discarded-value and value-producing member/index inc/dec.
+    /// Centralizing this match keeps the accepted lvalue families, source spans, and future property
+    /// or index-store extensions identical across both syntactic contexts.
+    pub(super) fn finish_incdec_access_assignment(
+        &mut self,
+        target: ExprId,
+        value: ExprId,
+        start: Span,
+        target_span: Span,
+    ) -> Option<StmtId> {
+        let statement = match self.file.expr(target).clone() {
+            Expr::Member { receiver, name } => Stmt::AssignMember {
+                receiver,
+                name,
+                value,
+                safe: false,
+            },
+            Expr::SafeCall {
+                receiver,
+                name,
+                args: None,
+            } => Stmt::AssignMember {
+                receiver,
+                name,
+                value,
+                safe: true,
+            },
+            Expr::Index { array, indices } => Stmt::AssignIndex {
+                array,
+                indices,
+                value,
+            },
+            _ => return None,
+        };
+        Some(self.finish_assignment_stmt(statement, start, target_span))
+    }
+
+    pub(super) fn incdec_target(
+        &mut self,
+        e: ExprId,
+        dec: bool,
+        prefix: bool,
+        op_span: Span,
+        start: Span,
+    ) -> StmtId {
+        let target_span = self.assignment_target_span(e);
+        match self.file.expr(e).clone() {
+            Expr::Name(n) => self.parse_incdec(n, dec, prefix, start, target_span),
+            _ => {
+                self.diags.error(
+                    op_span,
+                    "krusty: '++'/'--' is only supported on a variable, property, or indexed access",
+                );
+                self.finish_stmt(Stmt::Expr(e), start)
+            }
+        }
+    }
+
     pub(super) fn parse_incdec(
         &mut self,
         name: String,
