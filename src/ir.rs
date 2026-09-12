@@ -2225,6 +2225,14 @@ pub struct IrSecondaryCtor {
     pub vc_params: bool,
 }
 
+/// A compiler-generated secondary constructor's semantic role. Producers record this exact class
+/// and ordinal edge once; later plugin/backend phases must not recover the constructor from
+/// `synthetic`, its parameter arity, descriptor, or generated spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum IrSecondaryConstructorRole {
+    SerializationDeserialization,
+}
+
 /// Semantic declaration metadata retained when the JVM value-class pass replaces a secondary
 /// constructor with a static `constructor-impl` realization. The backend owns the physical handle;
 /// Kotlin metadata must still describe the original source parameters/defaults and link them to that
@@ -2505,6 +2513,9 @@ pub struct IrFile {
     /// ordinary function marker rather than constructor/value-class markers.
     pub class_static_local_functions: std::collections::HashSet<FunId>,
     pub classes: Vec<IrClass>,
+    /// Exact generated-constructor identities keyed by their semantic role within a class.
+    generated_secondary_constructors:
+        std::collections::HashMap<(ClassId, IrSecondaryConstructorRole), u32>,
     /// Source type aliases declared directly in a classifier, keyed by that classifier's semantic
     /// identity. These are pending-free declaration headers copied by common lowering; they carry
     /// no body, parser identity, source range, or backend representation.
@@ -3253,6 +3264,30 @@ pub struct IrFunctionOverride {
 }
 
 impl IrFile {
+    pub(crate) fn record_generated_secondary_constructor(
+        &mut self,
+        class: ClassId,
+        role: IrSecondaryConstructorRole,
+        ordinal: u32,
+    ) {
+        assert!(
+            self.generated_secondary_constructors
+                .insert((class, role), ordinal)
+                .is_none(),
+            "a generated secondary-constructor role has one exact declaration"
+        );
+    }
+
+    pub(crate) fn generated_secondary_constructor(
+        &self,
+        class: ClassId,
+        role: IrSecondaryConstructorRole,
+    ) -> Option<u32> {
+        self.generated_secondary_constructors
+            .get(&(class, role))
+            .copied()
+    }
+
     pub(crate) fn record_class_source_qualified_name(
         &mut self,
         class: ClassId,

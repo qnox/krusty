@@ -1704,3 +1704,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   subject is likewise materialized and therefore evaluates exactly once.
   With this and the switch, a `when` over `Int` constants matches kotlinc instruction for instruction.
   `tests/int_when_switch_e2e.rs::a_when_over_a_local_subject_matches_kotlinc_instruction_for_instruction`.
+- **A `@Serializable` class's deserialization constructor reports a missing element (fix).** kotlinc's
+  synthetic `<init>(int seen, …, SerializationConstructorMarker)` checks the decoder's `seen` mask
+  before it touches the instance — `if (required != (required and seen))
+  PluginExceptionsKt.throwMissingFieldException(seen, required, descriptor)` — and stores the DEFAULT
+  for an optional element whose bit is clear. krusty emitted the field stores alone, so a class
+  krusty compiled and ANOTHER module deserialized accepted input that omits a required element and
+  produced the type's zero value instead of `MissingFieldException`.
+  The check runs as the constructor's delegate PRELUDE: kotlinc emits it ahead of the `super()` call,
+  not after it.
+  Every ABI shape is covered: a generic class owns the exact `$cachedDescriptor` its constructor
+  reads; 32+ fields validate every mask through `throwArrayMissingFieldException` (including the
+  extra zero word at an exact 32-field boundary); and optional fields evaluate their retained,
+  lowered constructor-default expression rather than only supporting constants.
+  krusty's OWN `deserialize` still calls the primary constructor — passing these masks is the next
+  migration step.
+  `tests/serialization_companion_byte_parity_e2e.rs::{deserialization_constructor_checks_every_mask_shape_exactly,deserialization_constructor_uses_the_lowered_default_expression}`.

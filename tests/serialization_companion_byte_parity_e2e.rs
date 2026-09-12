@@ -1582,3 +1582,150 @@ fn serialize_maps_its_return_to_the_class_header_line() {
         }
     }
 }
+
+/// Instruction rows for one method, with constant-pool indices erased and javap comments dropped.
+fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for raw in disassembly.lines() {
+        let line = raw.trim();
+        if line.ends_with(';') && line.contains(marker) {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if [
+            "LineNumberTable",
+            "LocalVariableTable",
+            "StackMapTable",
+            "Exception table",
+        ]
+        .iter()
+        .any(|table| line.starts_with(table))
+            || (line.starts_with("descriptor:") && !out.is_empty())
+        {
+            break;
+        }
+        let Some((pc, rest)) = line.split_once(": ") else {
+            continue;
+        };
+        if pc.parse::<u32>().is_err() {
+            continue;
+        }
+        let code = rest
+            .split("//")
+            .next()
+            .unwrap_or(rest)
+            .split_whitespace()
+            .map(|token| if token.starts_with('#') { "#" } else { token })
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push(format!("{}: {code}", pc.trim()));
+    }
+    out
+}
+
+fn many_fields_source(class: &str, count: usize) -> String {
+    let fields = (0..count)
+        .map(|index| format!("val f{index:02}: Int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "import kotlinx.serialization.Serializable\n@Serializable\ndata class {class}({fields})\n"
+    )
+}
+
+/// Required-mask validation is a complete constructor ABI: generic serializers use their owning
+/// class's cached descriptor, and exact 32-field boundaries carry kotlinc's extra zero mask and
+/// array-form missing-field report. Every shape is compared as a complete instruction sequence.
+#[test]
+fn deserialization_constructor_checks_every_mask_shape_exactly() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let generic = "import kotlinx.serialization.Serializable\n\
+                   @Serializable\n\
+                   data class Generic<T>(val required: T, val optional: Int = 7)\n"
+        .to_string();
+    let value_class = "import kotlinx.serialization.Serializable\n\
+                       @JvmInline @Serializable value class Count(val value: Int)\n\
+                       @Serializable data class Holder(val count: Count)\n"
+        .to_string();
+    let cases = [
+        ("DeserMaskSmall", SRC.to_string(), "Point".to_string()),
+        ("DeserMaskGeneric", generic, "Generic".to_string()),
+        (
+            "DeserMask32",
+            many_fields_source("Fields32", 32),
+            "Fields32".to_string(),
+        ),
+        (
+            "DeserMask33",
+            many_fields_source("Fields33", 33),
+            "Fields33".to_string(),
+        ),
+        ("DeserMaskValueClass", value_class, "Holder".to_string()),
+    ];
+    for (tag, source, class) in cases {
+        let Some(built) = compare_with_kotlinc_plugin(tag, &source, &class, &cp, "25", &extra)
+        else {
+            eprintln!("skipping: reference kotlinc or javap unavailable");
+            return;
+        };
+        let marker = "SerializationConstructorMarker)";
+        let want = method_instructions(&built.reference, marker);
+        assert_eq!(
+            method_instructions(&built.krusty, marker),
+            want,
+            "{class}: complete deserialization-constructor instructions"
+        );
+        if class == "Generic" {
+            let cached_descriptor_rows = |text: &str| {
+                structure(text)
+                    .into_iter()
+                    .filter(|row| row.contains("$cachedDescriptor"))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                cached_descriptor_rows(&built.krusty),
+                cached_descriptor_rows(&built.reference),
+                "Generic: complete $cachedDescriptor projection"
+            );
+        }
+    }
+}
+
+/// A non-constant constructor default is evaluated only when its element bit is absent; retaining
+/// just `IrField::default` constants would silently store the decoder local's zero value.
+#[test]
+fn deserialization_constructor_uses_the_lowered_default_expression() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let source = "import kotlinx.serialization.Serializable\n\
+                  fun defaultText(): String = \"hi\"\n\
+                  @Serializable\n\
+                  data class Defaults(val required: Int, val text: String = defaultText())\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "DeserNonConstantDefault",
+        source,
+        "Defaults",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(
+        method_instructions(&built.krusty, "SerializationConstructorMarker)"),
+        method_instructions(&built.reference, "SerializationConstructorMarker)"),
+        "complete non-constant-default constructor instructions"
+    );
+}
