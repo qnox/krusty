@@ -11,6 +11,24 @@ use crate::names::property_getter_name;
 use crate::plugins::PluginContext;
 use crate::types::Ty;
 
+fn record_serialize_lines(
+    ir: &mut IrFile,
+    serialized_class: ClassId,
+    function: u32,
+    opening_expression: ExprId,
+) {
+    let (start_line, header_line) = {
+        let class = &ir.classes[serialized_class as usize];
+        (class.decl_start_line, class.decl_line)
+    };
+    if start_line != 0 {
+        ir.expr_lines.insert(opening_expression, start_line);
+    }
+    if header_line != 0 {
+        ir.fn_close_lines.insert(function, header_line);
+    }
+}
+
 pub(super) struct SerializeBody<'a> {
     pub(super) function: u32,
     pub(super) serializer_class: ClassId,
@@ -364,6 +382,7 @@ impl SerializeBody<'_> {
                 dispatch_receiver: Some(cend),
                 args: vec![dend],
             });
+            record_serialize_lines(ir, foo_id, fid, dvar);
             let body = ir.add_expr(IrExpr::Block {
                 stmts: vec![dvar, cvar, call_write_self, end],
                 value: None,
@@ -403,6 +422,7 @@ impl SerializeBody<'_> {
             let mut block = vec![cvar];
             block.extend(stmts);
             block.push(end);
+            record_serialize_lines(ir, foo_id, fid, cvar);
             let body = ir.add_expr(IrExpr::Block {
                 stmts: block,
                 value: None,
