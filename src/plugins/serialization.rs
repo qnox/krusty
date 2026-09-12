@@ -26,11 +26,13 @@ use crate::plugins::{
 use crate::types::{type_name, Ty};
 
 mod annotations;
+mod signatures;
 
 use annotations::{
     custom_serializer_of, field_serializer_of, generated_serializer_annotations,
     property_is_contextual, serial_name_of,
 };
+use signatures::generated_serializer_signature;
 
 pub const SERIALIZABLE_FQ: &str = "kotlinx/serialization/Serializable";
 pub const KSERIALIZER_FQ: &str = "kotlinx/serialization/KSerializer";
@@ -1934,17 +1936,10 @@ impl IrPlugin for SerializationPlugin {
             ir.mark_synthetic_class(serializer_identity);
             ir.mark_deprecated_class(serializer_identity);
             let ser_id = ir.add_class(ser);
-            if !serializer_type_parameters.is_empty() {
-                ir.insert_class_signature_name(
-                    serializer_identity,
-                    crate::ir::IrGenericSig {
-                        type_params: serializer_type_parameters,
-                        params: Vec::new(),
-                        ret: None,
-                        supers: vec![class_ty("kotlin/Any"), kserializer_of(serialized_ty)],
-                    },
-                );
-            }
+            ir.insert_class_signature_name(
+                serializer_identity,
+                generated_serializer_signature(serializer_type_parameters, serialized_ty),
+            );
 
             // Build the `descriptor` field in <init>: `descriptor = PluginGeneratedSerialDescriptor(
             // "<fqname>", null, <n>)` then `descriptor.addElement("<prop>", false)` per property.
