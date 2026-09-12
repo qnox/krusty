@@ -1517,3 +1517,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/serialization_companion_byte_parity_e2e.rs::an_enum_entrys_serial_name_reaches_its_serializer`
   plus a runtime assertion on the descriptor's element names, which is the part byte comparison
   cannot make.
+- **An enum CONSTANT's annotation type interns in the field-table window (fix).** kotlinc interns
+  `Lkotlinx/serialization/SerialName;` beside the deferred fields' `Signature` strings, immediately
+  before the class's own annotation descriptors — not where the constant's field was added. krusty
+  encoded it at `add_field`, which put it right after the first entry name and shifted every later
+  index; the class matched kotlinc in every other respect and still differed byte-wise.
+  The entry FIELDS cannot themselves be deferred — their `<clinit>` `putstatic` references interleave
+  with the entry names, which is kotlinc's order too — so only the ANNOTATION encoding moves:
+  `set_last_field_annotations_deferred` keeps the applications unencoded on the eager field, and
+  `intern_late_fields` encodes them in the same window it realizes the late fields.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_enum_entrys_annotation_type_interns_with_the_field_table`.

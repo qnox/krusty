@@ -1010,3 +1010,56 @@ const SERIAL_NAME_ENUM: &str = "import kotlinx.serialization.SerialName\n\
                                 \x20\n\
                                 \x20   PLAIN(\"plain\"),\n\
                                 }\n";
+
+/// An enum CONSTANT's annotation type interns in the field-table window — beside the deferred
+/// fields' `Signature` strings and just before the class's own annotations — not where the
+/// constant's field was added.
+///
+/// The entry fields cannot themselves be deferred: their `<clinit>` `putstatic` references
+/// interleave with the entry names, which is an order kotlinc also produces. Only the ANNOTATION
+/// encoding moves. Encoding it eagerly put `Lkotlinx/serialization/SerialName;` right after the
+/// first entry name and shifted every later pool index — the class matched kotlinc in every other
+/// respect and still differed byte-wise.
+#[test]
+fn an_enum_entrys_annotation_type_interns_with_the_field_table() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "EnumEntryAnnotationPool",
+        SERIAL_NAME_ENUM,
+        "Status",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Where the entry annotation's type lands, as a position in the pool.
+    let position = |text: &str| {
+        let rows: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('#') && line.contains(" = "))
+            .collect();
+        let at = rows
+            .iter()
+            .position(|line| line.contains("Lkotlinx/serialization/SerialName;"))
+            .unwrap_or_else(|| panic!("no SerialName descriptor in the pool:\n{text}"));
+        (at, rows.len())
+    };
+    let (want_at, want_len) = position(&built.reference);
+    let (got_at, got_len) = position(&built.krusty);
+    assert!(
+        want_at * 4 > want_len * 3,
+        "reference should intern it in the last quarter: {want_at} of {want_len}"
+    );
+    assert_eq!(
+        (got_at, got_len),
+        (want_at, want_len),
+        "entry-annotation descriptor position in the constant pool"
+    );
+}
