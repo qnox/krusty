@@ -894,3 +894,56 @@ fn continuation_uses_synthetic_kotlin_metadata() {
         "anonymous continuation name must not be interned:\n{text}"
     );
 }
+
+/// A `for` loop around a suspension spills FOUR values: the two locals in scope, the loop's iterator,
+/// and the loop variable. kotlinc numbers the `L$N` fields in the order the values are DECLARED — the
+/// iterator, created when the loop opens, takes `L$2` and the loop variable `L$3` — and the `s` array
+/// names the field each source variable landed in, skipping the iterator, which has no name.
+///
+/// krusty numbered them by IR index instead, where a compiler temporary sorts after every named
+/// local, so the iterator took the LAST field and the loop variable claimed `L$2`. Every suspending
+/// loop in the corpus carries that difference.
+#[test]
+fn continuation_metadata_numbers_spills_in_declaration_order() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun find(name: String): String? = name\n\
+        suspend fun load(names: List<String>): List<String> {\n\
+        \x20 val out = ArrayList<String>()\n\
+        \x20 for (name in names) {\n\
+        \x20   val found = find(name)\n\
+        \x20   if (found != null) out.add(found)\n\
+        \x20 }\n\
+        \x20 return out\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("SpillOrder", source)],
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile the suspending loop");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/SpillOrderKt$load$1").then_some(bytes))
+        .expect("load continuation");
+    let text = disassemble(&javap, bytes, "SpillOrderKt$load$1.class", "spill_order");
+    let annotation = text
+        .rsplit_once("RuntimeVisibleAnnotations:")
+        .map(|(_, annotation)| annotation)
+        .expect("runtime-visible annotations");
+
+    for expected in [
+        "s=[\"L$0\",\"L$1\",\"L$3\"]",
+        "n=[\"names\",\"out\",\"name\"]",
+    ] {
+        assert!(
+            annotation.contains(expected),
+            "missing {expected:?}:\n{text}"
+        );
+    }
+}

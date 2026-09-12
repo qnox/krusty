@@ -6242,6 +6242,11 @@ impl ScopeWalk<'_> {
         // (kotlinc's `nullOutSpilledVariable` stores are FIELD HYGIENE — clearing a previous
         // state's spill of a now-dead var — and never allocate positions beyond some state's live
         // list.)
+        // An unnamed TEMP that is still read after this point CONSUMES a spill position even though it
+        // contributes no name: kotlinc spills a loop's iterator into its own `L$N` between the locals
+        // declared before and after the loop opens, so the following named local's field number skips
+        // over it. Dropping the temp here compacted those numbers and made every suspending loop's `s`
+        // array disagree with kotlinc's.
         let live: Vec<(u32, Ty, Option<String>)> = self
             .scope
             .iter()
@@ -6249,7 +6254,7 @@ impl ScopeWalk<'_> {
                 if self.temps_only {
                     !e.named && self.pending_reads(e.slot)
                 } else {
-                    e.named
+                    e.named || self.pending_reads(e.slot)
                 }
             })
             .map(|e| (e.slot, e.ty, e.name.clone()))
