@@ -1631,3 +1631,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   which compares both the `d2` parameter-name projection and the prologue up to the last guard —
   bounded to the member's own code, since the erased BRIDGE below it guards its parameters too and
   an unbounded search finds that one instead.
+- **A one-armed `if` falls through instead of jumping to its own end (fix).** A statement `when` whose
+  remaining branches emit nothing ended its last real branch with `goto <end>` — a jump to the very
+  instruction the body already falls into. kotlinc emits no jump there.
+  A source `if` with no `else` is exactly that shape: the front end gives the conditional a
+  synthesized EMPTY else block, so the backend saw two branches and dutifully jumped over the second.
+  The jump is three bytes and a `StackMapTable` frame in every such `if` — one of the commonest
+  statements in the language — which is why a corpus class could match kotlinc member for member and
+  still differ in its code arrays.
+  Fallthrough is allowed only across an empty unconditional branch: an empty later conditional arm
+  must still be skipped because evaluating its condition is observable.
+  `tests/one_armed_when_fallthrough_e2e.rs::a_one_armed_if_falls_through_instead_of_jumping_to_its_own_end`
+  and `a_taken_branch_skips_the_condition_of_a_later_empty_branch`.
