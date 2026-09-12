@@ -1078,3 +1078,83 @@ fn a_generated_serializer_guards_its_parameters() {
         );
     }
 }
+
+/// kotlinc splits serialization in two: `$serializer.serialize` opens the structure and DELEGATES
+/// the element writes to the serialized class's own `write$Self` static, which is where they live.
+///
+/// krusty inlined the element writes into `serialize` and left `write$Self` an EMPTY body. That is
+/// not only a byte difference: the class exported a do-nothing helper, and generated code in any
+/// other module calls it — a `@Serializable` type compiled by krusty and serialized through a
+/// sibling module's generated serializer would have written no fields at all.
+///
+/// Living on the class also changes how a property is read: `write$Self` is a static MEMBER, so it
+/// reads the private backing field directly, where the old inlined shape on the `$serializer` had
+/// to go through the public getter.
+///
+/// A GENERIC class keeps the inlined shape for now: kotlinc passes its element serializers to
+/// `write$Self` as extra parameters, and krusty's helper has the three-parameter form only — a
+/// generic property's encode call reads `this.typeSerial<k>` off the `$serializer` INSTANCE, which a
+/// static helper has no receiver for. Emitting the delegation there produced a `getfield` on the
+/// wrong owner, which the verifier rejected; the three krusty-only generic serializer tests caught
+/// it.
+#[test]
+fn serialize_delegates_its_element_writes_to_write_self() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let instructions = |text: &str, member: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains(member))
+            .unwrap_or_else(|| panic!("{member} must be present:\n{text}"));
+        body.into_iter()
+            .skip(start)
+            .skip_while(|line| !line.starts_with("0: "))
+            .take_while(|line| {
+                line.split_once(':')
+                    .is_some_and(|(pc, _)| !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializeDelegates",
+        SRC,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = instructions(&built.reference, "void serialize(");
+    assert!(
+        want.iter().any(|line| line.contains("write$Self")),
+        "the reference must delegate to write$Self — the rule under test: {want:?}"
+    );
+    assert_eq!(
+        instructions(&built.krusty, "void serialize("),
+        want,
+        "serialize body"
+    );
+
+    // …and the helper it delegates to must actually write the elements.
+    let Some(helper) =
+        compare_with_kotlinc_plugin("SerializeDelegatesHelper", SRC, "Point", &cp, "25", &extra)
+    else {
+        return;
+    };
+    let want = instructions(&helper.reference, "write$Self");
+    assert!(
+        want.iter().any(|line| line.contains("Element")),
+        "the reference's write$Self must encode the elements: {want:?}"
+    );
+    assert_eq!(
+        instructions(&helper.krusty, "write$Self"),
+        want,
+        "write$Self body"
+    );
+}

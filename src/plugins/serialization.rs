@@ -2584,10 +2584,19 @@ impl IrPlugin for SerializationPlugin {
                         ir.functions[fid as usize].body = Some(body);
                     }
                     "serialize" => {
-                        // serialize(encoder=1, value=2): drive the CompositeEncoder per property.
-                        //   val c = encoder.beginStructure(descriptor)        [local 3]
-                        //   c.encode<T>Element(descriptor, i, value.<prop_i>)
-                        //   c.endStructure(descriptor)
+                        // kotlinc splits this in two: `serialize` opens the structure and DELEGATES
+                        // the element writes to the serialized class's own `write$Self` static,
+                        // which is where they live:
+                        //
+                        //   val descriptor = this.descriptor                      [local 3]
+                        //   val output = encoder.beginStructure(descriptor)       [local 4]
+                        //   Foo.write$Self$main(value, output, descriptor)
+                        //   output.endStructure(descriptor)
+                        //
+                        // krusty inlined the element writes here and left `write$Self` an empty
+                        // body — so the class exported a do-nothing helper that any OTHER module's
+                        // generated code calls, and `serialize` differed from kotlinc's from its
+                        // first instruction.
                         let ser_cid = ser_idx as u32;
                         let this_desc = |ir: &mut IrFile| -> ExprId {
                             let r = ir.add_expr(IrExpr::GetValue(0));
@@ -2597,48 +2606,93 @@ impl IrPlugin for SerializationPlugin {
                                 index: 0,
                             })
                         };
-                        let enc = ir.add_expr(IrExpr::GetValue(1));
-                        let d0 = this_desc(ir);
-                        let begin = ir.add_expr(IrExpr::Call {
-                            callee: virtual_iface(
-                                "kotlinx/serialization/encoding/Encoder",
-                                "beginStructure",
-                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeEncoder;",
-                            ),
-                            dispatch_receiver: Some(enc),
-                            args: vec![d0],
-                        });
-                        let cvar = ir.add_expr(IrExpr::Variable {
-                            index: 3,
-                            ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
-                            init: Some(begin),
-                            named: false,
-                        });
-                        let mut stmts = vec![cvar];
+                        // The element writes, in `write$Self`'s own frame: value = 0, output = 1,
+                        // descriptor = 2.
+                        // kotlinc hands a GENERIC class's element serializers to `write$Self` as
+                        // extra parameters; krusty's `write$Self` has the three-parameter shape only,
+                        // and a generic property's encode call reads `this.typeSerial<k>` off the
+                        // `$serializer` INSTANCE — which a static helper has no receiver for. So the
+                        // delegation applies to a non-generic class, and a generic one keeps the
+                        // inlined shape until `write$Self` carries those serializers too.
+                        let delegate = ir.classes[ser_idx].type_params.is_empty();
+                        let value_slot = if delegate { 0 } else { 2 };
+                        let encoder_slot = if delegate { 1 } else { 3 };
                         let mut bail = false;
+                        let mut stmts: Vec<ExprId> = Vec::new();
+                        // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
+                        // property's private backing FIELD directly — which is what kotlinc emits.
+                        // (The old inlined shape lived on the `$serializer`, which cannot, and had to
+                        // go through the public getter.)
+                        let read_property =
+                            |ir: &mut IrFile, name: &str, ty: &Ty| -> Option<ExprId> {
+                                let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
+                                if !delegate {
+                                    // The inlined shape lives on the `$serializer`, which cannot read the
+                                    // class's private field — it goes through the public getter.
+                                    let descriptor = ty_descriptor(ctx, ty)?;
+                                    return Some(ir.add_expr(IrExpr::Call {
+                                        callee: Callee::Virtual {
+                                            owner: type_name(&class_internal),
+                                            name: property_getter_name(name),
+                                            descriptor: format!("(){descriptor}"),
+                                            params: None,
+                                            interface: false,
+                                        },
+                                        dispatch_receiver: Some(receiver),
+                                        args: vec![],
+                                    }));
+                                }
+                                // Resolve the owner by NAME: the surrounding `class_id` is not always
+                                // the serialized class in this pass, and a `GetField` takes its owner
+                                // from the class index — pointing it at the `$serializer` emitted a
+                                // `getfield` the verifier rejects (`Box is not assignable to
+                                // Box$$serializer`).
+                                let owner = ir
+                                    .classes
+                                    .iter()
+                                    .position(|class| class.fq_name_matches(&class_internal));
+                                let field = owner.and_then(|owner| {
+                                    ir.classes[owner]
+                                        .fields
+                                        .iter()
+                                        .position(|field| field.name == name)
+                                        .map(|index| (owner, index))
+                                });
+                                if let Some((owner, index)) = field {
+                                    return Some(ir.add_expr(IrExpr::GetField {
+                                        receiver,
+                                        class: owner as u32,
+                                        index: index as u32,
+                                    }));
+                                }
+                                // A property with no backing field (a custom getter) still reads through
+                                // its accessor.
+                                let descriptor = ty_descriptor(ctx, ty)?;
+                                Some(ir.add_expr(IrExpr::Call {
+                                    callee: Callee::Virtual {
+                                        owner: type_name(&class_internal),
+                                        name: property_getter_name(name),
+                                        descriptor: format!("(){descriptor}"),
+                                        params: None,
+                                        interface: false,
+                                    },
+                                    dispatch_receiver: Some(receiver),
+                                    args: vec![],
+                                }))
+                            };
                         for (i, (pname, ty)) in fields.iter().enumerate() {
                             let n_before = stmts.len();
-                            let d = this_desc(ir);
+                            let d = if delegate {
+                                ir.add_expr(IrExpr::GetValue(2))
+                            } else {
+                                this_desc(ir)
+                            };
                             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                            // Read the property via its PUBLIC getter (`value.getX()`) — the backing
-                            // field is private, so a separate `$serializer` class can't read it directly.
-                            let vrecv = ir.add_expr(IrExpr::GetValue(2));
-                            let Some(getter_desc) = ty_descriptor(ctx, ty) else {
+                            let Some(v) = read_property(ir, pname, ty) else {
                                 bail = true;
                                 break;
                             };
-                            let v = ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: type_name(&class_internal),
-                                    name: property_getter_name(pname),
-                                    descriptor: format!("(){getter_desc}"),
-                                    params: None,
-                                    interface: false,
-                                },
-                                dispatch_receiver: Some(vrecv),
-                                args: vec![],
-                            });
-                            let c = ir.add_expr(IrExpr::GetValue(3));
+                            let c = ir.add_expr(IrExpr::GetValue(encoder_slot));
                             if let Some(inst) = contextual_serializer_for(
                                 ir,
                                 property_is_contextual(ctx, ir, class_id, pname),
@@ -2765,9 +2819,13 @@ impl IrPlugin for SerializationPlugin {
                             if let Some(Some(dc)) = field_defaults.get(i) {
                                 if stmts.len() == n_before + 1 {
                                     let enc_stmt = stmts.pop().unwrap();
-                                    let cd = this_desc(ir);
+                                    let cd = if delegate {
+                                        ir.add_expr(IrExpr::GetValue(2))
+                                    } else {
+                                        this_desc(ir)
+                                    };
                                     let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                                    let cc = ir.add_expr(IrExpr::GetValue(3));
+                                    let cc = ir.add_expr(IrExpr::GetValue(encoder_slot));
                                     let should = ir.add_expr(IrExpr::Call {
                                         callee: virtual_iface(
                                             "kotlinx/serialization/encoding/CompositeEncoder",
@@ -2782,7 +2840,7 @@ impl IrPlugin for SerializationPlugin {
                                     // `@Serializable` property always has an auto-generated side-effect-free
                                     // accessor, and kotlinc's own `write$Self` likewise reads the field twice
                                     // (`self.x != default` then `encode…(self.x)`), so this is equivalent.
-                                    let vr = ir.add_expr(IrExpr::GetValue(2));
+                                    let vr = ir.add_expr(IrExpr::GetValue(value_slot));
                                     let Some(getter_desc) = ty_descriptor(ctx, ty) else {
                                         bail = true;
                                         break;
@@ -2815,19 +2873,74 @@ impl IrPlugin for SerializationPlugin {
                                 }
                             }
                         }
+                        let write_self = delegate
+                            .then(|| {
+                                ir.classes[foo_id as usize].methods.iter().copied().find(
+                                    |&method| {
+                                        ir.functions[method as usize].name == self.write_self_name()
+                                    },
+                                )
+                            })
+                            .flatten();
                         if bail {
-                            // a field type we can't encode yet — emit a clean no-op return (no
-                            // beginStructure/endStructure), not a wrong call.
+                            // A field type we cannot encode yet (or a shape with no `write$Self`,
+                            // like a value class): emit a clean no-op return rather than half a
+                            // structure.
                             let ret = ir.add_expr(IrExpr::Return(None));
                             let body = ir.add_expr(IrExpr::Block {
                                 stmts: vec![ret],
                                 value: None,
                             });
                             ir.functions[fid as usize].body = Some(body);
-                        } else {
-                            let dend = this_desc(ir);
-                            let cend = ir.add_expr(IrExpr::GetValue(3));
-                            stmts.push(ir.add_expr(IrExpr::Call {
+                        } else if let Some(write_self) = write_self {
+                            let ws_ret = ir.add_expr(IrExpr::Return(None));
+                            stmts.push(ws_ret);
+                            let ws_body = ir.add_expr(IrExpr::Block { stmts, value: None });
+                            ir.functions[write_self as usize].body = Some(ws_body);
+
+                            // `serialize` itself: descriptor local, open, delegate, close.
+                            let descriptor_init = this_desc(ir);
+                            let dvar = ir.add_expr(IrExpr::Variable {
+                                index: 3,
+                                ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                                init: Some(descriptor_init),
+                                named: false,
+                            });
+                            let enc = ir.add_expr(IrExpr::GetValue(1));
+                            let dbegin = ir.add_expr(IrExpr::GetValue(3));
+                            let begin = ir.add_expr(IrExpr::Call {
+                                callee: virtual_iface(
+                                    "kotlinx/serialization/encoding/Encoder",
+                                    "beginStructure",
+                                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeEncoder;",
+                                ),
+                                dispatch_receiver: Some(enc),
+                                args: vec![dbegin],
+                            });
+                            let cvar = ir.add_expr(IrExpr::Variable {
+                                index: 4,
+                                ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
+                                init: Some(begin),
+                                named: false,
+                            });
+                            let wvalue = ir.add_expr(IrExpr::GetValue(2));
+                            let woutput = ir.add_expr(IrExpr::GetValue(4));
+                            let wdesc = ir.add_expr(IrExpr::GetValue(3));
+                            let call_write_self = ir.add_expr(IrExpr::Call {
+                                callee: Callee::Static {
+                                    owner: type_name(&class_internal),
+                                    name: self.write_self_name(),
+                                    descriptor: format!(
+                                        "(L{class_internal};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V"
+                                    ),
+                                    inline: InlineKind::None,
+                                },
+                                dispatch_receiver: None,
+                                args: vec![wvalue, woutput, wdesc],
+                            });
+                            let cend = ir.add_expr(IrExpr::GetValue(4));
+                            let dend = ir.add_expr(IrExpr::GetValue(3));
+                            let end = ir.add_expr(IrExpr::Call {
                                 callee: virtual_iface(
                                     "kotlinx/serialization/encoding/CompositeEncoder",
                                     "endStructure",
@@ -2835,8 +2948,50 @@ impl IrPlugin for SerializationPlugin {
                                 ),
                                 dispatch_receiver: Some(cend),
                                 args: vec![dend],
-                            }));
-                            let body = ir.add_expr(IrExpr::Block { stmts, value: None });
+                            });
+                            let body = ir.add_expr(IrExpr::Block {
+                                stmts: vec![dvar, cvar, call_write_self, end],
+                                value: None,
+                            });
+                            ir.functions[fid as usize].body = Some(body);
+                        } else {
+                            // The inlined shape (a generic class): open the structure, write the
+                            // elements here, close it.
+                            let enc = ir.add_expr(IrExpr::GetValue(1));
+                            let d0 = this_desc(ir);
+                            let begin = ir.add_expr(IrExpr::Call {
+                                callee: virtual_iface(
+                                    "kotlinx/serialization/encoding/Encoder",
+                                    "beginStructure",
+                                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeEncoder;",
+                                ),
+                                dispatch_receiver: Some(enc),
+                                args: vec![d0],
+                            });
+                            let cvar = ir.add_expr(IrExpr::Variable {
+                                index: 3,
+                                ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
+                                init: Some(begin),
+                                named: false,
+                            });
+                            let dend = this_desc(ir);
+                            let cend = ir.add_expr(IrExpr::GetValue(3));
+                            let end = ir.add_expr(IrExpr::Call {
+                                callee: virtual_iface(
+                                    "kotlinx/serialization/encoding/CompositeEncoder",
+                                    "endStructure",
+                                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
+                                ),
+                                dispatch_receiver: Some(cend),
+                                args: vec![dend],
+                            });
+                            let mut block = vec![cvar];
+                            block.extend(stmts);
+                            block.push(end);
+                            let body = ir.add_expr(IrExpr::Block {
+                                stmts: block,
+                                value: None,
+                            });
                             ir.functions[fid as usize].body = Some(body);
                         }
                     }

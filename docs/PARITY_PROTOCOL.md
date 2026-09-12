@@ -1527,3 +1527,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_guards_its_parameters`,
   which compares the prologue up to the last guard — bounded to the member's own code, since the
   erased BRIDGE below it guards its parameters too and an unbounded search finds that one instead.
+- **`serialize` DELEGATES its element writes to `write$Self` (fix).** kotlinc splits serialization in
+  two: `$serializer.serialize` opens the structure and calls the serialized class's own `write$Self`
+  static, which holds the element writes. krusty inlined those writes into `serialize` and left
+  `write$Self` an EMPTY body — so the class exported a do-nothing helper that generated code in ANY
+  other module calls: a `@Serializable` type compiled by krusty, serialized through a sibling
+  module's generated serializer, wrote no fields at all. A miscompile, not a byte difference.
+  Living on the class also changes the property read: `write$Self` is a static MEMBER, so it reads
+  the private backing FIELD, where the inlined shape on the `$serializer` had to use the getter.
+  A GENERIC class keeps the inlined shape: kotlinc passes its element serializers to `write$Self` as
+  extra parameters, and krusty's helper has the three-parameter form only — a generic property's
+  encode reads `this.typeSerial<k>` off the `$serializer` INSTANCE, which a static has no receiver
+  for. Emitting the delegation there produced a `getfield` on the wrong owner and the verifier
+  rejected it; the krusty-only generic serializer tests caught that within the same change.
+  `tests/serialization_companion_byte_parity_e2e.rs::serialize_delegates_its_element_writes_to_write_self`.
