@@ -778,7 +778,7 @@ fn collection_serializer_builder(classifier: TypeName) -> Option<(&'static str, 
     }
 }
 
-fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
+fn element_serializer_expr(ir: &mut IrFile, ctx: &PluginContext, ty: &Ty) -> Option<ExprId> {
     let nn = ty.non_null();
     // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
     // name but DO have a builtin element serializer (resolved at the tail via `builtin_element_serializer`).
@@ -816,7 +816,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
                 // A NULLABLE element (`List<String?>`) needs a `.nullable` element serializer — the
                 // collection serializer applies it per element (unlike a nullable FIELD, whose nullability
                 // is the `encodeNullableSerializableElement` method, not a wrapped serializer).
-                let elem = element_serializer_expr(ir, a)?;
+                let elem = element_serializer_expr(ir, ctx, a)?;
                 arg_sers.push(if is_nullable(a) {
                     wrap_nullable_serializer(ir, elem)
                 } else {
@@ -895,7 +895,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
                 Ty::InProjection(_) => return None,
                 _ => *argument,
             };
-            arg_sers.push(element_serializer_expr(ir, &readable)?);
+            arg_sers.push(element_serializer_expr(ir, ctx, &readable)?);
         }
         if arg_sers.len() != n_tp {
             return None;
@@ -908,6 +908,17 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
             kserializer_of(class_ty(&fq_internal)),
             arg_sers,
         ));
+    }
+    // A DEPENDENCY's `@Serializable` class brings its own generated serializer: read that singleton
+    // off the classpath, which is exactly what kotlinc emits
+    // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
+    // generates serializers for what this file declares.
+    // Scope: the non-generic shape. A generic dependency serializer is built through
+    // `Foo.Companion.serializer(<argument serializers>)`, which needs the companion's ABI read back
+    // from the classpath; until then such a field stays underivable and the caller bails cleanly.
+    if type_args.is_empty() && ctx.has_external_serializer(&fq_internal) {
+        let serializer = serializer_fq(&fq_internal);
+        return Some(ir.external_static_instance(&serializer, &serializer, "INSTANCE"));
     }
     if let Some(ser) = builtin_element_serializer(ty) {
         return Some(ir.external_static_instance(ser, ser, "INSTANCE"));
@@ -978,7 +989,7 @@ fn build_polymorphic_serializer(ir: &mut IrFile, base_internal: &str) -> ExprId 
 /// Non-mutating mirror of [`element_serializer_expr`]: whether a property of type `ty` HAS a derivable
 /// element serializer (nested @Serializable generic/non-generic, or a builtin). `deserialize` gates on
 /// this so it stubs cleanly instead of emitting a `null` element serializer for an un-derivable type.
-fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
+fn can_derive_element_serializer(ir: &IrFile, ctx: &PluginContext, ty: &Ty) -> bool {
     let nn = ty.non_null();
     // Include de-erased primitives/`String` (mirrors `element_serializer_expr`): they own no `Obj`
     // internal name but ARE derivable via the `builtin_element_serializer` tail. The old `obj_internal()`
@@ -1003,7 +1014,7 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
             && type_args
                 .iter()
                 .take(n)
-                .all(|a| can_derive_element_serializer(ir, a));
+                .all(|a| can_derive_element_serializer(ir, ctx, a));
     }
     // An interface (any) / abstract-@Serializable class field → `PolymorphicSerializer` (mirrors
     // `element_serializer_expr`; a `@Serializable` sealed interface was claimed by the sealed branch above).
@@ -1040,8 +1051,12 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
                     Ty::InProjection(_) => return false,
                     _ => *argument,
                 };
-                can_derive_element_serializer(ir, &readable)
+                can_derive_element_serializer(ir, ctx, &readable)
             });
+    }
+    // A dependency's own generated serializer (mirrors `element_serializer_expr`).
+    if type_args.is_empty() && ctx.has_external_serializer(&fq_name.render()) {
+        return true;
     }
     builtin_element_serializer(ty).is_some()
 }
@@ -2281,7 +2296,7 @@ impl IrPlugin for SerializationPlugin {
                     .iter()
                     .map(|(_, ty)| {
                         if needs_cache(ty) {
-                            if let Some(es) = element_serializer_expr(ir, ty) {
+                            if let Some(es) = element_serializer_expr(ir, ctx, ty) {
                                 return ir.add_expr(IrExpr::Call {
                                     callee: Callee::Static {
                                         owner: type_name("kotlin/LazyKt"),
@@ -2599,7 +2614,7 @@ impl IrPlugin for SerializationPlugin {
                             // actually derivable (a generic field with an un-derivable type arg is not) —
                             // else deserialize stubs cleanly rather than emit a `null` element serializer.
                             if nested[i].is_some() {
-                                return can_derive_element_serializer(ir, t);
+                                return can_derive_element_serializer(ir, ctx, t);
                             }
                             // A standard collection field decodes through its builtin collection serializer
                             // (via the `element_serializer_expr` fallback below) when its elements derive.
@@ -2608,7 +2623,7 @@ impl IrPlugin for SerializationPlugin {
                                 .and_then(collection_serializer_builder)
                                 .is_some()
                             {
-                                return can_derive_element_serializer(ir, t);
+                                return can_derive_element_serializer(ir, ctx, t);
                             }
                             if is_nullable(t) {
                                 return builtin_element_serializer(t).is_some();
@@ -2795,7 +2810,7 @@ impl IrPlugin for SerializationPlugin {
                                     // (collection). Same descriptor; the nullable variant yields null for a
                                     // JSON-null element.
                                     let inst =
-                                        element_serializer_expr(ir, ty).unwrap_or_else(|| {
+                                        element_serializer_expr(ir, ctx, ty).unwrap_or_else(|| {
                                             ir.add_expr(IrExpr::Const(IrConst::Null))
                                         });
                                     let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -2973,7 +2988,7 @@ impl IrPlugin for SerializationPlugin {
                                         base
                                     }
                                 } else if let Some(e) =
-                                    element_serializer_expr(ir, &serializer_field_types[i])
+                                    element_serializer_expr(ir, ctx, &serializer_field_types[i])
                                 {
                                     // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
                                     // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.

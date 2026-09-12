@@ -204,7 +204,7 @@ impl SerializeBody<'_> {
                 // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
                 // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
                 // the SAME descriptor (writes JSON null) — a method-name swap.
-                let Some(inst) = element_serializer_expr(ir, ty) else {
+                let Some(inst) = element_serializer_expr(ir, ctx, ty) else {
                     bail = true;
                     break;
                 };
@@ -225,7 +225,7 @@ impl SerializeBody<'_> {
             } else if is_nullable(ty) {
                 // Any derivable nullable element — builtin, interface-polymorphic, sealed, or
                 // nested — uses the nullable serializable call so the encoder can write JSON null.
-                if let Some(inst) = element_serializer_expr(ir, ty) {
+                if let Some(inst) = element_serializer_expr(ir, ctx, ty) {
                     stmts.push(ir.add_expr(IrExpr::Call {
                         callee: virtual_iface(
                             "kotlinx/serialization/encoding/CompositeEncoder",
@@ -249,7 +249,7 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, v],
                 }));
-            } else if let Some(inst) = element_serializer_expr(ir, ty) {
+            } else if let Some(inst) = element_serializer_expr(ir, ctx, ty) {
                 // A non-null reference element with a builtin/derivable serializer (e.g.
                 // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
                 stmts.push(ir.add_expr(IrExpr::Call {

@@ -1582,3 +1582,96 @@ fn serialize_maps_its_return_to_the_class_header_line() {
         }
     }
 }
+
+/// A `@Serializable` class whose ELEMENT type is a `@Serializable` class from the CLASSPATH — another
+/// module's jar, which is how every generated API client is shaped. kotlinc reads that dependency's
+/// generated serializer straight off the classpath (`getstatic dep/Inner$$serializer.INSTANCE`).
+///
+/// krusty derived an element serializer only from a `$serializer` declared in the SAME file, so the
+/// field had none: first it emitted a `null` child serializer (an NPE at decode), and once that was
+/// made explicit it declined the whole file — taking every other class in the module with it.
+#[test]
+fn an_element_typed_by_a_classpath_serializable_class_uses_its_serializer() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skipping: no scratch dir");
+        return;
+    };
+    // The dependency: built by the reference compiler running its own plugin, exactly as a real jar is.
+    let dependency_dir = dir.join("dep");
+    std::fs::create_dir_all(&dependency_dir).expect("dependency output directory");
+    let dependency_source = dir.join("Dep.kt");
+    std::fs::write(
+        &dependency_source,
+        "package dep\n\
+         import kotlinx.serialization.Serializable\n\
+         @Serializable\n\
+         data class Inner(val a: Int, val b: String)\n",
+    )
+    .expect("write dependency");
+    let Some((code, stderr)) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        dependency_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-classpath".to_string(),
+        cp.iter()
+            .map(|jar| jar.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":"),
+        format!("-Xplugin={}", plugin.display()),
+        dependency_source.to_string_lossy().into_owned(),
+    ]) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc(dependency) failed: {stderr}");
+
+    let mut classpath = cp.clone();
+    classpath.push(dependency_dir.clone());
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               import dep.Inner\n\
+               @Serializable\n\
+               data class Outer(val inner: Inner, val items: List<Inner>)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ClasspathElementSerializer",
+        src,
+        "Outer$$serializer",
+        &classpath,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    // The dependency's own generated serializer, referenced by name.
+    assert!(
+        built.reference.contains("dep/Inner$$serializer.INSTANCE"),
+        "reference must read the dependency's serializer — that is the rule under test:\n{}",
+        built.reference
+    );
+    assert!(
+        built.krusty.contains("dep/Inner$$serializer.INSTANCE"),
+        "krusty must read the dependency's serializer instead of deriving nothing:\n{}",
+        built.krusty
+    );
+    // A `null` child serializer is the shape that used to reach the runtime as an NPE.
+    let child_serializers = |text: &str| {
+        text.lines()
+            .skip_while(|line| !line.contains("childSerializers()"))
+            .take_while(|line| !line.contains("typeParametersSerializers"))
+            .filter(|line| line.contains("aconst_null"))
+            .count()
+    };
+    assert_eq!(
+        child_serializers(&built.krusty),
+        child_serializers(&built.reference),
+        "krusty must not leave a null child serializer:\n{}",
+        built.krusty
+    );
+}
