@@ -1774,6 +1774,6 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   keep their eager visit (their names and the one shared `Ljava/lang/Object;` descriptor intern with
   the table, as kotlinc's do); the annotation now follows them, and the three remaining fields are
   deferred to their first use.
-  Still open on this class: kotlinc interns the constructor's descriptor and `LocalVariableTable`
-  names with the constructor's own header, where krusty leaves them to the body.
+  The continuation constructor reserves its name, descriptor, and generic signature before building
+  its body, matching ASM's method-header visit and keeping a captured `this$0` after `<init>`.
   `tests/suspend_debug_metadata_e2e.rs::continuation_pool_interns_spills_then_metadata_then_used_fields`.

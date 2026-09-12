@@ -6257,6 +6257,14 @@ fn emit_class(
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
+        let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
+        if is_continuation {
+            // Continuation fields are registered without interning `this$0`/`result`/`label`, so the
+            // constructor must expose its HEADER before its body first references `this$0`. ASM-based
+            // kotlinc visits `<init>`, its descriptor, and its generic signature before `visitCode`;
+            // building the body first inverted `<init>` and `this$0` for member continuations.
+            cw.reserve_method_pool("<init>", &ctor_desc, ctor_signature.as_deref(), &[]);
+        }
         let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut ctor = CodeBuilder::new(1 + params_words);
         // The superclass constructor's parameter types (empty for the erased top type — the front end
@@ -6486,7 +6494,7 @@ fn emit_class(
         cw.add_method_sig(
             ctor_access,
             "<init>",
-            &method_descriptor(&param_tys, Ty::Unit),
+            &ctor_desc,
             &ctor,
             ctor_signature.as_deref(),
         );
