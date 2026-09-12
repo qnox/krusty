@@ -232,6 +232,7 @@ pub fn lower_suspend(
                         params: &prefix,
                         scope: Vec::new(),
                         pending: Vec::new(),
+                        levels: Vec::new(),
                         temps_only: false,
                         out: Default::default(),
                     };
@@ -3637,6 +3638,7 @@ fn build_state_machine(
             find_var_init(ir, wst, idx).map_or(0, |init| count_suspensions(ir, init, &suspend_set));
         in_stmt != in_init
     };
+    let before_crossing = reads.clone();
     reads.retain(|&idx| {
         if param_ty(idx).is_some() || named_vars.contains(&idx) {
             return true;
@@ -3656,6 +3658,15 @@ fn build_state_machine(
                 }
                 continue;
             }
+            // A statement between the write and this read that OVERWRITES `idx` on EVERY path
+            // before reading it kills the earlier value: a `when` assigning the temp in each of its
+            // branches leaves nothing of the declaration's value to carry, and the suspensions
+            // inside it all run BEFORE their branch's store. The crossing test restarts from that
+            // statement — only a suspension AFTER it can make the surviving value cross.
+            let (wi, rebased) = stmts[wi + 1..ri]
+                .iter()
+                .rposition(|&s2| kills_value(ir, s2, idx, &suspend_set))
+                .map_or((wi, false), |k| (wi + 1 + k, true));
             // A suspending statement strictly between the write and this read → the value crosses.
             if stmts[wi + 1..ri]
                 .iter()
@@ -3663,8 +3674,9 @@ fn build_state_machine(
             {
                 return true;
             }
-            // The write statement suspends outside the initializer → crossing, keep.
-            if susp_outside_init(stmts[wi], idx) {
+            // The write statement suspends outside the initializer → crossing, keep. A REBASED write
+            // statement suspends only before its own stores, by `kills_value`'s own definition.
+            if !rebased && susp_outside_init(stmts[wi], idx) {
                 return true;
             }
             // The read statement itself suspends: a read INSIDE a suspend call's own subtree
@@ -3679,6 +3691,14 @@ fn build_state_machine(
         }
         false
     });
+    // Locals the crossing filter dropped only because a later statement OVERWRITES them on every
+    // path. They carry nothing across a suspension — no spill field — but the flattener still splits
+    // their binding and their reads across states, so each keeps a method-scope slot.
+    let kill_dropped: Vec<u32> = before_crossing
+        .into_iter()
+        .filter(|idx| !reads.contains(idx))
+        .filter(|&idx| stmts.iter().any(|&s| kills_value(ir, s, idx, &suspend_set)))
+        .collect();
     // LOOP-CARRIED values: a local written+read inside a SUSPENDING loop statement is re-read on the
     // back-edge AFTER a resume (the induction `i` of `for (i in 5..6) { susp(i.toString()) }`), so
     // "consumed before the suspension" never holds — spill every local of such a loop.
@@ -3751,6 +3771,12 @@ fn build_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
+    // A dropped temp still needs its slot declared once per invocation, exactly like a spilled one.
+    let machine_locals: Vec<(u32, Ty)> = kill_dropped
+        .iter()
+        .filter(|idx| !spilled.iter().any(|(local, _)| local == *idx))
+        .filter_map(|&idx| find_local_ty(ir, b, idx).map(|ty| (idx, spill_field_ty(ty))))
+        .collect();
     // The spilled value parameters — captured at continuation construction (in spilled order).
     let param_caps: Vec<(u32, Ty)> = spilled
         .iter()
@@ -3814,6 +3840,7 @@ fn build_state_machine(
             params: &param_caps,
             scope: Vec::new(),
             pending: Vec::new(),
+            levels: Vec::new(),
             temps_only: false,
             out: Default::default(),
         };
@@ -4056,7 +4083,7 @@ fn build_state_machine(
     // cross-state reads all target one method-scope slot. Value parameters already own theirs.
     let is_param = |local: u32| param_caps.iter().any(|(p, _)| *p == local);
     let mut prologue_decls: Vec<ExprId> = Vec::new();
-    for (local, ty) in spilled.iter().copied() {
+    for (local, ty) in spilled.iter().chain(machine_locals.iter()).copied() {
         if is_param(local) {
             continue;
         }
@@ -4326,6 +4353,7 @@ fn build_lambda_state_machine(
             params: &[],
             scope: Vec::new(),
             pending: Vec::new(),
+            levels: Vec::new(),
             temps_only: false,
             out: Default::default(),
         };
@@ -6025,6 +6053,50 @@ fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
 /// local mis-frames the structural loop's back-edge. A write inside a SUSPENDING loop IS live (loop-carried
 /// across the inner suspension), so descend there.
 /// Whether the subtree under `e` writes local `idx` (declares it or `SetValue`s it).
+/// Whether EVERY path through `stmt` assigns `idx` before reading it AND no suspension runs after
+/// that assignment — i.e. `stmt` ends the lifetime of whatever `idx` held on entry without starting a
+/// crossing of its own. A `when` that binds its result temp in each branch is the shape that matters:
+/// the branch VALUES suspend, the stores follow the resumes, and no read can observe the old value.
+fn kills_value(ir: &IrFile, stmt: ExprId, idx: u32, suspend_set: &HashSet<u32>) -> bool {
+    match &ir.exprs[stmt as usize] {
+        IrExpr::Variable {
+            index,
+            init: Some(init),
+            ..
+        } if *index == idx => !expr_reads(ir, *init, idx),
+        IrExpr::SetValue { var, value } if *var == idx => !expr_reads(ir, *value, idx),
+        IrExpr::Block { stmts, value } => {
+            let mut killed = false;
+            for &s in stmts.iter().chain(value.iter()) {
+                if killed {
+                    // The value written above is live from here on: a later suspension carries it.
+                    if expr_calls_suspend(ir, s, suspend_set) {
+                        return false;
+                    }
+                    continue;
+                }
+                if kills_value(ir, s, idx, suspend_set) {
+                    killed = true;
+                    continue;
+                }
+                if expr_reads(ir, s, idx) || stmt_writes(ir, s, idx) {
+                    return false;
+                }
+            }
+            killed
+        }
+        // Exhaustive only — a `when` without an `else` leaves a path that writes nothing.
+        IrExpr::When { branches } => {
+            branches.iter().any(|(cond, _)| cond.is_none())
+                && branches.iter().all(|(cond, body)| {
+                    cond.is_none_or(|c| !expr_reads(ir, c, idx) && !stmt_writes(ir, c, idx))
+                        && kills_value(ir, *body, idx, suspend_set)
+                })
+        }
+        _ => false,
+    }
+}
+
 fn stmt_writes(ir: &IrFile, e: ExprId, idx: u32) -> bool {
     match ir.exprs[e as usize] {
         IrExpr::Variable { index, .. } if index == idx => return true,
@@ -6122,6 +6194,9 @@ struct ScopeWalk<'a> {
     /// Exprs that may still execute after the current walk point (rest-of-list statements, whole
     /// enclosing loops).
     pending: Vec<ExprId>,
+    /// Start index in `pending` of each nesting level, outermost first. `pending` grows one
+    /// contiguous block per level, so the levels run INSIDE-OUT: the last block executes first.
+    levels: Vec<usize>,
     /// Snapshot ONLY the unnamed temps that are LIVE at each suspension, with no parameter prefix —
     /// the complementary pass run over the FINAL body (see [`live_temp_scopes`]). The default (false)
     /// snapshots the parameter prefix plus the NAMED locals in scope.
@@ -6141,6 +6216,7 @@ fn live_temp_scopes(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> Su
         params: &[],
         scope: Vec::new(),
         pending: Vec::new(),
+        levels: Vec::new(),
         temps_only: true,
         out: Default::default(),
     };
@@ -6273,14 +6349,34 @@ impl ScopeWalk<'_> {
     /// liveness test for an unnamed temp (rest-of-list statements, plus whole enclosing loops, which
     /// re-run their subtrees on the back-edge).
     fn pending_reads(&self, slot: u32) -> bool {
-        self.pending.iter().any(|&p| expr_reads(self.ir, p, slot))
+        // Levels run inside-out and each level's own entries in execution order, so walk the blocks
+        // back to front. The first entry that READS `slot` keeps it live; the first that OVERWRITES
+        // it on every path (a `when` binding its result temp in each branch) makes every later read
+        // see the new value, so nothing of the current one has to cross this suspension.
+        let mut end = self.pending.len();
+        for &start in self.levels.iter().rev() {
+            for &p in &self.pending[start..end] {
+                if expr_reads(self.ir, p, slot) {
+                    return true;
+                }
+                if kills_value(self.ir, p, slot, self.suspend_set) {
+                    return false;
+                }
+            }
+            end = start;
+        }
+        self.pending[..end]
+            .iter()
+            .any(|&p| expr_reads(self.ir, p, slot))
     }
     fn walk_stmts(&mut self, stmts: &[ExprId]) {
         let base = self.scope.len();
         for (i, &st) in stmts.iter().enumerate() {
             let pbase = self.pending.len();
             self.pending.extend_from_slice(&stmts[i + 1..]);
+            self.levels.push(pbase);
             self.walk(st);
+            self.levels.pop();
             self.pending.truncate(pbase);
             self.push_decl(st);
         }
@@ -6300,7 +6396,9 @@ impl ScopeWalk<'_> {
                 if let Some(v) = value {
                     let pbase = self.pending.len();
                     self.pending.push(v);
+                    self.levels.push(pbase);
                     self.walk_stmts(&stmts);
+                    self.levels.pop();
                     self.pending.truncate(pbase);
                     // The trailing value sees the block's declarations.
                     for &st in &stmts {
@@ -6328,6 +6426,7 @@ impl ScopeWalk<'_> {
                 // Inside the loop, its WHOLE subtree may re-run on the back-edge.
                 let pbase = self.pending.len();
                 self.pending.push(e);
+                self.levels.push(pbase);
                 self.walk(cond);
                 let base = self.scope.len();
                 self.walk(body);
@@ -6335,6 +6434,7 @@ impl ScopeWalk<'_> {
                     self.walk(u);
                 }
                 self.close_scope(base);
+                self.levels.pop();
                 self.pending.truncate(pbase);
             }
             IrExpr::Try {
