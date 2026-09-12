@@ -385,9 +385,9 @@ pub fn run_enabled(
     enabled_plugins(module_name).run(ir, &ctx);
 }
 
-/// Field types this file does NOT declare whose generated serializer already exists where the target
-/// can reach it. A plugin derives a serializer only for what it generates; a dependency's
-/// `@Serializable` class brings its own, and only the target can say whether it is there.
+/// Field types this file does NOT declare whose generated serializer the target can reach: another
+/// file of this module, or a dependency. A plugin derives a serializer only for what IT generates;
+/// every other `@Serializable` class brings its own, and only the target knows where those live.
 fn external_serializers(
     ir: &IrFile,
     generated_serializer_exists: &dyn Fn(&str) -> bool,
@@ -410,10 +410,7 @@ fn external_serializers(
         if !seen.insert(internal.clone()) || declared.contains(&internal) {
             continue;
         }
-        let serializer =
-            crate::types::type_name_nested_child(crate::types::type_name(&internal), "$serializer")
-                .render();
-        if generated_serializer_exists(&serializer) {
+        if generated_serializer_exists(&internal) {
             external.insert(internal);
         }
     }
