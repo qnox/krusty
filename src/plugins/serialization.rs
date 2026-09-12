@@ -12,6 +12,7 @@
 //! deserialize bodies.
 
 mod enum_serializer;
+mod generated_members;
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
@@ -24,6 +25,7 @@ use crate::plugins::{
     FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty};
+use generated_members::{add_guarded_instance_method, add_instance_method, GuardedParameter};
 
 mod annotations;
 mod signatures;
@@ -1489,26 +1491,6 @@ impl SerializationPlugin {
         });
         ir.classes[class_id as usize].methods.push(accessor);
     }
-
-    /// Add a method to `ir` and return its `FunId`.
-    fn add_method(
-        ir: &mut IrFile,
-        owner_fq: &str,
-        name: &str,
-        params: Vec<Ty>,
-        ret: Ty,
-        body: Option<ExprId>,
-    ) -> u32 {
-        ir.add_fun(IrFunction {
-            name: name.to_string(),
-            params,
-            ret,
-            body,
-            is_static: false,
-            dispatch_receiver: Some(type_name(owner_fq)),
-            param_checks: Vec::new(),
-        })
-    }
 }
 
 impl IrPlugin for SerializationPlugin {
@@ -1768,36 +1750,43 @@ impl IrPlugin for SerializationPlugin {
                 .collect::<Vec<_>>();
 
             // Member signatures; bodies are filled in `transform_bodies`.
-            let descriptor = Self::add_method(
+            let serializer_name = type_name(&ser_fq);
+            let descriptor = add_instance_method(
                 ir,
-                &ser_fq,
+                serializer_name,
                 "getDescriptor",
                 vec![],
                 class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
                 None,
             );
-            let serialize = Self::add_method(
+            let serialize = add_guarded_instance_method(
                 ir,
-                &ser_fq,
+                serializer_name,
                 "serialize",
                 vec![
-                    class_ty("kotlinx/serialization/encoding/Encoder"),
-                    serialized_ty,
+                    GuardedParameter::new(
+                        class_ty("kotlinx/serialization/encoding/Encoder"),
+                        "encoder",
+                    ),
+                    GuardedParameter::new(serialized_ty, "value"),
                 ],
                 unit(),
                 None,
             );
-            let deserialize = Self::add_method(
+            let deserialize = add_guarded_instance_method(
                 ir,
-                &ser_fq,
+                serializer_name,
                 "deserialize",
-                vec![class_ty("kotlinx/serialization/encoding/Decoder")],
+                vec![GuardedParameter::new(
+                    class_ty("kotlinx/serialization/encoding/Decoder"),
+                    "decoder",
+                )],
                 serialized_ty,
                 None,
             );
-            let child = Self::add_method(
+            let child = add_instance_method(
                 ir,
-                &ser_fq,
+                serializer_name,
                 "childSerializers",
                 vec![],
                 Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
@@ -1814,9 +1803,9 @@ impl IrPlugin for SerializationPlugin {
                 stmts: vec![tps_ret],
                 value: None,
             });
-            let type_params_ser = Self::add_method(
+            let type_params_ser = add_instance_method(
                 ir,
-                &ser_fq,
+                serializer_name,
                 "typeParametersSerializers",
                 vec![],
                 Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
