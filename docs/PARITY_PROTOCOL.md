@@ -1595,3 +1595,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/branch_soft_keyword_name_e2e.rs`: all four fixtures compile with both kotlinc and Krusty;
   they cover `value` in `if`, `actual` in `when`, declaration visibility, and the block-level
   `suspend`-newline form.
+- **A generated `$serializer` carries `@Deprecated(level = HIDDEN)` (fix).** kotlinc marks every
+  plugin-generated serializer class deprecated-hidden: the class is an implementation detail, and
+  the HIDDEN level is what keeps it out of a consumer's resolution while its realization stays
+  callable. krusty emitted the class with no annotation at all, so to every other compiler it was
+  ordinary public API — a semantic difference, not a missing attribute.
+  The annotation carries ARGUMENTS (`message`, and `level` as an enum constant), which the metadata
+  encoder already handles, so it lands in both `RuntimeVisibleAnnotations` and `@Metadata`'s `d2`.
+  Native plugin realization now consumes those annotations exclusively from checked IR. The old
+  `source_file`/name-resolver bridge, its AST lookup and fallback, the borrowed/simple-name
+  annotation index, and the duplicate backend entry are deleted; activation and annotation queries
+  compare qualified `TypeName` identities. An aliased kotlinx annotation activates serialization,
+  while an unrelated `sample.Serializable` does not.
+  Still open on the same class: its generic `Signature`, the `checkNotNullParameter` guards kotlinc
+  emits at the head of `serialize`/`deserialize`, and the debug tables on its generated members.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_carries_the_hidden_deprecated_marker`,
+  `tests/plugins_e2e.rs::{serialization_activates_from_source_annotation,an_unrelated_serializable_simple_name_does_not_activate_the_plugin}`.
