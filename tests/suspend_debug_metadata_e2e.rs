@@ -932,18 +932,50 @@ fn continuation_metadata_numbers_spills_in_declaration_order() {
         .find_map(|(name, bytes)| (name == "demo/SpillOrderKt$load$1").then_some(bytes))
         .expect("load continuation");
     let text = disassemble(&javap, bytes, "SpillOrderKt$load$1.class", "spill_order");
-    let annotation = text
-        .rsplit_once("RuntimeVisibleAnnotations:")
-        .map(|(_, annotation)| annotation)
-        .expect("runtime-visible annotations");
 
-    for expected in [
-        "s=[\"L$0\",\"L$1\",\"L$3\"]",
-        "n=[\"names\",\"out\",\"name\"]",
-    ] {
-        assert!(
-            annotation.contains(expected),
-            "missing {expected:?}:\n{text}"
-        );
-    }
+    let reference_root = common::scratch_dir().expect("reference scratch dir");
+    let reference_out = reference_root.join("classes");
+    std::fs::create_dir_all(&reference_out).expect("reference output dir");
+    let reference_source = reference_root.join("SpillOrder.kt");
+    std::fs::write(&reference_source, source).expect("reference source");
+    let Some((code, stderr)) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        reference_source.to_string_lossy().into_owned(),
+    ]) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let reference_bytes = std::fs::read(reference_out.join("demo/SpillOrderKt$load$1.class"))
+        .expect("kotlinc continuation");
+    let reference_text = disassemble(
+        &javap,
+        &reference_bytes,
+        "ReferenceSpillOrderKt$load$1.class",
+        "reference_spill_order",
+    );
+
+    let debug_metadata = |output: &str| {
+        let mut lines = output
+            .lines()
+            .skip_while(|line| !line.contains("kotlin.coroutines.jvm.internal.DebugMetadata("));
+        let first = lines.next().expect("DebugMetadata annotation");
+        let mut block = vec![first.trim().to_string()];
+        for line in lines {
+            let line = line.trim().to_string();
+            let end = line == ")";
+            block.push(line);
+            if end {
+                return block;
+            }
+        }
+        panic!("unterminated DebugMetadata annotation:\n{output}")
+    };
+    let _ = std::fs::remove_dir_all(reference_root);
+    assert_eq!(
+        debug_metadata(&text),
+        debug_metadata(&reference_text),
+        "continuation DebugMetadata must exactly match kotlinc\nkrusty:\n{text}\nkotlinc:\n{reference_text}"
+    );
 }
