@@ -804,6 +804,24 @@ fn element_serializer_expr(ir: &mut IrFile, ctx: &PluginContext, ty: &Ty) -> Opt
             vec![],
         ));
     }
+    // A `@Serializable` ENUM element has no `$serializer` class of its own: kotlinc's accessor builds
+    // the serializer at run time (`createSimpleEnumSerializer`/`createAnnotatedEnumSerializer`), so an
+    // element reads it through the enum's own `serializer()` — `Level.Companion.serializer()`. The
+    // accessor's presence is what proves the enum is `@Serializable`.
+    if ir
+        .classes
+        .iter()
+        .any(|c| c.fq_name_matches(&fq_internal) && !c.enum_entries.is_empty())
+        && generated_serializer_accessor(ir, fq_name, 0).is_some()
+    {
+        return Some(serializer_of(
+            ir,
+            &fq_internal,
+            vec![],
+            kserializer_of(class_ty(&fq_internal)),
+            vec![],
+        ));
+    }
     // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes through
     // the kotlinx builtin collection serializer over its element serializer(s):
     // `ListSerializer(<T>)` / `SetSerializer(<T>)` / `MapSerializer(<K>, <V>)` (top-level functions in
@@ -1004,6 +1022,15 @@ fn can_derive_element_serializer(ir: &IrFile, ctx: &PluginContext, ty: &Ty) -> b
         .classes
         .iter()
         .any(|c| c.fq_name_id() == fq_name && c.is_sealed)
+        && generated_serializer_accessor(ir, fq_name, 0).is_some()
+    {
+        return true;
+    }
+    // A `@Serializable` ENUM (mirrors `element_serializer_expr`): derivable through its own accessor.
+    if ir
+        .classes
+        .iter()
+        .any(|c| c.fq_name_matches(&fq_name.render()) && !c.enum_entries.is_empty())
         && generated_serializer_accessor(ir, fq_name, 0).is_some()
     {
         return true;

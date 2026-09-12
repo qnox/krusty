@@ -1718,3 +1718,44 @@ fn an_element_declared_in_another_file_of_the_module_uses_its_serializer() {
         "krusty must reference the sibling file's generated serializer"
     );
 }
+
+/// A `@Serializable` ENUM stored as an element. An enum has no `$serializer` class of its own — its
+/// accessor builds the serializer at run time — so the element reads it through the enum's own
+/// `serializer()`, which is what kotlinc caches in `$childSerializers`. krusty derived nothing for it
+/// and declined the file; generated API clients are full of enum-typed fields.
+#[test]
+fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.SerialName\n\
+               @Serializable\n\
+               data class Action(val type: Type, val note: String) {\n\
+               \x20   @Serializable\n\
+               \x20   enum class Type(val value: String) {\n\
+               \x20       @SerialName(\"attach\") ATTACH(\"attach\"),\n\
+               \x20       @SerialName(\"detach\") DETACH(\"detach\"),\n\
+               \x20   }\n\
+               }\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableEnumElement", src, "Action", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // kotlinc caches an enum element's serializer behind a `Lazy` whose body calls the enum's own
+    // accessor; the point under test is that the accessor is reached at all.
+    assert!(
+        built.reference.contains("Action$Type$Companion.serializer"),
+        "reference must read the enum's own accessor — that is the rule under test:\n{}",
+        built.reference
+    );
+    assert!(
+        built.krusty.contains("Action$Type$Companion.serializer"),
+        "krusty must read the enum's accessor instead of deriving nothing:\n{}",
+        built.krusty
+    );
+}
