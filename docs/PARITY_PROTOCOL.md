@@ -1754,3 +1754,26 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   use `u32::MAX` and their producer-recorded identity/placement; `ACC_SYNTHETIC` remains only a JVM
   representation flag.
   `tests/secondary_constructor_member_order_e2e.rs::{a_source_secondary_constructor_is_interleaved_with_declared_members,a_value_class_secondary_constructor_keeps_its_source_order_after_realization}`.
+- **An unnamed temporary live across a suspension consumes its spill position (fix).** kotlinc gives a
+  suspending loop's ITERATOR its own `L$N` field, so the loop variable declared after it takes the NEXT
+  number: `for (name in names)` inside a suspend function records `s=["L$0","L$1","L$3"]` for
+  `names`/`out`/`name`, with `L$2` holding the unnamed iterator.
+  krusty's `@DebugMetadata` walker kept only NAMED variables, so the positions compacted and every
+  suspending loop reported `L$2` for a variable kotlinc puts in `L$3`. The temp now participates when
+  it is still read past the suspension — the same liveness test the temps-only machine already used —
+  and contributes no name, exactly as kotlinc's arrays show.
+  `tests/suspend_debug_metadata_e2e.rs::continuation_metadata_numbers_spills_in_declaration_order`.
+- **A continuation's pool follows kotlinc's visit order (fix).** Three orderings were wrong at once on
+  every suspend function's continuation class: `@DebugMetadata` was built BEFORE the field table, so
+  the subset of `L$N` names its `s` array happens to mention interned ahead of the fields that own
+  them; and `result`, `this$0` and `label` were declared eagerly with the spill fields, while kotlinc
+  first names them where they are USED — `this$0` in the constructor's `putfield`, the other two in
+  `invokeSuspend`.
+  Neither changes what the class SAYS, and both shift every pool entry after them, which is why a
+  continuation could match kotlinc member for member and still differ byte for byte. The spill fields
+  keep their eager visit (their names and the one shared `Ljava/lang/Object;` descriptor intern with
+  the table, as kotlinc's do); the annotation now follows them, and the three remaining fields are
+  deferred to their first use.
+  The continuation constructor reserves its name, descriptor, and generic signature before building
+  its body, matching ASM's method-header visit and keeping a captured `this$0` after `<init>`.
+  `tests/suspend_debug_metadata_e2e.rs::continuation_pool_interns_spills_then_metadata_then_used_fields`.

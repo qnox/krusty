@@ -14,6 +14,28 @@ fn disassemble(_javap: &str, bytes: &[u8], class_file_name: &str, _tag: &str) ->
         .expect("pooled JavaRunner unavailable")
 }
 
+fn kotlinc_class(source_name: &str, source: &str, class_name: &str) -> Option<Vec<u8>> {
+    let root = common::scratch_dir().expect("reference scratch dir");
+    let out = root.join("classes");
+    std::fs::create_dir_all(&out).expect("reference output dir");
+    let source_path = root.join(format!("{source_name}.kt"));
+    std::fs::write(&source_path, source).expect("reference source");
+    let compiled = common::kotlinc_compile(&[
+        "-d".to_string(),
+        out.to_string_lossy().into_owned(),
+        source_path.to_string_lossy().into_owned(),
+    ]);
+    let Some((code, stderr)) = compiled else {
+        let _ = std::fs::remove_dir_all(root);
+        return None;
+    };
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let bytes = std::fs::read(out.join(format!("{class_name}.class")))
+        .unwrap_or_else(|error| panic!("read kotlinc class {class_name}: {error}"));
+    let _ = std::fs::remove_dir_all(root);
+    Some(bytes)
+}
+
 #[test]
 fn continuation_emits_debug_and_enclosing_metadata() {
     let jdk = common::jdk_modules();
@@ -892,5 +914,173 @@ fn continuation_uses_synthetic_kotlin_metadata() {
             && line.contains("Utf8")
             && line.ends_with(" 1")),
         "anonymous continuation name must not be interned:\n{text}"
+    );
+}
+
+/// A `for` loop around a suspension spills FOUR values: the two locals in scope, the loop's iterator,
+/// and the loop variable. kotlinc numbers the `L$N` fields in the order the values are DECLARED — the
+/// iterator, created when the loop opens, takes `L$2` and the loop variable `L$3` — and the `s` array
+/// names the field each source variable landed in, skipping the iterator, which has no name.
+///
+/// krusty numbered them by IR index instead, where a compiler temporary sorts after every named
+/// local, so the iterator took the LAST field and the loop variable claimed `L$2`. Every suspending
+/// loop in the corpus carries that difference.
+#[test]
+fn continuation_metadata_numbers_spills_in_declaration_order() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun find(name: String): String? = name\n\
+        suspend fun load(names: List<String>): List<String> {\n\
+        \x20 val out = ArrayList<String>()\n\
+        \x20 for (name in names) {\n\
+        \x20   val found = find(name)\n\
+        \x20   if (found != null) out.add(found)\n\
+        \x20 }\n\
+        \x20 return out\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("SpillOrder", source)],
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile the suspending loop");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/SpillOrderKt$load$1").then_some(bytes))
+        .expect("load continuation");
+    let text = disassemble(&javap, bytes, "SpillOrderKt$load$1.class", "spill_order");
+
+    let Some(reference_bytes) = kotlinc_class("SpillOrder", source, "demo/SpillOrderKt$load$1")
+    else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    let reference_text = disassemble(
+        &javap,
+        &reference_bytes,
+        "ReferenceSpillOrderKt$load$1.class",
+        "reference_spill_order",
+    );
+
+    let debug_metadata = |output: &str| {
+        let mut lines = output
+            .lines()
+            .skip_while(|line| !line.contains("kotlin.coroutines.jvm.internal.DebugMetadata("));
+        let first = lines.next().expect("DebugMetadata annotation");
+        let mut block = vec![first.trim().to_string()];
+        for line in lines {
+            let line = line.trim().to_string();
+            let end = line == ")";
+            block.push(line);
+            if end {
+                return block;
+            }
+        }
+        panic!("unterminated DebugMetadata annotation:\n{output}")
+    };
+    assert_eq!(
+        debug_metadata(&text),
+        debug_metadata(&reference_text),
+        "continuation DebugMetadata must exactly match kotlinc\nkrusty:\n{text}\nkotlinc:\n{reference_text}"
+    );
+}
+
+/// A continuation's constant pool follows kotlinc's VISIT order: the spill fields' names and their
+/// one shared descriptor intern with the field table, `@DebugMetadata` after them — its `s` array
+/// names those very fields — and `result`/`this$0`/`label` only where they are first USED, in the
+/// constructor and `invokeSuspend`.
+///
+/// krusty built the annotation before the fields, so the subset of `L$N` names the array mentions
+/// interned ahead of the table, and it declared all three remaining fields eagerly, which pushed the
+/// constructor's own strings down. Neither changes what the class says, and both shift every entry
+/// after them — a class that matches kotlinc member for member still differs byte for byte.
+#[test]
+fn continuation_pool_interns_spills_then_metadata_then_used_fields() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        class Loader {\n\
+        \x20 suspend fun find(name: String): String? = name\n\
+        \x20 suspend fun load(names: List<String>): List<String> {\n\
+        \x20   val out = ArrayList<String>()\n\
+        \x20   for (name in names) {\n\
+        \x20     val found = find(name)\n\
+        \x20     if (found != null) out.add(found)\n\
+        \x20   }\n\
+        \x20   return out\n\
+        \x20 }\n\
+        }\n";
+    let classes = common::compile_in_process_files(
+        &[("PoolOrder", source)],
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile the suspending loop");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/Loader$load$1").then_some(bytes))
+        .expect("load continuation");
+    let text = disassemble(&javap, bytes, "Loader$load$1.class", "pool_order");
+    let Some(reference_bytes) = kotlinc_class("PoolOrder", source, "demo/Loader$load$1") else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    let reference_text = disassemble(
+        &javap,
+        &reference_bytes,
+        "ReferenceLoader$load$1.class",
+        "reference_pool_order",
+    );
+    let visit_order = |output: &str| {
+        const CONTRACT: [&str; 9] = [
+            "L$0",
+            "L$1",
+            "L$2",
+            "L$3",
+            "Lkotlin/coroutines/jvm/internal/DebugMetadata;",
+            "<init>",
+            "this$0",
+            "result",
+            "label",
+        ];
+        output
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('#') && line.contains(" = "))
+            .filter_map(|line| line.split_once(" = ").map(|(_, entry)| entry))
+            .filter_map(|entry| entry.split_whitespace().nth(1))
+            .filter(|value| CONTRACT.contains(value))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let reference_order = visit_order(&reference_text);
+    assert_eq!(
+        reference_order,
+        [
+            "L$0",
+            "L$1",
+            "L$2",
+            "L$3",
+            "Lkotlin/coroutines/jvm/internal/DebugMetadata;",
+            "<init>",
+            "this$0",
+            "result",
+            "label",
+        ],
+        "fixture must exercise kotlinc's complete continuation visit-order contract:\n{reference_text}"
+    );
+    assert_eq!(
+        visit_order(&text),
+        reference_order,
+        "continuation constant-pool visit order must exactly match kotlinc\nkrusty:\n{text}\nkotlinc:\n{reference_text}"
     );
 }
