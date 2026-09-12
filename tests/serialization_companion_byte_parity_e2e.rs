@@ -917,3 +917,96 @@ fn a_nested_serializable_declaration_spells_its_serial_name_with_dots() {
         assert_eq!(names(&built.krusty), want, "{class}: serial name constants");
     }
 }
+
+/// An entry's `@SerialName` is the name the FORMAT reads and writes for that constant, and it
+/// selects a different factory: `createSimpleEnumSerializer` derives every name from the constant's
+/// own spelling, so `@SerialName("active") ACTIVE` serialized as `"ACTIVE"` — wrong data, not a byte
+/// difference. kotlinc emits `createAnnotatedEnumSerializer(name, values(), names, entryAnnotations,
+/// classAnnotations)`, passing `null` for an entry that carries no name of its own.
+///
+/// The annotation lives on the entry's static FIELD — an enum constant has no property — which is
+/// why a property-driven `@SerialName` lookup never saw it.
+#[test]
+fn an_enum_entrys_serial_name_reaches_its_serializer() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = SERIAL_NAME_ENUM;
+    let Some(built) =
+        compare_with_kotlinc_plugin("EnumSerialName", src, "Status", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The generated initializer's body: the factory call and the arrays it builds.
+    let initializer = |text: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains("_init_$_anonymous_"))
+            .expect("generated enum serializer initializer is present");
+        body.into_iter()
+            .skip(start)
+            .take_while(|line| !line.starts_with("public") && !line.starts_with("private static ["))
+            .collect::<Vec<_>>()
+    };
+    let want = initializer(&built.reference);
+    assert!(
+        want.iter()
+            .any(|line| line.contains("createAnnotatedEnumSerializer")),
+        "reference must use the annotated factory — the rule under test:\n{}",
+        built.reference
+    );
+    assert_eq!(
+        initializer(&built.krusty),
+        want,
+        "generated enum-serializer initializer"
+    );
+}
+
+/// The names must reach the DESCRIPTOR, which is what a format actually reads. This is the
+/// assertion the byte comparison cannot make: a serializer built from the wrong factory verifies,
+/// runs, and produces different data.
+#[test]
+fn an_enum_serializer_reports_the_entrys_serial_name() {
+    let Some((_, cp)) = plugin_and_runtime() else {
+        return;
+    };
+    let src = format!(
+        "{SERIAL_NAME_ENUM}\
+         fun box(): String {{\n\
+         \x20 val descriptor = Status.serializer().descriptor\n\
+         \x20 return descriptor.getElementName(0) + \",\" + descriptor.getElementName(1) + \",\" + descriptor.getElementName(2)\n\
+         }}\n"
+    );
+    let jdk = common::jdk_modules();
+    let Some(classes) =
+        common::compile_in_process(&src, "EnumSerialNameRun", &cp, Some(jdk.as_path()))
+    else {
+        panic!(
+            "{:?}",
+            common::front_end_diagnostics(&src, &cp, Some(jdk.as_path()))
+        );
+    };
+    assert_eq!(
+        common::run_box(&classes, "EnumSerialNameRunKt", &cp).expect("box runner"),
+        "active,warning,PLAIN"
+    );
+}
+
+/// Two annotated entries prove order; the trailing plain entry proves the factory receives a null
+/// slot and falls back to the constant spelling only for that entry.
+const SERIAL_NAME_ENUM: &str = "import kotlinx.serialization.SerialName\n\
+                                import kotlinx.serialization.Serializable\n\
+                                @Serializable\n\
+                                enum class Status(val value: String) {\n\
+                                \x20   @SerialName(\"active\")\n\
+                                \x20   ACTIVE(\"active\"),\n\
+                                \x20\n\
+                                \x20   @SerialName(\"warning\")\n\
+                                \x20   WARNING(\"warning\"),\n\
+                                \x20\n\
+                                \x20   PLAIN(\"plain\"),\n\
+                                }\n";

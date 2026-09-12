@@ -1501,3 +1501,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   being a collection face rather than testing `is_interface`.
   `tests/java_interface_mutable_collection_face_e2e.rs`, which keeps the read-only-List refusal as an
   explicit second assertion.
+- **An enum entry's `@SerialName` selects a different serializer factory (fix — a MISCOMPILE, not a
+  byte difference).** `createSimpleEnumSerializer(name, values())` derives every serial name from the
+  constant's own spelling, so `@SerialName("active") ACTIVE` serialized as `"ACTIVE"`: valid
+  bytecode, verifying class, wrong data. kotlinc emits
+  `createAnnotatedEnumSerializer(name, values(), serialNames, entryAnnotations, classAnnotations)`
+  with a `null` name element for an entry that carries none.
+  The annotation lives on the entry's static FIELD — an enum constant has no property — which is why
+  the plugin's property-driven `@SerialName` lookup never saw it; it reads `field_annotations` now.
+  The emitted instruction sequence matches kotlinc exactly, `astore_0`/`aload_0` temp included, so
+  this closes the CODE_INSNS half of the corpus's 2725-class cluster. What remains on those classes
+  is `@Metadata`: kotlinc records each entry's annotations in `d1`/`d2`, krusty writes bare entries.
+  Entry annotations OTHER than `@SerialName` still take the simple factory — a narrower pre-existing
+  gap, unchanged here.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_enum_entrys_serial_name_reaches_its_serializer`
+  plus a runtime assertion on the descriptor's element names, which is the part byte comparison
+  cannot make.
