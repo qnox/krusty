@@ -1052,6 +1052,9 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+
+#[path = "int_when_switch_e2e.rs"]
+mod int_when_switch_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
