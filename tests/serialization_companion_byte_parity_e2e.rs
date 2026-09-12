@@ -1582,3 +1582,61 @@ fn serialize_maps_its_return_to_the_class_header_line() {
         }
     }
 }
+
+/// kotlinc emits a `@Serializable` class's synthetic deserialization constructor
+/// `(int seen, …, SerializationConstructorMarker)` LAST among the methods — after the declared
+/// members and after `write$Self$main`, immediately before `<clinit>`. krusty emitted it beside the
+/// primary constructor, which pushed every declared member down one slot and, because `add_method`
+/// interns the member's name and descriptor as it goes, shifted the constant pool with it.
+#[test]
+fn a_serializable_class_emits_its_synthetic_constructor_last() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableCtorOrder", src, "Point", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Member declarations in emission order with their parameter lists kept: the two constructors
+    // share a name and differ only in parameters. `javap -v` also prints constant-pool rows and
+    // `LocalVariableTable` entries that end in `;`, so anchor on a leading access modifier — plus
+    // `static {}`, which is how javap spells `<clinit>`.
+    let members = |text: &str| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.ends_with(';')
+                    && (line.starts_with("static {}")
+                        || ["public ", "private ", "protected "]
+                            .iter()
+                            .any(|lead| line.starts_with(lead)))
+            })
+            .map(|line| match line.split_once('(') {
+                Some((head, rest)) => {
+                    format!("{}({rest}", head.split_whitespace().last().unwrap_or(head))
+                }
+                None => line.split_whitespace().last().unwrap_or(line).to_string(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = members(&built.reference);
+    let at = |names: &[String], needle: &str| names.iter().position(|n| n.contains(needle));
+    assert!(
+        matches!(
+            (
+                at(&want, "SerializationConstructorMarker"),
+                at(&want, "write$Self$main"),
+            ),
+            (Some(synthetic), Some(write_self)) if synthetic > write_self
+        ),
+        "reference must emit the synthetic constructor after write$Self$main: {want:?}"
+    );
+    assert_eq!(members(&built.krusty), want, "member order");
+}

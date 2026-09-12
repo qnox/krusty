@@ -1704,3 +1704,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   subject is likewise materialized and therefore evaluates exactly once.
   With this and the switch, a `when` over `Int` constants matches kotlinc instruction for instruction.
   `tests/int_when_switch_e2e.rs::a_when_over_a_local_subject_matches_kotlinc_instruction_for_instruction`.
+- **A `@Serializable` class's synthetic deserialization constructor emits LAST (fix).** The plugin
+  generates `<init>(int seen, …, SerializationConstructorMarker)` as a secondary constructor, and the
+  emitter wrote every secondary constructor immediately after the primary one. kotlinc instead orders
+  it with the generated members: after the declared accessors, `copy`/`toString`/`hashCode`/`equals`
+  and `write$Self$main`, immediately before `<clinit>`.
+  The order is not cosmetic — `add_method` interns the member's name and descriptor as it goes, so
+  emitting the constructor early also shifted the constant pool of every `@Serializable` class, on
+  top of the `METHOD_ORDER` difference itself.
+  Only the SYNTHETIC secondary constructors move; a source-written `constructor(…)` keeps its place
+  beside the primary, which is where kotlinc puts it. The loop body became `emit_secondary_ctor` so
+  the two emission points share it.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_class_emits_its_synthetic_constructor_last`.
