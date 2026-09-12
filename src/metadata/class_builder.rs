@@ -613,7 +613,7 @@ impl Default for ClassTail<'_> {
 /// leaves metadata that describes a differently-named constant to every reflective reader.
 pub struct EnumEntryMeta<'a> {
     pub name: &'a str,
-    pub annotations: &'a [crate::ir::AppliedAnnotation],
+    pub annotations: Option<&'a crate::ir::DeclarationAnnotations>,
 }
 
 pub fn build_class(
@@ -1211,9 +1211,11 @@ pub fn build_class(
         .map(|entry| {
             let mut ee = Pb::new();
             ee.field_varint(1, st.local(entry.name) as u64);
-            for annotation in entry.annotations {
-                let encoded = crate::metadata::builder::annotation_pb(&mut st, annotation);
-                ee.repeated_message(2, &encoded);
+            if let Some(annotations) = entry.annotations {
+                for annotation in annotations.applications() {
+                    let encoded = crate::metadata::builder::annotation_pb(&mut st, annotation);
+                    ee.repeated_message(2, &encoded);
+                }
             }
             ee
         })
