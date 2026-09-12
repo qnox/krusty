@@ -2150,3 +2150,75 @@ fn an_element_whose_class_names_its_own_serializer_reads_that_class() {
         built.krusty
     );
 }
+
+/// A NULLABLE element whose type is a `@Serializable` class, an enum, or a collection. `deserialize`
+/// required a BUILTIN serializer for any nullable element, so one of these made the whole method
+/// undecodable — and krusty then emitted a stub that DEFAULT-CONSTRUCTS the class and ignores the
+/// input entirely. `serialize` and `childSerializers` derived the very same element fine.
+///
+/// kotlinc decodes every nullable element through `decodeNullableSerializableElement` with the same
+/// element serializer the other members use.
+#[test]
+fn a_nullable_serializable_element_is_actually_decoded() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Team(val name: String)\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, IDLE }\n\
+               @Serializable\n\
+               data class Account(\n\
+               \x20   val team: Team? = null,\n\
+               \x20   val status: Status? = null,\n\
+               \x20   val tags: List<String>? = null,\n\
+               )\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "NullableSerializableElement",
+        src,
+        "Account$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The decoder calls `deserialize` makes: a class that decodes nothing calls none of them.
+    let decoder_calls = |text: &str| {
+        let mut calls: Vec<String> = text
+            .lines()
+            .skip_while(|line| !line.contains("Account deserialize("))
+            .take_while(|line| !line.contains("public java.lang.Object deserialize("))
+            .filter_map(|line| line.split("CompositeDecoder.").nth(1))
+            .filter_map(|call| call.split(':').next())
+            .map(str::to_string)
+            .collect();
+        calls.sort();
+        calls.dedup();
+        calls
+    };
+    let want = decoder_calls(&built.reference);
+    assert!(
+        want.iter()
+            .any(|call| call == "decodeNullableSerializableElement"),
+        "reference must decode the nullable elements — that is the rule under test:\n{}",
+        built.reference
+    );
+    // krusty has no `decodeSequentially` fast path yet, so its call set is kotlinc's minus that one;
+    // what this test pins is that the nullable elements are decoded at all.
+    let got = decoder_calls(&built.krusty);
+    assert!(
+        got.iter()
+            .any(|call| call == "decodeNullableSerializableElement"),
+        "krusty must decode the nullable elements instead of default-constructing the class:\n{}",
+        built.krusty
+    );
+    assert!(
+        got.iter().all(|call| want.contains(call)),
+        "krusty calls a decoder method kotlinc does not: {got:?} vs {want:?}"
+    );
+}

@@ -1842,3 +1842,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   With the four shapes before it, all four corpus modules the strict bail knocked out compile again:
   rover, and the github (15915 classes), digitalocean (5209) and kubernetes (3226) httpclients.
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_whose_class_names_its_own_serializer_reads_that_class`.
+- **A nullable `@Serializable` element is actually decoded (fix).** `deserialize` demanded a BUILTIN
+  serializer for any NULLABLE element, so a nullable nested class, enum or collection made the whole
+  method undecodable — and krusty then emitted a stub that DEFAULT-CONSTRUCTS the class and ignores
+  the input. `serialize` and `childSerializers` derived the very same element without trouble; only
+  this gate disagreed with them.
+  The gate now asks the same question the rest of the plugin does: a non-nullable primitive decodes
+  through its own `decode<T>Element`, and everything else through an element serializer — which is
+  how kotlinc decodes a nullable element too (`decodeNullableSerializableElement` with the same
+  serializer). On the corpus this is 2406 `$serializer` classes whose deserialization was silently
+  empty.
+  krusty still emits no `decodeSequentially` fast path, so its decoder-call set is kotlinc's minus
+  that one — the remaining difference in this method.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_nullable_serializable_element_is_actually_decoded`.
