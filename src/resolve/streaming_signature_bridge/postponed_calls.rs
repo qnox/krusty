@@ -16,6 +16,16 @@ pub(super) struct PostponedCallableFamily {
     )>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct PostponedReceiverCall<'a, 'source> {
+    pub(super) scope: crate::fir::SignatureScope,
+    pub(super) receiver: Ty,
+    pub(super) spelling: &'a str,
+    pub(super) arguments: &'a [crate::fir::SigCallArgumentProbe<'source>],
+    pub(super) type_arguments: &'a [Ty],
+    pub(super) trailing_lambda: bool,
+}
+
 impl PostponedCallableFamily {
     pub(super) fn callables(&self) -> &crate::libraries::Callables {
         &self.callables
@@ -104,6 +114,14 @@ pub(super) fn collect_type_parameters(
 }
 
 impl ProductionSignatureSemantics<'_> {
+    pub(super) fn candidate_participates_in_signature_selection(
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        candidate.visibility == crate::types::Visibility::Public
+            || candidate.flags.inline.must_inline()
+            || candidate.stable_declaration.is_some()
+    }
+
     pub(super) fn common_postponed_parameters(
         &self,
         resolver: &crate::symbol_resolver::SymbolResolver<'_>,
@@ -173,6 +191,207 @@ impl ProductionSignatureSemantics<'_> {
             ));
         }
         Some(common)
+    }
+
+    /// Resolve the contextual parameter shape of one receiver-callable family.
+    ///
+    /// Most families share one declaration-slot mapping, so selection can operate on one mapped
+    /// argument vector. When overloads place a source argument in different declaration slots, map
+    /// and specialize each candidate independently, project its parameters back into source order,
+    /// and retain only expectations common to every applicable candidate. No positional retry is
+    /// valid here: source order is an output of declaration-owned mapping, not a substitute for it.
+    pub(super) fn receiver_family_postponed_parameters(
+        &self,
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        callables: crate::libraries::Callables,
+        call: PostponedReceiverCall<'_, '_>,
+    ) -> Option<(Vec<Ty>, Vec<Option<usize>>)> {
+        let PostponedReceiverCall {
+            scope,
+            receiver,
+            spelling,
+            arguments,
+            type_arguments,
+            trailing_lambda,
+        } = call;
+        let (parameters, slots) = if let Some((kinds, slots)) =
+            Self::probe_call_arguments(callables.functions(), arguments, trailing_lambda)
+        {
+            let projected = self.project_postponed_callables(scope, receiver, callables, &kinds);
+            let parameters = match resolver.select_receiver_function_with_params(
+                receiver,
+                spelling,
+                projected.arguments(),
+                type_arguments,
+                projected.callables(),
+            ) {
+                Some((_, parameters)) => parameters,
+                None => self.common_postponed_parameters(
+                    resolver,
+                    arguments,
+                    resolver.receiver_function_parameter_shapes(
+                        receiver,
+                        projected.arguments(),
+                        type_arguments,
+                        projected.callables(),
+                    ),
+                )?,
+            };
+            (parameters, slots)
+        } else {
+            let parameters =
+                self.common_candidate_mapped_parameters(resolver, callables.functions(), call)?;
+            let slots = (0..arguments.len()).map(Some).collect();
+            (parameters, slots)
+        };
+        let parameters = parameters
+            .into_iter()
+            .map(|parameter| {
+                resolver
+                    .functional_expectation(parameter)
+                    .unwrap_or(parameter)
+            })
+            .collect();
+        Some((parameters, slots))
+    }
+
+    fn common_candidate_mapped_parameters(
+        &self,
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        candidates: &[crate::libraries::FunctionInfo],
+        call: PostponedReceiverCall<'_, '_>,
+    ) -> Option<Vec<Ty>> {
+        let PostponedReceiverCall {
+            scope,
+            receiver,
+            spelling,
+            arguments,
+            type_arguments,
+            trailing_lambda,
+        } = call;
+        if arguments.iter().any(|argument| {
+            matches!(
+                argument,
+                crate::fir::SigCallArgumentProbe::PostponedLambda { spread: true, .. }
+                    | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
+                        spread: true,
+                        ..
+                    }
+            )
+        }) {
+            return None;
+        }
+        let names = arguments
+            .iter()
+            .map(|argument| match argument {
+                crate::fir::SigCallArgumentProbe::Typed(argument) => {
+                    argument.name.map(str::to_owned)
+                }
+                crate::fir::SigCallArgumentProbe::PostponedLambda { name, .. }
+                | crate::fir::SigCallArgumentProbe::PostponedCallableReference { name, .. } => {
+                    name.map(str::to_owned)
+                }
+            })
+            .collect::<Vec<_>>();
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element_probe(&arguments[first], &arguments[extra])
+        };
+        let mapped = candidates
+            .iter()
+            .filter(|candidate| Self::candidate_participates_in_signature_selection(candidate))
+            .filter_map(|candidate| {
+                let slots = Self::candidate_call_slots(
+                    candidate,
+                    &names,
+                    arguments.len(),
+                    trailing_lambda,
+                    &extra_admitted,
+                )?;
+                Some((candidate, slots))
+            })
+            .collect::<Vec<_>>();
+        if mapped.is_empty() {
+            return None;
+        }
+        let shapes = mapped
+            .into_iter()
+            .map(|(candidate, slots)| {
+                crate::trace_compiler!(
+                    "signature",
+                    "candidate-mapped expectation {spelling} receiver={receiver:?} slots={slots:?} candidate={}{}",
+                    candidate.callable.name,
+                    candidate.callable.descriptor,
+                );
+                let kinds = slots
+                    .iter()
+                    .map(|source| {
+                        source
+                            .and_then(|source| arguments.get(source))
+                            .map(Self::probe_argument_kind)
+                            .unwrap_or(crate::symbol_resolver::CallArgKind::OmittedDefault)
+                    })
+                    .collect::<Vec<_>>();
+                let callables =
+                    crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
+                        overloads: vec![candidate.clone()],
+                    });
+                let projected =
+                    self.project_postponed_callables(scope, receiver, callables, &kinds);
+                let parameters = match resolver.select_receiver_function_with_params(
+                    receiver,
+                    spelling,
+                    projected.arguments(),
+                    type_arguments,
+                    projected.callables(),
+                ) {
+                    Some((_, parameters)) => parameters,
+                    None => {
+                        let mut shapes = resolver.receiver_function_parameter_shapes(
+                            receiver,
+                            projected.arguments(),
+                            type_arguments,
+                            projected.callables(),
+                        );
+                        if shapes.len() != 1 {
+                            return None;
+                        }
+                        shapes.pop()?
+                    }
+                };
+                let mut source_parameters = vec![Ty::obj("kotlin/Any"); arguments.len()];
+                let mut assigned = vec![false; arguments.len()];
+                for (parameter, source) in slots.iter().enumerate() {
+                    let Some(source) = *source else {
+                        continue;
+                    };
+                    source_parameters[source] = *parameters.get(parameter)?;
+                    assigned[source] = true;
+                }
+                if let Some(vararg) = candidate.call_sig.vararg_index {
+                    let parameter = *parameters.get(vararg)?;
+                    for (source, assigned) in assigned.iter_mut().enumerate() {
+                        if !*assigned {
+                            source_parameters[source] = parameter;
+                            *assigned = true;
+                        }
+                    }
+                }
+                crate::trace_compiler!(
+                    "signature",
+                    "candidate-mapped expectation {spelling} source_parameters={source_parameters:?}",
+                );
+                assigned
+                    .iter()
+                    .all(|assigned| *assigned)
+                    .then_some(source_parameters)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        crate::trace_compiler!(
+            "signature",
+            "candidate-mapped expectation {spelling} common-shape candidates={}",
+            shapes.len(),
+        );
+        self.common_postponed_parameters(resolver, arguments, shapes)
     }
 
     pub(super) fn project_postponed_callables(

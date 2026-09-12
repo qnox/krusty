@@ -1758,11 +1758,7 @@ impl ProductionSignatureSemantics<'_> {
             // selection. Public declarations, compiler-provided must-inline bodies, and stable
             // declarations from this compilation all carry that fact on the normalized candidate;
             // no provider/origin branch belongs here.
-            .filter(|candidate| {
-                candidate.visibility == crate::types::Visibility::Public
-                    || candidate.flags.inline.must_inline()
-                    || candidate.stable_declaration.is_some()
-            })
+            .filter(|candidate| Self::candidate_participates_in_signature_selection(candidate))
             .filter_map(|candidate| {
                 Self::candidate_call_slots(
                     candidate,

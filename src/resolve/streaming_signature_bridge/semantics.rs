@@ -5234,38 +5234,18 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 functions.overloads = self
                     .implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
                 let callables = crate::libraries::Callables::from_parts(functions, properties);
-                let (kinds, slots) =
-                    Self::probe_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-                let projected =
-                    self.project_postponed_callables(scope, receiver.get(), callables, &kinds);
-                let selected_parameters = match resolver.select_receiver_function_with_params(
-                    receiver.get(),
-                    spelling,
-                    projected.arguments(),
-                    &type_arguments,
-                    projected.callables(),
-                ) {
-                    Some((_, parameters)) => parameters,
-                    None => self.common_postponed_parameters(
-                        resolver,
+                self.receiver_family_postponed_parameters(
+                    resolver,
+                    callables,
+                    super::postponed_calls::PostponedReceiverCall {
+                        scope,
+                        receiver: receiver.get(),
+                        spelling,
                         arguments,
-                        resolver.receiver_function_parameter_shapes(
-                            receiver.get(),
-                            projected.arguments(),
-                            &type_arguments,
-                            projected.callables(),
-                        ),
-                    )?,
-                };
-                let parameters = selected_parameters
-                    .into_iter()
-                    .map(|parameter| {
-                        resolver
-                            .functional_expectation(parameter)
-                            .unwrap_or(parameter)
-                    })
-                    .collect();
-                Some((parameters, slots))
+                        type_arguments: &type_arguments,
+                        trailing_lambda,
+                    },
+                )
             })?;
         crate::trace_compiler!(
             "signature",
