@@ -1798,3 +1798,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   emitter allocates the branch-local binding at the next free slot. Fixing that requires a physical
   local-lifetime model; aliasing two IR lifetimes to one slot produces invalid StackMap frames.
   `tests/suspend_prologue_cast_e2e.rs::the_get_or_create_prologue_casts_the_completion_once`.
+- **A suspension in a `when` arm resumes on the line the arm falls into (fix).** `@DebugMetadata`'s
+  `nl` gave every arm the enclosing statement's successor line. kotlinc uses what the arm actually
+  falls into: the NEXT branch — its condition, or, when the next branch is the `else`, that arm's first
+  executable line (a block arm enters on its first statement, not on the brace) — and for the LAST arm
+  the `when` expression's OWN line, since every arm converges on the `when`'s merge and kotlinc
+  attributes the merge to the expression rather than to the statement after it.
+  Measured on all four shapes against kotlinc 2.4.10.
+  `tests/suspend_when_branch_resume_line_e2e.rs`.
+  The `continuation_metadata_uses_returned_expression_end_line` fixture was an `if` whose arms are TAIL
+  suspend calls — kotlinc emits no continuation class for it at all, so its pinned `nl` had no ground
+  truth. The arms now feed a later expression, and the test compares `l`/`nl` against kotlinc's own.
