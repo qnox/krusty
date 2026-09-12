@@ -33,6 +33,7 @@ fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i3
         meta: decode_metadata(&d1_strings, &d2, kind, internal, None, &[]),
         signature: None,
         retention: None,
+        serializer_with: None,
         kotlin_targets: Vec::new(),
         java_targets: Vec::new(),
         inner_classes: Vec::new(),
