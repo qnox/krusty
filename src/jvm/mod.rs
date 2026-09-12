@@ -8,6 +8,7 @@ pub mod classpath;
 pub mod classreader;
 mod common_metadata;
 pub mod companion;
+mod constructor_debug;
 mod declaration_collisions;
 mod external_calls;
 mod function_classifiers;

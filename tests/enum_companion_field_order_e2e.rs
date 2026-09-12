@@ -170,3 +170,95 @@ fn an_enum_interns_its_pool_in_kotlincs_order() {
         );
     }
 }
+
+fn assert_enum_constructor_lines(tag: &str, src: &str, expected_entries: usize) {
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skipping: no scratch dir");
+        return;
+    };
+    let source = dir.join(format!("{tag}.kt"));
+    std::fs::write(&source, src).expect("write fixture");
+    let reference_dir = dir.join("ref");
+    std::fs::create_dir_all(&reference_dir).expect("reference output directory");
+    let Some((code, stderr)) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        source.to_string_lossy().into_owned(),
+    ]) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let krusty_dir = dir.join("out");
+    std::fs::create_dir_all(&krusty_dir).expect("krusty output directory");
+    let classes =
+        common::compile_in_process_metadata_cp_module_target(src, tag, &[], "main", Some(69))
+            .expect("krusty compiles the fixture");
+    for (internal, bytes) in &classes {
+        std::fs::write(krusty_dir.join(format!("{internal}.class")), bytes)
+            .expect("write krusty class");
+    }
+    // The `line N: pc` rows of the constructor, which javap prints under its Code attribute.
+    let constructor_lines = |disassembly: &str| {
+        let start = disassembly
+            .find("private Shape(int, java.lang.String);")
+            .expect("javap must contain the enum constructor signature");
+        disassembly[start..]
+            .lines()
+            .skip_while(|line| !line.contains("LineNumberTable"))
+            .skip(1)
+            .take_while(|line| line.trim().starts_with("line "))
+            .map(|line| line.trim().to_string())
+            .collect::<Vec<_>>()
+    };
+    let Some(reference) =
+        common::javap(&["-p", "-v", "-cp", &reference_dir.to_string_lossy(), "Shape"])
+    else {
+        eprintln!("skipping: javap unavailable");
+        return;
+    };
+    let krusty = common::javap(&["-p", "-v", "-cp", &krusty_dir.to_string_lossy(), "Shape"])
+        .expect("javap reads krusty's output");
+    let want = constructor_lines(&reference);
+    assert_eq!(
+        want.len(),
+        expected_entries,
+        "reference constructor line shape changed: {want:?}\n{reference}"
+    );
+    assert_eq!(constructor_lines(&krusty), want, "<init> LineNumberTable");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An enum constructor maps each property store to the PARAMETER's own line and the trailing
+/// `return` back to the class header — the same four-entry shape kotlinc gives an ordinary class.
+/// Only a parameter list spanning lines can distinguish the stores from the header.
+#[test]
+fn an_enum_constructor_maps_each_property_store_to_its_parameter_line() {
+    let src = "enum class Shape(\n\
+               \x20   val sides: Int,\n\
+               \x20   val label: String,\n\
+               ) {\n\
+               \x20   TRIANGLE(3, \"tri\"),\n\
+               \x20   SQUARE(4, \"sq\"),\n\
+               }\n";
+    assert_enum_constructor_lines("EnumCtorLines", src, 4);
+}
+
+/// A body-property initializer makes lowering put BOTH constructor-parameter stores and the body
+/// store in `init_body` (`explicit_param_stores`). The enum path must retain each statement's line
+/// instead of silently replacing the entire block with one header entry.
+#[test]
+fn an_enum_init_body_keeps_parameter_and_body_property_lines() {
+    let src = "enum class Shape(\n\
+               \x20   val sides: Int,\n\
+               \x20   val label: String,\n\
+               ) {\n\
+               \x20   TRIANGLE(3, \"tri\"),\n\
+               \x20   SQUARE(4, \"sq\");\n\
+               \x20\n\
+               \x20   val summary: String = \"shape\"\n\
+               }\n";
+    assert_enum_constructor_lines("EnumCtorInitBodyLines", src, 5);
+}

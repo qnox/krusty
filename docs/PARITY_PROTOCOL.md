@@ -1538,3 +1538,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `@Serializable` enum whose constants carry `@SerialName` is byte-identical to kotlinc — the shape
   behind the corpus's largest post-`MISSING_CLASS` cluster.
   `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enum_with_entry_serial_names_is_byte_identical`.
+- **An enum constructor maps each property store to its PARAMETER's line (fix).** kotlinc gives an
+  enum's `<init>` the same three-part table an ordinary class's gets: the `super(name, ordinal)` call
+  on the declaration's start line, each property store on the PARAMETER's own line, and the trailing
+  `return` back on the class HEADER line (`0:1, 6:2, 11:3, 17:1`). The enum path put every store on
+  the header line and wrote no closing entry; the ordinary-class path already did this correctly, so
+  the two simply did not share the rule.
+  Only a parameter list spanning LINES can show it — with the parameters on the header line all three
+  lines coincide and the entries dedupe to one, which every enum fixture in the suite happened to be,
+  and which is why a generated-code corpus (where the generator wraps every parameter) shows it on
+  thousands of classes while the suite showed nothing.
+  A body-property initializer exposed a deeper version of the same split: the enum path used
+  `fields.len() > ctor_param_count` as a proxy for `explicit_param_stores`, selected an `init_body`
+  that contained only the body store, and omitted every constructor-parameter store. The emitter now
+  follows the explicit lowering contract and shares the ordinary-class SetField/line operation;
+  missing source lines are not reconstructed with a header fallback.
+  `tests/enum_companion_field_order_e2e.rs::{an_enum_constructor_maps_each_property_store_to_its_parameter_line,an_enum_init_body_keeps_parameter_and_body_property_lines}`.
