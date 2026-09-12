@@ -1748,3 +1748,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   derivation needed. With the classpath, sibling-file and enum shapes, the digitalocean and kubernetes
   httpclient modules compile again.
   `tests/serialization_companion_byte_parity_e2e.rs::a_contextual_element_inside_a_collection_is_derivable`.
+- **An element whose class NAMES its own serializer reads that class (fix).**
+  `@Serializable(with = JsonObjectSerializer::class)` is how kotlinx's own types are serialized:
+  there is no generated `$serializer` to find, and a consumer storing such a type reads the named
+  class's singleton (`getstatic kotlinx/serialization/json/JsonObjectSerializer.INSTANCE`).
+  krusty could not see the annotation's ARGUMENT — the classpath recorded annotation identities only
+  — so the element was underivable and the file was declined. The class reader now decodes
+  `@Serializable`'s `with` class element, and the backend's serializer probe returns a NAME rather
+  than a yes/no: the named class when there is one, else the generated `$serializer`.
+  With the four shapes before it, all four corpus modules the strict bail knocked out compile again:
+  rover, and the github (15915 classes), digitalocean (5209) and kubernetes (3226) httpclients.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_whose_class_names_its_own_serializer_reads_that_class`.

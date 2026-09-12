@@ -941,9 +941,10 @@ fn element_serializer_expr(ir: &mut IrFile, ctx: &PluginContext, ty: &Ty) -> Opt
     // Scope: the non-generic shape. A generic dependency serializer is built through
     // `Foo.Companion.serializer(<argument serializers>)`, which needs the companion's ABI read back
     // from the classpath; until then such a field stays underivable and the caller bails cleanly.
-    if type_args.is_empty() && ctx.has_external_serializer(&fq_internal) {
-        let serializer = serializer_fq(&fq_internal);
-        return Some(ir.external_static_instance(&serializer, &serializer, "INSTANCE"));
+    if type_args.is_empty() {
+        if let Some(serializer) = ctx.external_serializer(&fq_internal).map(str::to_string) {
+            return Some(ir.external_static_instance(&serializer, &serializer, "INSTANCE"));
+        }
     }
     if let Some(ser) = builtin_element_serializer(ty) {
         return Some(ir.external_static_instance(ser, ser, "INSTANCE"));
@@ -1093,7 +1094,7 @@ fn can_derive_element_serializer(ir: &IrFile, ctx: &PluginContext, ty: &Ty) -> b
             });
     }
     // A dependency's own generated serializer (mirrors `element_serializer_expr`).
-    if type_args.is_empty() && ctx.has_external_serializer(&fq_name.render()) {
+    if type_args.is_empty() && ctx.external_serializer(&fq_name.render()).is_some() {
         return true;
     }
     builtin_element_serializer(ty).is_some()

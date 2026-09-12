@@ -105,11 +105,11 @@ pub struct FrontendClassContext<'a> {
 pub struct PluginContext {
     pub class_annotations: HashMap<ClassId, Vec<TypeName>>,
     target_type_descriptor: fn(Ty) -> Option<String>,
-    /// Types this compilation does NOT declare that already carry a plugin-generated serializer on
-    /// the classpath — another module's `@Serializable` classes. A plugin can only DERIVE a
-    /// serializer for what this file declares; for everything else the dependency's own generated
-    /// one is the answer, and this set is how the target tells the plugin which types have one.
-    external_serializers: std::collections::HashSet<String>,
+    /// Types this compilation does NOT declare, mapped to the serializer that already exists for
+    /// them: another file's or a dependency's generated `$serializer`, or the one a class names for
+    /// itself with `@Serializable(with = …)`. A plugin can only DERIVE a serializer for what this
+    /// file declares; for everything else only the target knows where the serializer is.
+    external_serializers: std::collections::HashMap<String, String>,
 }
 
 impl Default for PluginContext {
@@ -117,7 +117,7 @@ impl Default for PluginContext {
         Self {
             class_annotations: HashMap::new(),
             target_type_descriptor: no_target_type_descriptor,
-            external_serializers: std::collections::HashSet::new(),
+            external_serializers: std::collections::HashMap::new(),
         }
     }
 }
@@ -142,19 +142,19 @@ impl PluginContext {
         (self.target_type_descriptor)(ty)
     }
 
-    /// Record the types whose serializer already exists outside this compilation.
+    /// Record the serializer that exists outside this compilation for each type that has one.
     pub fn with_external_serializers(
         mut self,
-        serializers: std::collections::HashSet<String>,
+        serializers: std::collections::HashMap<String, String>,
     ) -> Self {
         self.external_serializers = serializers;
         self
     }
 
-    /// Whether `internal` (a JVM internal name) carries a plugin-generated serializer the target can
-    /// reference directly.
-    pub fn has_external_serializer(&self, internal: &str) -> bool {
-        self.external_serializers.contains(internal)
+    /// The serializer class (a JVM internal name) the target can reference for `internal`, when one
+    /// already exists outside this file.
+    pub fn external_serializer(&self, internal: &str) -> Option<&str> {
+        self.external_serializers.get(internal).map(String::as_str)
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -372,7 +372,7 @@ pub fn run_enabled(
     ir: &mut IrFile,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
-    generated_serializer_exists: &dyn Fn(&str) -> bool,
+    generated_serializer_exists: &dyn Fn(&str) -> Option<String>,
 ) {
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
     if ctx
@@ -390,8 +390,8 @@ pub fn run_enabled(
 /// every other `@Serializable` class brings its own, and only the target knows where those live.
 fn external_serializers(
     ir: &IrFile,
-    generated_serializer_exists: &dyn Fn(&str) -> bool,
-) -> std::collections::HashSet<String> {
+    generated_serializer_exists: &dyn Fn(&str) -> Option<String>,
+) -> std::collections::HashMap<String, String> {
     let declared: std::collections::HashSet<String> =
         ir.classes.iter().map(|class| class.fq_name()).collect();
     let mut candidates: Vec<Ty> = ir
@@ -400,7 +400,7 @@ fn external_serializers(
         .flat_map(|class| class.fields.iter().map(|field| field.ty))
         .collect();
     let mut seen = std::collections::HashSet::new();
-    let mut external = std::collections::HashSet::new();
+    let mut external = std::collections::HashMap::new();
     while let Some(ty) = candidates.pop() {
         // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
         candidates.extend(ty.non_null().type_args().iter().copied());
@@ -410,8 +410,8 @@ fn external_serializers(
         if !seen.insert(internal.clone()) || declared.contains(&internal) {
             continue;
         }
-        if generated_serializer_exists(&internal) {
-            external.insert(internal);
+        if let Some(serializer) = generated_serializer_exists(&internal) {
+            external.insert(internal, serializer);
         }
     }
     external
