@@ -50,23 +50,38 @@ const SRC: &str = "import lib.DefaultFactory\n\
 /// The PRODUCTION streaming compiler, which is where the gap lives: the non-streaming analysis used
 /// by `front_end_diagnostics` solves an inferred property's type through a different path and
 /// resolves this fixture either way.
-fn compiles(src: &str, tag: &str, lib: &str) -> Option<bool> {
-    let library = common::compile_lib_ref(tag, lib)?;
+fn assert_compiles_like_kotlinc(src: &str, tag: &str, lib: &str) {
+    let library = common::compile_lib_ref(tag, lib).expect("dependency library compiles");
     let classpath = vec![library, common::stdlib_jar()];
     let jdk = common::jdk_modules();
-    Some(common::compile_in_process(src, tag, &classpath, Some(jdk.as_path())).is_some())
+    let reference = common::scratch_dir().expect("scratch directory");
+    let source = reference.join(format!("{tag}Consumer.kt"));
+    let output = reference.join("reference");
+    std::fs::write(&source, src).expect("write reference consumer source");
+    std::fs::create_dir_all(&output).expect("create reference output directory");
+    let joined_classpath = std::env::join_paths(&classpath)
+        .expect("join reference classpath")
+        .to_string_lossy()
+        .into_owned();
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        joined_classpath,
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc available");
+    assert_eq!(code, 0, "kotlinc must accept the fixture: {stderr}");
+    assert!(
+        common::compile_in_process(src, tag, &classpath, Some(jdk.as_path())).is_some(),
+        "krusty must accept the same fixture as kotlinc"
+    );
+    let _ = std::fs::remove_dir_all(reference);
 }
 
 #[test]
 fn an_overloaded_receiver_extension_shapes_its_own_lambda() {
-    let Some(compiled) = compiles(SRC, "OverloadedReceiverExtension", LIB) else {
-        eprintln!("skipping: the dependency library could not be built");
-        return;
-    };
-    assert!(
-        compiled,
-        "a call to an overloaded receiver extension must shape its own lambda"
-    );
+    assert_compiles_like_kotlinc(SRC, "OverloadedReceiverExtension", LIB);
 }
 
 /// The single-overload form must keep working — it is the shape that already resolved, and the fix
@@ -83,9 +98,25 @@ fn a_single_receiver_extension_still_shapes_its_lambda() {
         single.len() < LIB.len(),
         "the second overload must be removed for this fixture"
     );
-    let Some(compiled) = compiles(SRC, "SingleReceiverExtension", &single) else {
-        eprintln!("skipping: the dependency library could not be built");
-        return;
-    };
-    assert!(compiled, "the single-overload shape must keep resolving");
+    assert_compiles_like_kotlinc(SRC, "SingleReceiverExtension", &single);
+}
+
+/// A typed positional argument makes the first overload uniquely applicable, while each overload
+/// has a different number of defaulted middle slots before its trailing lambda. Neither declaration
+/// mapping is positional; both must be projected back to the two source arguments before selection.
+#[test]
+fn typed_arguments_project_the_lambda_shape_from_each_candidate() {
+    let typed_overloads = LIB
+        .replace(
+            "fun Config<*>.tweak(block: Builder.() -> Unit) { Builder().block() }\n",
+            "fun Config<*>.tweak(value: String, replaceExisting: Boolean = false, block: Builder.() -> Unit) { Builder().block() }\n",
+        )
+        .replace(
+            "fun Config<*>.tweak(replaceExisting: Boolean = false, block: Builder.() -> Unit) {\n",
+            "fun Config<*>.tweak(value: Int, replaceExisting: Boolean = false, retries: Int = 0, block: Builder.() -> Unit) {\n",
+        );
+    assert_ne!(typed_overloads, LIB, "both overloads must be replaced");
+    let typed = SRC.replace("tweak { }", "tweak(\"x\") { }");
+    assert_ne!(typed, SRC, "the call must carry the typed discriminator");
+    assert_compiles_like_kotlinc(&typed, "TypedReceiverExtensionArgument", &typed_overloads);
 }

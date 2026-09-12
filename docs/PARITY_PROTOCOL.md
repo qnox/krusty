@@ -1565,14 +1565,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   LATER use of that property loses its lambda receivers — a pile of `unresolved reference` errors in
   unrelated builder lambdas further down the file (the whole ktor-client-DSL error family in the
   corpus, and the compile failures behind it).
-  With no NAMED argument the caller's own order is unambiguous, so the probe now falls back to a
-  POSITIONAL mapping instead of giving up. It only supplies contextual types: the per-candidate
-  parameter shapes it feeds are reconciled afterwards, and candidates that genuinely disagree about
-  the argument's type still yield no expectation.
+  The postponed-call boundary now applies each declaration's NORMAL argument mapping independently,
+  specializes that candidate, projects its parameter types back into SOURCE-argument order, and only
+  then reconciles the family. There is no positional retry: candidates that genuinely disagree about
+  the lambda's inputs yield no expectation, and a mapped candidate that cannot be specialized is not
+  silently dropped.
   Three ingredients are all required to see it, which is why no fixture had: the extension must be
   overloaded with a leading defaulted parameter, the property's type must be inferred, and the
   declarations must come from a compiled DEPENDENCY. It also reproduces ONLY through the production
   streaming compiler — the non-streaming analysis behind `front_end_diagnostics` solves the
   property's type by another path and accepts the fixture either way, so the test drives
-  `compile_in_process`.
+  `compile_in_process`. A second overloaded fixture puts typed positional arguments ahead of
+  different counts of defaulted middle slots, so neither candidate has a positional declaration
+  mapping; both consumers are also compiled with kotlinc before Krusty must accept them.
   `tests/overloaded_receiver_extension_expectation_e2e.rs`.

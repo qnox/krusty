@@ -943,42 +943,25 @@ impl ProductionSignatureSemantics<'_> {
                 functions.overloads = self
                     .implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
                 let callables = crate::libraries::Callables::from_parts(functions, properties);
-                let (kinds, slots) =
-                    Self::probe_call_arguments(callables.functions(), arguments, trailing_lambda)?;
-                let projected =
-                    self.project_postponed_callables(scope, receiver, callables, &kinds);
-                let selected_parameters = match resolver.select_receiver_function_with_params(
-                    receiver,
-                    spelling,
-                    projected.arguments(),
-                    type_arguments,
-                    projected.callables(),
-                ) {
-                    Some((_, parameters)) => parameters,
-                    None => self.common_postponed_parameters(
-                        resolver,
+                let selected = self.receiver_family_postponed_parameters(
+                    resolver,
+                    callables,
+                    super::postponed_calls::PostponedReceiverCall {
+                        scope,
+                        receiver,
+                        spelling,
                         arguments,
-                        resolver.receiver_function_parameter_shapes(
-                            receiver,
-                            projected.arguments(),
-                            type_arguments,
-                            projected.callables(),
-                        ),
-                    )?,
-                };
-                let parameters = selected_parameters
-                    .into_iter()
-                    .map(|parameter| {
-                        resolver
-                            .functional_expectation(parameter)
-                            .unwrap_or(parameter)
-                    })
-                    .collect::<Vec<_>>();
-                crate::trace_compiler!(
-                    "signature",
-                    "member call expectation {spelling} receiver={receiver:?} parameters={parameters:?}",
+                        type_arguments,
+                        trailing_lambda,
+                    },
                 );
-                Some((parameters, slots))
+                if let Some((parameters, _)) = &selected {
+                    crate::trace_compiler!(
+                        "signature",
+                        "member call expectation {spelling} receiver={receiver:?} parameters={parameters:?}",
+                    );
+                }
+                selected
             });
             if let Ok((parameters, slots)) = selected {
                 return Ok(Self::postponed_expectations(arguments, &slots, &parameters));
