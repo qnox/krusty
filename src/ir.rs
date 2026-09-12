@@ -2515,7 +2515,7 @@ pub struct IrFile {
     pub classes: Vec<IrClass>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:
-        std::collections::HashMap<(ClassId, IrSecondaryConstructorRole), u32>,
+        std::collections::HashMap<(TypeName, IrSecondaryConstructorRole), u32>,
     /// Exact `New` expressions targeting a generated secondary constructor. This call-site edge
     /// preserves the selected declaration through target representation passes.
     generated_secondary_constructor_calls:
@@ -3274,9 +3274,10 @@ impl IrFile {
         role: IrSecondaryConstructorRole,
         ordinal: u32,
     ) {
+        let owner = self.classes[class as usize].fq_name_id();
         assert!(
             self.generated_secondary_constructors
-                .insert((class, role), ordinal)
+                .insert((owner, role), ordinal)
                 .is_none(),
             "a generated secondary-constructor role has one exact declaration"
         );
@@ -3287,8 +3288,19 @@ impl IrFile {
         class: ClassId,
         role: IrSecondaryConstructorRole,
     ) -> Option<u32> {
+        self.generated_secondary_constructor_by_owner(
+            self.classes[class as usize].fq_name_id(),
+            role,
+        )
+    }
+
+    pub(crate) fn generated_secondary_constructor_by_owner(
+        &self,
+        owner: TypeName,
+        role: IrSecondaryConstructorRole,
+    ) -> Option<u32> {
         self.generated_secondary_constructors
-            .get(&(class, role))
+            .get(&(owner, role))
             .copied()
     }
 
