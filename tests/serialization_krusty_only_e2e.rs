@@ -712,8 +712,8 @@ fun box(): String {
 
 #[test]
 fn default_value_decode_fills_default_in_krusty() {
-    // Decoding input that OMITS an optional element fills it from the constant default (the decode local
-    // starts at the default, so a never-decoded element keeps it) — `{"a":1}` → `C(1, 5, null)`.
+    // The decoder passes its exact seen mask to the synthetic constructor: an omitted optional field
+    // evaluates its declaration default, while an omitted required field throws MissingFieldException.
     let src = r#"import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 @Serializable data class C(val a: Int, val b: Int = 5, val t: String? = null)
@@ -722,6 +722,15 @@ fun box(): String {
     if (c1 != C(1, 5, null)) return "c1=$c1"
     val c2 = Json.decodeFromString(C.serializer(), "{\"a\":1,\"b\":9,\"t\":\"hi\"}")
     if (c2 != C(1, 9, "hi")) return "c2=$c2"
+    try {
+        Json.decodeFromString(C.serializer(), "{}")
+        return "missing required element accepted"
+    } catch (expected: Throwable) {
+        val failure = expected.toString()
+        if (!failure.startsWith("kotlinx.serialization.MissingFieldException")) {
+            return "wrong failure=" + failure
+        }
+    }
     return "OK"
 }
 "#;
