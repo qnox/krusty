@@ -1777,3 +1777,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   The continuation constructor reserves its name, descriptor, and generic signature before building
   its body, matching ASM's method-header visit and keeping a captured `this$0` after `<init>`.
   `tests/suspend_debug_metadata_e2e.rs::continuation_pool_interns_spills_then_metadata_then_used_fields`.
+- **A continuation's constructor header and `LocalVariableTable` intern with the constructor (fix).**
+  kotlinc interns a method's header — name, descriptor, `Signature` — before it visits the body, and
+  that method's `LocalVariableTable` names right after it, before the next method. krusty interned the
+  primary constructor's header at `add_method_sig`, i.e. AFTER everything its body touched (on a
+  continuation that put `<init>` behind the `this$0` field reference it stores), and batched every
+  method's table names into a trailing debug pass, which moved the constructor's `this`/`$completion`
+  past the whole class.
+  With the spill positions and the pool's visit order, a suspending function's continuation class is
+  now **byte-identical to kotlinc** — the first class from the corpus's largest difference family to
+  match exactly.
+  `tests/suspend_debug_metadata_e2e.rs::a_suspending_loops_continuation_is_byte_identical`.

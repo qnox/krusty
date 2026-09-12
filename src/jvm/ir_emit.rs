@@ -6266,6 +6266,16 @@ fn emit_class(
             cw.reserve_method_pool("<init>", &ctor_desc, ctor_signature.as_deref(), &[]);
         }
         let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
+        // kotlinc interns a method's HEADER — name, descriptor, `Signature` — before it visits the
+        // body, so the body's own references follow them. The primary constructor interned its header
+        // at `add_method_sig` instead, i.e. AFTER everything its body touched: on a continuation class
+        // that put `<init>` behind the `this$0` field reference it stores.
+        cw.reserve_method_pool(
+            "<init>",
+            &method_descriptor(&param_tys, Ty::Unit),
+            ctor_signature.as_deref(),
+            &[],
+        );
         let mut ctor = CodeBuilder::new(1 + params_words);
         // The superclass constructor's parameter types (empty for the erased top type — the front end
         // names it `kotlin/Any`, which this backend maps to `java/lang/Object`).
@@ -6498,6 +6508,37 @@ fn emit_class(
             &ctor,
             ctor_signature.as_deref(),
         );
+        // A continuation's constructor table is attached HERE, not in the trailing debug pass:
+        // kotlinc interns a method's `LocalVariableTable` names with that method, before it visits
+        // the next one, so batching every table at the end reordered the pool from `<init>` onward.
+        if let Some(metadata) = continuation_metadata {
+            let has_this0 = c.fields.iter().any(|field| field.name == "this$0");
+            let mut ctor_locals: Vec<(String, String, u16)> =
+                vec![("this".to_string(), format!("L{fq_name};"), 0)];
+            let mut slot = 1u16;
+            if has_this0 {
+                ctor_locals.push((
+                    "this$0".to_string(),
+                    format!("L{};", metadata.enclosing_class),
+                    slot,
+                ));
+                slot += 1;
+            }
+            ctor_locals.push((
+                "$completion".to_string(),
+                "Lkotlin/coroutines/Continuation;".to_string(),
+                slot,
+            ));
+            let ctor_desc = if has_this0 {
+                format!(
+                    "(L{};Lkotlin/coroutines/Continuation;)V",
+                    metadata.enclosing_class
+                )
+            } else {
+                "(Lkotlin/coroutines/Continuation;)V".to_string()
+            };
+            cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
+        }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
         let primary_annotations = &c.primary_ctor_annotations;
@@ -7033,34 +7074,8 @@ fn emit_class(
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
-    if let Some(metadata) = continuation_metadata {
+    if continuation_metadata.is_some() {
         let self_desc = format!("L{fq_name};");
-        let has_this0 = c.fields.iter().any(|f| f.name == "this$0");
-        let mut ctor_locals: Vec<(String, String, u16)> =
-            vec![("this".to_string(), self_desc.clone(), 0)];
-        let mut slot = 1u16;
-        if has_this0 {
-            ctor_locals.push((
-                "this$0".to_string(),
-                format!("L{};", metadata.enclosing_class),
-                slot,
-            ));
-            slot += 1;
-        }
-        ctor_locals.push((
-            "$completion".to_string(),
-            "Lkotlin/coroutines/Continuation;".to_string(),
-            slot,
-        ));
-        let ctor_desc = if has_this0 {
-            format!(
-                "(L{};Lkotlin/coroutines/Continuation;)V",
-                metadata.enclosing_class
-            )
-        } else {
-            "(Lkotlin/coroutines/Continuation;)V".to_string()
-        };
-        cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
         cw.set_method_debug(
             "invokeSuspend",
             "(Ljava/lang/Object;)Ljava/lang/Object;",
