@@ -1704,3 +1704,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   subject is likewise materialized and therefore evaluates exactly once.
   With this and the switch, a `when` over `Int` constants matches kotlinc instruction for instruction.
   `tests/int_when_switch_e2e.rs::a_when_over_a_local_subject_matches_kotlinc_instruction_for_instruction`.
+- **An element typed by a CLASSPATH `@Serializable` class uses that class's own serializer (fix).**
+  The plugin derived an element serializer only from a `$serializer` declared in the SAME IR file, so a
+  field whose type comes from a dependency had none. That first showed as a `null` child serializer
+  (an NPE at decode); once the plugin made the gap explicit, the whole file was declined — and since a
+  file that fails emits nothing, a single such field cost a module every class it had. Every generated
+  API client is shaped that way, which is how three corpus modules and 10687 byte-identical classes
+  went missing at once.
+  kotlinc reads the dependency's generated serializer straight off the classpath
+  (`getstatic dep/Inner$$serializer.INSTANCE`), and so does krusty now. Only the TARGET can say
+  whether that class is there, so `PluginContext` carries the set of types whose serializer already
+  exists outside this compilation; the JVM backend fills it from the classpath.
+  Scope: the non-generic shape. A generic dependency serializer is built through
+  `Foo.Companion.serializer(<argument serializers>)`, and a library type with a hand-written
+  serializer (`JsonObject` → `JsonObjectSerializer.INSTANCE`) is named by its own
+  `@Serializable(with = …)`; both still bail cleanly, as does a same-module element declared in
+  ANOTHER FILE, whose serializer this compilation has not generated yet.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_classpath_serializable_class_uses_its_serializer`.
