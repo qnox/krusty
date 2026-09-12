@@ -1721,3 +1721,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `@Serializable(with = …)`; both still bail cleanly, as does a same-module element declared in
   ANOTHER FILE, whose serializer this compilation has not generated yet.
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_classpath_serializable_class_uses_its_serializer`.
+- **An element declared in ANOTHER FILE of the module uses its serializer (fix).** krusty compiles a
+  file at a time, so a sibling `@Serializable` class's `$serializer` is neither in this file's IR nor
+  yet on the classpath — it is generated as that other file compiles. The plugin therefore could not
+  derive an element serializer for it and declined the file, which is the shape every generated API
+  client has: one declaration per file, each storing its siblings.
+  The classifier's `@Serializable` annotation is the fact that settles it, and the backend now carries
+  classifier annotations in its module facts so it can answer for a declaration this file cannot see.
+  With this and the classpath half, the kubernetes httpclient module compiles again (1 error → 0).
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_declared_in_another_file_of_the_module_uses_its_serializer`.
