@@ -1084,17 +1084,34 @@ impl BodyLowering<'_> {
                 let mut prefix = Vec::new();
                 let subject = subject
                     .map(|subject| {
-                        let value = self.expression(subject)?;
-                        let temporary = self.allocate_temporary();
-                        let ty = self
+                        let subject_expression = self
                             .body
                             .expr(subject)
-                            .ok_or(FirLoweringFailure::MissingExpression(subject))?
-                            .ty
-                            .get();
+                            .ok_or(FirLoweringFailure::MissingExpression(subject))?;
+                        let stable_local = match &subject_expression.kind {
+                            FirExprKind::ValueRead(value)
+                                if !self.local_value_is_mutable(*value) =>
+                            {
+                                Some(*value)
+                            }
+                            _ => None,
+                        };
+                        let subject_ty = subject_expression.ty.get();
+                        let value = self.expression(subject)?;
+                        // Only an immutable FIR value may replace the subject snapshot. An arbitrary
+                        // IR GetValue is not enough: a mutable `var` can change while earlier branch
+                        // conditions are evaluated, but every comparison must still see its original
+                        // subject value.
+                        if let Some(local) = stable_local {
+                            let slot = self.value_slot(local);
+                            if matches!(self.ir.expr(value), IrExpr::GetValue(read) if *read == slot) {
+                                return Ok::<_, FirLoweringFailure>(slot);
+                            }
+                        }
+                        let temporary = self.allocate_temporary();
                         prefix.push(self.ir.add_expr(IrExpr::Variable {
                             index: temporary,
-                            ty,
+                            ty: subject_ty,
                             init: Some(value),
                             named: false,
                         }));
