@@ -704,6 +704,54 @@ impl NameTree {
         Some(owner)
     }
 
+    /// Every already-interned classifier that could be an encoded owner of `nested`, from the
+    /// deepest textual boundary to the shallowest. This is deliberately separate from
+    /// [`Self::nested_owner`]: a generated local name such as `Outer$build$1` has no semantic owner
+    /// encoded by its last boundary, while the JVM `InnerClasses` backend may still need to compare
+    /// all textual boundaries against the exact declarations of the current file.
+    pub(crate) fn existing_nested_owners(&self, nested: NameId) -> Vec<NameId> {
+        let node = self.node(nested);
+        let Some(parent) = node.parent else {
+            return Vec::new();
+        };
+        node.segment
+            .rmatch_indices(['$', '.'])
+            .filter_map(|(split, _)| self.child(parent, &node.segment[..split]))
+            .collect()
+    }
+
+    /// The classifier segment of `candidate` relative to an already-resolved enclosing classifier.
+    /// Nested JVM segments are flattened (`Outer$Nested$Deep`), so this preserves every `$` that is
+    /// part of the source nested name without rendering either identity.
+    pub(crate) fn nested_segment_within(&self, candidate: NameId, owner: NameId) -> Option<&str> {
+        let candidate = self.node(candidate);
+        let owner = self.node(owner);
+        (candidate.parent == owner.parent)
+            .then(|| candidate.segment.strip_prefix(&*owner.segment))
+            .flatten()?
+            .strip_prefix('$')
+    }
+
+    /// Split the last JVM nesting boundary for backend emission when no enclosing classifier is
+    /// declared in the current file. The split stays in the name tree; callers receive the final
+    /// external strings rather than rendering a name and interpreting it themselves.
+    pub(crate) fn jvm_nested_parts(&self, nested: NameId) -> Option<(String, String)> {
+        let node = self.node(nested);
+        let split = node.segment.rfind('$')?;
+        let parent = node.parent?;
+        let mut outer = self.render(parent);
+        if parent != Self::ROOT {
+            outer.push('/');
+        }
+        outer.push_str(&node.segment[..split]);
+        Some((outer, node.segment[split + 1..].to_string()))
+    }
+
+    /// Lexicographic ordering of two stored paths without allocating their rendered forms.
+    pub(crate) fn path_cmp(&self, left: NameId, right: NameId) -> std::cmp::Ordering {
+        self.path_bytes(left).cmp(self.path_bytes(right))
+    }
+
     pub fn parent(&self, id: NameId) -> Option<NameId> {
         self.node(id).parent
     }
@@ -878,6 +926,20 @@ mod tests {
 
         let dotted = names.insert("kotlin/collections/Map.Entry");
         assert_eq!(names.nested_owner(dotted), Some(map));
+
+        let dollar_name = names.insert("kotlin/collections/Map$Nested$With$Dollars");
+        assert_eq!(names.nested_owner(dollar_name), None);
+        assert_eq!(names.existing_nested_owners(dollar_name), vec![map]);
+        assert_eq!(
+            names.nested_segment_within(dollar_name, map),
+            Some("Nested$With$Dollars")
+        );
+
+        let external_nested = names.insert("external/Outer$Inner");
+        assert_eq!(
+            names.jvm_nested_parts(external_nested),
+            Some(("external/Outer".to_string(), "Inner".to_string()))
+        );
 
         let late_nested = names.insert("late/Outer$Inner");
         assert_eq!(names.nested_owner(late_nested), None);

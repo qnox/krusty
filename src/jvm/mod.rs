@@ -16,6 +16,7 @@ mod function_references;
 mod generic_erasure;
 pub mod inline;
 pub mod inline_class;
+mod inner_classes;
 pub mod ir_emit;
 pub mod java_stub;
 pub mod jvm_class_map;

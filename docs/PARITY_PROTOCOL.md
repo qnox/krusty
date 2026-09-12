@@ -1671,3 +1671,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   compares the direct body's complete line table, including both bytecode offsets, and the generic
   body's exact source-line sequence while its separate `write$Self` ABI migration still changes code
   offsets.
+- **`InnerClasses` candidates are prepared once from classifier identities (perf).** Registration
+  previously rendered every class name inside an all-pairs prefix scan and repeated that scan for
+  every emitted class, making a generated file's emission cubic in its declaration count. The JVM
+  backend now builds one file-owned candidate registry from interned `TypeName` relations and renders
+  only its final classfile payload. A source identifier containing `$` remains intact because the name
+  tree selects the nearest existing owner identity from every possible nesting boundary; generated
+  serializers and companions use their exact interned child identities. The focused registry and name
+  tree tests pin candidate order, names, access flags, and the embedded-dollar boundary without adding
+  a machine-timing-dependent 24-second test to the suite.
