@@ -1527,3 +1527,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `set_last_field_annotations_deferred` keeps the applications unencoded on the eager field, and
   `intern_late_fields` encodes them in the same window it realizes the late fields.
   `tests/serialization_companion_byte_parity_e2e.rs::an_enum_entrys_annotation_type_interns_with_the_field_table`.
+- **An enum CONSTANT's annotations belong in its `@Metadata` entry (fix).** `EnumEntry` records
+  `{ name = f1, annotation = f2 }`; krusty wrote only the name, so a reflective reader saw a
+  constant with no `@SerialName` even though the class file carried one on its field. The builder's
+  `enum_entries` is now `EnumEntryMeta { name, annotations }` and the entry's NAME interns before its
+  annotations, each annotation's own strings after it — kotlinc's `d2` order.
+  The argument-carrying `annotation_pb` already existed (it is what a CLASS annotation uses); the
+  gap was only that entries never reached it.
+  With this, the entry-annotation pool position, and the annotated-serializer factory, a
+  `@Serializable` enum whose constants carry `@SerialName` is byte-identical to kotlinc — the shape
+  behind the corpus's largest post-`MISSING_CLASS` cluster.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_enum_with_entry_serial_names_is_byte_identical`.
