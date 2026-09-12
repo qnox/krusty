@@ -22,12 +22,14 @@ use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod enum_metadata;
+mod member_schedule;
 mod operand_stack;
 mod secondary_constructor;
 mod vararg;
 mod when;
 
-use secondary_constructor::{defer_serialization_constructor, SecondaryConstructorEmitter};
+use member_schedule::{source_ordered_members, SourceOrderedMember};
+use secondary_constructor::SecondaryConstructorEmitter;
 
 struct InlineStaticTarget<'a> {
     owner: &'a str,
@@ -6520,43 +6522,11 @@ fn emit_class(
         c.fq_name_id(),
         crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
     );
-    // Secondary constructors: each `<init>(p)` delegates (via `this(…)` to an own `<init>`, or via
-    // `super(…)` to the base `<init>`) then runs its body. A `super(…)`-reaching ctor's `body` already
-    // has the class init steps prepended (the lowering does that). `this` is slot 0, parameters follow.
-    for (secondary_ordinal, sc) in c.secondary_ctors.iter().enumerate() {
-        // The exact serialization-plugin constructor is held back to the generated-member position
-        // below. Other synthetic constructors retain their own declaration order.
-        if defer_serialization_constructor(secondary_ordinal, serialization_constructor) {
-            continue;
-        }
-        SecondaryConstructorEmitter {
-            ir,
-            class: c,
-            owner: &fq_name,
-            facade,
-            env,
-            writer: &mut cw,
-        }
-        .emit(secondary_ordinal, sc);
-    }
-    // JVM method order follows Kotlin declaration order. A plain property's accessors do not have
-    // `FunId`s, so interleave the declaration itself with source-written functions/accessors rather
-    // than grouping backend-synthesized accessors ahead of every function.
-    enum DeclaredMember<'a> {
-        Property(&'a crate::ir::IrProperty),
-        Function(u32),
-    }
-    let mut ordered = Vec::with_capacity(c.properties.len() + c.methods.len());
-    ordered.extend(c.properties.iter().map(DeclaredMember::Property));
-    ordered.extend(c.methods.iter().copied().map(DeclaredMember::Function));
-    ordered.sort_by_key(|member| match member {
-        DeclaredMember::Property(property) => property.source_order,
-        DeclaredMember::Function(fid) => ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX),
-    });
+    let ordered = source_ordered_members(ir, c, serialization_constructor);
     let markers = property_annotation_marker_fids(ir, c);
     for member in ordered {
         let fid = match member {
-            DeclaredMember::Property(property) => {
+            SourceOrderedMember::Property(property) => {
                 emit_declared_property_accessor(
                     ir,
                     c,
@@ -6577,12 +6547,26 @@ fn emit_class(
                 }
                 continue;
             }
-            DeclaredMember::Function(fid)
+            SourceOrderedMember::Function(fid)
                 if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) =>
             {
                 continue;
             }
-            DeclaredMember::Function(fid) => fid,
+            SourceOrderedMember::Function(fid) => fid,
+            SourceOrderedMember::SecondaryConstructor(ordinal, constructor) => {
+                // Each `<init>(p)` delegates to an exact checked target, then runs its body. A
+                // `super(…)`-reaching body already includes the class initialization steps.
+                SecondaryConstructorEmitter {
+                    ir,
+                    class: c,
+                    owner: &fq_name,
+                    facade,
+                    env,
+                    writer: &mut cw,
+                }
+                .emit(ordinal, constructor);
+                continue;
+            }
         };
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {

@@ -1745,3 +1745,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the ordinary emission phase. The shared constructor emitter lives in its own responsibility module
   rather than extending the `ir_emit` monolith.
   `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_class_emits_its_deserialization_constructor_last`.
+- **Source secondary constructors share declaration order with properties/functions (fix).** A
+  secondary constructor is a source declaration, but the JVM emitter previously wrote every one
+  immediately after the primary constructor before visiting source-ordered properties and methods.
+  Common IR now retains the constructor's stable source offset, and the class emitter interleaves its
+  exact identity in the same declaration stream as property accessors and functions. Value-class
+  lowering transfers that order to the exact `constructor-impl` realization. Generated constructors
+  use `u32::MAX` and their producer-recorded identity/placement; `ACC_SYNTHETIC` remains only a JVM
+  representation flag.
+  `tests/secondary_constructor_member_order_e2e.rs::{a_source_secondary_constructor_is_interleaved_with_declared_members,a_value_class_secondary_constructor_keeps_its_source_order_after_realization}`.

@@ -319,6 +319,9 @@ pub(super) fn finalize_constructors(
             ir.classes[constructor.class as usize].secondary_ctors.push(
                 crate::ir::IrSecondaryCtor {
                     annotations: constructor.annotations,
+                    source_order: index
+                        .source_order(declaration)
+                        .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
                     prefix_params,
                     params: named_params.iter().map(|(_, ty)| *ty).collect(),
                     named_params,

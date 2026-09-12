@@ -7082,7 +7082,8 @@ fn synth_value_members(
             let result = ir.add_expr(IrExpr::GetValue(delegated_value));
             stmts.push(ir.add_expr(IrExpr::Return(Some(result))));
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-            add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            let constructor = add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            ir.fn_source_order.insert(constructor, sc.source_order);
         }
     }
     true
