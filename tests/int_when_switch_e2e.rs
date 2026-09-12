@@ -172,3 +172,68 @@ fn int_switch_cases_and_defaults_execute() {
         "OK"
     );
 }
+
+/// kotlinc reads a `when` subject that is already a local — a parameter here — straight into the
+/// dispatch (`iload_0; tableswitch`). krusty copied every subject into a temporary first, so even a
+/// `when` that now switches correctly carried two extra instructions and an extra local ahead of it.
+///
+/// With the temporary gone the whole method matches kotlinc instruction for instruction, which is the
+/// point: a switch with the right keys is still not the same code array.
+#[test]
+fn a_when_over_a_local_subject_matches_kotlinc_instruction_for_instruction() {
+    let Some((reference, krusty)) = build_both() else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Instruction rows of `method`, pool indices erased (their numbering is an emission-order
+    // artifact) and javap's trailing comments dropped. Branch targets are kept.
+    let instructions = |text: &str, method: &str| {
+        let mut out = Vec::new();
+        let mut inside = false;
+        for raw in text.lines() {
+            let line = raw.trim();
+            if !inside {
+                inside = line.contains(&format!(" {method}(int);"));
+                continue;
+            }
+            if line.ends_with(';') && line.contains('(') {
+                break;
+            }
+            let code = line.split("//").next().unwrap_or(line).trim();
+            let normalized = code
+                .split_whitespace()
+                .map(|token| if token.starts_with('#') { "#" } else { token })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !normalized.is_empty() {
+                out.push(normalized);
+            }
+        }
+        out
+    };
+    for method in ["dense", "sparse", "negative"] {
+        let want = instructions(&reference, method);
+        assert_eq!(
+            instructions(&krusty, method),
+            want,
+            "{method}: instructions\n{krusty}"
+        );
+    }
+}
+
+#[test]
+fn a_mutable_subject_keeps_its_original_snapshot() {
+    const SOURCE: &str = "fun box(): String {\n\
+        var x = 0\n\
+        return when (x) {\n\
+            ++x -> \"wrong-1\"\n\
+            1 -> \"wrong-2\"\n\
+            else -> \"OK\"\n\
+        }\n\
+    }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "MutableWhenSubject")
+            .expect("mutable when subject compiles and runs"),
+        "OK"
+    );
+}

@@ -1695,3 +1695,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   through — kotlinc's layout, so a `when` whose subject is a parameter now matches it instruction for
   instruction apart from the subject temporary krusty still materializes.
   `tests/int_when_switch_e2e.rs::a_when_over_int_constants_switches_the_way_kotlinc_does`.
+- **A `when` whose subject is already an immutable local reads it directly (fix).** The lowering
+  copied EVERY `when` subject into a temporary, so even a `when (x)` over a parameter carried an
+  extra store, an extra load and an extra local ahead of the dispatch. kotlinc reads an immutable
+  parameter or `val` straight into the comparison or switch (`iload_0; tableswitch`).
+  A mutable `var` still gets a subject temporary: evaluating an earlier condition can mutate the
+  variable, while every later comparison must use the original subject snapshot. Every non-stable
+  subject is likewise materialized and therefore evaluates exactly once.
+  With this and the switch, a `when` over `Int` constants matches kotlinc instruction for instruction.
+  `tests/int_when_switch_e2e.rs::a_when_over_a_local_subject_matches_kotlinc_instruction_for_instruction`.
