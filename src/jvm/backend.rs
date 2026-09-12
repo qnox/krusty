@@ -85,38 +85,43 @@ pub fn run_backend_passes(
 /// dependency compiled with the serialization plugin carries `<type>$serializer` on the classpath.
 /// A `@Serializable` class of THIS module declared in another file has one too, but it is generated
 /// as that file compiles — the classpath cannot answer for it, and the module's own facts do.
-fn generated_serializer_exists(
-    internal: &str,
+fn legacy_generated_serializer(
+    classifier: crate::types::TypeName,
     classpath: &crate::jvm::classpath::Classpath,
     module_serializable: &dyn Fn(crate::types::TypeName) -> bool,
-) -> Option<String> {
-    let name = crate::types::type_name(internal);
+) -> Option<crate::types::TypeName> {
     // A class that NAMES its serializer has no generated one: `@Serializable(with = X::class)` is
     // where kotlinx's own types (`JsonObject` → `JsonObjectSerializer`) put theirs, and a consumer
     // storing such a type references that class.
-    if let Some(named) = classpath
-        .find(internal)
-        .and_then(|class| class.serializer_with.clone())
-    {
+    if let Some(named) = classpath.find_name(classifier).and_then(|class| {
+        class
+            .annotations
+            .iter()
+            .find(|annotation| {
+                annotation
+                    .annotation
+                    .matches(crate::plugins::serialization::SERIALIZABLE_FQ)
+            })
+            .and_then(|annotation| {
+                annotation.arguments.iter().find_map(|(name, value)| {
+                    (name == "with")
+                        .then_some(value)
+                        .and_then(|value| match value {
+                            crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
+                            _ => None,
+                        })
+                })
+            })
+    }) {
         return Some(named);
     }
-    let serializer = crate::types::type_name_nested_child(name, "$serializer").render();
-    (classpath.class_exists(&serializer) || module_serializable(name)).then_some(serializer)
+    let serializer = classifier.nested_child("$serializer");
+    (classpath.find_name(serializer).is_some() || module_serializable(classifier))
+        .then_some(serializer)
 }
 
 /// Whether the classifier is declared in THIS module and carries `@Serializable` — its generated
 /// serializer will exist once that declaration's own file is emitted.
-fn module_declares_serializable(
-    facts: &crate::backend::BackendModuleFacts,
-    classifier: crate::types::TypeName,
-) -> bool {
-    facts.classifier(classifier).is_some_and(|fact| {
-        fact.annotations
-            .iter()
-            .any(|annotation| annotation.matches(crate::plugins::serialization::SERIALIZABLE_FQ))
-    })
-}
-
 /// Run the JVM pass pipeline and retain continuation metadata for class emission.
 pub fn run_backend_passes_with_metadata(
     ir: &mut crate::ir::IrFile,
@@ -126,16 +131,21 @@ pub fn run_backend_passes_with_metadata(
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, &|internal| {
-        generated_serializer_exists(internal, classpath, &|classifier| {
-            syms.classes.values().any(|class| {
-                class.internal == classifier
-                    && class.annotations.iter().any(|annotation| {
-                        annotation.matches(crate::plugins::serialization::SERIALIZABLE_FQ)
-                    })
+    crate::plugins::run_enabled_legacy_bridge(
+        ir,
+        module_name,
+        jvm_plugin_type_descriptor,
+        &|classifier| {
+            legacy_generated_serializer(classifier, classpath, &|classifier| {
+                syms.classes.values().any(|class| {
+                    class.internal == classifier
+                        && class.annotations.iter().any(|annotation| {
+                            annotation.matches(crate::plugins::serialization::SERIALIZABLE_FQ)
+                        })
+                })
             })
-        })
-    });
+        },
+    );
     let module_value_classes: std::collections::HashMap<_, _> = syms
         .classes
         .values()
@@ -169,11 +179,7 @@ pub fn run_backend_passes_with_checked_metadata(
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: &[String],
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, &|internal| {
-        generated_serializer_exists(internal, classpath, &|classifier| {
-            module_declares_serializable(classifiers.module(), classifier)
-        })
-    });
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
     run_backend_passes_after_plugins(
         ir,
         facade,

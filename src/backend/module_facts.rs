@@ -39,7 +39,7 @@ pub trait BackendClassifierSource {
 /// The exact classifier information representation backends may inspect after semantic checking.
 /// Resolver candidate maps, constructors, constants, source keys, inline plans, contracts, and
 /// parser-backed member identities cannot be represented here.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
     pub access: crate::libraries::ClassifierAccess,
     pub is_kotlin: bool,
@@ -54,7 +54,7 @@ pub struct BackendClassifierFact {
     /// Resolved declaration annotations. A backend reads these to answer questions a plugin cannot
     /// answer for itself — whether ANOTHER file of this module carries an annotation whose generated
     /// declarations this file's emission must name.
-    pub annotations: Box<[TypeName]>,
+    pub annotations: Box<[crate::types::ResolvedAnnotation]>,
     /// Number of leading semantic type parameters declared by this classifier itself. Remaining
     /// parameters are lexical captures used by common checking, not parameters of its backend
     /// declaration.
@@ -138,9 +138,7 @@ impl BackendClassifierFact {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             surface: surface.into_boxed_slice(),
-            // A dependency shape carries no annotation list; the classpath answers for those
-            // directly (its generated classes are already compiled).
-            annotations: Box::default(),
+            annotations: shape.annotations.clone().into_boxed_slice(),
             own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
@@ -511,7 +509,13 @@ impl BackendModuleFacts {
                     .into_boxed_slice(),
                 annotations: index
                     .declaration_annotations(declaration)
-                    .to_vec()
+                    .iter()
+                    .copied()
+                    .map(|annotation| crate::types::ResolvedAnnotation {
+                        annotation,
+                        arguments: Vec::new(),
+                    })
+                    .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 own_type_parameter_count,
                 type_param_variances,

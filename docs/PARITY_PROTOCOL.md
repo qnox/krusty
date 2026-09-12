@@ -1876,23 +1876,24 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   file that fails emits nothing, a single such field cost a module every class it had. Every generated
   API client is shaped that way, which is how three corpus modules and 10687 byte-identical classes
   went missing at once.
-  kotlinc reads the dependency's generated serializer straight off the classpath
-  (`getstatic dep/Inner$$serializer.INSTANCE`), and so does krusty now. Only the TARGET can say
-  whether that class is there, so `PluginContext` carries the set of types whose serializer already
-  exists outside this compilation; the JVM backend fills it from the classpath.
+  kotlinc reads the dependency's generated serializer (`getstatic dep/Inner$$serializer.INSTANCE`),
+  and so does krusty now. The plugin asks the provider-neutral `CheckedBackendClassifiers` view: its
+  one classifier record covers both frozen module declarations and dependency metadata, with no
+  classpath/module branch in the plugin or checked backend path.
   Scope: the non-generic shape. A generic dependency serializer is built through
   `Foo.Companion.serializer(<argument serializers>)`, and a library type with a hand-written
-  serializer (`JsonObject` → `JsonObjectSerializer.INSTANCE`) is named by its own
-  `@Serializable(with = …)`; both still bail cleanly, as does a same-module element declared in
-  ANOTHER FILE, whose serializer this compilation has not generated yet.
+  serializer (`JsonObject` → `JsonObjectSerializer.INSTANCE`) is named by its own typed
+  `@Serializable(with = …)` application. Both non-generic forms are covered; an unsupported generic
+  dependency still declines cleanly.
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_classpath_serializable_class_uses_its_serializer`.
 - **An element declared in ANOTHER FILE of the module uses its serializer (fix).** krusty compiles a
   file at a time, so a sibling `@Serializable` class's `$serializer` is neither in this file's IR nor
   yet on the classpath — it is generated as that other file compiles. The plugin therefore could not
   derive an element serializer for it and declined the file, which is the shape every generated API
   client has: one declaration per file, each storing its siblings.
-  The classifier's `@Serializable` annotation is the fact that settles it, and the backend now carries
-  classifier annotations in its module facts so it can answer for a declaration this file cannot see.
+  The classifier's resolved `@Serializable` annotation is the fact that settles it. Frozen module
+  facts and dependency records publish the same `ResolvedAnnotation` shape, so the plugin does not
+  know which provider supplied the declaration.
   With this and the classpath half, the kubernetes httpclient module compiles again (1 error → 0).
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_declared_in_another_file_of_the_module_uses_its_serializer`.
 - **An element typed by a `@Serializable` ENUM uses the enum's own accessor (fix).** An enum has no
@@ -1902,7 +1903,8 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   had a branch for every other element shape — sealed, collection, polymorphic, a generated
   `$serializer` — but none for an enum, so it derived nothing and declined the file. Generated API
   clients are full of enum-typed fields.
-  The accessor's presence is what proves the enum is `@Serializable`; a plain enum still bails.
+  The generated accessor selected in the shared serializer plan proves that the enum is
+  `@Serializable`; a plain enum still bails.
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_serializable_enum_uses_its_accessor`.
 - **A contextual element INSIDE a collection is derivable (fix).**
   `@file:UseContextualSerialization(T::class)` makes every `T` in the file serialize through a
@@ -1917,10 +1919,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `@Serializable(with = JsonObjectSerializer::class)` is how kotlinx's own types are serialized:
   there is no generated `$serializer` to find, and a consumer storing such a type reads the named
   class's singleton (`getstatic kotlinx/serialization/json/JsonObjectSerializer.INSTANCE`).
-  krusty could not see the annotation's ARGUMENT — the classpath recorded annotation identities only
-  — so the element was underivable and the file was declined. The class reader now decodes
-  `@Serializable`'s `with` class element, and the backend's serializer probe returns a NAME rather
-  than a yes/no: the named class when there is one, else the generated `$serializer`.
+  krusty could not see the annotation's ARGUMENT — dependency classifier records carried no applied
+  values — so the element was underivable and the file was declined. The class reader now decodes
+  every class-level application generically into resolved identities and typed values. The plugin
+  selects `@Serializable` and its `with` class literal from that common record; the reader contains
+  no kotlinx-specific branch.
   With the four shapes before it, all four corpus modules the strict bail knocked out compile again:
   rover, and the github (15915 classes), digitalocean (5209) and kubernetes (3226) httpclients.
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_whose_class_names_its_own_serializer_reads_that_class`.
@@ -1929,9 +1932,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   method undecodable — and krusty then emitted a stub that DEFAULT-CONSTRUCTS the class and ignores
   the input. `serialize` and `childSerializers` derived the very same element without trouble; only
   this gate disagreed with them.
-  The gate now asks the same question the rest of the plugin does: a non-nullable primitive decodes
-  through its own `decode<T>Element`, and everything else through an element serializer — which is
-  how kotlinc decodes a nullable element too (`decodeNullableSerializableElement` with the same
+  Applicability and IR construction now consume one immutable `ElementSerializerPlan`; there is no
+  mirrored `can_derive` algorithm to drift. A non-nullable primitive decodes through its own
+  `decode<T>Element`, and everything else through the selected element serializer — which is how
+  kotlinc decodes a nullable element too (`decodeNullableSerializableElement` with the same
   serializer). On the corpus this is 2406 `$serializer` classes whose deserialization was silently
   empty.
   krusty still emits no `decodeSequentially` fast path, so its decoder-call set is kotlinc's minus

@@ -178,7 +178,7 @@ impl SerializeBody<'_> {
                 }));
             } else if let Some(internal) = field_serializer_of(ctx, ir, class_id, pname) {
                 // An explicit per-property serializer takes precedence over the property's type.
-                let inst = build_field_serializer_instance(ir, &internal);
+                let inst = build_field_serializer_instance(ir, internal);
                 let method = if is_nullable(ty) {
                     "encodeNullableSerializableElement"
                 } else {

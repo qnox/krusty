@@ -18,8 +18,8 @@ pub(super) fn custom_serializer_of(
     ctx: &PluginContext,
     ir: &IrFile,
     class_id: ClassId,
-) -> Option<String> {
-    ctx.class_annotation_class_literal_internal(ir, class_id, type_name(SERIALIZABLE_FQ))
+) -> Option<crate::types::TypeName> {
+    ctx.class_annotation_class_literal(ir, class_id, type_name(SERIALIZABLE_FQ))
 }
 
 pub(super) fn field_serializer_of(
@@ -27,13 +27,8 @@ pub(super) fn field_serializer_of(
     ir: &IrFile,
     class_id: ClassId,
     property: &str,
-) -> Option<String> {
-    ctx.property_annotation_class_literal_internal(
-        ir,
-        class_id,
-        property,
-        type_name(SERIALIZABLE_FQ),
-    )
+) -> Option<crate::types::TypeName> {
+    ctx.property_annotation_class_literal(ir, class_id, property, type_name(SERIALIZABLE_FQ))
 }
 
 pub(super) fn serial_name_of(

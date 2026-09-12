@@ -1,10 +1,9 @@
 //! Checked generation of a serializer's `deserialize` body.
 
 use super::{
-    builtin_element_serializer, can_derive_element_serializer, class_ty,
-    collection_serializer_builder, contextual_serializer_for, decode_element_method,
-    element_serializer_expr, inline_prim_methods, is_nullable, property_is_contextual, slot_width,
-    value_class_underlying, virtual_iface,
+    builtin_element_serializer, class_ty, collection_serializer_builder, contextual_serializer_for,
+    decode_element_method, element_serializer_expr, element_serializer_plan, inline_prim_methods,
+    is_nullable, property_is_contextual, slot_width, value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -116,7 +115,7 @@ impl DeserializeBody<'_> {
             // actually derivable (a generic field with an un-derivable type arg is not) —
             // else deserialize stubs cleanly rather than emit a `null` element serializer.
             if nested[i].is_some() {
-                return can_derive_element_serializer(ir, ctx, t);
+                return element_serializer_plan(ir, ctx, t).is_some();
             }
             // A standard collection field decodes through its builtin collection serializer
             // (via the `element_serializer_expr` fallback below) when its elements derive.
@@ -125,7 +124,7 @@ impl DeserializeBody<'_> {
                 .and_then(collection_serializer_builder)
                 .is_some()
             {
-                return can_derive_element_serializer(ir, ctx, t);
+                return element_serializer_plan(ir, ctx, t).is_some();
             }
             // Everything else decodes either as a PRIMITIVE through its own `decode<T>Element`, or
             // through an element serializer — the same one `serialize` and `childSerializers` use. A
@@ -135,7 +134,7 @@ impl DeserializeBody<'_> {
             if !is_nullable(t) && decode_element_method(t).is_some() {
                 return true;
             }
-            can_derive_element_serializer(ir, ctx, t)
+            element_serializer_plan(ir, ctx, t).is_some()
         });
         if !decodable {
             let message = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
