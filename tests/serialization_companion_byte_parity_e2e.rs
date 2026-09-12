@@ -1840,3 +1840,41 @@ fn deserialize_passes_every_seen_mask_to_the_exact_constructor() {
         );
     }
 }
+
+/// kotlinc emits a `@Serializable` class's generated deserialization constructor after the
+/// declared and generated methods, immediately before `<clinit>`.
+#[test]
+fn a_serializable_class_emits_its_deserialization_constructor_last() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("SerializableCtorOrder", src, "Point", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let members = |text: &str| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.ends_with(';')
+                    && (line.starts_with("static {}")
+                        || ["public ", "private ", "protected "]
+                            .iter()
+                            .any(|lead| line.starts_with(lead)))
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        members(&built.krusty),
+        members(&built.reference),
+        "member order"
+    );
+}
