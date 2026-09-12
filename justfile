@@ -365,21 +365,7 @@ conformance VERSION=`just max-version`:
 conformance-run BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
-    v="{{VERSION}}"
-    bin="{{BIN}}"
-    [ -x "$bin" ] || { echo "conformance binary is not executable: $bin" >&2; exit 1; }
-    kotlinc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
-    box_dir="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
-    export KRUSTY_LANGUAGE_VERSION="$v"
-    export KRUSTY_KOTLINC="$kotlinc"
-    export KRUSTY_KOTLIN_BOX_DIR="$box_dir"
-    export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
-    report=$(mktemp)
-    trap 'rm -f "$report"' EXIT
-    KRUSTY_CONFORMANCE_REPORT="$report" \
-      "$bin" kotlin_codegen_box_conformance --nocapture >&2
-    [ -s "$report" ] || { echo "conformance test did not write its report" >&2; exit 1; }
-    cat "$report"
+    bash scripts/conformance-run.sh "{{BIN}}" "{{VERSION}}"
 
 # Write the shields.io endpoint badges (docs/badges/*.json) from current numbers. CI commits these
 # on master; safe to run locally to preview. Color ramps with the conformance percentage.

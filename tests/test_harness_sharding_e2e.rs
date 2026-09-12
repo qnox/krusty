@@ -4,6 +4,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn planner_arg(input: &str, shards: &str) -> std::process::Output {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
@@ -163,6 +166,85 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
         .collect::<Vec<_>>();
     assert_eq!(values, [120, 295, 295, 22]);
     assert!(values[..3].iter().all(|seconds| *seconds < 300));
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runner = root.join("scripts").join("conformance-run.sh");
+    let temp = std::env::temp_dir().join(format!(
+        "krusty-conformance-run-deadline-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp).expect("create conformance deadline test directory");
+    let binary = temp.join("conformance-bin");
+    fs::write(&binary, "#!/usr/bin/env bash\nsleep 10\n")
+        .expect("write delayed conformance fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
+        .expect("make delayed conformance fixture executable");
+
+    let started = std::time::Instant::now();
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg(&binary)
+        .arg("2.4.10")
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "1")
+        .output()
+        .expect("run delayed conformance fixture");
+    let elapsed = started.elapsed();
+
+    assert_eq!(output.status.code(), Some(124));
+    assert_eq!(output.stdout, b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("deadline stderr is UTF-8"),
+        "conformance-run: timed out after 1s: Kotlin 2.4.10\n"
+    );
+    assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
+    fs::remove_dir_all(temp).expect("remove conformance deadline test directory");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_runner_preserves_the_report_contract() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runner = root.join("scripts").join("conformance-run.sh");
+    let temp = std::env::temp_dir().join(format!(
+        "krusty-conformance-run-report-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp).expect("create conformance report test directory");
+    let binary = temp.join("conformance-bin");
+    fs::write(
+        &binary,
+        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" >&2\nprintf '62.50 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n",
+    )
+    .expect("write reporting conformance fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
+        .expect("make reporting conformance fixture executable");
+
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg(&binary)
+        .arg("2.4.10")
+        .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
+        .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
+        .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .output()
+        .expect("run reporting conformance fixture");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"62.50 5 8\n");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("report stderr is UTF-8"),
+        format!(
+            "2.4.10|/bin/reference-kotlinc|{}|kotlin_codegen_box_conformance|--nocapture\n",
+            temp.display()
+        )
+    );
+    fs::remove_dir_all(temp).expect("remove conformance report test directory");
 }
 
 #[test]
