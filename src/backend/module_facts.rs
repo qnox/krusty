@@ -51,6 +51,10 @@ pub struct BackendClassifierFact {
     pub supertypes: Box<[TypeName]>,
     /// Functions and property accessors in semantic declaration order.
     pub surface: Box<[BackendMemberFact]>,
+    /// Resolved declaration annotations. A backend reads these to answer questions a plugin cannot
+    /// answer for itself — whether ANOTHER file of this module carries an annotation whose generated
+    /// declarations this file's emission must name.
+    pub annotations: Box<[TypeName]>,
     /// Number of leading semantic type parameters declared by this classifier itself. Remaining
     /// parameters are lexical captures used by common checking, not parameters of its backend
     /// declaration.
@@ -134,6 +138,9 @@ impl BackendClassifierFact {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             surface: surface.into_boxed_slice(),
+            // A dependency shape carries no annotation list; the classpath answers for those
+            // directly (its generated classes are already compiled).
+            annotations: Box::default(),
             own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
@@ -501,6 +508,10 @@ impl BackendModuleFacts {
                     .into_iter()
                     .map(|(_, member)| member)
                     .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                annotations: index
+                    .declaration_annotations(declaration)
+                    .to_vec()
                     .into_boxed_slice(),
                 own_type_parameter_count,
                 type_param_variances,
