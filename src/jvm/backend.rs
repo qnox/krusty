@@ -89,10 +89,19 @@ fn generated_serializer_exists(
     internal: &str,
     classpath: &crate::jvm::classpath::Classpath,
     module_serializable: &dyn Fn(crate::types::TypeName) -> bool,
-) -> bool {
+) -> Option<String> {
     let name = crate::types::type_name(internal);
-    let serializer = crate::types::type_name_nested_child(name, "$serializer");
-    classpath.class_exists(&serializer.render()) || module_serializable(name)
+    // A class that NAMES its serializer has no generated one: `@Serializable(with = X::class)` is
+    // where kotlinx's own types (`JsonObject` → `JsonObjectSerializer`) put theirs, and a consumer
+    // storing such a type references that class.
+    if let Some(named) = classpath
+        .find(internal)
+        .and_then(|class| class.serializer_with.clone())
+    {
+        return Some(named);
+    }
+    let serializer = crate::types::type_name_nested_child(name, "$serializer").render();
+    (classpath.class_exists(&serializer) || module_serializable(name)).then_some(serializer)
 }
 
 /// Whether the classifier is declared in THIS module and carries `@Serializable` — its generated
