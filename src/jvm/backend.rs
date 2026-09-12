@@ -90,7 +90,9 @@ pub fn run_backend_passes_with_metadata(
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, &|internal| {
+        classpath.class_exists(internal)
+    });
     let module_value_classes: std::collections::HashMap<_, _> = syms
         .classes
         .values()
@@ -124,7 +126,9 @@ pub fn run_backend_passes_with_checked_metadata(
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: &[String],
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, &|internal| {
+        classpath.class_exists(internal)
+    });
     run_backend_passes_after_plugins(
         ir,
         facade,
