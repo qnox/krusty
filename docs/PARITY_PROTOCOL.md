@@ -1611,3 +1611,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   emits at the head of `serialize`/`deserialize`, and the debug tables on its generated members.
   `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_carries_the_hidden_deprecated_marker`,
   `tests/plugins_e2e.rs::{serialization_activates_from_source_annotation,an_unrelated_serializable_simple_name_does_not_activate_the_plugin}`.
+- **A generated `$serializer` always carries a class `Signature` (fix).** Even with no type
+  parameters of its own, the interface it implements is generic — `GeneratedSerializer<Point>` — and
+  that instantiation exists ONLY in the signature; the descriptor erases it. krusty wrote the
+  attribute only for a GENERIC serializer, and wrote the wrong supertype even there:
+  `KSerializer<Box<T>>` (the semantic supertype) instead of the `GeneratedSerializer<Box<T>>` the
+  class actually implements. One insertion covers both, and both shapes are now pinned because they
+  failed differently — one missing the attribute, the other carrying it with the wrong interface.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_carries_its_class_signature`.
