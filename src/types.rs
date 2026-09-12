@@ -302,6 +302,32 @@ impl TypeName {
         type_names().nested_owner(self.name_id()).map(TypeName)
     }
 
+    /// Backend-oriented candidates for textual JVM nesting, deepest first. Semantic resolution
+    /// continues to use the single exact [`Self::nested_owner`] relation.
+    pub(crate) fn existing_nested_owners(self) -> Vec<TypeName> {
+        type_names()
+            .existing_nested_owners(self.name_id())
+            .into_iter()
+            .map(TypeName)
+            .collect()
+    }
+
+    /// The flattened JVM nested segment relative to an already-resolved enclosing classifier.
+    pub(crate) fn nested_segment_within(self, owner: TypeName) -> Option<&'static str> {
+        type_names().nested_segment_within(self.name_id(), owner.name_id())
+    }
+
+    /// Backend boundary split for a nested classifier whose enclosing declaration is external to
+    /// the current file. Semantic callers should keep using [`Self::nested_owner`].
+    pub(crate) fn jvm_nested_parts(self) -> Option<(String, String)> {
+        type_names().jvm_nested_parts(self.name_id())
+    }
+
+    /// Lexicographic path ordering for deterministic external serialization.
+    pub(crate) fn path_cmp(self, other: TypeName) -> std::cmp::Ordering {
+        type_names().path_cmp(self.name_id(), other.name_id())
+    }
+
     /// Existing classifier nested directly in `self`, without rendering or interning a probe.
     pub fn existing_nested_child(self, nested: &str) -> Option<TypeName> {
         type_names()
