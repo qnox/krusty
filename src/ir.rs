@@ -2197,6 +2197,9 @@ pub struct IrSecondaryCtor {
     /// analogue of [`IrFile::function_annotations`] (a secondary constructor is not an
     /// [`IrFunction`], so it carries them directly).
     pub annotations: DeclarationAnnotations,
+    /// Stable source byte offset of a declared constructor. Generated constructors use
+    /// `u32::MAX`; their producer records any later placement rule by exact identity.
+    pub source_order: u32,
     /// Compiler-supplied leading parameters shared by every constructor of the class. These occupy
     /// body value slots before `params`, but are absent from Kotlin source metadata and default masks.
     pub prefix_params: Vec<Ty>,
