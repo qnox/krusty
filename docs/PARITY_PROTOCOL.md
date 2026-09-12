@@ -1554,3 +1554,28 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   follows the explicit lowering contract and shares the ordinary-class SetField/line operation;
   missing source lines are not reconstructed with a header fallback.
   `tests/enum_companion_field_order_e2e.rs::{an_enum_constructor_maps_each_property_store_to_its_parameter_line,an_enum_init_body_keeps_parameter_and_body_property_lines}`.
+- **An OVERLOADED extension on an implicit lambda receiver must still shape its own lambda (fix).**
+  `makeClient(Factory) { tweak { … } }` — `tweak` is an extension on the lambda's receiver with two
+  overloads, `(block)` and `(flag = false, block)`, whose single trailing lambda lands on DIFFERENT
+  parameter indices. `mapped_call_slots` demands one agreed argument→parameter mapping across
+  candidates, found none, and the signature pass produced no expectation; the inner lambda then had
+  no receiver to type against, the enclosing call declined, and the INFERRED property built from it
+  published `Error`.
+  Where it surfaces is what made it expensive: the property's own line reports nothing, and every
+  LATER use of that property loses its lambda receivers — a pile of `unresolved reference` errors in
+  unrelated builder lambdas further down the file (the whole ktor-client-DSL error family in the
+  corpus, and the compile failures behind it).
+  The postponed-call boundary now applies each declaration's NORMAL argument mapping independently,
+  specializes that candidate, projects its parameter types back into SOURCE-argument order, and only
+  then reconciles the family. There is no positional retry: candidates that genuinely disagree about
+  the lambda's inputs yield no expectation, and a mapped candidate that cannot be specialized is not
+  silently dropped.
+  Three ingredients are all required to see it, which is why no fixture had: the extension must be
+  overloaded with a leading defaulted parameter, the property's type must be inferred, and the
+  declarations must come from a compiled DEPENDENCY. It also reproduces ONLY through the production
+  streaming compiler — the non-streaming analysis behind `front_end_diagnostics` solves the
+  property's type by another path and accepts the fixture either way, so the test drives
+  `compile_in_process`. A second overloaded fixture puts typed positional arguments ahead of
+  different counts of defaulted middle slots, so neither candidate has a positional declaration
+  mapping; both consumers are also compiled with kotlinc before Krusty must accept them.
+  `tests/overloaded_receiver_extension_expectation_e2e.rs`.
