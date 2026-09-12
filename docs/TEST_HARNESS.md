@@ -82,9 +82,10 @@ the planner's count, so filtering cannot silently reduce coverage.
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the
 runtime reference toolchain, so the matrix does not rebuild Rust code per Kotlin version. Each leg
-must score at least 55% of backend-applicable cases before a release can publish. Unsupported and
-miscompiled applicable cases count against that floor; cases excluded solely by the selected
-backend do not.
+uses the same configurable process-group conformance deadline as the local harness, including its
+spawned compiler and runner JVMs. Each leg must score at least 55% of backend-applicable cases before
+a release can publish. Unsupported and miscompiled applicable cases count against that floor; cases
+excluded solely by the selected backend do not.
 
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 295
 seconds and can be adjusted with `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`; each product e2e shard
