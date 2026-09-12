@@ -1579,3 +1579,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   different counts of defaulted middle slots, so neither candidate has a positional declaration
   mapping; both consumers are also compiled with kotlinc before Krusty must accept them.
   `tests/overloaded_receiver_extension_expectation_e2e.rs`.
+- **A modifier SOFT KEYWORD used as a name ends a bare branch (fix).**
+  `fun pad(value: String) = if (c) "lit" else value`, followed by another declaration: the statement
+  parser's modifier-prefix scan looks ACROSS newlines for a declaration keyword — it must, since
+  `suspend`⏎`fun local()` inside a block is one declaration — so it read `value`⏎`fun helper(…)` as a
+  modifier-prefixed LOCAL function and swallowed the declaration into the branch. The branch then
+  carried a declaration's `Unit` value, the `if` joined `String` with `Unit` to `Any`, and the
+  function reported a return-type mismatch over a span covering the swallowed declaration.
+  The swallowed declaration is the real casualty: it vanishes from the class, so the errors that get
+  REPORTED are unresolved references at its callers elsewhere in the file — nowhere near the cause.
+  `value` is the soft keyword that matters in practice (`value class`) and an ordinary parameter
+  name; renaming it compiles the same code, which is what made the diagnostic so misleading.
+  A bare branch is an expression position, so a modifier ident that ENDS ITS LINE now closes the
+  branch. The block-level form still crosses the newline, which kotlinc also accepts.
+  `tests/branch_soft_keyword_name_e2e.rs`: all four fixtures compile with both kotlinc and Krusty;
+  they cover `value` in `if`, `actual` in `when`, declaration visibility, and the block-level
+  `suspend`-newline form.

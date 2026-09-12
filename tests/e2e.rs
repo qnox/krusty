@@ -80,6 +80,8 @@ mod box_harness_skip_semantics_e2e;
 mod boxed_array_construction_e2e;
 #[path = "bracket_lambda_param_e2e.rs"]
 mod bracket_lambda_param_e2e;
+#[path = "branch_soft_keyword_name_e2e.rs"]
+mod branch_soft_keyword_name_e2e;
 #[path = "break_continue_e2e.rs"]
 mod break_continue_e2e;
 #[path = "break_continue_expr_e2e.rs"]
