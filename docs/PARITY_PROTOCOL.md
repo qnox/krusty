@@ -1619,3 +1619,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   class actually implements. One insertion covers both, and both shapes are now pinned because they
   failed differently — one missing the attribute, the other carrying it with the wrong interface.
   `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_carries_its_class_signature`.
+- **A generated `$serializer` guards its parameters (fix).** Its members are public API — a Java
+  caller can pass `null` — so kotlinc opens `serialize`/`deserialize` with
+  `Intrinsics.checkNotNullParameter(encoder, "encoder")` exactly as it does a user-written function.
+  krusty emitted the body with no prologue, so every such member differed from instruction 0 on: the
+  largest single reason the `$serializer` family carried `CODE_INSNS`.
+  The guard carries the PARAMETER NAME, so the paired generated-parameter record also fixes the
+  names Kotlin Metadata gives those parameters (`encoder`/`value`/`decoder`) — krusty had
+  positional placeholders.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_guards_its_parameters`,
+  which compares both the `d2` parameter-name projection and the prologue up to the last guard —
+  bounded to the member's own code, since the erased BRIDGE below it guards its parameters too and
+  an unbounded search finds that one instead.
