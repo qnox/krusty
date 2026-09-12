@@ -105,6 +105,11 @@ pub struct FrontendClassContext<'a> {
 pub struct PluginContext {
     pub class_annotations: HashMap<ClassId, Vec<TypeName>>,
     target_type_descriptor: fn(Ty) -> Option<String>,
+    /// Types this compilation does NOT declare that already carry a plugin-generated serializer on
+    /// the classpath — another module's `@Serializable` classes. A plugin can only DERIVE a
+    /// serializer for what this file declares; for everything else the dependency's own generated
+    /// one is the answer, and this set is how the target tells the plugin which types have one.
+    external_serializers: std::collections::HashSet<String>,
 }
 
 impl Default for PluginContext {
@@ -112,6 +117,7 @@ impl Default for PluginContext {
         Self {
             class_annotations: HashMap::new(),
             target_type_descriptor: no_target_type_descriptor,
+            external_serializers: std::collections::HashSet::new(),
         }
     }
 }
@@ -121,6 +127,7 @@ impl Clone for PluginContext {
         Self {
             class_annotations: self.class_annotations.clone(),
             target_type_descriptor: self.target_type_descriptor,
+            external_serializers: self.external_serializers.clone(),
         }
     }
 }
@@ -133,6 +140,21 @@ impl PluginContext {
 
     pub fn target_type_descriptor(&self, ty: Ty) -> Option<String> {
         (self.target_type_descriptor)(ty)
+    }
+
+    /// Record the types whose serializer already exists outside this compilation.
+    pub fn with_external_serializers(
+        mut self,
+        serializers: std::collections::HashSet<String>,
+    ) -> Self {
+        self.external_serializers = serializers;
+        self
+    }
+
+    /// Whether `internal` (a JVM internal name) carries a plugin-generated serializer the target can
+    /// reference directly.
+    pub fn has_external_serializer(&self, internal: &str) -> bool {
+        self.external_serializers.contains(internal)
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -350,6 +372,7 @@ pub fn run_enabled(
     ir: &mut IrFile,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
+    generated_serializer_exists: &dyn Fn(&str) -> bool,
 ) {
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
     if ctx
@@ -358,7 +381,43 @@ pub fn run_enabled(
     {
         return;
     }
+    let ctx = ctx.with_external_serializers(external_serializers(ir, generated_serializer_exists));
     enabled_plugins(module_name).run(ir, &ctx);
+}
+
+/// Field types this file does NOT declare whose generated serializer already exists where the target
+/// can reach it. A plugin derives a serializer only for what it generates; a dependency's
+/// `@Serializable` class brings its own, and only the target can say whether it is there.
+fn external_serializers(
+    ir: &IrFile,
+    generated_serializer_exists: &dyn Fn(&str) -> bool,
+) -> std::collections::HashSet<String> {
+    let declared: std::collections::HashSet<String> =
+        ir.classes.iter().map(|class| class.fq_name()).collect();
+    let mut candidates: Vec<Ty> = ir
+        .classes
+        .iter()
+        .flat_map(|class| class.fields.iter().map(|field| field.ty))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut external = std::collections::HashSet::new();
+    while let Some(ty) = candidates.pop() {
+        // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
+        candidates.extend(ty.non_null().type_args().iter().copied());
+        let Some(internal) = ty.kotlin_class_internal().map(|name| name.render()) else {
+            continue;
+        };
+        if !seen.insert(internal.clone()) || declared.contains(&internal) {
+            continue;
+        }
+        let serializer =
+            crate::types::type_name_nested_child(crate::types::type_name(&internal), "$serializer")
+                .render();
+        if generated_serializer_exists(&serializer) {
+            external.insert(internal);
+        }
+    }
+    external
 }
 
 pub(crate) fn enabled_plugins(module_name: &str) -> PluginHost {

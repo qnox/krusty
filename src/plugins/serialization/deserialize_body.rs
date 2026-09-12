@@ -116,7 +116,7 @@ impl DeserializeBody<'_> {
             // actually derivable (a generic field with an un-derivable type arg is not) —
             // else deserialize stubs cleanly rather than emit a `null` element serializer.
             if nested[i].is_some() {
-                return can_derive_element_serializer(ir, t);
+                return can_derive_element_serializer(ir, ctx, t);
             }
             // A standard collection field decodes through its builtin collection serializer
             // (via the `element_serializer_expr` fallback below) when its elements derive.
@@ -125,7 +125,7 @@ impl DeserializeBody<'_> {
                 .and_then(collection_serializer_builder)
                 .is_some()
             {
-                return can_derive_element_serializer(ir, t);
+                return can_derive_element_serializer(ir, ctx, t);
             }
             if is_nullable(t) {
                 return builtin_element_serializer(t).is_some();
@@ -352,7 +352,7 @@ impl DeserializeBody<'_> {
                     // (non-generic) / `Foo.serializer(A_ser)` (generic) / `ListSerializer(…)`
                     // (collection). Same descriptor; the nullable variant yields null for a
                     // JSON-null element.
-                    let inst = element_serializer_expr(ir, ty)
+                    let inst = element_serializer_expr(ir, ctx, ty)
                         .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
                     let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
                     let method = if is_nullable(ty) {
