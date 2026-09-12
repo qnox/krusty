@@ -159,6 +159,8 @@ pub struct ClassInfo {
     /// use of this annotation is emitted `RuntimeVisibleAnnotations` for RUNTIME, `RuntimeInvisible…` for
     /// CLASS, and dropped for SOURCE.
     pub retention: Option<String>,
+    /// `@kotlinx.serialization.Serializable(with = X::class)`'s `X`, as a JVM internal name.
+    pub serializer_with: Option<String>,
     /// For an annotation type: the `@kotlin.annotation.Target` `allowedTargets` entries
     /// (`AnnotationTarget` constant names) — a KOTLIN annotation's declared target set, which has no
     /// Java equivalent for `PROPERTY`. Empty when the annotation declares no `@Target` (applicable
@@ -558,6 +560,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         meta,
         signature: attrs.signature,
         retention: attrs.retention,
+        serializer_with: attrs.serializer_with,
         kotlin_targets: attrs.kotlin_targets,
         java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
@@ -579,6 +582,9 @@ struct ClassAttrs {
     pn: Option<String>,
     signature: Option<String>,
     retention: Option<String>,
+    /// `@kotlinx.serialization.Serializable(with = X::class)`'s `X`, as a JVM internal name. A class
+    /// that names its own serializer has NO generated `$serializer`; this is where its serializer is.
+    serializer_with: Option<String>,
     kotlin_targets: Vec<String>,
     java_targets: Vec<String>,
     inner_classes: Vec<InnerClassRef>,
@@ -652,6 +658,7 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
             // `@interface` records `ElementType`s. Both decide where an application written without
             // a use-site prefix lands.
             let is_kotlin_target = atype == "Lkotlin/annotation/Target;";
+            let is_serializable = atype == "Lkotlinx/serialization/Serializable;";
             let is_java_target = atype == "Ljava/lang/annotation/Target;";
             let Ok(n_pairs) = attr.u2() else { break };
             for _ in 0..n_pairs {
@@ -665,6 +672,26 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                         let _ = attr.u2(); // enum type descriptor index
                         if let Ok(ci) = attr.u2() {
                             out.retention = Some(utf8(ci).to_string());
+                        }
+                    } else {
+                        // Unexpected shape — stop parsing this class's attributes rather than desync.
+                        return out;
+                    }
+                    continue;
+                }
+                // `@Serializable`'s `with` is a CLASS element (`c` tag, a Utf8 descriptor): the
+                // serializer the class names for itself, in place of a generated one. kotlinx's own
+                // types use it (`JsonObject` → `JsonObjectSerializer`), and a consumer that stores
+                // such a type must reference THAT serializer.
+                if is_serializable && ename == "with" {
+                    let Ok(tag) = attr.u1() else { break };
+                    if tag == b'c' {
+                        if let Ok(vi) = attr.u2() {
+                            let descriptor = utf8(vi);
+                            out.serializer_with = descriptor
+                                .strip_prefix('L')
+                                .and_then(|rest| rest.strip_suffix(';'))
+                                .map(str::to_string);
                         }
                     } else {
                         // Unexpected shape — stop parsing this class's attributes rather than desync.

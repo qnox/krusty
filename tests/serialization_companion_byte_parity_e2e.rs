@@ -1804,3 +1804,53 @@ fn a_contextual_element_inside_a_collection_is_derivable() {
         built.krusty
     );
 }
+
+/// A library type that NAMES its own serializer. `@Serializable(with = JsonObjectSerializer::class)`
+/// is how kotlinx's own types are serialized — there is no generated `$serializer` to find, and a
+/// consumer storing such a type reads the named class's singleton, which is what kotlinc emits
+/// (`getstatic kotlinx/serialization/json/JsonObjectSerializer.INSTANCE`).
+///
+/// krusty could not see the annotation's ARGUMENT: the classpath recorded annotation identities only,
+/// so the element was underivable and the file was declined.
+#[test]
+fn an_element_whose_class_names_its_own_serializer_reads_that_class() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let Some(json) = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-json-jvm")
+    else {
+        eprintln!("skipping: kotlinx-serialization-json jar not available locally");
+        return;
+    };
+    let mut classpath = cp.clone();
+    classpath.push(json);
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.json.JsonObject\n\
+               @Serializable\n\
+               data class Holder(val one: JsonObject)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "NamedSerializerElement",
+        src,
+        "Holder",
+        &classpath,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert!(
+        built
+            .reference
+            .contains("json/JsonObjectSerializer.INSTANCE"),
+        "reference must read the named serializer — that is the rule under test:\n{}",
+        built.reference
+    );
+    assert!(
+        built.krusty.contains("json/JsonObjectSerializer.INSTANCE"),
+        "krusty must read the serializer the class names for itself:\n{}",
+        built.krusty
+    );
+}
