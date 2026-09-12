@@ -13,6 +13,7 @@
 
 mod enum_serializer;
 mod generated_members;
+mod serialize_body;
 
 use crate::ir::{
     Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
@@ -24,8 +25,11 @@ use crate::plugins::{
     synthetic_class, FrontendCallable, FrontendCallableOwner, FrontendClassContext,
     FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
 };
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TypeName};
 use generated_members::{add_guarded_instance_method, add_instance_method, GuardedParameter};
+use serialize_body::SerializeBody;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 mod annotations;
 mod signatures;
@@ -103,6 +107,7 @@ impl SerializationAbi {
 pub struct SerializationPlugin {
     pub abi: SerializationAbi,
     pub module: String,
+    write_self_methods: Mutex<HashMap<TypeName, u32>>,
 }
 
 impl SerializationPlugin {
@@ -110,6 +115,7 @@ impl SerializationPlugin {
         Self {
             abi,
             module: module.into(),
+            write_self_methods: Mutex::new(HashMap::new()),
         }
     }
 
@@ -129,6 +135,28 @@ impl SerializationPlugin {
                 format!("write$Self${mangled}")
             }
         }
+    }
+
+    fn record_write_self(&self, owner: TypeName, function: u32) {
+        self.write_self_methods
+            .lock()
+            .expect("serialization write$Self registry")
+            .insert(owner, function);
+    }
+
+    fn clear_write_self_methods(&self) {
+        self.write_self_methods
+            .lock()
+            .expect("serialization write$Self registry")
+            .clear();
+    }
+
+    fn write_self_method(&self, owner: TypeName) -> Option<u32> {
+        self.write_self_methods
+            .lock()
+            .expect("serialization write$Self registry")
+            .get(&owner)
+            .copied()
     }
 }
 
@@ -716,20 +744,37 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
 /// - a non-generic nested `@Serializable` class → its `Foo$serializer.INSTANCE` singleton;
 /// - a directly-supported builtin (`String`/primitive/…) → its `…Serializer.INSTANCE`.
 ///
-/// Returns `None` for a type with no derivable serializer (the caller bails to a clean no-op).
+/// Returns `None` for a type with no derivable serializer.
 /// The `BuiltinSerializersKt` factory name + type-argument count for a standard collection type, or `None`.
 /// `List`/`Set`/`Collection`/`Iterable` → 1-arg `ListSerializer`/`SetSerializer`; `Map` → 2-arg `MapSerializer`.
-fn collection_serializer_builder(fq_name: &str) -> Option<(&'static str, usize)> {
-    match fq_name {
-        "kotlin/collections/List"
-        | "kotlin/collections/MutableList"
-        | "kotlin/collections/Collection"
-        | "kotlin/collections/MutableCollection"
-        | "kotlin/collections/Iterable"
-        | "kotlin/collections/MutableIterable" => Some(("ListSerializer", 1)),
-        "kotlin/collections/Set" | "kotlin/collections/MutableSet" => Some(("SetSerializer", 1)),
-        "kotlin/collections/Map" | "kotlin/collections/MutableMap" => Some(("MapSerializer", 2)),
-        _ => None,
+fn collection_serializer_builder(classifier: TypeName) -> Option<(&'static str, usize)> {
+    if [
+        "kotlin/collections/List",
+        "kotlin/collections/MutableList",
+        "kotlin/collections/Collection",
+        "kotlin/collections/MutableCollection",
+        "kotlin/collections/Iterable",
+        "kotlin/collections/MutableIterable",
+    ]
+    .into_iter()
+    .map(type_name)
+    .any(|candidate| candidate == classifier)
+    {
+        Some(("ListSerializer", 1))
+    } else if ["kotlin/collections/Set", "kotlin/collections/MutableSet"]
+        .into_iter()
+        .map(type_name)
+        .any(|candidate| candidate == classifier)
+    {
+        Some(("SetSerializer", 1))
+    } else if ["kotlin/collections/Map", "kotlin/collections/MutableMap"]
+        .into_iter()
+        .map(type_name)
+        .any(|candidate| candidate == classifier)
+    {
+        Some(("MapSerializer", 2))
+    } else {
+        None
     }
 }
 
@@ -738,7 +783,8 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
     // name but DO have a builtin element serializer (resolved at the tail via `builtin_element_serializer`).
     // The old `obj_internal()` guard returned `None` for them, leaving a null child serializer → runtime NPE.
-    let fq_name = ty.kotlin_class_internal()?.render();
+    let fq_name = ty.kotlin_class_internal()?;
+    let fq_internal = fq_name.render();
     let type_args = nn.type_args();
     // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
     // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
@@ -747,14 +793,14 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     if ir
         .classes
         .iter()
-        .any(|c| c.fq_name_matches(&fq_name) && c.is_sealed)
-        && generated_serializer_accessor(ir, type_name(&fq_name), 0).is_some()
+        .any(|c| c.fq_name_id() == fq_name && c.is_sealed)
+        && generated_serializer_accessor(ir, fq_name, 0).is_some()
     {
         return Some(serializer_of(
             ir,
-            &fq_name,
+            &fq_internal,
             vec![],
-            kserializer_of(class_ty(&fq_name)),
+            kserializer_of(class_ty(&fq_internal)),
             vec![],
         ));
     }
@@ -763,7 +809,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     // `ListSerializer(<T>)` / `SetSerializer(<T>)` / `MapSerializer(<K>, <V>)` (top-level functions in
     // `BuiltinSerializersKt`). The element serializers are derived recursively; if any can't be, the whole
     // collection can't (a clean `null`/bail, as before).
-    if let Some((builder, n)) = collection_serializer_builder(&fq_name) {
+    if let Some((builder, n)) = collection_serializer_builder(fq_name) {
         if type_args.len() >= n {
             let mut arg_sers = Vec::with_capacity(n);
             for a in type_args.iter().take(n) {
@@ -805,7 +851,7 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     // reaches this — both serialize as `PolymorphicSerializer` (kind OPEN). An abstract CLASS still
     // requires the `serializer()` accessor and must not be sealed (a sealed class took the branch above).
     if ir.classes.iter().any(|c| {
-        c.fq_name_matches(&fq_name)
+        c.fq_name_id() == fq_name
             && (c.is_interface
                 || (c.is_abstract
                     && !c.is_sealed
@@ -816,15 +862,19 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
                             .iter()
                             .any(|&m| ir.functions[m as usize].name == "serializer"))))
     }) {
-        return Some(build_polymorphic_serializer(ir, &fq_name));
+        return Some(build_polymorphic_serializer(ir, &fq_internal));
     }
-    let ser_fq = serializer_fq(&fq_name);
-    if let Some(sid) = ir.classes.iter().position(|c| c.fq_name_matches(&ser_fq)) {
+    let serializer_name = fq_name.nested_child("$serializer");
+    if let Some(sid) = ir
+        .classes
+        .iter()
+        .position(|c| c.fq_name_id() == serializer_name)
+    {
         // The declared type-parameter count comes from the BASE class (the `$serializer` is erased).
         let n_tp = ir
             .classes
             .iter()
-            .find(|c| c.fq_name_matches(&fq_name))
+            .find(|c| c.fq_name_id() == fq_name)
             .map(|c| c.type_params.len())
             .unwrap_or(0);
         if n_tp == 0 {
@@ -853,9 +903,9 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
         let kser = kserializer_of(class_ty("kotlin/Any"));
         return Some(serializer_of(
             ir,
-            &fq_name,
+            &fq_internal,
             vec![kser; n_tp],
-            kserializer_of(class_ty(&fq_name)),
+            kserializer_of(class_ty(&fq_internal)),
             arg_sers,
         ));
     }
@@ -933,7 +983,7 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     // Include de-erased primitives/`String` (mirrors `element_serializer_expr`): they own no `Obj`
     // internal name but ARE derivable via the `builtin_element_serializer` tail. The old `obj_internal()`
     // guard rejected them, so a `List<Int>` field looked un-derivable and `deserialize` stubbed out.
-    let Some(fq_name) = ty.kotlin_class_internal().map(|n| n.render()) else {
+    let Some(fq_name) = ty.kotlin_class_internal() else {
         return false;
     };
     let type_args = nn.type_args();
@@ -942,13 +992,13 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     if ir
         .classes
         .iter()
-        .any(|c| c.fq_name_matches(&fq_name) && c.is_sealed)
-        && generated_serializer_accessor(ir, type_name(&fq_name), 0).is_some()
+        .any(|c| c.fq_name_id() == fq_name && c.is_sealed)
+        && generated_serializer_accessor(ir, fq_name, 0).is_some()
     {
         return true;
     }
     // A standard COLLECTION field (mirrors `element_serializer_expr`): derivable iff every element type is.
-    if let Some((_, n)) = collection_serializer_builder(&fq_name) {
+    if let Some((_, n)) = collection_serializer_builder(fq_name) {
         return type_args.len() >= n
             && type_args
                 .iter()
@@ -958,7 +1008,7 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     // An interface (any) / abstract-@Serializable class field → `PolymorphicSerializer` (mirrors
     // `element_serializer_expr`; a `@Serializable` sealed interface was claimed by the sealed branch above).
     if ir.classes.iter().any(|c| {
-        c.fq_name_matches(&fq_name)
+        c.fq_name_id() == fq_name
             && (c.is_interface
                 || (c.is_abstract
                     && !c.is_sealed
@@ -972,12 +1022,12 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
     if ir
         .classes
         .iter()
-        .any(|c| c.fq_name_matches(&serializer_fq(&fq_name)))
+        .any(|c| c.fq_name_id() == fq_name.nested_child("$serializer"))
     {
         let n_tp = ir
             .classes
             .iter()
-            .find(|c| c.fq_name_matches(&fq_name))
+            .find(|c| c.fq_name_id() == fq_name)
             .map(|c| c.type_params.len())
             .unwrap_or(0);
         if n_tp == 0 {
@@ -1689,6 +1739,8 @@ impl IrPlugin for SerializationPlugin {
 
     /// Generate the `$serializer` object, its members, and the `serializer()` accessor.
     fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
+        // A host can be reused for another IR file; generated `FunId`s belong only to this arena.
+        self.clear_write_self_methods();
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             let class_fq = ir.classes[class_id as usize].fq_name();
             // `@Serializable(with = X::class)`: no generated `$serializer` — `serializer()` returns an
@@ -2155,6 +2207,7 @@ impl IrPlugin for SerializationPlugin {
                 });
                 ir.synthetic_methods.insert(write_self);
                 ir.classes[class_id as usize].methods.push(write_self);
+                self.record_write_self(ir.classes[class_id as usize].fq_name_id(), write_self);
             }
 
             // `<getter>$annotations()` markers for properties kotlinc preserves the serialization
@@ -2264,16 +2317,16 @@ impl IrPlugin for SerializationPlugin {
             // ALLOCATED rather than a singleton: a collection (`ArrayListSerializer(…)`) or an ENUM
             // (`EnumSerializer(…)`). A primitive/`String` (singleton `INSTANCE`) or a nested `@Serializable`
             // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is `LazyKt.lazyOf(…)`, else null.
-            let enum_internals: std::collections::HashSet<String> = ir
+            let enum_internals: std::collections::HashSet<TypeName> = ir
                 .classes
                 .iter()
                 .filter(|c| !c.enum_entries.is_empty())
-                .map(|c| c.fq_name())
+                .map(crate::ir::IrClass::fq_name_id)
                 .collect();
             let needs_cache = |ty: &Ty| -> bool {
-                let internal = ty.kotlin_class_internal();
-                internal.map(|i| i.render()).is_some_and(|i| {
-                    collection_serializer_builder(&i).is_some() || enum_internals.contains(&i)
+                ty.kotlin_class_internal().is_some_and(|classifier| {
+                    collection_serializer_builder(classifier).is_some()
+                        || enum_internals.contains(&classifier)
                 })
             };
             if plain_data_class && foo_fields.iter().any(|(_, ty)| needs_cache(ty)) {
@@ -2513,261 +2566,19 @@ impl IrPlugin for SerializationPlugin {
                         ir.functions[fid as usize].body = Some(body);
                     }
                     "serialize" => {
-                        // serialize(encoder=1, value=2): drive the CompositeEncoder per property.
-                        //   val c = encoder.beginStructure(descriptor)        [local 3]
-                        //   c.encode<T>Element(descriptor, i, value.<prop_i>)
-                        //   c.endStructure(descriptor)
-                        let ser_cid = ser_idx as u32;
-                        let this_desc = |ir: &mut IrFile| -> ExprId {
-                            let r = ir.add_expr(IrExpr::GetValue(0));
-                            ir.add_expr(IrExpr::GetField {
-                                receiver: r,
-                                class: ser_cid,
-                                index: 0,
-                            })
-                        };
-                        let enc = ir.add_expr(IrExpr::GetValue(1));
-                        let d0 = this_desc(ir);
-                        let begin = ir.add_expr(IrExpr::Call {
-                            callee: virtual_iface(
-                                "kotlinx/serialization/encoding/Encoder",
-                                "beginStructure",
-                                "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeEncoder;",
-                            ),
-                            dispatch_receiver: Some(enc),
-                            args: vec![d0],
-                        });
-                        let cvar = ir.add_expr(IrExpr::Variable {
-                            index: 3,
-                            ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
-                            init: Some(begin),
-                            named: false,
-                        });
-                        let mut stmts = vec![cvar];
-                        let mut bail = false;
-                        for (i, (pname, ty)) in fields.iter().enumerate() {
-                            let n_before = stmts.len();
-                            let d = this_desc(ir);
-                            let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                            // Read the property via its PUBLIC getter (`value.getX()`) — the backing
-                            // field is private, so a separate `$serializer` class can't read it directly.
-                            let vrecv = ir.add_expr(IrExpr::GetValue(2));
-                            let Some(getter_desc) = ty_descriptor(ctx, ty) else {
-                                bail = true;
-                                break;
-                            };
-                            let v = ir.add_expr(IrExpr::Call {
-                                callee: Callee::Virtual {
-                                    owner: type_name(&class_internal),
-                                    name: property_getter_name(pname),
-                                    descriptor: format!("(){getter_desc}"),
-                                    params: None,
-                                    interface: false,
-                                },
-                                dispatch_receiver: Some(vrecv),
-                                args: vec![],
-                            });
-                            let c = ir.add_expr(IrExpr::GetValue(3));
-                            if let Some(inst) = contextual_serializer_for(
-                                ir,
-                                property_is_contextual(ctx, ir, class_id, pname),
-                                ty,
-                            ) {
-                                // Contextual element: encode[Nullable]SerializableElement(desc, i,
-                                // ContextualSerializer(<type>::class), value.getX()).
-                                let method = if is_nullable(ty) {
-                                    "encodeNullableSerializableElement"
-                                } else {
-                                    "encodeSerializableElement"
-                                };
-                                stmts.push(ir.add_expr(IrExpr::Call {
-                                    callee: virtual_iface(
-                                        "kotlinx/serialization/encoding/CompositeEncoder",
-                                        method,
-                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                                    ),
-                                    dispatch_receiver: Some(c),
-                                    args: vec![d, idx, inst, v],
-                                }));
-                            } else if let Some(fidx) = tp_field[i] {
-                                // Type-parameter element: encode[Nullable]SerializableElement(desc, i,
-                                // this.typeSerialK, value.getX()) — the serializer is the ctor-supplied one.
-                                let this_s = ir.add_expr(IrExpr::GetValue(0));
-                                let inst = ir.add_expr(IrExpr::GetField {
-                                    receiver: this_s,
-                                    class: ser_idx as u32,
-                                    index: fidx,
-                                });
-                                let method = if is_nullable(ty) {
-                                    "encodeNullableSerializableElement"
-                                } else {
-                                    "encodeSerializableElement"
-                                };
-                                stmts.push(ir.add_expr(IrExpr::Call {
-                                    callee: virtual_iface(
-                                        "kotlinx/serialization/encoding/CompositeEncoder",
-                                        method,
-                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                                    ),
-                                    dispatch_receiver: Some(c),
-                                    args: vec![d, idx, inst, v],
-                                }));
-                            } else if nested[i].is_some()
-                                || ty
-                                    .non_null()
-                                    .obj_internal()
-                                    .map(|n| n.render())
-                                    .and_then(|n| collection_serializer_builder(&n))
-                                    .is_some()
-                            {
-                                // Nested @Serializable OR a standard collection: encode[Nullable]Serializable
-                                // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
-                                // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
-                                // the SAME descriptor (writes JSON null) — a method-name swap.
-                                let Some(inst) = element_serializer_expr(ir, ty) else {
-                                    bail = true;
-                                    break;
-                                };
-                                let method = if is_nullable(ty) {
-                                    "encodeNullableSerializableElement"
-                                } else {
-                                    "encodeSerializableElement"
-                                };
-                                stmts.push(ir.add_expr(IrExpr::Call {
-                                    callee: virtual_iface(
-                                        "kotlinx/serialization/encoding/CompositeEncoder",
-                                        method,
-                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                                    ),
-                                    dispatch_receiver: Some(c),
-                                    args: vec![d, idx, inst, v],
-                                }));
-                            } else if is_nullable(ty) {
-                                // Nullable element: encodeNullableSerializableElement(desc, i,
-                                // <Elem>Serializer.INSTANCE, value.getX()) — the encoder writes JSON
-                                // null when the value is null. Only reference elements (no boxing) for
-                                // now; nullable primitives bail to a clean no-op.
-                                if let Some(ser) = builtin_element_serializer(ty) {
-                                    let inst = ir.external_static_instance(ser, ser, "INSTANCE");
-                                    stmts.push(ir.add_expr(IrExpr::Call {
-                                        callee: virtual_iface(
-                                            "kotlinx/serialization/encoding/CompositeEncoder",
-                                            "encodeNullableSerializableElement",
-                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                                        ),
-                                        dispatch_receiver: Some(c),
-                                        args: vec![d, idx, inst, v],
-                                    }));
-                                } else {
-                                    bail = true;
-                                    break;
-                                }
-                            } else if let Some((mname, mdesc)) = encode_element_method(ty) {
-                                stmts.push(ir.add_expr(IrExpr::Call {
-                                    callee: virtual_iface(
-                                        "kotlinx/serialization/encoding/CompositeEncoder",
-                                        mname,
-                                        mdesc,
-                                    ),
-                                    dispatch_receiver: Some(c),
-                                    args: vec![d, idx, v],
-                                }));
-                            } else if let Some(inst) = element_serializer_expr(ir, ty) {
-                                // A non-null reference element with a builtin/derivable serializer (e.g.
-                                // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
-                                stmts.push(ir.add_expr(IrExpr::Call {
-                                    callee: virtual_iface(
-                                        "kotlinx/serialization/encoding/CompositeEncoder",
-                                        "encodeSerializableElement",
-                                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-                                    ),
-                                    dispatch_receiver: Some(c),
-                                    args: vec![d, idx, inst, v],
-                                }));
-                            } else {
-                                bail = true;
-                                break;
-                            }
-                            // OPTIONAL element (a constant default): omit it on encode when it still
-                            // equals the default — wrap the just-pushed encode call in
-                            //   if (c.shouldEncodeElementDefault(desc, i) || value.getX() != default) { … }
-                            if let Some(Some(dc)) = field_defaults.get(i) {
-                                if stmts.len() == n_before + 1 {
-                                    let enc_stmt = stmts.pop().unwrap();
-                                    let cd = this_desc(ir);
-                                    let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                                    let cc = ir.add_expr(IrExpr::GetValue(3));
-                                    let should = ir.add_expr(IrExpr::Call {
-                                        callee: virtual_iface(
-                                            "kotlinx/serialization/encoding/CompositeEncoder",
-                                            "shouldEncodeElementDefault",
-                                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
-                                        ),
-                                        dispatch_receiver: Some(cc),
-                                        args: vec![cd, ci],
-                                    });
-                                    // Re-read `value.getX()` for the comparison (a second, independent
-                                    // node — an IR expr can't be shared across two tree positions). A
-                                    // `@Serializable` property always has an auto-generated side-effect-free
-                                    // accessor, and kotlinc's own `write$Self` likewise reads the field twice
-                                    // (`self.x != default` then `encode…(self.x)`), so this is equivalent.
-                                    let vr = ir.add_expr(IrExpr::GetValue(2));
-                                    let Some(getter_desc) = ty_descriptor(ctx, ty) else {
-                                        bail = true;
-                                        break;
-                                    };
-                                    let cur = ir.add_expr(IrExpr::Call {
-                                        callee: Callee::Virtual {
-                                            owner: type_name(&class_internal),
-                                            name: property_getter_name(pname),
-                                            descriptor: format!("(){getter_desc}"),
-                                            params: None,
-                                            interface: false,
-                                        },
-                                        dispatch_receiver: Some(vr),
-                                        args: vec![],
-                                    });
-                                    let def = ir.add_expr(IrExpr::Const(dc.clone()));
-                                    let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
-                                        op: crate::ir::IrBinOp::Ne,
-                                        lhs: cur,
-                                        rhs: def,
-                                    });
-                                    let cond = ir.add_expr(IrExpr::PrimitiveBinOp {
-                                        op: crate::ir::IrBinOp::Or,
-                                        lhs: should,
-                                        rhs: neq,
-                                    });
-                                    stmts.push(ir.add_expr(IrExpr::When {
-                                        branches: vec![(Some(cond), enc_stmt)],
-                                    }));
-                                }
-                            }
+                        SerializeBody {
+                            function: fid,
+                            serializer_class: ser_idx as u32,
+                            serialized_class: foo_id,
+                            fields: &fields,
+                            field_defaults: &field_defaults,
+                            nested_serializers: &nested,
+                            type_parameter_serializer_fields: &tp_field,
+                            write_self: self
+                                .write_self_method(ir.classes[foo_id as usize].fq_name_id()),
+                            write_self_name: self.write_self_name(),
                         }
-                        if bail {
-                            // a field type we can't encode yet — emit a clean no-op return (no
-                            // beginStructure/endStructure), not a wrong call.
-                            let ret = ir.add_expr(IrExpr::Return(None));
-                            let body = ir.add_expr(IrExpr::Block {
-                                stmts: vec![ret],
-                                value: None,
-                            });
-                            ir.functions[fid as usize].body = Some(body);
-                        } else {
-                            let dend = this_desc(ir);
-                            let cend = ir.add_expr(IrExpr::GetValue(3));
-                            stmts.push(ir.add_expr(IrExpr::Call {
-                                callee: virtual_iface(
-                                    "kotlinx/serialization/encoding/CompositeEncoder",
-                                    "endStructure",
-                                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-                                ),
-                                dispatch_receiver: Some(cend),
-                                args: vec![dend],
-                            }));
-                            let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-                            ir.functions[fid as usize].body = Some(body);
-                        }
+                        .generate(ir, ctx);
                     }
                     "deserialize"
                         if ir.classes[foo_id as usize].is_value
@@ -2850,8 +2661,7 @@ impl IrPlugin for SerializationPlugin {
                             // (via the `element_serializer_expr` fallback below) when its elements derive.
                             if t.non_null()
                                 .obj_internal()
-                                .map(|n| n.render())
-                                .and_then(|n| collection_serializer_builder(&n))
+                                .and_then(collection_serializer_builder)
                                 .is_some()
                             {
                                 return can_derive_element_serializer(ir, t);
@@ -3032,8 +2842,7 @@ impl IrPlugin for SerializationPlugin {
                                     || ty
                                         .non_null()
                                         .obj_internal()
-                                        .map(|n| n.render())
-                                        .and_then(|n| collection_serializer_builder(&n))
+                                        .and_then(collection_serializer_builder)
                                         .is_some()
                                 {
                                     // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
