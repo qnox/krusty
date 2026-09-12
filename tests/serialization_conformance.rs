@@ -68,7 +68,7 @@ fn serializer_object_emits_wellformed_bytecode() {
         return;
     };
 
-    let ctx = PluginContext::from_source(&files[0], &ir);
+    let ctx = PluginContext::from_ir(&ir);
     let mut host = PluginHost::new();
     host.register(Box::new(SerializationPlugin::default()));
     host.run(&mut ir, &ctx);

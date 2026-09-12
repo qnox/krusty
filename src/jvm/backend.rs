@@ -72,34 +72,25 @@ pub enum SkipReason {
 /// Per-site concerns (timing counters, bail-reason strings, diagnostics) stay at the call sites.
 pub fn run_backend_passes(
     ir: &mut crate::ir::IrFile,
-    file: &File,
     facade: &str,
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
 ) -> Result<(), SkipReason> {
     let mut discard = crate::jvm::suspend::ContinuationMetadataMap::default();
-    run_backend_passes_with_metadata(ir, file, facade, module_name, syms, classpath, &mut discard)
+    run_backend_passes_with_metadata(ir, facade, module_name, syms, classpath, &mut discard)
 }
 
 /// Run the JVM pass pipeline and retain continuation metadata for class emission.
 pub fn run_backend_passes_with_metadata(
     ir: &mut crate::ir::IrFile,
-    file: &File,
     facade: &str,
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
-    let resolve_class_name = |name: &str| syms.class_names.get(name);
-    crate::plugins::run_enabled(
-        ir,
-        file,
-        module_name,
-        &resolve_class_name,
-        jvm_plugin_type_descriptor,
-    );
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
     let module_value_classes: std::collections::HashMap<_, _> = syms
         .classes
         .values()
@@ -133,7 +124,7 @@ pub fn run_backend_passes_with_checked_metadata(
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: &[String],
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled_from_ir(ir, module_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
     run_backend_passes_after_plugins(
         ir,
         facade,
@@ -724,7 +715,6 @@ impl JvmBackend {
         let mut continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
         if let Err(reason) = run_backend_passes_with_metadata(
             &mut ir,
-            file,
             &facade_name,
             module_name,
             syms,

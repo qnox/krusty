@@ -1110,3 +1110,108 @@ fn a_serializable_enum_with_entry_serial_names_is_byte_identical() {
         );
     }
 }
+
+/// kotlinc marks every generated `$serializer` `@Deprecated(…, level = HIDDEN)`. The class is an
+/// implementation detail of the plugin, and the HIDDEN level is what keeps it out of a consumer's
+/// resolution while its realization stays callable — a semantic fact a consumer reads, not a
+/// cosmetic attribute: without it the class is an ordinary public API to every other compiler.
+#[test]
+fn a_generated_serializer_carries_the_hidden_deprecated_marker() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerDeprecated",
+        SRC,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The rendered `kotlin.Deprecated(...)` block javap prints for the CLASS.
+    let marker = |text: &str| {
+        let rows: Vec<&str> = text.lines().map(str::trim).collect();
+        let at = rows
+            .iter()
+            .position(|line| line.starts_with("kotlin.Deprecated("))?;
+        // Stop at the marker's own closing paren: the next annotation's raw constant-pool row
+        // follows immediately, and its indices are an emission-order artifact.
+        let mut block = Vec::new();
+        for line in &rows[at..] {
+            block.push((*line).to_string());
+            if *line == ")" {
+                break;
+            }
+        }
+        Some(block)
+    };
+    let want = marker(&built.reference).unwrap_or_else(|| {
+        panic!(
+            "reference must mark the generated serializer deprecated:\n{}",
+            built.reference
+        )
+    });
+    assert!(
+        want.iter().any(|line| line.contains("HIDDEN")),
+        "the reference marker must carry the HIDDEN level — the rule under test: {want:?}"
+    );
+    let annotation_section = |text: &str| {
+        let rows = text.lines().map(str::trim).collect::<Vec<_>>();
+        let marker = rows
+            .iter()
+            .position(|line| line.starts_with("kotlin.Deprecated("))?;
+        rows[..marker]
+            .iter()
+            .rfind(|line| line.ends_with("Annotations:"))
+            .map(|line| (*line).to_string())
+    };
+    assert_eq!(
+        annotation_section(&built.reference),
+        Some("RuntimeVisibleAnnotations:".to_string()),
+        "kotlinc emits the marker with Kotlin Deprecated's runtime retention"
+    );
+    assert_eq!(
+        marker(&built.krusty),
+        Some(want),
+        "@Deprecated marker on the generated serializer"
+    );
+    assert_eq!(
+        annotation_section(&built.krusty),
+        annotation_section(&built.reference),
+        "@Deprecated retention section on the generated serializer"
+    );
+
+    // Kotlin consumers also read the annotation from the class metadata. Compare the exact d2
+    // string table rendered inside `kotlin.Metadata`, not merely the standalone JVM annotation.
+    let metadata_marker = |text: &str| {
+        let d2 = text
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("d2=["))?;
+        let marker = d2.find("\"Lkotlin/Deprecated;\"")?;
+        Some(d2[marker..].to_string())
+    };
+    let reference_marker =
+        metadata_marker(&built.reference).expect("reference metadata carries the marker");
+    assert!(
+        [
+            "Lkotlin/Deprecated;",
+            "This synthesized declaration should not be used directly",
+            "Lkotlin/DeprecationLevel;",
+            "HIDDEN",
+        ]
+        .iter()
+        .all(|entry| reference_marker.contains(entry)),
+        "reference metadata must retain the complete marker: {reference_marker}"
+    );
+    assert_eq!(
+        metadata_marker(&built.krusty),
+        Some(reference_marker),
+        "deprecated-marker suffix in the generated serializer's @Metadata d2"
+    );
+}

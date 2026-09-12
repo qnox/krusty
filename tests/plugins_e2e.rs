@@ -74,7 +74,7 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
 
     let mut ctx = PluginContext::default();
     ctx.class_annotations
-        .insert(foo_id, vec![SERIALIZABLE_FQ.to_string()].into());
+        .insert(foo_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
 
     let mut host = PluginHost::new();
     host.register(Box::new(SerializationPlugin::default()));
@@ -137,25 +137,28 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
 
 #[test]
 fn serialization_activates_from_source_annotation() {
-    // The keystone: the surface activates from a REAL `@Serializable` in source — parser captures the
-    // annotation, `PluginContext::from_source` indexes it, the plugin fires. No manual injection.
+    // The keystone: the surface activates from a REAL `@Serializable` in source. The frontend binds
+    // it to its qualified identity and lowering retains it in IR; the plugin needs no source lookup.
     let Some(serialization) = common::find_jar("kotlinx-serialization-core-jvm-", &["sources"])
     else {
         eprintln!("skipping: no kotlinx-serialization core jar");
         return;
     };
-    let Some((file, mut ir)) = lower_with_classpath(
-        "import kotlinx.serialization.Serializable\n@Serializable class Foo(val a: Int, val b: String)",
+    let Some((_file, mut ir)) = lower_with_classpath(
+        "import kotlinx.serialization.Serializable as Wire\n@Wire class Foo(val a: Int, val b: String)",
         &[serialization],
     ) else {
         eprintln!("skipping: class outside IR subset");
         return;
     };
 
-    let ctx = PluginContext::from_source(&file, &ir);
+    let ctx = PluginContext::from_ir(&ir);
     assert!(
-        !ctx.classes_with_simple("Serializable").is_empty(),
-        "@Serializable captured from source and indexed"
+        !ctx.classes_with(krusty::types::type_name(
+            "kotlinx/serialization/Serializable"
+        ))
+        .is_empty(),
+        "resolved @Serializable retained in checked IR"
     );
 
     let mut host = PluginHost::new();
@@ -167,6 +170,39 @@ fn serialization_activates_from_source_annotation() {
             .iter()
             .any(|c| c.fq_name().ends_with("Foo$$serializer")),
         "$serializer synthesized purely from the source annotation"
+    );
+}
+
+#[test]
+fn an_unrelated_serializable_simple_name_does_not_activate_the_plugin() {
+    let Some((_file, mut ir)) = lower(
+        "package sample\n\
+         annotation class Serializable\n\
+         @Serializable class Foo(val value: String)\n",
+    ) else {
+        panic!("the same-package annotation fixture must lower");
+    };
+    let ctx = PluginContext::from_ir(&ir);
+    assert_eq!(
+        ctx.classes_with(krusty::types::type_name("sample/Serializable"))
+            .len(),
+        1,
+        "the source annotation keeps its own qualified identity"
+    );
+    assert!(
+        ctx.classes_with(krusty::types::type_name(SERIALIZABLE_FQ))
+            .is_empty(),
+        "same simple spelling must not impersonate kotlinx.serialization.Serializable"
+    );
+
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.run(&mut ir, &ctx);
+    assert!(
+        ir.classes
+            .iter()
+            .all(|class| !class.fq_name().ends_with("Foo$$serializer")),
+        "an unrelated @sample.Serializable must not synthesize a serializer"
     );
 }
 
@@ -188,7 +224,7 @@ fn serializable_enum_relocates_serializer_to_companion() {
 
     let mut ctx = PluginContext::default();
     ctx.class_annotations
-        .insert(e_id, vec![SERIALIZABLE_FQ.to_string()].into());
+        .insert(e_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
 
     let mut host = PluginHost::new();
     host.register(Box::new(SerializationPlugin::default()));
@@ -243,7 +279,7 @@ fn deser_ctor_appends_marker_for_value_class_field() {
 
     let mut ctx = PluginContext::default();
     ctx.class_annotations
-        .insert(d_id, vec![SERIALIZABLE_FQ.to_string()].into());
+        .insert(d_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
     let mut host = PluginHost::new();
     host.register(Box::new(SerializationPlugin::default()));
     host.run(&mut ir, &ctx);
@@ -289,7 +325,7 @@ fn value_class_serializer_omits_write_self() {
 
     let mut ctx = PluginContext::default();
     ctx.class_annotations
-        .insert(v_id, vec![SERIALIZABLE_FQ.to_string()].into());
+        .insert(v_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
 
     let mut host = PluginHost::new();
     host.register(Box::new(SerializationPlugin::default()));
