@@ -41,7 +41,7 @@ fn value_class_synthesizes_box_unbox_constructor_impl() {
     let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     let facade = file_class_name("S", None);
     // The value-class `-impl` members are synthesized by the JVM passes (not `ir_lower`).
-    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms, &cp)
+    krusty::jvm::backend::run_backend_passes(&mut ir, &facade, "main", &syms, &cp)
         .expect("backend passes should accept this value class");
     let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
 
@@ -107,7 +107,7 @@ fn value_class_is_property_uses_javabean_getter_name() {
     let runtime = JvmLibraries::new(cp.clone());
     let mut ir = lower_file(&files[0], &info, &syms, &runtime).expect("value class should lower");
     let facade = file_class_name("Flag", None);
-    krusty::jvm::backend::run_backend_passes(&mut ir, &files[0], &facade, "main", &syms, &cp)
+    krusty::jvm::backend::run_backend_passes(&mut ir, &facade, "main", &syms, &cp)
         .expect("backend passes should accept this value class");
     let classes = emit_all(&ir, &facade, &*cp, None, &syms).expect("emit");
 
