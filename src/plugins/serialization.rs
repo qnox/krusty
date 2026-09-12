@@ -26,7 +26,7 @@ use crate::plugins::{
     FrontendExpressionContext, IrPlugin, PluginContext, PluginExpressionPlan,
 };
 use crate::types::{type_name, Ty, TypeName};
-use generated_members::{add_guarded_instance_method, add_instance_method, GuardedParameter};
+use generated_members::{add_serializer_members, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -1801,71 +1801,15 @@ impl IrPlugin for SerializationPlugin {
                 .map(|parameter| kserializer_of(*parameter))
                 .collect::<Vec<_>>();
 
-            // Member signatures; bodies are filled in `transform_bodies`.
             let serializer_name = type_name(&ser_fq);
-            let descriptor = add_instance_method(
-                ir,
-                serializer_name,
-                "getDescriptor",
-                vec![],
-                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-                None,
-            );
-            let serialize = add_guarded_instance_method(
-                ir,
-                serializer_name,
-                "serialize",
-                vec![
-                    GuardedParameter::new(
-                        class_ty("kotlinx/serialization/encoding/Encoder"),
-                        "encoder",
-                    ),
-                    GuardedParameter::new(serialized_ty, "value"),
-                ],
-                unit(),
-                None,
-            );
-            let deserialize = add_guarded_instance_method(
-                ir,
-                serializer_name,
-                "deserialize",
-                vec![GuardedParameter::new(
-                    class_ty("kotlinx/serialization/encoding/Decoder"),
-                    "decoder",
-                )],
-                serialized_ty,
-                None,
-            );
-            let child = add_instance_method(
-                ir,
-                serializer_name,
-                "childSerializers",
-                vec![],
-                Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
-                None,
-            );
-            // `typeParametersSerializers(): KSerializer<?>[]` is filled in `transform_bodies`.
-            let tps_arr = ir.add_expr(IrExpr::Vararg {
-                array_type: Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
-                spreads: vec![],
-                elements: vec![],
-            });
-            let tps_ret = ir.add_expr(IrExpr::Return(Some(tps_arr)));
-            let tps_body = ir.add_expr(IrExpr::Block {
-                stmts: vec![tps_ret],
-                value: None,
-            });
-            let type_params_ser = add_instance_method(
-                ir,
-                serializer_name,
-                "typeParametersSerializers",
-                vec![],
-                Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
-                Some(tps_body),
-            );
-            // kotlinc emits it non-final (a plain `GeneratedSerializer` override).
-            ir.open_methods.insert(type_params_ser);
-            ir.bridge_methods.insert(type_params_ser);
+            let owner_line = ir.classes[class_id as usize].decl_start_line;
+            let GeneratedSerializerMembers {
+                descriptor,
+                serialize,
+                deserialize,
+                child_serializers: child,
+                type_parameter_serializers: type_params_ser,
+            } = add_serializer_members(ir, serializer_name, serialized_ty, owner_line);
 
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields

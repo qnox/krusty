@@ -11759,7 +11759,8 @@ fn emit_method_inner_with_holder(
     let ret = jvm_declared_ty(&f.ret);
     let mut e = Emitter::new(ir, cw, env, owner, facade, ret, [body]);
     // Suspend lowering does not preserve source-local expression IDs.
-    e.record_locals = ir.fn_decl_lines.contains_key(&fid) && !ir.suspend_funs.contains(&fid);
+    e.record_locals = (ir.fn_decl_lines.contains_key(&fid) || ir.fn_debug_locals.contains(&fid))
+        && !ir.suspend_funs.contains(&fid);
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;

@@ -2871,6 +2871,10 @@ pub struct IrFile {
     /// FunId → 1-based source line of its `fun` declaration, for the method's `LineNumberTable`.
     /// A side map (not a field on `IrFunction`) so the 40-odd construction sites stay untouched.
     pub fn_decl_lines: std::collections::HashMap<u32, u32>,
+    /// Functions whose debug representation retains receiver/parameter bindings even when the body
+    /// deliberately has no executable source line. Generated declarations use this explicit
+    /// source/debug contract instead of inventing a line merely to retain their binding names.
+    pub fn_debug_locals: std::collections::HashSet<FunId>,
     /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
     /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
     pub fn_close_lines: std::collections::HashMap<u32, u32>,

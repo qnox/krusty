@@ -1657,3 +1657,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   for. Emitting the delegation there produced a `getfield` on the wrong owner and the verifier
   rejected it; the krusty-only generic serializer tests caught that within the same change.
   `tests/serialization_companion_byte_parity_e2e.rs::serialize_delegates_its_element_writes_to_write_self`.
+- **Every generated `$serializer` member carries its complete debug-table contract (fix).** kotlinc
+  emits a `LocalVariableTable` for all five declared members. `serialize`, `deserialize`,
+  `childSerializers`, and `typeParametersSerializers` also carry a `LineNumberTable` rooted at the
+  annotated declaration; the bare `getDescriptor` field read deliberately has no line table.
+  A separate common-IR locals-table fact represents that distinction without inventing a source line,
+  and the generated-member owner records the complete five-method set instead of a name-based backend
+  exception. `tests/serialization_companion_byte_parity_e2e.rs::generated_serializer_members_carry_their_complete_debug_tables`.
+- **`serialize` maps its trailing return to the class header (fix).** Its body opens on the annotated
+  declaration line, while kotlinc maps the implicit return after `endStructure` back to the class
+  header. The serialize-body owner records both stable source facts for direct and generic bodies;
+  `tests/serialization_companion_byte_parity_e2e.rs::serialize_maps_its_return_to_the_class_header_line`
+  compares the direct body's complete line table, including both bytecode offsets, and the generic
+  body's exact source-line sequence while its separate `write$Self` ABI migration still changes code
+  offsets.
