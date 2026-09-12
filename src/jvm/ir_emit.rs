@@ -20070,19 +20070,13 @@ impl<'a> Emitter<'a> {
         code: &mut CodeBuilder,
     ) {
         let end = code.new_label();
-        // The operand-stack height BEFORE any branch (the conditions consume their own operands). Each
-        // subsequent branch is reached by a JUMP from the previous condition, so it starts at THIS height,
-        // not the height the previous branch left after pushing its value (the linear counter carries the
-        // prior branch's value across `bind(next)`); reset it so a branch body emits on the right baseline
-        // (else e.g. an inline HOF splice in the SECOND branch sees a phantom operand and bails).
+        // Each branch starts at the pre-condition height, not the linear counter left by the prior
+        // body. Resetting at `next` prevents a phantom operand in later branch bodies.
         let entry_height = code.stack_height().max(0) as u16;
         let has_else = branches.iter().any(|(c, _)| c.is_none());
         let exhaustive_result = self.ir.exhaustive_whens.get(&expression).copied();
-        // A `when` with no `else`, or one whose value is `Unit`, is a statement: branch values are
-        // discarded and nothing reaches the operand stack at `end`.
-        // The exhaustive marker carries the checked semantic result. Frames need its JVM erasure:
-        // a generic `when` result `T` occupies the bound's reference slot, never verification
-        // `Top`. Non-exhaustive joins already derive JVM-visible types from their branch values.
+        // A no-`else` or `Unit` `when` is a statement, so nothing reaches the stack at `end`.
+        // Exhaustive results use their checked JVM erasure; other joins derive it from branch values.
         let result_ty = exhaustive_result
             .map(|result| ir_ty_to_jvm(&result))
             .unwrap_or_else(|| self.value_ty_of_when(branches));
@@ -20095,17 +20089,13 @@ impl<'a> Emitter<'a> {
         // `end` is reachable if any branch falls through to it (i.e. doesn't return/throw). A
         // no-`else` statement always has the implicit no-match fallthrough.
         let mut end_reachable = !has_else && exhaustive_result.is_none();
-        for (cond, body) in branches {
+        for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {
                 Some(c) => {
                     // Skip to the next branch when this condition is false (fused comparison branch).
                     let next = code.new_label();
-                    // A condition that folds to a constant `false` never selects this branch, and the
-                    // skip above is then an unconditional `goto next` — so the body would be laid down
-                    // after it, unreachable and unframed ("Expecting a stack map frame"). The suspend
-                    // flattener builds exactly that shape: a `do … while (false)` loop dragged into the
-                    // state machine (by a labeled jump crossing out of it) becomes a header state whose
-                    // `when` tests the literal `false` (see docs/SPEC.md). Emit nothing for it.
+                    // A constant-false condition emits `goto next`; do not lay down its unreachable,
+                    // unframed body. Suspend flattening produces this shape for some do-while loops.
                     if self.emit_cond_branch(*c, next, false, code) {
                         // Skipping the CODE must not skip the merge-point accounting: `diverges` does
                         // not fold constant conditions, so a `when` whose only falling-through branch is
@@ -20126,12 +20116,8 @@ impl<'a> Emitter<'a> {
                         continue;
                     }
                     if is_stmt {
-                        // Statement emission owns the value/void representation boundary. Some
-                        // semantically-Unit expressions are physical `void` operations (an array
-                        // or collection write), while an explicit `Unit` expression pushes
-                        // `Unit.INSTANCE`. Emitting every arm as a value and discarding by semantic
-                        // type cannot distinguish those shapes: `Ty::Unit` has zero stack words,
-                        // so the singleton survived one predecessor while the write left none.
+                        // Statement emission handles both physical-void operations and explicit
+                        // `Unit.INSTANCE`; semantic `Ty::Unit` alone cannot distinguish them.
                         self.emit(*body, code);
                     } else {
                         self.emit_value(*body, code);
@@ -20148,11 +20134,20 @@ impl<'a> Emitter<'a> {
                         self.diverges(*body)
                     };
                     if !body_diverges {
-                        // A diverging branch (e.g. an inlined `error(...)`) left nothing and ended in
-                        // `athrow` — don't jump to `end`.
-                        // Only a falling-through branch jumps to (and needs a frame at) `end`.
-                        self.frame(end, result_stack.clone(), code);
-                        code.goto(end);
+                        // Fall through only across empty ELSE branches. An empty conditional branch
+                        // still evaluates its condition, which the selected arm must skip.
+                        let nothing_follows = branches[index + 1..]
+                            .iter()
+                            .all(|(condition, rest)| {
+                                condition.is_none()
+                                    && matches!(self.ir.expr(*rest), IrExpr::Block { stmts, value } if stmts.is_empty() && value.is_none())
+                            })
+                            && (has_else || exhaustive_result.is_none());
+                        let falls_into_end = is_stmt && nothing_follows;
+                        if !falls_into_end {
+                            self.frame(end, result_stack.clone(), code);
+                            code.goto(end);
+                        }
                         end_reachable = true;
                     }
                     code.bind(next);
