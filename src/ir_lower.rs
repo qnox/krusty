@@ -4404,6 +4404,7 @@ fn lower_file_at_reporting_impl(
                         };
                         secs.push(crate::ir::IrSecondaryCtor {
                             annotations: ctor_annotations(sc, info),
+                            source_order: sc.span.lo,
                             prefix_params: constructor_prefix.clone(),
                             vararg_index: sc.params.iter().position(|p| p.is_vararg),
                             params: param_irs,

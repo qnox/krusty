@@ -348,6 +348,7 @@ pub(super) fn add_deserialization_constructor(
         .secondary_ctors
         .push(IrSecondaryCtor {
             annotations: DeclarationAnnotations::default(),
+            source_order: u32::MAX,
             prefix_params: Vec::new(),
             vararg_index: None,
             params,
