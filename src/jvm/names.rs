@@ -5,6 +5,35 @@ use crate::types::{InternalName, Ty};
 /// Kotlin's JVM runtime provides numbered function interfaces only through `Function22`.
 pub(crate) const MAX_NUMBERED_FUNCTION_ARITY: usize = 22;
 
+/// Physical JVM functional-interface names. This table is representation state and must not leak
+/// into parser, resolver, checked FIR, or common IR; those phases retain `kotlin/FunctionN` or the
+/// structural [`Ty::Fun`] shape.
+pub(super) const FUNCTION_N_INTERNAL: [&str; 23] = [
+    "kotlin/jvm/functions/Function0",
+    "kotlin/jvm/functions/Function1",
+    "kotlin/jvm/functions/Function2",
+    "kotlin/jvm/functions/Function3",
+    "kotlin/jvm/functions/Function4",
+    "kotlin/jvm/functions/Function5",
+    "kotlin/jvm/functions/Function6",
+    "kotlin/jvm/functions/Function7",
+    "kotlin/jvm/functions/Function8",
+    "kotlin/jvm/functions/Function9",
+    "kotlin/jvm/functions/Function10",
+    "kotlin/jvm/functions/Function11",
+    "kotlin/jvm/functions/Function12",
+    "kotlin/jvm/functions/Function13",
+    "kotlin/jvm/functions/Function14",
+    "kotlin/jvm/functions/Function15",
+    "kotlin/jvm/functions/Function16",
+    "kotlin/jvm/functions/Function17",
+    "kotlin/jvm/functions/Function18",
+    "kotlin/jvm/functions/Function19",
+    "kotlin/jvm/functions/Function20",
+    "kotlin/jvm/functions/Function21",
+    "kotlin/jvm/functions/Function22",
+];
+
 pub(crate) fn uses_function_n(arity: usize) -> bool {
     arity > MAX_NUMBERED_FUNCTION_ARITY
 }
@@ -14,7 +43,7 @@ pub(crate) fn function_interface_internal_name(arity: usize) -> String {
     if uses_function_n(arity) {
         "kotlin/jvm/functions/FunctionN".to_string()
     } else {
-        format!("kotlin/jvm/functions/Function{arity}")
+        FUNCTION_N_INTERNAL[arity].to_string()
     }
 }
 

@@ -619,13 +619,13 @@ fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// JVM local-slot width of a field type. Long/Double take two slots — but a NULLABLE Long?/Double? is
-/// carried boxed (`java.lang.Long`/`Double`), a one-slot reference.
+/// JVM local-slot width of a field type. Semantic non-null `Long`/`Double` values take two slots;
+/// nullable forms are references and therefore take one. Choosing their physical wrapper class is
+/// a backend concern and does not enter this plugin decision.
 fn slot_width(ty: &Ty) -> u32 {
     match *ty {
-        // A non-nullable Long/Double occupies two slots, whether carried as a de-erased primitive
-        // (`Ty::Long`) or an erased `Obj("kotlin/Long")`. A NULLABLE one is boxed (`java/lang/Long`,
-        // `Ty::Nullable`) — a one-slot reference — and falls through to 1.
+        // `Ty::Long` and `Ty::Double` are the common semantic classifier identities. Their nullable
+        // wrappers fall through to the one-slot reference case.
         Ty::Long | Ty::Double => 2,
         _ => 1,
     }
@@ -1038,32 +1038,41 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
 }
 
 fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
-    let fq = ty.kotlin_class_internal()?;
-    Some(
-        if fq.matches("kotlin/Int") || fq.matches("java/lang/Integer") {
-            "kotlin/Int"
-        } else if fq.matches("kotlin/Long") || fq.matches("java/lang/Long") {
-            "kotlin/Long"
-        } else if fq.matches("kotlin/Boolean") || fq.matches("java/lang/Boolean") {
-            "kotlin/Boolean"
-        } else if fq.matches("kotlin/Double") || fq.matches("java/lang/Double") {
-            "kotlin/Double"
-        } else if fq.matches("kotlin/Float") || fq.matches("java/lang/Float") {
-            "kotlin/Float"
-        } else if fq.matches("kotlin/Char") || fq.matches("java/lang/Character") {
-            "kotlin/Char"
-        } else if fq.matches("kotlin/Byte") || fq.matches("java/lang/Byte") {
-            "kotlin/Byte"
-        } else if fq.matches("kotlin/Short") || fq.matches("java/lang/Short") {
-            "kotlin/Short"
-        } else if fq.matches("kotlin/String") || fq.matches("java/lang/String") {
-            "kotlin/String"
-        } else if fq.matches("kotlin/uuid/Uuid") {
-            "kotlin/uuid/Uuid"
-        } else {
-            return None;
-        },
-    )
+    let fq = match ty.non_null() {
+        Ty::Int => type_name("kotlin/Int"),
+        Ty::Long => type_name("kotlin/Long"),
+        Ty::Boolean => type_name("kotlin/Boolean"),
+        Ty::Double => type_name("kotlin/Double"),
+        Ty::Float => type_name("kotlin/Float"),
+        Ty::Char => type_name("kotlin/Char"),
+        Ty::Byte => type_name("kotlin/Byte"),
+        Ty::Short => type_name("kotlin/Short"),
+        Ty::String => type_name("kotlin/String"),
+        semantic => semantic.kotlin_class_internal()?,
+    };
+    Some(if fq.matches("kotlin/Int") {
+        "kotlin/Int"
+    } else if fq.matches("kotlin/Long") {
+        "kotlin/Long"
+    } else if fq.matches("kotlin/Boolean") {
+        "kotlin/Boolean"
+    } else if fq.matches("kotlin/Double") {
+        "kotlin/Double"
+    } else if fq.matches("kotlin/Float") {
+        "kotlin/Float"
+    } else if fq.matches("kotlin/Char") {
+        "kotlin/Char"
+    } else if fq.matches("kotlin/Byte") {
+        "kotlin/Byte"
+    } else if fq.matches("kotlin/Short") {
+        "kotlin/Short"
+    } else if fq.matches("kotlin/String") {
+        "kotlin/String"
+    } else if fq.matches("kotlin/uuid/Uuid") {
+        "kotlin/uuid/Uuid"
+    } else {
+        return None;
+    })
 }
 
 fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
@@ -2771,12 +2780,12 @@ mod tests {
     }
 
     #[test]
-    fn nullable_primitive_uses_boxed_name_and_builtin_serializer() {
-        // krusty lowers a nullable primitive to its BOXED fq name (`Int?` → `java/lang/Integer`,
-        // nullable). The plugin must still route it through encodeNullableSerializableElement with the
-        // builtin IntSerializer singleton — this guards the boxed-name mapping.
+    fn nullable_primitive_keeps_semantic_name_and_uses_builtin_serializer() {
+        // Common IR retains the semantic classifier for `Int?`; choosing `java/lang/Integer` is a
+        // JVM-backend decision. The plugin must route that semantic type through the nullable
+        // serializable calls with the builtin IntSerializer singleton.
         let (mut ir, ctx, id) = serializable_class("P", &["kotlin/Int"]);
-        ir.classes[id as usize].fields[0].ty = Ty::nullable(Ty::obj("java/lang/Integer"));
+        ir.classes[id as usize].fields[0].ty = Ty::nullable(Ty::Int);
         run(&mut ir, &ctx);
         assert!(
             calls_method(&ir, "encodeNullableSerializableElement")
@@ -2786,6 +2795,15 @@ mod tests {
         assert!(
             refs_external_static(&ir, "kotlinx/serialization/internal/IntSerializer"),
             "nullable Int? must reference IntSerializer.INSTANCE"
+        );
+    }
+
+    #[test]
+    fn runtime_wrapper_name_is_not_a_semantic_builtin_identity() {
+        assert_eq!(
+            builtin_element_key(&Ty::obj("java/lang/Integer")),
+            None,
+            "plugins must not recover Kotlin semantics from a JVM carrier name"
         );
     }
 

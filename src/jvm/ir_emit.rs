@@ -20483,10 +20483,9 @@ fn ref_internal(t: Ty) -> String {
         Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name(&n.render()),
         // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
         // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
-        Ty::Fun(_) => t
-            .function_interface_internal()
-            .unwrap_or("java/lang/Object")
-            .to_string(),
+        Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
+            signature.params.len() + usize::from(signature.suspend),
+        ),
         _ => "java/lang/Object".to_string(),
     }
 }

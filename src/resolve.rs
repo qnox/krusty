@@ -11105,10 +11105,11 @@ fn collect_signatures_with_cp_impl(
                     let mut interfaces: Vec<String> = classifier_header
                         .supertypes
                         .iter()
-                        // Arrow syntax contributes a callable shape, not a nominal classifier
-                        // edge. Resolving its parser marker (`<fun>`) as an interface both emits a
-                        // bogus unresolved-reference diagnostic and pollutes hierarchy traversal.
-                        .filter(|t| function_type_ref_shape(t).is_none())
+                        // A function supertype through the numbered semantic classifier contributes
+                        // both its nominal `kotlin/FunctionN` edge and its exact callable shape. Only
+                        // the unmaterialized `<fun>` marker used by suspend/big-arity shapes lacks a
+                        // nominal classifier and must stay out of hierarchy traversal.
+                        .filter(|t| t.name != "<fun>")
                         .filter(|t| parenless_base.as_deref() != Some(t.name.as_str()))
                         .map(|t| resolve_super(&t.name))
                         .collect();
@@ -11602,7 +11603,7 @@ fn collect_signatures_with_cp_impl(
                             interface_type_args: classifier_header
                                 .supertypes
                                 .iter()
-                                .filter(|interface| function_type_ref_shape(interface).is_none())
+                                .filter(|interface| interface.name != "<fun>")
                                 .filter(|interface| {
                                     parenless_base.as_deref() != Some(interface.name.as_str())
                                 })
@@ -42323,6 +42324,16 @@ fun box(): String {
             class.callable_signature,
             Some(Ty::fun_with_shape(vec![Ty::Int], Ty::Unit, 0, true, false,)),
             "source function supertype lost its receiver/function shape"
+        );
+        assert_eq!(
+            class.interfaces.iter_ids().collect::<Vec<_>>(),
+            [type_name("kotlin/Function1")],
+            "class hierarchy must retain the semantic function classifier identity"
+        );
+        assert_eq!(
+            class.interface_type_args,
+            [vec![Ty::Int, Ty::Unit]],
+            "class hierarchy must retain the function classifier arguments"
         );
         for function in ["arrayTest", "charArrayTest", "call"] {
             let signature = symbols

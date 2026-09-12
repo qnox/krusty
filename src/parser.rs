@@ -4205,11 +4205,12 @@ impl<'a> Parser<'a> {
                         .type_annotations
                         .insert(self.tok().span.lo, supertype_annotations);
                 }
-                // A FUNCTION-TYPE supertype (`class C : () -> R`, `(A) -> R`, `Recv.() -> R`): a class
-                // implementing a function type implements `kotlin/jvm/functions/FunctionN` (arity N =
-                // value parameters, with an extension receiver folded in as the first). Parse the type
-                // and record the `FunctionN` interface. A `suspend` function-type supertype maps to a
-                // different (`SuspendFunctionN`) shape krusty doesn't model — reject so the file skips.
+                // A FUNCTION-TYPE supertype (`class C : () -> R`, `(A) -> R`, `Recv.() -> R`): retain
+                // Kotlin's semantic `kotlin/FunctionN` classifier (arity N = value parameters, with an
+                // extension receiver folded in as the first). The JVM backend alone maps that identity
+                // to `kotlin/jvm/functions/FunctionN`. A suspend function-type supertype maps to a
+                // different (`SuspendFunctionN`) shape krusty doesn't model — preserve it for a later
+                // semantic rejection instead of encoding a target representation here.
                 if self.at_function_type_supertype() {
                     let ft = self.parse_type();
                     let arity = ft.fun_params.len();
@@ -4224,10 +4225,10 @@ impl<'a> Parser<'a> {
                             targs.push(ret.clone());
                         }
                         ifaces.push(TypeRef {
-                            name: crate::types::FUNCTION_N_INTERNAL[arity].to_string(),
-                            // Keep the exact semantic function shape beside the physical FunctionN
-                            // classifier. Receiver/context flags cannot be reconstructed from arity or
-                            // the classifier name after parsing.
+                            name: format!("kotlin/Function{arity}"),
+                            // Keep the exact semantic function shape beside its classifier. Receiver/
+                            // context flags cannot be reconstructed from arity or the classifier name
+                            // after parsing.
                             flags: ft
                                 .flags
                                 .with_nullable(false)
@@ -8275,6 +8276,35 @@ mod tests {
         assert_eq!(visibility("Parent.DerivedOnly"), Visibility::Protected);
         assert_eq!(visibility("Parent.ModuleOnly"), Visibility::Internal);
         assert_eq!(visibility("Parent.Visible"), Visibility::Public);
+    }
+
+    #[test]
+    fn function_supertype_retains_kotlin_classifier_not_jvm_carrier() {
+        let mut diagnostics = DiagSink::new();
+        let source = "class Transform : (Int) -> String {\n\
+                          override fun invoke(value: Int): String = value.toString()\n\
+                      }\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test", source)
+        );
+        let class = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Transform" => Some(class),
+                _ => None,
+            })
+            .expect("Transform class");
+        let [function] = class.supertypes.as_slice() else {
+            panic!("expected one function supertype: {:?}", class.supertypes)
+        };
+        assert_eq!(function.name, "kotlin/Function1");
+        assert_eq!(function.fun_params.len(), 1);
+        assert_eq!(function.targs.len(), 2);
     }
 
     #[test]
