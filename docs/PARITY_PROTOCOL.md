@@ -1730,3 +1730,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   classifier annotations in its module facts so it can answer for a declaration this file cannot see.
   With this and the classpath half, the kubernetes httpclient module compiles again (1 error → 0).
   `tests/serialization_companion_byte_parity_e2e.rs::an_element_declared_in_another_file_of_the_module_uses_its_serializer`.
+- **An element typed by a `@Serializable` ENUM uses the enum's own accessor (fix).** An enum has no
+  `$serializer` class: its accessor builds the serializer at run time
+  (`createSimpleEnumSerializer`/`createAnnotatedEnumSerializer`), which is why kotlinc reaches an enum
+  element through `Level.Companion.serializer()` and caches the result in `$childSerializers`. krusty
+  had a branch for every other element shape — sealed, collection, polymorphic, a generated
+  `$serializer` — but none for an enum, so it derived nothing and declined the file. Generated API
+  clients are full of enum-typed fields.
+  The accessor's presence is what proves the enum is `@Serializable`; a plain enum still bails.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_serializable_enum_uses_its_accessor`.
