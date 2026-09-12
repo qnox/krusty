@@ -1830,3 +1830,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `no parameter with name 'x' found` — one such shadowing pair produced eight errors in one file, and
   a module with any error emits nothing.
   `tests/explicit_import_shadows_same_package_e2e.rs::explicit_import_wins_over_same_package_class`.
+- **A spliced stdlib `map`/`flatMap` spills its inline locals (fix).** kotlinc's expansion is TWO
+  inline frames deep (`map` → `mapTo`, `flatMap` → `flatMapTo`), and a suspension inside the lambda
+  runs with every local that expansion introduced live. kotlinc spills each under its inline name —
+  `$this$map$iv` / `$this$flatMap$iv`, `$this$mapTo$iv$iv` / `$this$flatMapTo$iv$iv`,
+  `destination$iv$iv`, the loop element (`item$iv$iv` for `map`, `element$iv$iv` for `flatMap`), and
+  the lambda's own parameter under its source name; the iterator keeps a spill POSITION with no name.
+  krusty's expansion bound only an accumulator, an iterator and the lambda's formal, none of them
+  named, so the continuation came out short on both fields and `s`/`n` entries.
+  It also COPIED every lambda capture into a fresh temp. A capture that is already a plain local read
+  is now used in place — the copy was a second live value on the same data at every suspension, one
+  more spill field than kotlinc allocates.
+  `tests/suspend_inline_collection_spill_e2e.rs`.
