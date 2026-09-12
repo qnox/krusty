@@ -1531,6 +1531,26 @@ impl SerializationPlugin {
         ret: Ty,
         body: Option<ExprId>,
     ) -> u32 {
+        Self::add_method_guarded(ir, owner_fq, name, params, ret, body, &[])
+    }
+
+    /// [`Self::add_method`] with the ENTRY GUARDS kotlinc emits on a generated member's non-null
+    /// reference parameters (`Intrinsics.checkNotNullParameter(encoder, "encoder")`). A generated
+    /// member is public API — a caller from Java can pass `null` — so kotlinc guards it exactly as
+    /// it guards a user-written one; krusty emitted the body with no prologue at all.
+    fn add_method_guarded(
+        ir: &mut IrFile,
+        owner_fq: &str,
+        name: &str,
+        params: Vec<Ty>,
+        ret: Ty,
+        body: Option<ExprId>,
+        guarded: &[&str],
+    ) -> u32 {
+        let param_checks = guarded
+            .iter()
+            .map(|parameter| Some((*parameter).to_string()))
+            .collect();
         ir.add_fun(IrFunction {
             name: name.to_string(),
             params,
@@ -1538,7 +1558,7 @@ impl SerializationPlugin {
             body,
             is_static: false,
             dispatch_receiver: Some(type_name(owner_fq)),
-            param_checks: Vec::new(),
+            param_checks,
         })
     }
 }
@@ -1808,7 +1828,7 @@ impl IrPlugin for SerializationPlugin {
                 class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
                 None,
             );
-            let serialize = Self::add_method(
+            let serialize = Self::add_method_guarded(
                 ir,
                 &ser_fq,
                 "serialize",
@@ -1818,14 +1838,16 @@ impl IrPlugin for SerializationPlugin {
                 ],
                 unit(),
                 None,
+                &["encoder", "value"],
             );
-            let deserialize = Self::add_method(
+            let deserialize = Self::add_method_guarded(
                 ir,
                 &ser_fq,
                 "deserialize",
                 vec![class_ty("kotlinx/serialization/encoding/Decoder")],
                 serialized_ty,
                 None,
+                &["decoder"],
             );
             let child = Self::add_method(
                 ir,

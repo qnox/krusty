@@ -1010,3 +1010,71 @@ const SERIAL_NAME_ENUM: &str = "import kotlinx.serialization.SerialName\n\
                                 \x20\n\
                                 \x20   PLAIN(\"plain\"),\n\
                                 }\n";
+
+/// A generated `$serializer`'s members are public API — a Java caller can pass `null` — so kotlinc
+/// guards their non-null reference parameters at entry exactly as it guards a user-written
+/// function: `Intrinsics.checkNotNullParameter(encoder, "encoder")`. krusty emitted the body with
+/// no prologue at all, so every `serialize`/`deserialize` differed from the first instruction on.
+///
+/// The guard carries the PARAMETER NAME, so this also pins the names kotlinc gives them
+/// (`encoder`/`value`/`decoder`) rather than positional placeholders.
+#[test]
+fn a_generated_serializer_guards_its_parameters() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerParamGuards",
+        SRC,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The instructions a method opens with, up to its first guard-free instruction.
+    let prologue = |text: &str, member: &str| {
+        let body = structure(text);
+        let start = body
+            .iter()
+            .position(|line| line.contains(member))
+            .unwrap_or_else(|| panic!("{member} must be present:\n{text}"));
+        // Up to and including the LAST guard: what follows is the member's own body, whose first
+        // instruction differs for an unrelated reason and would make this test about that instead.
+        let instructions = body
+            .into_iter()
+            .skip(start)
+            .skip_while(|line| !line.starts_with("0: "))
+            // This member's code only: a later member (the erased bridge) guards its parameters
+            // too, and an unbounded search would find ITS prologue instead.
+            .take_while(|line| {
+                line.split_once(':')
+                    .is_some_and(|(pc, _)| !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .collect::<Vec<_>>();
+        let last_guard = instructions
+            .iter()
+            .rposition(|line| line.contains("checkNotNullParameter"));
+        match last_guard {
+            Some(at) => instructions[..=at].to_vec(),
+            None => Vec::new(),
+        }
+    };
+    for member in ["void serialize(", "deserialize("] {
+        let want = prologue(&built.reference, member);
+        assert!(
+            want.iter()
+                .any(|line| line.contains("checkNotNullParameter")),
+            "the reference must guard {member} — the rule under test: {want:?}"
+        );
+        assert_eq!(
+            prologue(&built.krusty, member),
+            want,
+            "{member} entry guards"
+        );
+    }
+}

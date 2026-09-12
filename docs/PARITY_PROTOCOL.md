@@ -1517,3 +1517,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/serialization_companion_byte_parity_e2e.rs::an_enum_entrys_serial_name_reaches_its_serializer`
   plus a runtime assertion on the descriptor's element names, which is the part byte comparison
   cannot make.
+- **A generated `$serializer` guards its parameters (fix).** Its members are public API — a Java
+  caller can pass `null` — so kotlinc opens `serialize`/`deserialize` with
+  `Intrinsics.checkNotNullParameter(encoder, "encoder")` exactly as it does a user-written function.
+  krusty emitted the body with no prologue, so every such member differed from instruction 0 on: the
+  largest single reason the `$serializer` family carried `CODE_INSNS`.
+  The guard carries the PARAMETER NAME, so this also fixes the names kotlinc gives those parameters
+  (`encoder`/`value`/`decoder`) — krusty had positional placeholders.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_generated_serializer_guards_its_parameters`,
+  which compares the prologue up to the last guard — bounded to the member's own code, since the
+  erased BRIDGE below it guards its parameters too and an unbounded search finds that one instead.
