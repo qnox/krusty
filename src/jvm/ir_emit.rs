@@ -5920,17 +5920,6 @@ fn emit_class(
             &metadata.enclosing_method,
             &metadata.enclosing_descriptor,
         );
-        cw.set_debug_metadata(
-            opts.source_file.as_deref().unwrap_or(""),
-            &metadata.l,
-            &metadata.nl,
-            &metadata.i,
-            &metadata.s,
-            &metadata.n,
-            &metadata.m,
-            &metadata.c,
-            metadata.v,
-        );
     }
     register_sealed_subtypes(
         &mut cw,
@@ -6109,7 +6098,20 @@ fn emit_class(
         // therefore visited eagerly and neither receives property nullability annotations here.
         // Ordinary declared properties use the later field-table visit: their methods establish the
         // preceding pool window and their backing fields carry Kotlin's nullability annotation.
-        if c.is_data || is_continuation {
+        if is_continuation && matches!(name.as_str(), "result" | "this$0" | "label") {
+            // kotlinc interns a continuation's SPILL field names with the field visit, but `result`,
+            // `this$0` and `label` first appear where they are USED — `this$0` in the constructor's
+            // `putfield`, the other two in `invokeSuspend`. Declaring them eagerly interned all three
+            // ahead of the constructor and shifted every later pool entry.
+            cw.add_field_late_sig(
+                acc,
+                &physical_name,
+                &field_desc,
+                field_sig.as_deref(),
+                None,
+                None,
+            );
+        } else if c.is_data || is_continuation {
             cw.add_field_sig(acc, &physical_name, &field_desc, field_sig.as_deref());
         } else {
             // Through the SHARED classification, so this field's annotation cannot disagree with the
@@ -6140,6 +6142,23 @@ fn emit_class(
                 cw.set_last_late_field_annotations(&annotations.annotations);
             }
         }
+    }
+    // `@DebugMetadata` interns AFTER the field table: its `s` array names the very spill fields just
+    // declared (`L$0`, `I$0`, …), and kotlinc's pool carries each of those strings once, first visited
+    // with the FIELD. Building the annotation earlier interned the subset the array happens to mention
+    // ahead of the table and left the rest to the fields, reordering the whole pool.
+    if let Some(metadata) = continuation_metadata {
+        cw.set_debug_metadata(
+            opts.source_file.as_deref().unwrap_or(""),
+            &metadata.l,
+            &metadata.nl,
+            &metadata.i,
+            &metadata.s,
+            &metadata.n,
+            &metadata.m,
+            &metadata.c,
+            metadata.v,
+        );
     }
     // A `companion object`'s `const val`s live on THIS (outer) class as `public static final` +
     // `ConstantValue` fields (kotlinc's layout); they have no `<clinit>` store (the JVM initializes them).
