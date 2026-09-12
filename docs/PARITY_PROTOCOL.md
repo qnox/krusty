@@ -1732,3 +1732,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   primary-constructor/default-object fallback. Field locals start at JVM zero, so a default expression
   is evaluated only by the constructor when its bit is absent.
   `tests/serialization_companion_byte_parity_e2e.rs::deserialize_passes_every_seen_mask_to_the_exact_constructor`.
+- **A `@Serializable` class's synthetic deserialization constructor emits LAST (fix).** The plugin
+  generates `<init>(int seen, …, SerializationConstructorMarker)` as a secondary constructor, and the
+  emitter wrote every secondary constructor immediately after the primary one. kotlinc instead orders
+  it with the generated members: after the declared accessors, `copy`/`toString`/`hashCode`/`equals`
+  and `write$Self$main`, immediately before `<clinit>`.
+  The order is not cosmetic — `add_method` interns the member's name and descriptor as it goes, so
+  emitting the constructor early also shifted the constant pool of every `@Serializable` class, on
+  top of the `METHOD_ORDER` difference itself.
+  Only the constructor identity recorded by the serialization producer moves; `ACC_SYNTHETIC` is a
+  representation flag and does not identify an origin. Every other secondary constructor remains in
+  the ordinary emission phase. The shared constructor emitter lives in its own responsibility module
+  rather than extending the `ir_emit` monolith.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_serializable_class_emits_its_deserialization_constructor_last`.
