@@ -32,6 +32,7 @@ mod callable_reference_selection;
 mod capture_analysis;
 mod collection_literals;
 mod compound_assignments;
+mod conditional_branch;
 mod constant_evaluation;
 mod context_capture;
 mod context_sensitive_resolution;
@@ -76069,9 +76070,8 @@ impl<'a> Checker<'a> {
             .then_some(signature)
     }
 
-    /// A generic result that a conditional sibling may constrain. Return-only formals remain
-    /// eligible when an enclosing expectation supplied their provisional binding.
     fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
+        let expression = conditional_branch::branch_value_expression(self.file, expression);
         if let Some(signature) = self.unbound_call_result_signature(expression) {
             return Some(signature);
         }

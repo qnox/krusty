@@ -1987,3 +1987,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/classpath_jdk_static_e2e.rs::incomparable_literal_overloads_are_ambiguous` was asserting the
   krusty-only outcome and is updated with the measured reference wording.
   `tests/sam_lambda_expected_result_e2e.rs::a_reactive_chain_binds_its_element_type_through_to_the_fallback`.
+- **A branch written as a block rebinds like an expression branch (fix).** `if (c) A() else B()` lets
+  an under-constrained branch take its type arguments from its sibling — that is how
+  `if (found) Mono.just(auth) else Mono.empty()` gives `Mono.empty()` its element type. The rebinding
+  asked the BRANCH expression for the generic signature to re-solve, and a block is not a call, so
+  putting either branch in braces silently disabled it: the branch stayed at its unconstrained result
+  and the join collapsed to `Mono<Any>`.
+  Braces around a branch are not a semantic choice, and a multi-statement branch has no other
+  spelling, so this made an ordinary reactive body unrepresentable. The signature lookup now walks a
+  block to the trailing expression that actually produces the branch's value; a block with no
+  trailing expression still produces `Unit` and is still rejected against an incompatible sibling.
+  `tests/conditional_block_branch_rebind_e2e.rs::a_multi_statement_branch_rebinds_against_its_sibling`.
