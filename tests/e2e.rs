@@ -232,6 +232,8 @@ mod classpath_is_smartcast_e2e;
 mod classpath_jdk_static_e2e;
 #[path = "classpath_jvmstatic_object_property_e2e.rs"]
 mod classpath_jvmstatic_object_property_e2e;
+#[path = "classpath_member_lambda_unit_e2e.rs"]
+mod classpath_member_lambda_unit_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
 #[path = "classpath_member_mutable_collection_e2e.rs"]
