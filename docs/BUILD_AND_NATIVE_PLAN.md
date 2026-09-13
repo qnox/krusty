@@ -7,16 +7,14 @@ ships value on its own.
 The two bets:
 
 1. **A Go-like build layer** — one binary that reads a module graph, hashes inputs, skips work whose
-   ABI inputs are unchanged, and schedules the rest across cores. Targets the JVM first, where krusty
-   already emits correct artifacts.
+   ABI inputs are unchanged, and schedules the rest. Targets the JVM first, where krusty already
+   emits correct artifacts.
 2. **A Kotlin/Native-shaped target** — klib in, native code out, under the Kotlin Multiplatform
-   contract (no Java interop). Justified only if it is *fast*; Kotlin/Native is LLVM-based and
-   whole-program, and that is the gap.
+   contract (no Java interop).
 
-They share a spine. Phases 1–4 below are prerequisites for both; only phases 5–6 are native-only.
+They share a spine. Phases 0–5 below are prerequisites for both; only phases 6–8 are native-only.
 
-References below cite **files and symbols** rather than line numbers, which rot quickly on this
-repository.
+References cite **files and symbols** rather than line numbers, which rot quickly here.
 
 ---
 
@@ -41,44 +39,51 @@ ABI hashes, a parallel DAG, and a compiler that starts instantly. krusty already
 of those — a Rust binary with no VM startup, no daemon warmup, no configuration phase. The rest is
 missing, and it is conventional engineering.
 
-**Kotlin/Native is slow for structural reasons, not incidental ones.** It runs LLVM with
-optimization passes, and it compiles whole-program: every dependency klib is deserialized and
-lowered again at each link of the final binary, with no per-module native artifact cache worth the
-name. That is the anti-Go model. A target that used a fast code generator and cached per-module
-native artifacts would occupy an opening nobody in the Kotlin ecosystem occupies today.
+**Compact export data matters more than the cache.** Classpath probing is currently the dominant
+compile cost: `docs/LAZY_CLASSPATH_RESOLUTION.md` measures `collect_signatures_with_cp` at **~65% of
+compile**, memoized only per process (`src/lru.rs`, `src/jvm/classpath.rs`). Go's per-package export
+data is what makes a process-per-unit build viable without a daemon. Replacing classpath probing
+with purpose-built per-module export data is therefore the load-bearing win; compilation avoidance
+is the second one.
+
+**Kotlin/Native's release path is whole-program.** `-opt` binaries re-lower dependency klibs through
+LLVM with full optimization at every link. Its klib compiler caches (since ~1.6/1.7,
+`-Xauto-cache-from`, on by default for debug binaries) address the debug loop but not the release
+one, and the first build of the stdlib and platform-library caches is itself expensive. The opening
+is per-module cached native artifacts, not a faster instruction selector — LLVM-versus-Cranelift is
+second-order, and the thesis above says why.
 
 **Multiplatform removes the objection that killed native before.** Java interop is out of contract
 for a native target — Kotlin/Native never had it; its interop is C and Objective-C/Swift. So a
 native target does not forfeit krusty's identity. It adopts the same target contract JetBrains
 already defined: klibs, `expect`/`actual`, the common stdlib.
 
-**klib is a better library format than the classpath, not a worse one.** The compiler's deepest JVM
-coupling has been that the semantic model of the stdlib is read out of `.class` files, and that
-`inline fun` is realized by splicing compiled bytecode (`src/jvm/inline.rs`, which relocates
-constant-pool indices between class files). A klib carries serialized Kotlin IR *including inline
-function bodies*, so the native path replaces bytecode splicing with IR-level inlining — the
-architecturally cleaner design. The hardest-looking blocker dissolves into a deserializer, and the
-codebase has already started moving this way on its own (see `InlineBodyPlan`, below).
+**klib is a better library format than the classpath.** The compiler's deepest JVM coupling is that
+the semantic model of the stdlib is read out of `.class` files, and that `inline fun` is realized by
+splicing compiled bytecode — `src/jvm/inline.rs` relocates constant-pool indices between class
+files, and `src/jvm/ir_emit.rs` calls `splice_unified` on the production streaming path. A klib
+carries serialized Kotlin IR including inline function bodies, so a native path would replace
+splicing with IR-level inlining. That is the architecturally cleaner design, but it does not exist
+anywhere in the tree today (see [What does not exist](#what-does-not-exist)).
 
 ---
 
 ## Scope and non-goals
 
-**In scope.** A `krusty build` driver with a module graph, ABI hashing, and a content-addressed
-output cache. klib ingestion and emission. A native code generator and the minimum runtime to run
-the `codegen/box` corpus on Linux x86-64 and arm64.
+**In scope.** Deterministic emission; a total-output contract; a `krusty build` driver with a module
+graph, ABI export data, and a content-addressed cache. Then klib ingestion and emission, and a
+native code generator with the minimum runtime to run the `codegen/box` corpus on Linux
+x86-64/arm64.
 
 **Not in scope, deliberately.**
 
 - *Java interop on the native target.* Out of contract. The JVM target keeps it; the native target
   never has it. `src/java_source.rs` and `src/jvm/java_stub.rs` stay JVM-only.
 - *Byte-identical native binaries.* The JVM target's bar is byte parity with `kotlinc`. No such bar
-  exists or should exist for native output; the oracle is behavioral (see
-  [Correctness strategy](#correctness-strategy)). This is a genuine loosening of constraint.
+  exists or should exist for native output; the oracle is behavioral.
 - *Replacing Gradle.* The build layer reads existing Gradle/Maven/BSP/JPS models. A native manifest
   format is a later option, never an adoption prerequisite.
-- *Objective-C/Swift export and cinterop.* Last, if ever. The build-speed thesis is provable on
-  Linux first.
+- *Objective-C/Swift export and cinterop.* Last, if ever.
 - *A second general-purpose IR below the current one for the JVM target.* The native lowering gets
   its own low IR; the JVM path is not rerouted through it.
 
@@ -86,154 +91,186 @@ the `codegen/box` corpus on Linux x86-64 and arm64.
 
 ## What already exists
 
-The seams are considerably further along than the roadmap suggests — and the recent FIR streaming
-work moved them further still.
-
-### The target contract is a named trait tower
+### A partial target contract
 
 ```
 SymbolSource            src/symbol_source.rs     where declarations come from
   └─ SemanticPlatform   src/libraries.rs         library semantics in Kotlin terms
-TargetRuntime           src/runtime.rs           platform ABI services (~25 default-None methods)
-  └─ CompilerPlatform   src/runtime.rs           SemanticPlatform + TargetRuntime, blanket impl
+TargetRuntime           src/runtime.rs           platform ABI services (20 methods, 16 return None)
 Backend                 src/backend.rs           lower_file / lower_ir_file / finalize → Vec<Artifact>
 ```
 
-A target is a `CompilerPlatform` plus a `Backend`. `src/jvm/jvm_libraries.rs` (~9,000 lines) is the
-JVM implementation of the first; `src/jvm/backend.rs` is the second. Common lowering is generic over
-`TargetRuntime`, so it asks the platform for descriptors, range constructors, boxing shapes, and
-runtime helpers rather than spelling them. **A klib platform slots in beside the JVM one without
-inventing a new abstraction** — `CompilerPlatform` has a blanket impl, so implementing the two
-halves is sufficient.
+`src/jvm/jvm_libraries.rs` (~9,000 lines) implements `SymbolSource`, `SemanticPlatform` and
+`TargetRuntime`; `src/jvm/backend.rs` implements `Backend`.
 
-### The backend boundary is now a streaming IR boundary
+**`CompilerPlatform` is not the contract.** `src/runtime.rs` declares
+`pub trait CompilerPlatform: SemanticPlatform + TargetRuntime {}` with a blanket impl, but those two
+lines are its *only* occurrences in the repository — nothing is bounded on it, nothing stores one.
+The real seam takes the halves separately: the frontend takes `Box<dyn SemanticPlatform>`
+(`src/frontend.rs`), and the backend constructs its own runtime (`JvmBackend::new(cp)`).
+`crates/krusty-lsp/src/worker.rs` records the friction directly — analysis holds a
+`Box<dyn SemanticPlatform>` *"which cannot be re-borrowed as a `TargetRuntime`."* A new target
+implements the two halves; unifying them is unfinished work, not an available abstraction.
 
-`Backend` carries a second entry point, `lower_ir_file(CheckedIrFile)`, and the main driver in
-`src/compiler.rs` uses it. Its contract is strict, in the code's own words: *"No parsed source or
-AST-keyed semantic table crosses this boundary; target realization consumes only checked IR and
-compact stable module facts."*
+**`TargetRuntime` is genuinely target-neutral where it reaches.** `PlatformCtor`, `PlatformAccessor`,
+`RangeConstruction`, `RuntimeOp` and `mutable_local_ref_type` keep platform names out of their
+callers. But see the next point for how far that reach actually goes.
 
-The accompanying `src/backend/module_facts.rs` defines `BackendClassifierSource` — *"the only
-semantic query a representation backend may make after common lowering"* — returning frozen
-`BackendClassifierFact` records guaranteed free of `Ty::Pending`, `Ty::Error`, source type
-references, and source-body payloads.
+### The backend boundary is a streaming IR boundary
 
-This matters more than anything else in this section. **A backend now consumes (checked IR + frozen,
-finalized classifier facts) and nothing else.** That is a serializable, target-neutral input — which
-is precisely what both a cache key and a native backend need. The older `lower_file(CheckedFile)`
-path still exists alongside it; the migration is in flight.
+`Backend` carries `lower_ir_file(CheckedIrFile)`, and the shipped CLI takes that path
+(`crates/krusty-cli/src/main.rs` → `compiler::emit_analyzed` → `lower_ir_file`). Its contract reads:
+*"No parsed source or AST-keyed semantic table crosses this boundary; target realization consumes
+only checked IR and compact stable module facts."* `src/backend/module_facts.rs` adds
+`BackendClassifierSource` — *"the only semantic query a representation backend may make after common
+lowering"* — returning frozen `BackendClassifierFact` records free of `Ty::Pending` and `Ty::Error`.
 
-### The frontend already separates headers from bodies
+The legacy `lower_file(CheckedFile)` path has **no production caller**: `compiler::emit_checked` is
+reached only from tests, `src/dump.rs`, and `src/bin/*`. This is a completed migration with a
+vestigial second entry point, not a migration in flight.
 
-`src/fir/` (~29,000 lines) is documented as a *"streaming frontend ownership model"* whose module
-tree *"follows frontend lifetime boundaries: stable header inventory, temporary signature solving,
-checked body ownership."* It contains `header.rs`, `signature.rs` (~3,600 lines), and
-`signature_extract.rs` (~2,900 lines); `src/fir_lower/` adds ~22,000 more.
+**The boundary is narrow but not serializable.** `BackendClassifierSource` is a lazy query trait, and
+its production impl wraps a live `&dyn SymbolSource` — the classpath. `JvmBackend` separately holds
+`Rc<Classpath>` and reads it during `lower_ir_file` (range, function-reference and property-reference
+realization) and again at emit time for inline splicing. `IrFile` also carries `Ty`/`TypeName`
+interned as process-lifetime `Box::leak`ed values. So the declared input is narrow and stable; the
+*actual* input includes the classpath, and nothing here is serializable today. It is a good
+foundation for a serializable module input, not one already built.
 
-**A stable header inventory separated from body checking is the ABI/Impl split, at the frontend
-level, already built.** Phase 2 below is largely a matter of serializing and hashing what this layer
-already computes, rather than deriving it from scratch.
+### The frontend separates a header inventory from body checking
 
-### Inline bodies are already modeled semantically
+`src/fir/` (~64,000 lines; ~39,000 excluding tests) is a *"streaming frontend ownership model"* whose
+module tree *"follows frontend lifetime boundaries: stable header inventory, temporary signature
+solving, checked body ownership, and exhaustive parser coverage."*
 
-`InlineBodyPlan` in `src/libraries.rs` describes stdlib inline functions as structured plans —
-`InvokeLambda { lambda_parameter, argument_parameters, return_parameter }`, `CollectionTransform
-{ lambda_parameter, flatten, .. }`, `SuspendBeforeLambdaFinally { .. }` — with the note that the
-provider owns the exact declarations and *"consumers see only their stable identities after
-selection."*
+This is the right shape for an ABI artifact but is **not** one yet. `src/fir/header.rs` states its
+own scope: it contains *"only data structures"*, and *"signature evaluation deliberately does not
+live here."* `StreamedHeaderModule` holds packed, *unresolved* type syntax and module-local ids whose
+`signature_origins` are destroyed on consumption. An ABI artifact needs resolved signature types,
+which come from the layer `src/fir/mod.rs` calls *"temporary signature solving."*
 
-This is a semantic model of inlining, not a bytecode-level one. The project is already migrating off
-pure constant-pool splicing, which is the single most native-hostile thing in the tree.
+### `expect`/`actual` matching exists
 
-### The seam is test-enforced, not aspirational
+`src/fir/header.rs::actualized_declaration_pairs` matches `expect` to `actual` over compact headers:
+name/kind/arity keys, type-flag matching, recursive type-shape matching with type-parameter renaming
+and actualized-typealias awareness. What is missing is matching across a *source-set hierarchy*.
 
-`src/architecture.rs` (~800 lines of `#[cfg(test)]` guards) asserts module-dependency allowlists:
-`src/backend.rs` may use only `diag`, `fir`, `frontend`, `ir`; `src/js/emit.rs` only `ir`,
-`kt_string`, `types`; `src/ir_lower.rs` carries an explicit allowlist and is forbidden from
-containing `fn resolve_` (`ir_lower_has_no_symbol_selection_entry_points`). **`src/ir_lower.rs` does
-not import `crate::jvm` at all.**
+### Project model, module graph, and caching precedent
 
-### A second backend already proves the contract
+`crates/krusty-lsp/src/project/` (~10,200 lines, 17 files) derives a `ProjectModel` from Gradle (an
+injected init script emitting JSON), Maven, BSP and JPS. `Module` carries `depends_on`, `outputs`,
+`friend_paths`, `source_roots`, `classpath`, `jvm_target`, `kotlinc_args`. KMP compilations are
+extracted (`project/gradle.rs::kmp_module_of`).
 
-`src/js/` (~1,300 lines) implements `Backend` and passes `EmptySymbolSource` as its platform — every
-`TargetRuntime` method answering `None`. It covers roughly half the `IrExpr` variants and runs under
-Node in `tests/js_backend_e2e.rs` and `tests/js_backend_coverage_e2e.rs`. Small, but existence proof
-that a non-JVM backend compiles and runs through this contract.
-
-### The project model, module graph, and caching precedent
-
-`crates/krusty-lsp/src/project/` (~10,200 lines across 17 files) derives a `ProjectModel` of
-`Module`s from Gradle (an injected init script emitting JSON), Maven, BSP, and JPS. `Module`
-(`project/model.rs`) already carries `depends_on: Vec<ModuleId>`, `outputs`, `friend_paths`,
-`source_roots`, `classpath`, `jvm_target`, `kotlinc_args` — the exact shape a scheduler needs. KMP
-compilations are already extracted (`project/gradle.rs`, `kmp_module_of`).
-
-Supporting precedent: `deps_cache.rs` (349 lines) is a versioned, globally locked, age- and
-size-collected **content-addressed disk cache**; `project/fingerprint.rs` with `project/sync.rs`
-content-hashes build files (wrapper, version catalogs, locks, `buildSrc`, `build-logic`) and skips
-the build-tool probe when the fingerprint is unchanged; `src/lru.rs` with `src/jvm/classpath.rs`
-memoizes classpath lookups with hit/miss counters under `KRUSTY_TRACE=cache`.
+`crates/krusty-lsp/src/deps_cache.rs` (349 lines) is a versioned, globally locked, age- and
+size-collected content-addressed cache — of *browsable dependency sources* for LSP navigation, not
+build artifacts. It is a design precedent to copy, not a component to reuse.
+`project/fingerprint.rs` and `project/sync.rs` content-hash build files and skip the build-tool probe
+when unchanged.
 
 ### Process orchestration
 
 `crates/krusty-lsp/src/worker.rs` (~2,200 lines) is a restartable child-process worker with framed
-JSON, a bounded launch frame, an analysis timeout, and `DEFAULT_ANALYSES_PER_WORKER = 64` to bound
-interner lifetime. `crates/krusty-cli/src/worker.rs` (~1,200 lines) speaks the Bazel
-persistent-worker protocol with an explicit `Refusal` enum so it fails loudly rather than emitting a
-wrong jar.
+JSON and `DEFAULT_ANALYSES_PER_WORKER = 64`, bounding interner lifetime.
+`crates/krusty-cli/src/worker.rs` (~1,200 lines) speaks the Bazel persistent-worker protocol and
+keeps a decoded classpath warm across requests.
 
-### Multiplatform groundwork
+### A second backend proves the `Backend` trait
 
-The parser already accepts `expect` (`is_expect` on declarations in `src/ast.rs`, set in
-`src/parser.rs`). The library set is already phrased platform-neutrally in the checker —
-`src/resolve.rs` describes it as *"a JVM classpath or a klib"* and notes this eliminates *"the need
-for any hardcoded type lists."* `docs/IMPLEMENTATION_PLAN.md` anticipates *"multiplatform: JVM
-bytecode now, Kotlin/JS via klib later."*
+`src/js/` (~1,300 lines) implements `Backend` and handles 26 of 54 `IrExpr` variants, running under
+Node in two e2e test files. It is generic over `TargetRuntime`, with `EmptySymbolSource` supplied by
+test harnesses; there is no production JS driver.
 
 ---
 
 ## What does not exist
 
-Stated plainly, because the sequencing depends on it.
+### Emission is not deterministic — and this blocks everything
 
-**Build layer.**
+Two independent measurements, in two documents:
 
-- No ABI extraction and no compilation avoidance. `crates/krusty-cli/src/worker.rs` says it outright:
-  krusty keeps no incremental state, and emits no reduced ABI jar, so *"a consumer that compiles
-  against this one therefore rebuilds on any change, not only on ABI changes."*
-- No output cache keyed on inputs, no module-DAG scheduler, no build daemon.
-- The compilation unit is the whole module: the driver checks a source set, then streams files to
-  the backend. There is no unit smaller than a module. For a Go-like model that is acceptable — Go's
-  unit is the package — but it interacts badly with the next point.
-- Frontend resolution is superlinear. `docs/LSP_INDEXING_PROFILE.md`: 1,000 files → 6.94s / 465 MiB;
-  2,000 files → 22.47s / 1,270 MiB (2× files ⇒ 3.35× time, 2.73× memory), dominated by return
-  pre-inference and signature collection, not parsing (3.3%). **Large single modules are the pain
-  point that caching cannot hide.** (The FIR streaming work is expected to move these numbers;
-  they should be re-measured before phase 4 sets any target.)
-- All project-model code lives in the LSP crate, and `src/architecture.rs` forbids the compiler from
-  depending on either process adapter. It must be lifted into a shared layer.
+- `docs/RESOLUTION_ENGINE_PLAN.md`: *"the BASE binary produces four distinct md5s for
+  `unqualifiedSuperKt$box$1.class` across six runs of the same input. Emission order is keyed by hash
+  iteration order over the class signature's member maps, which is a separate pre-existing defect."*
+- `docs/SPEC.md`: *"A 47th differs between any two runs of the SAME binary — a pre-existing
+  non-deterministic emission, not a guard."*
 
-**Native target.**
+**A content-addressed cache over a nondeterministic producer inverts.** An unchanged module's ABI
+bytes change on rebuild, so its hash changes, so every dependent rebuilds. Worse, caching *hides* the
+defect: a nondeterminism bug that would surface as a byte diff instead surfaces as a cache hit. And
+Phase 4's natural oracle — output equivalence against a clean rebuild — is unwritable while a clean
+build does not equal a second clean build. Hence Phase 0.
 
-- The common IR still carries JVM shapes: verbatim descriptors and dispatch kinds in `Callee`, the
-  `$default` mask/marker ABI, `INSTANCE` singletons, `Ref$XxxRef` holders, a `java.lang.Class` ldc.
-  `docs/COMPILER_REVIEW.md` §4, *"IR is partly backend-neutral and partly JVM bytecode IR"*, names
-  this the top structural debt and proposes the common-IR / JVM-IR split.
-- No klib reader or writer. The stdlib is mandatorily a jar (`stdlib_jar()` in `src/toolchain.rs`).
-- No `expect`/`actual` *resolution* across a source-set hierarchy. Parsing exists; matching does not.
-- No native code generator, and no runtime of any kind: no GC, object layout, vtables, exception
-  mechanism, threading model, or coroutine scheduler. `src/jvm/suspend.rs` (~8,000 lines) shows the
-  CPS transform is understood at IR level, but the scheduler beneath it is new.
-- `docs/ARCHITECTURE.md` and `src/ir.rs` explicitly scope LLVM out of the *current* IR — *"LLVM is
-  the right tool only for a future native backend (as in Kotlin/Native)."* This proposal agrees with
-  that reading: the native path needs a second, lower IR beneath the current one, not a rerouting
-  of it.
+### The compiler silently emits partial output
 
-**Language coverage, which gates everything.** `docs/PROJECT_PARITY.md`: of 931 intellij-community
-modules scanned, 4 check with zero errors. The build layer can ship far ahead of this (with
-per-module fallback to `kotlinc`, mirroring the two modes of `bazel/defs.bzl`), but "blazing fast
-builds of arbitrary real projects" ultimately gates on the existing language-surface grind, not on
-anything in this document.
+`src/compiler.rs` skips a source that hits an unsupported shape (`if source_rejected { continue; }`)
+with no error diagnostic; the CLI then reports success and exits 0. For a conformance corpus this is
+the correct `docs/PARITY_PROTOCOL.md` posture — a skip means "this case does not count." In a build
+system a skip means a jar is missing classes, and the failure surfaces at link or run time in a
+different module.
+
+Caching would make that permanent, storing a truncated artifact under a key asserting it is correct.
+The Bazel worker's `Refusal` enum does not cover this: its three variants (`JavaSources`,
+`Unsupported`, `Malformed`) are all decided from the work request's flags *before* compilation, while
+the refusals that matter are per-file and discovered mid-lowering.
+
+### Build layer
+
+- **No ABI extraction.** The Bazel worker's `--abi-out` is written, but as a byte copy of the full
+  jar — the source comments say so directly: *"krusty has nothing distinct to put in them"*, and a
+  consumer therefore *"rebuilds on any change, not only on ABI changes."* No reduction exists.
+- No output cache, no module-DAG scheduler, no build daemon, no `krusty build`, no `krusty-build`
+  crate.
+- The compilation unit is the whole module; there is no smaller unit.
+- **The compiler is not `Send`.** Compiler state deliberately holds `Rc`/`RefCell` (hence the
+  `stacker` dependency), and interning leaks — which is why the LSP restarts its worker every 64
+  analyses. Parallelism must be process-per-module or a restarted worker pool, not threads.
+- Frontend cost is superlinear, and the current figures are worse than the widely-quoted ones.
+  `docs/LSP_INDEXING_PROFILE.md` records 1,000 files → 6.94s/465 MiB and 2,000 → 22.47s/1,270 MiB on
+  its profiling base, but then re-measures on `acee6cd0` at **1,000 → 12.52s/260 MiB and 2,000 →
+  50.03s/415 MiB** (4.0× time, 1.6× memory), and warns that even those must be re-measured against
+  present-day `master`. Caching cannot hide single-module latency.
+- Project-model code lives in the LSP crate and `src/architecture.rs` forbids the compiler depending
+  on either process adapter.
+
+### Native target
+
+- **The common IR commits to JVM semantics, not merely JVM spellings.** `IrExpr::StaticInstance`
+  is constructed with the literal `"INSTANCE"` at ~7 sites in `src/ir_lower.rs`, asserting eager
+  static-field singleton initialization (Kotlin/Native initializes objects lazily with thread-state
+  checks). `Callee::LocalDefault`/`ClassStaticDefault` encode the `(…, int mask, Object marker)`
+  `$default` convention; `Callee::Virtual`/`Special` carry `interface: bool` for JVM dispatch
+  selection; `IrExpr::ClassConst` is defined as a `java.lang.Class`. Common lowering also *parses*
+  descriptors via `descriptor_method_layout` to locate continuation slots and to decline a file on
+  reference/primitive slot mismatch. `docs/COMPILER_REVIEW.md` §4 states it plainly:
+  *"`ir_lower.rs` builds descriptors and JVM owners before the backend gets control."*
+- **`TargetRuntime` does not reach the production lowering path.** `src/fir_lower/` — the lowering
+  the shipped driver uses — contains **zero** references to `TargetRuntime` or `crate::runtime`, and
+  `src/architecture.rs` does not permit it that dependency. `TargetRuntime` is threaded only through
+  the legacy `src/ir_lower.rs` (as `&dyn`, not generically). A native target needs that abstraction
+  extended to `fir_lower`, which does not exist yet.
+- **`inline` is still bytecode splicing, including its "semantic" model.** `InlineBodyPlan`
+  (`src/libraries.rs`) has exactly three variants, and they are produced by *disassembling the
+  stdlib's compiled body*: `jvm_libraries.rs::inline_body_plan_uncached` reads `<name>$$forInline`
+  or `<name>` `method_code` from the jar and calls `crate::jvm::inline::disassemble`. Coverage is
+  narrow and partly hardcoded — `CollectionTransform` is attached to two intrinsics (`Map`,
+  `FlatMap`) over a literal `java/util/ArrayList` table; `InvokeLambda` matches only bodies with
+  exactly one function invoke. General `inline fun` expansion remains constant-pool splicing on the
+  production path. This is a JVM-provider-side decode of bytecode into a neutral plan — evidence that
+  a neutral description is *possible*, not evidence of a migration under way.
+- No klib reader or writer; no `expect`/`actual` resolution across a source-set hierarchy; no native
+  codegen; no runtime of any kind (no GC, object layout, dispatch, exceptions, threading, or
+  coroutine scheduler). `src/jvm/suspend.rs` (~8,000 lines) is a JVM-only IR→IR CPS transform.
+- `docs/ARCHITECTURE.md` scopes LLVM out of the current IR: *"LLVM is the right tool only for a
+  future native backend (as in Kotlin/Native)."* This proposal agrees — the native path needs a
+  second, lower IR beneath the current one.
+
+### Language coverage gates the end-user claim
+
+`docs/PROJECT_PARITY.md`: of 931 intellij-community modules scanned, **4** check with zero errors,
+916 report errors, 10 crash (SIGBUS), 1 times out. A build layer can ship ahead of this, but a
+whole-project benchmark today measures an orchestrator around `kotlinc`, and the scheduler needs
+crash isolation with a defined per-module outcome.
 
 ---
 
@@ -241,191 +278,291 @@ anything in this document.
 
 ### Artifact model
 
-Three artifact kinds per module, each independently cacheable:
-
 | Artifact | Contents | Consumers |
 |---|---|---|
-| **ABI** | Declaration signatures only; no bodies except `inline` ones | Dependents' frontends; the cache key of every dependent |
-| **Impl** | Target code — `.class` files today, native objects later | Link/package step only |
-| **Metadata** | `@kotlin.Metadata` + `.kotlin_module` (JVM), klib metadata (native) | Downstream tooling, the LSP |
+| **ABI** | Class headers, `@kotlin.Metadata`, constant values, non-`SOURCE` annotations, sealed-subclass lists, enum entry order, contracts, **compiled bodies of `inline` functions** plus the bridges and synthetics they reach, and `.kotlin_module` | Dependents' frontends; every dependent's cache key |
+| **Impl** | Everything else — non-inline method bodies, suspend state machines | Link/package step only |
 
-The ABI/Impl split is the whole game. A body-only edit changes Impl, leaves ABI byte-identical, and
-therefore rebuilds no dependents. Two existing layers supply most of the content: `src/fir/header.rs`
-and `src/fir/signature_extract.rs` compute the stable header inventory, and `src/metadata/`
-(~4,600 lines) already writes a protobuf declaration model.
+On the JVM, `@kotlin.Metadata` *is* the ABI — it is what `src/jvm/jvm_libraries.rs` reads to check
+against a dependency — so it belongs in the ABI artifact, not beside it.
+
+**Four things put bodies in the ABI**, which the naive "signatures only" reading gets wrong and each
+of which is a silent-miscompile risk:
+
+1. **`inline` bodies.** On the JVM these are *compiled bytecode* read from the dependency's class
+   files. So the ABI artifact is a reduced **class-file set**, not a serialized FIR record set, and
+   producing it requires the backend — not the frontend alone.
+2. **`const val` initializer values.** Folded at the consumer: `src/jvm/classreader.rs` reads a
+   `static final` field's `ConstantValue` attribute, `src/jvm/jvm_libraries.rs` turns it into a
+   `LibraryConst`, and `src/fir/body_check.rs` publishes it as a `FirExprKind::Constant` on the read.
+   Changing `30` to `60` with no signature change must therefore rebuild dependents. (krusty declines
+   one narrow case rather than modelling it — an `object` whose `init` block has side effects, where
+   a `const val` read must not trigger initialization.)
+3. **Contracts.** `src/contracts.rs` flows a `contract { … }` block into `Function.contract` and into
+   callers' smart-cast analysis — a construct that lives syntactically inside a body.
+4. **Default argument expressions** for `inline` functions, annotation classes, and `@JvmOverloads`.
+
+Also in the ABI because they change the physical shape: `@JvmName`, `@JvmStatic`, `@JvmField`,
+`@JvmOverloads`, `@JvmInline`, `@PublishedApi`, `@Deprecated(HIDDEN)`, `@InlineOnly`, `@Throws`;
+value-class carrier and mangling; `suspend`-ness; `inline`/`reified`; data-class `componentN` order;
+`@JvmDefault` mode. Excluded: `AnnotationRetention.SOURCE` annotations, or every `@Suppress` edit
+cascades.
+
+**`internal` needs two hashes.** Friendship is path-set membership against classpath entries. Pruning
+`internal` declarations breaks friend modules (every `test` source set); keeping them invalidates
+non-friend dependents on every `internal` edit. Emit `abi_hash_public` and `abi_hash_friend`, and let
+each edge select one.
+
+**Suspend is where the split is cleanest:** the `Continuation` parameter and erased return are ABI;
+the state machine built in `src/jvm/suspend.rs` is Impl.
 
 ### Cache key
 
+A wrong cache hit ships a wrong binary with no diagnostic — the highest-severity failure mode in this
+design. Every input below is in the key by default; an input leaves the key only with a test
+demonstrating output invariance under its change.
+
 ```
-key(module) = H( compiler_version_and_flags
-               ∥ sorted_source_content_hashes
-               ∥ sorted ABI_hash(d) for d in direct_dependencies
+key(module) = H( krusty_version_and_build_id
+               ∥ canonical_compiler_flags            # incl. -module-name, -jvm-target, -Xjvm-default,
+                                                     #  friend paths, assertions, opt-ins, language version
+               ∥ output_affecting_environment        # explicit allowlist: JAVA_HOME identity,
+                                                     #  KRUSTY_NO_CLASS_METADATA, KRUSTY_LANGUAGE_VERSION
+               ∥ jdk_identity                        # java.version + content hash of lib/modules or ct.sym
+               ∥ ordered [(source_relpath, content_hash)]
+               ∥ ordered [(classpath_entry_path, content_hash)]
+               ∥ ordered [(friend_path, content_hash)]
+               ∥ ordered ABI_hash(d) for d in direct_dependencies
+               ∥ plugin_set                          # each plugin jar's content hash + its options
                ∥ target_triple_or_jvm_target )
 ```
 
-Dependency *ABI* hashes, never dependency source hashes — that is what makes avoidance transitive,
-and what `crates/krusty-cli/src/worker.rs` records as missing today. Cache layout and eviction
-follow `deps_cache.rs`: versioned root, global lock, age and size collection.
+`ordered`, not `sorted`, and content hashes rather than paths or mtimes. Each deviation from the
+obvious key is forced by something in the tree:
+
+- **Source order and basenames are load-bearing.** `JvmState::module_packages` accumulates facade
+  names in file-streaming order and emits them unsorted; the CLI derives `stems` from
+  `file_stem(path)`, which names the facade class and the `SourceFile` attribute.
+- **Classpath entry *paths* are semantically load-bearing**, not just their contents:
+  `src/plugins/serialization.rs` parses the *jar file name* to choose `write$Self` versus
+  `write$Self$<module>` mangling.
+- **`module_name` reaches the bytes** three ways: `@Metadata.classModuleName`, the
+  `META-INF/<module>.kotlin_module` file name, and that serialization mangle.
+- **`friend_paths` are path-identity-based** and change which `internal` declarations are visible.
+- **Environment reaches the bytes**: `KRUSTY_NO_CLASS_METADATA` switches off per-class `@Metadata`
+  outright; `KRUSTY_LANGUAGE_VERSION` selects the reference version; `JAVA_HOME` selects the
+  bootclasspath, which determines what `java.*` resolves to.
+- **KSP processors are external jars that generate sources** (`src/plugins/ksp.rs` runs a fixpoint
+  through `src/plugins/codegen_loop.rs`), and `KspToolchain` is build-resolved, so the build layer is
+  exactly where processor identity must be hashed.
+
+The tree's existing entry identity (`classpath.rs::path_identity`, using dev/ino/ctime/mtime) is fine
+for an in-process memo but unusable as a build-cache key: a `git checkout` restoring identical bytes
+changes ctime.
+
+**In-process staleness.** `src/jvm/classpath.rs` memoizes scans per entry. A long-lived worker that
+compiles module B after writing module A into a directory on B's classpath can serve a stale scan.
+Either invalidate on write, or use a fresh worker for any module whose classpath contains a
+just-produced output.
 
 ### Target contract for native
 
-No new abstraction is introduced. A native target is:
+A native target implements `SemanticPlatform` + `TargetRuntime` (`KlibPlatform`) and `Backend`
+(`NativeBackend`, via `lower_ir_file`). Two things must land first, and neither is optional:
 
-- `KlibPlatform: SemanticPlatform + TargetRuntime` — reads declarations and inline bodies from klibs
-  instead of `.class` files, and answers `TargetRuntime` with native ABI tokens rather than JVM
-  descriptors. It satisfies `CompilerPlatform` through the existing blanket impl.
-- `NativeBackend: Backend` — implements `lower_ir_file`, lowering checked common IR plus frozen
-  classifier facts to a low native IR, then to machine code.
+1. **`TargetRuntime` must reach `fir_lower`**, which today has no access to it.
+2. **The IR split** (`docs/COMPILER_REVIEW.md` §4, Step 3 of its refactor order) must remove
+   `"INSTANCE"`, the `$default` convention, `interface: bool` dispatch and `ClassConst` from common
+   lowering. These encode JVM *semantics* a native target cannot reinterpret by minting different
+   token strings.
 
-The `descriptor` fields in the IR are *provider-owned opaque tokens* by design: common lowering only
-hands them back to the backend that issued them. A native platform may therefore mint its own token
-grammar and work correctly *before* the IR split lands. The split remains required to make klib
-*emission* faithful, and to stop `$default`/`INSTANCE`/JVM dispatch kinds from constraining native
-lowering — but it does not block the first native experiment.
+Without both, a native backend is limited to a subset with no objects, no default arguments, no
+suspend and no class literals — a useful spike, not a path to corpus coverage.
 
 ### Where the build layer lives
 
-A new `crates/krusty-build` crate, depended on by both `krusty-cli` and `krusty-lsp`:
+A new `crates/krusty-build` crate, consumed by both `krusty-cli` and `krusty-lsp`:
 
 ```
 crates/krusty-build/
-  model/        lifted from crates/krusty-lsp/src/project/ (gradle, maven, bsp, jps, detect, …)
+  model/        lifted and EXTENDED from crates/krusty-lsp/src/project/
   graph.rs      module DAG, cycle detection, topological scheduling
   cache.rs      content-addressed artifact store (deps_cache.rs lineage)
   abi.rs        ABI artifact extraction and hashing
   driver.rs     krusty build: plan → schedule → execute → report
 ```
 
-The LSP keeps consuming the model exactly as today, so the lift is a move plus a dependency
-inversion, not a rewrite. `src/architecture.rs` guards must be extended to allow the new edges and
-to keep the compiler itself free of any dependency on the build crate.
+This is **not** a pure refactor. The LSP model is deliberately not a build model: it omits
+**resources** (`project/jps.rs`: *"resource folders skipped"*), **module name** (which reaches the
+bytes), **annotation-processor/KSP configuration**, **Java sources** (Gradle modules routinely mix
+Java; krusty has no Java frontend), per-module JDK home, and output kind (jar versus class dir). It
+also currently feeds the worker *"the union of all module classpaths"* — the opposite of per-module
+isolation.
+
+**A dependency-policy decision is required here, not later.** `krusty-lsp` pulls `serde`,
+`serde_json`, `roxmltree`, `url`, `fs2`, `sha2`; making `krusty-cli` depend on a lifted model would
+add `roxmltree`, `url`, `fs2`, `sha2` to the shipped compiler binary. `docs/ARCHITECTURE.md`
+quarantines exactly these: *"`serde`, `serde_json`, JSON-RPC transport, and session state belong to
+the separate `crates/krusty-lsp` workspace package."* This deserves the same explicit decision as
+Cranelift.
 
 ---
 
 ## Phases
 
-Sequenced so each ends green and is independently shippable. Per `CLAUDE.md`, every phase lands with
-tests and a green `./run-tests.sh`.
+Each ends green with tests, per `CLAUDE.md`.
 
-### Phase 1 — Lift the project model into `krusty-build`
+### Phase 0 — Deterministic emission
 
-Move `crates/krusty-lsp/src/project/` into the new crate; `krusty-lsp` consumes it unchanged. Extend
-the `src/architecture.rs` allowlists. **Ends green with the existing LSP project tests passing
-against the new crate location, and no behavior change.** Pure refactor, no user-visible feature.
+Nothing downstream is meaningful without it (see [What does not exist](#what-does-not-exist)).
+Replace every unordered collection on an emission-ordering path with an ordered container or an
+explicit sort at the boundary, and add an `src/architecture.rs`-style guard forbidding unordered
+iteration in `src/jvm/ir_emit.rs`, `src/jvm/classfile.rs`, `src/metadata/`, and
+`JvmBackend::finalize`.
 
-### Phase 2 — ABI artifact and hashing
+*Test:* N-run byte identity over the full `codegen/box` corpus, as a gate rather than a one-off
+measurement. The sweep harness from `docs/RESOLUTION_ENGINE_PLAN.md` already exists and already made
+this measurement. Zero classes may differ across runs.
 
-Serialize a reduced ABI artifact per module (declarations plus `inline` bodies) from the FIR header
-and signature-extraction layers, and hash it. Wire it to the Bazel worker's `--abi-out`, today a
-declared-but-unwritten output.
+### Phase 1 — Total-output contract
 
-*Test:* an ABI artifact is byte-stable across body-only edits; changing a signature changes the
-hash; `javap` signatures of the ABI artifact match those of the full output. This is the
-highest-leverage phase — everything downstream keys on it — and the one most helped by the FIR work.
+Make every declined declaration an observable, module-level failure: `source_rejected` must fail the
+module with a distinct exit status the build layer can route, rather than exiting 0 with a short jar.
+This matches the Bazel worker's existing posture of failing loudly rather than emitting a wrong jar.
 
-### Phase 3 — Content-addressed output cache
+*Test:* a module containing an unsupported construct exits non-zero and emits no partial artifact.
 
-Implement `cache.rs` and the key above. A second build of an unchanged module produces a cache hit
-and no compiler invocation.
+### Phase 2 — Lift and extend the project model into `krusty-build`
 
-*Test:* hit/miss assertions over a synthetic multi-module fixture — untouched module hits; body edit
-rebuilds that module only; signature edit rebuilds the module and its dependents; compiler-version
-change invalidates everything.
+Move `crates/krusty-lsp/src/project/`; extend it with resources, module name, processor
+configuration, Java-source detection, per-module JDK and output kind; resolve the dependency-policy
+question above. `krusty-lsp` consumes the result unchanged.
 
-### Phase 4 — `krusty build` driver and parallel scheduling
+*Test:* existing LSP project tests pass against the new crate; new fixtures cover each added field.
 
-DAG scheduling across cores, with per-module fallback to `kotlinc` for modules krusty refuses (the
-`Refusal` enum already distinguishes the cases). First phase with a user-visible command, and the
-first that can be **benchmarked against Gradle + kotlinc on a real multi-module project** — that
-benchmark is the deliverable, not just the code.
+### Phase 3 — ABI artifact and hashing
 
-Phases 1–4 are target-independent and pay off on the JVM alone. **Stopping here is a coherent
-outcome.**
+Emit a reduced ABI artifact per module with the contents listed in
+[Artifact model](#artifact-model). Declarations come from the FIR header and signature layers; inline
+bodies and bridges must come from the JVM backend, so **this phase spans frontend and backend** and
+is larger than serialization. Replace the Bazel worker's full-jar copy at `--abi-out`.
 
-### Phase 5 — klib ingestion
+*Test:* (a) ABI bytes stable across body-only edits of non-inline, non-`const`, contract-free
+declarations; (b) a signature change, a `const val` value change, a contract change, a new sealed
+subclass, or an `inline` body change each changes the hash; (c) **round-trip** — compiling a
+dependent against the ABI artifact produces byte-identical output to compiling it against the full
+module output. (c) is the oracle that matters.
 
-`KlibPlatform` implementing `SymbolSource` + `SemanticPlatform` over kotlinc-produced klibs, plus
-`expect`/`actual` resolution across a source-set hierarchy. Enables checking `commonMain` with no
-JVM present — immediately shippable through the LSP, independent of any native codegen.
+Measure this phase against classpath probing (~65% of compile) as well as against avoidance; that
+number is what decides whether a daemon is needed.
 
-*Test:* differential diagnostics against `kotlinc -Xmetadata-only` over common-source fixtures.
+### Phase 4 — `krusty build` driver and module DAG, sequential
 
-### Phase 6 — klib emission, then native codegen
+Plan, order and execute a module graph with no cache and no parallelism. Define the process model
+(process-per-module or a restarted worker pool — the compiler is not `Send`), crash isolation with a
+defined outcome per module, and diagnostic reporting across modules.
 
-Emit klibs, differential against kotlinc's, following the `docs/METADATA_NOTES.md` methodology.
-krusty becomes a fast MPP *frontend* usable inside existing KMP builds before any native code exists.
+*Test:* whole-project output equals a hand-run sequence of `krusty` invocations. This assertion
+depends on Phase 0.
 
-Only then: a low native IR, a code generator, and the minimum runtime (allocation and a simple
-collector, object layout and dispatch, exceptions, a coroutine scheduler) targeting Linux
-x86-64/arm64, gated on the `codegen/box` corpus.
+### Phase 5 — Content-addressed cache and parallel scheduling
 
-The IR split of `docs/COMPILER_REVIEW.md` §4 is a prerequisite for faithful klib *emission*, not for
-ingestion. It is worth doing on its own merits for the JVM and JS targets regardless of whether
-phases 5–6 ever start.
+Implement the corrected key. Then parallelize.
+
+*Test:* untouched module hits; body edit rebuilds that module only; signature or `const` edit
+rebuilds the module and its dependents; a change to any keyed input invalidates. Benchmark against a
+*warm* Gradle daemon with configuration cache, build cache and kotlinc incremental all enabled —
+anything less measures Gradle's cold start, which nobody disputes. State plainly what share of
+modules fall back to `kotlinc`.
+
+Phases 0–5 are target-independent. **Stopping here is a coherent outcome.**
+
+### Phase 6 — IR split
+
+`docs/COMPILER_REVIEW.md` §4, plus extending `TargetRuntime` to reach `fir_lower`. A prerequisite for
+native codegen *and* for faithful klib emission, and worth doing for the JVM and JS targets
+regardless of whether anything below it happens.
+
+### Phase 7 — klib ingestion
+
+`KlibPlatform` over kotlinc-produced klibs, plus `expect`/`actual` across a source-set hierarchy —
+building on `actualized_declaration_pairs`, which already matches within a module. Note that a KMP
+source-set hierarchy is a `dependsOn` graph among *source sets*, where `commonMain` compiles *into*
+each target's compilation; `Module::depends_on` models compile-classpath edges. `graph.rs` must say
+whether it models one graph or two. Also note that the Gradle init script and the Rust parser
+currently *filter out* non-JVM compilations and `.klib` files, so Phase 7 partly undoes Phase 2.
+
+*Test:* diagnostic parity against `kotlinc -Xmetadata-only` over common-source fixtures.
+
+### Phase 8+ — klib emission, then native
+
+Separate tracks, explicitly outside the phase discipline: klib emission (differential against
+kotlinc's); then a low native IR; then a code generator; then a runtime. The runtime alone is
+allocation and collection, object layout and dispatch, exceptions, threading and a coroutine
+scheduler.
 
 ---
 
 ## Correctness strategy
 
-The differential methodology is the project's foundation and transfers intact, with one relaxation
-and one substitution.
-
 | Phase | Oracle |
 |---|---|
-| 1 | Existing LSP project-model tests; no behavior change permitted |
-| 2 | `javap` signature parity between ABI artifact and full output; byte-stability across body edits |
-| 3 | Deterministic hit/miss assertions on a multi-module fixture |
-| 4 | Whole-project output equivalence vs. a clean non-cached build; wall-clock benchmark vs. Gradle |
-| 5 | Diagnostic parity vs. `kotlinc` metadata-only compilation of common sources |
-| 6 | klib differential vs. kotlinc; then `codegen/box` **behavioral** parity vs. `kotlinc-native` |
+| 0 | N-run byte identity over the `codegen/box` corpus, gated |
+| 1 | A module with an unsupported construct fails; no partial artifact is produced |
+| 2 | Existing LSP project-model tests; new fixtures per added field |
+| 3 | Round-trip: compiling against the ABI artifact equals compiling against full output |
+| 4 | Whole-project output equals a hand-run invocation sequence |
+| 5 | Hit/miss assertions per keyed input; benchmark vs. fully warm Gradle |
+| 6 | Existing differential harness stays green through the split |
+| 7 | Diagnostic parity vs. `kotlinc -Xmetadata-only` |
+| 8+ | klib differential vs. kotlinc; `codegen/box` **behavioral** parity vs. `kotlinc-native` |
 
-**The relaxation:** native output is judged by `box()` returning `OK`, not by byte identity. The
-invariant that carries over from `docs/PARITY_PROTOCOL.md` is the important one — *never miscompile
-a case krusty accepts*; skipping is always permitted, silent wrongness never is.
+**The relaxation:** native output is judged by `box()` returning `OK`, not byte identity. The
+`docs/PARITY_PROTOCOL.md` invariant carries over unchanged — never miscompile a case krusty accepts;
+skipping is permitted, silent wrongness never is. Note Phase 1 sharpens what "skip" may mean in a
+build.
 
-**The substitution:** where the JVM target's oracle is `kotlinc`, the native target's is
-`kotlinc-native` over the same corpus. An oracle exists; it is just a different binary.
+**The substitution:** `kotlinc-native` replaces `kotlinc` as the native oracle.
 
 ---
 
 ## Risks and open questions
 
-**The runtime is the real cost, and nothing in this repo de-risks it.** Phases 1–5 are extensions of
-work krusty has already done well. Phase 6's runtime — GC, dispatch, exceptions, threading,
-coroutine scheduling — has no precedent in the tree and is a multi-year item. It should not be
-started until phases 1–4 have demonstrated the build-speed thesis on the JVM.
+**The runtime is the real cost.** Phases 0–7 extend work krusty has done well. The Phase 8 runtime
+has no precedent in the tree and is a multi-year item. It should not start until Phases 0–5 have
+demonstrated the build-speed thesis on the JVM.
 
-**A code generator conflicts with the dependency-lean ethos.** krusty has four runtime dependencies
-(`zip`, `flate2`, `unicode-general-category`, `stacker`); it hand-writes its own class-file writer
-and LRU, and `CLAUDE.md` forbids adding even a logging crate. Cranelift is the natural choice for
-fast codegen — it is what `cg_clif` uses for exactly this reason, and it fits the thesis far better
-than LLVM — but it is a large dependency tree, and adopting it is a **project-values decision that
-must be made explicitly, not smuggled in under a phase.** The alternative, a hand-written code
-generator as Go did, is defensible here but is a significantly larger commitment. *This is the
-single most important open question in the document, and it is deliberately left open.*
+**Deferring the code generator is right; deferring the low IR's shape is not.** Three decisions shape
+the low native IR and must be answered when it is designed, independently of Cranelift-versus-
+hand-written: (1) precise versus conservative GC — precise requires explicit safepoint and stack-map
+nodes in the IR; (2) exception propagation — table-driven unwinding versus explicit result
+propagation; (3) whether `suspend` lowers through the existing CPS transform or to native stack
+switching.
 
-**klib is a version-unstable format.** Its IR encoding changes between Kotlin releases. This is the
-same hazard as `@kotlin.Metadata`, which the project already handles by pinning reference Kotlin
-versions per release and reverse-engineering the schema into `docs/METADATA_NOTES.md`. Known hazard,
-known playbook — but ongoing maintenance, not a one-time cost.
+**The code-generator dependency is a project-values decision.** The compiler *library* has four
+runtime dependencies (`zip`, `flate2`, `unicode-general-category`, `stacker`), hand-writes its own
+class-file writer and LRU, and `CLAUDE.md` forbids adding even a logging crate. (The shipped binary
+already adds `serde`, `serde_json`, `zip` via `krusty-cli`.) Cranelift is the natural fast-codegen
+choice, but `cg_clif`'s reported wins over LLVM are roughly 1.3–1.5× on debug builds — not an order
+of magnitude, and not by itself the thesis. Decide explicitly, before Phase 8, never inside a phase.
+The same standard applies to `roxmltree`/`url`/`fs2`/`sha2` in Phase 2.
 
-**Superlinear frontend cost limits the achievable win.** Caching removes repeated work; it does not
-make a large module's first build fast. Single-module latency remains bounded by signature
-collection and return pre-inference, work independent of this proposal. Re-measure after the FIR
-streaming migration completes before setting any phase-4 target.
+**klib is a version-unstable format.** Its IR encoding changes between Kotlin releases — the same
+hazard as `@kotlin.Metadata`, handled the same way (pin reference versions, reverse-engineer into
+`docs/METADATA_NOTES.md`), but as ongoing maintenance.
 
-**The FIR migration is in flight.** Both `lower_file` and `lower_ir_file` exist on `Backend`. Phases
-2 and 6 should build on the streaming IR path only, and should not begin in a way that would need
-rework when the older path is retired.
+**Superlinear frontend cost bounds the win.** Caching removes repeated work, not a large module's
+first build. Re-measure `docs/LSP_INDEXING_PROFILE.md`'s figures against present-day `master` before
+setting any Phase 5 target; that document already warns its own numbers are stale.
 
 **Open questions.**
 
-1. Code generator: Cranelift, or hand-written? (See above — decide before phase 6, not during.)
-2. Does the ABI artifact reuse the `.kotlin_module`/`@Metadata` protobuf model, or get its own
-   format? Reuse is cheaper; a dedicated format hashes more stably. The FIR signature-extraction
-   layer may make a third option — serializing its own records — cheapest of all.
-3. Is a daemon needed at all? With instant process startup, the Go answer is no — and "no daemon" is
-   itself a feature worth defending. Provisionally: no daemon; revisit only if phase-4 benchmarks
-   show process startup is material.
-4. Should `krusty build` ever own a native manifest format, or only ever read existing build models?
-   Reading-only maximizes adoption; owning one enables the tightest cache keys.
+1. Code generator: Cranelift, or hand-written?
+2. Does the ABI artifact reuse the `@Metadata` protobuf model or get its own format? Reuse is
+   cheaper and is already what dependents read; a dedicated format hashes more stably.
+3. Is a daemon needed? The answer depends on Phase 3: with compact export data replacing classpath
+   probing, process-per-module is viable; without it, every module pays ~65% of a compile on
+   classpath decoding and a persistent worker becomes mandatory.
+4. Remote/shared caching, cache poisoning and trust, and concurrent builds against one cache are
+   unaddressed here and need their own design before the cache is shared beyond one machine.
+5. Windows and macOS support for the build layer is unscoped.
