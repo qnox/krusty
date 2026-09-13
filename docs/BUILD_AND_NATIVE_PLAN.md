@@ -1054,14 +1054,17 @@ What that changes, and what it does not:
   document began with, applied to native: a module compiles to an object once, dependents rebuild
   only when its ABI moves, and the link is the only whole-program step — as in Go.
 
-**The one decision this leaves open is the code generator itself**, and it is the project-values
-question the *Risks* section reserved: drive **Cranelift** (a Rust library; measured at 46 transitive
+**Decided: Cranelift, as a library.** The last open question was the project-values one the *Risks*
+section reserved, and it is closed: krusty drives **Cranelift** (a Rust library; measured at 46 transitive
 crates against a compiler library that has four today; Go-league compile speed; x86-64, AArch64,
 RISC-V and s390x backends already written), or **hand-write** the instruction selection and
 encoding for each architecture (maximal ownership, as Go did; the truly multi-year item across three
 targets). The lowering from common IR, the ABI, object layout, GC integration and the linker are
-krusty's under either choice; the choice is only who owns instruction selection and register
-allocation.
+krusty's under either choice; what Cranelift owns is instruction selection and register allocation,
+and only that. The dependency is taken knowingly: it is the first break from this tree's four-crate
+compiler library, made because the alternative is the multi-year item this track exists to avoid.
+The lowering stays behind a narrow seam so a hand-written backend could replace Cranelift one
+architecture at a time if that ever becomes worth doing.
 
 **Sequencing, in runnable increments — every commit runs a Kotlin program that could not run
 before:**
