@@ -232,6 +232,8 @@ mod classpath_is_smartcast_e2e;
 mod classpath_jdk_static_e2e;
 #[path = "classpath_jvmstatic_object_property_e2e.rs"]
 mod classpath_jvmstatic_object_property_e2e;
+#[path = "classpath_member_lambda_unit_e2e.rs"]
+mod classpath_member_lambda_unit_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
 #[path = "classpath_member_mutable_collection_e2e.rs"]
@@ -668,6 +670,8 @@ mod generic_hof_vc_binding_e2e;
 mod generic_inferred_primitive_return_e2e;
 #[path = "generic_inferred_return_e2e.rs"]
 mod generic_inferred_return_e2e;
+#[path = "generic_member_extension_lambda_result_e2e.rs"]
+mod generic_member_extension_lambda_result_e2e;
 #[path = "generic_return_inference_e2e.rs"]
 mod generic_return_inference_e2e;
 #[path = "generic_signature_e2e.rs"]
@@ -1201,6 +1205,8 @@ mod sam_classpath_e2e;
 mod sam_conversion_e2e;
 #[path = "sam_generic_lambda_param_e2e.rs"]
 mod sam_generic_lambda_param_e2e;
+#[path = "sam_lambda_expected_result_e2e.rs"]
+mod sam_lambda_expected_result_e2e;
 #[path = "same_package_classpath_e2e.rs"]
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
