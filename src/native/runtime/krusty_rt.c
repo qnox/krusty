@@ -528,6 +528,13 @@ KRef kt_safe_cast(KRef object, const KType *type) {
     return kt_is_instance(object, type) ? object : NULL;
 }
 
+KRef kt_not_null(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+    }
+    return value;
+}
+
 void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n"); }
 
 void kt_null_receiver(void) { KT_FAIL("krusty: member access on a null receiver\n"); }

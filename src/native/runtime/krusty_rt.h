@@ -120,6 +120,10 @@ KRef kt_safe_cast(KRef object, const KType *type);
 
 /* The vtable entry for an abstract method: never reached in a type-correct program, but a loud
    failure rather than a jump through NULL. */
+/* `x!!` — yields `x`, or fails when it is null. Kotlin throws a NullPointerException here; with no
+   exception machinery yet the honest realization is a diagnosable exit. */
+KRef kt_not_null(KRef value);
+
 void kt_abstract_method_called(void);
 /* A member access on `null`: the placeholder for NullPointerException. */
 void kt_null_receiver(void);

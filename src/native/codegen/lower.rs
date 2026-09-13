@@ -886,6 +886,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
             IrExpr::StringConcat(parts) => self.concat(&parts),
+            IrExpr::NotNullAssert { operand, .. } => {
+                // `x!!` yields `x` or fails. The check is the runtime's so the failure reads the
+                // same whatever produced the null, and so the generator emits no control flow for
+                // what is, on every path that matters, a value passing straight through.
+                let ty = self.type_of(operand);
+                let value = self.reference(operand)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                let checked = self
+                    .runtime_call("kt_not_null", &[any()], any(), &[value])?
+                    .expect("`kt_not_null` returns its argument");
+                // `x!!` on a nullable primitive is the unboxing Kotlin means by it.
+                match ty.map(|ty| ty.non_null()) {
+                    Some(ty) if carrier(ty) != Carrier::Ref => {
+                        self.convert(checked, Some(any()), ty)
+                    }
+                    _ => Ok(Some(checked)),
+                }
+            }
             IrExpr::New {
                 internal,
                 args,
@@ -1751,12 +1771,17 @@ fn callee_kind(callee: &Callee) -> &'static str {
 
 /// A short phrase naming the construct, for the declining diagnostic.
 fn describe(node: &IrExpr) -> String {
+    // The first two identifiers, not one: `Checked(Call { … })` and `Checked(PropertyRead { … })`
+    // are different pieces of work, and a backlog that lumps them together cannot be worked from.
     let debug = format!("{node:?}");
-    let head = debug
+    let mut identifiers = debug
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|piece| !piece.is_empty())
-        .unwrap_or("expression");
-    format!("`{head}`")
+        .filter(|piece| !piece.is_empty());
+    let head = identifiers.next().unwrap_or("expression");
+    match (head, identifiers.next()) {
+        ("Checked", Some(operation)) => format!("`Checked({operation})`"),
+        _ => format!("`{head}`"),
+    }
 }
 
 #[cfg(test)]

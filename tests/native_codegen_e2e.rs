@@ -795,3 +795,57 @@ fn boxing_a_small_value_hands_out_the_same_object() {
         "true\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\n42\n1000\n"
     );
 }
+
+#[test]
+fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    assert_eq!(
+        run(
+            "fun maybe(n: Int): String? = if (n > 0) \"value-$n\" else null\n\
+             fun boxed(n: Int): Int? = if (n > 0) n else null\n\
+             fun main() {\n\
+             \x20   println(maybe(1)!!)\n\
+             \x20   println(boxed(7)!! + 1)\n\
+             }\n"
+        ),
+        "value-1\n8\n"
+    );
+    // On null it must fail loudly rather than carry the null onward: there are no exceptions yet,
+    // so the honest realization is a diagnosable exit naming what happened.
+    let (artifacts, diagnostics) = compile(
+        &[(
+            "Main",
+            "fun maybe(n: Int): String? = if (n > 0) \"value-$n\" else null\n\
+             fun main() { println(\"before\"); println(maybe(0)!!) }\n",
+        )],
+        target,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let objects = artifacts
+        .iter()
+        .map(|(_, bytes)| bytes.as_slice())
+        .collect::<Vec<_>>();
+    let image = krusty::native::link_program(&objects, target).expect("link");
+    let scratch = Scratch::new("notnull");
+    let executable = scratch.path().join("program");
+    std::fs::write(&executable, &image).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = std::process::Command::new(&executable)
+        .env_clear()
+        .output()
+        .expect("run");
+    assert!(!output.status.success(), "a `!!` on null must not continue");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("null cannot be cast to a non-null type"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

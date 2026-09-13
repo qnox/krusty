@@ -5389,6 +5389,14 @@ and behavior is checked by RUNNING the emitted program.
   is unspecified, as Kotlin says.
   Tests: `tests/native_codegen_e2e.rs` (`boxing_a_small_value_hands_out_the_same_object`).
 
+- **`x!!` is a runtime check, and on a nullable primitive it is the unboxing.** The check lives in
+  the runtime (`kt_not_null`) so the failure reads the same whatever produced the null, and so the
+  generator emits no branch for what is, on every path that matters, a value passing through.
+  Kotlin throws a `NullPointerException` here; with no exception machinery yet the honest
+  realization is a diagnosable exit.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_not_null_assertion_passes_a_value_through_and_fails_on_null`).
+
 - **A `when` whose arms disagree on a carrier is a reference.** `when (s) { "a" -> 1; else -> null }`
   is `Int?`: taking the first arm's type would carry it as `Int` and store the `null` arm's pointer
   into a 32-bit slot. An arm that leaves (a `return`) has no type and does not vote.
