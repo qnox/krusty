@@ -371,7 +371,10 @@ impl BodyLowering<'_> {
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
         if let Some(plan) = inline_plan {
-            if let Some(expanded) = self.external_inline_call(ExternalInlineCallRequest {
+            // A checked plan is an obligation, not an optimization hint. If its already-validated
+            // operands cannot be materialized, propagate failure to `checked_call` as an unsupported
+            // external call; never retry the same source as an ordinary dependency invocation.
+            let expanded = self.external_inline_call(ExternalInlineCallRequest {
                 plan,
                 receiver_ty,
                 parameter_types: &parameter_types,
@@ -379,10 +382,9 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-            }) {
-                self.ir.inline_regions.insert(expanded);
-                return Some(expanded);
-            }
+            })?;
+            self.ir.inline_regions.insert(expanded);
+            return Some(expanded);
         }
         let (statements, receiver, args, mut defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
@@ -638,7 +640,10 @@ impl BodyLowering<'_> {
         let state_slot = match (state, state_parameter) {
             (Some(state), Some(parameter)) => {
                 let state_ty = *parameter_types.get(parameter)?;
-                let state_value = if defaults.iter().any(|default| *default as usize == parameter) {
+                let state_value = if defaults
+                    .iter()
+                    .any(|default| *default as usize == parameter)
+                {
                     match state.default {
                         crate::fir::FirInlineDefaultValue::Null => {
                             self.ir.add_expr(IrExpr::Const(IrConst::Null))

@@ -43,6 +43,27 @@ fn with_permit_hosts_a_suspension_in_its_lambda() {
     );
 }
 
+/// Both member calls in the structural plan return Kotlin `Unit`. Their physical suspend/JVM
+/// descriptors use `Object`/`void`, so this catches any attempt to reconstruct the semantic result
+/// from those descriptors instead of the declarations' metadata.
+#[test]
+fn with_permit_preserves_a_typed_unit_result() {
+    const SRC: &str = "import kotlinx.coroutines.sync.Semaphore\n\
+        import kotlinx.coroutines.sync.withPermit\n\
+        import kotlinx.coroutines.runBlocking\n\
+        suspend fun tick(): Unit = Unit\n\
+        suspend fun guarded(gate: Semaphore): Unit = gate.withPermit { tick() }\n\
+        fun box(): String = runBlocking {\n\
+        \x20   val gate = Semaphore(1)\n\
+        \x20   val result: Unit = guarded(gate)\n\
+        \x20   if (result == Unit && gate.availablePermits == 1) \"OK\" else \"FAIL\"\n\
+        }\n";
+    assert_eq!(
+        run(SRC).expect("withPermit keeps its metadata-declared Unit member results"),
+        "OK"
+    );
+}
+
 /// The permit is released on the exceptional path too, so the second acquire still succeeds. This is
 /// what proves the expansion kept the `finally`, not merely that the call type-checked.
 #[test]
