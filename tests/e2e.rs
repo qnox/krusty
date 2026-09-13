@@ -12,6 +12,8 @@ mod common {
     pub use super::e2e_support::*;
 }
 
+#[path = "abi_fingerprint_e2e.rs"]
+mod abi_fingerprint_e2e;
 #[path = "abstract_instantiation_check_e2e.rs"]
 mod abstract_instantiation_check_e2e;
 #[path = "abstract_member_check_e2e.rs"]
