@@ -2126,10 +2126,12 @@ impl ClassWriter {
             signature,
             ann_types,
             &crate::ir::DeclarationAnnotations::default(),
+            &[],
         );
     }
 
-    /// [`Self::reserve_method_pool`] plus the DECLARED annotations' constants. kotlinc interns a
+    /// [`Self::reserve_method_pool`] plus the DECLARED annotations' constants and the
+    /// `MethodParameters` names (empty when the method gets no such attribute). kotlinc interns a
     /// method's header — name, descriptor, `Signature`, its own annotations, then the compiler's
     /// `@NotNull`/`@Nullable` types — before visiting the body, so the payload of a user annotation
     /// must be reserved here rather than when the annotation is attached after code generation.
@@ -2142,11 +2144,18 @@ impl ClassWriter {
         signature: Option<&str>,
         ann_types: &[&str],
         annotations: &crate::ir::DeclarationAnnotations,
+        parameters: &[(String, u16)],
     ) {
         self.cp.utf8(name);
         self.cp.utf8(desc);
         if let Some(s) = signature {
             self.cp.utf8(s);
+        }
+        // `MethodParameters` names sit between the header and the annotation types: ASM visits
+        // `visitParameter` before `visitParameterAnnotation` and before the code, so a parameter name
+        // precedes both the `@NotNull`/`@Nullable` descriptors and every constant the body introduces.
+        for (parameter, _) in parameters {
+            self.cp.utf8(parameter);
         }
         let _ = self.encode_declaration_annotations(annotations);
         for a in ann_types {

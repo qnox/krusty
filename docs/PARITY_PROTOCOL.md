@@ -1865,4 +1865,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   Typed source/provenance records cover declared functions (including `suspend`), primary and
   secondary constructors, inner/local/anonymous captures, enums, data/value-class generated members,
   continuations, and `$DefaultImpls` forwards; mismatched physical arity fails explicitly.
+  A parameter NAME interns with the method HEADER — ASM visits `visitParameter` before
+  `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
+  parameter descriptors and every constant the body introduces.
   `tests/java_parameters_attribute_e2e.rs`.

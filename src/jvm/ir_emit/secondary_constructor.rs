@@ -48,6 +48,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             None,
             &[],
             &sc.annotations,
+            &[],
         );
         let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut sctor = CodeBuilder::new(1 + sc_words);

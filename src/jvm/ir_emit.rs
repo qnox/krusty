@@ -6266,6 +6266,28 @@ fn emit_class(
         // follows the method name, descriptor, and generic signature in the pool. Continuations made
         // the old inversion visible because their body first touches the deferred `this$0` field.
         cw.reserve_method_pool("<init>", &ctor_desc, ctor_signature.as_deref(), &[]);
+        let ctor_parameters = if env.java_parameters {
+            declared_constructor_parameters(c, &param_tys)
+        } else {
+            Vec::new()
+        };
+        if is_continuation {
+            // Continuation fields are registered without interning `this$0`/`result`/`label`, so the
+            // constructor must expose its HEADER before its body first references `this$0`. ASM-based
+            // kotlinc visits `<init>`, its descriptor, and its generic signature before `visitCode`;
+            // building the body first inverted `<init>` and `this$0` for member continuations.
+            cw.reserve_method_pool("<init>", &ctor_desc, ctor_signature.as_deref(), &[]);
+        }
+        // A `MethodParameters` name is interned with the method HEADER, before the body's constants
+        // and before the `@NotNull`/`@Nullable` parameter descriptors — ASM's `visitParameter` order.
+        cw.reserve_method_pool_with_annotations(
+            "<init>",
+            &ctor_desc,
+            ctor_signature.as_deref(),
+            &[],
+            &crate::ir::DeclarationAnnotations::default(),
+            &ctor_parameters,
+        );
         let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut ctor = CodeBuilder::new(1 + params_words);
         // The superclass constructor's parameter types (empty for the erased top type — the front end
@@ -6529,8 +6551,20 @@ fn emit_class(
                 "(Lkotlin/coroutines/Continuation;)V".to_string()
             };
             cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
-        if env.java_parameters {
+            // kotlinc names a continuation's constructor parameters PLAIN: the captured outer
+            // instance is `this$0` with no `mandated` flag, unlike an inner class's own.
+            if env.java_parameters {
+                let mut parameters = Vec::with_capacity(2);
+                if has_this0 {
+                    parameters.push(("this$0".to_string(), 0));
+                }
+                parameters.push(("$completion".to_string(), 0));
+                cw.set_method_parameters("<init>", &ctor_desc, &parameters);
+            }
+        }
+        if env.java_parameters && continuation_metadata.is_none() {
             let parameters = declared_constructor_parameters(c, &param_tys);
+            let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
             cw.set_method_parameters("<init>", &ctor_desc, &parameters);
         }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
@@ -7079,16 +7113,10 @@ fn emit_class(
                 ("$result".to_string(), "Ljava/lang/Object;".to_string(), 1),
             ],
         );
-        // A continuation's two methods are compiler-manufactured, but kotlinc still names their
-        // parameters under `-java-parameters` — and names them PLAIN: the captured outer instance is
-        // `this$0` with no `mandated` flag, unlike an inner class's own constructor parameter.
+        // A continuation's `invokeSuspend` is compiler-manufactured, but kotlinc still names its
+        // parameter under `-java-parameters`. (Its `<init>` is named where that constructor's own
+        // debug tables are attached, with the descriptor in scope there.)
         if env.java_parameters {
-            let mut ctor_parameters = Vec::with_capacity(2);
-            if has_this0 {
-                ctor_parameters.push(("this$0".to_string(), 0));
-            }
-            ctor_parameters.push(("$completion".to_string(), 0));
-            cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
             cw.set_method_parameters(
                 "invokeSuspend",
                 "(Ljava/lang/Object;)Ljava/lang/Object;",
@@ -11651,12 +11679,18 @@ fn emit_method_inner_with_holder(
             ann_types.extend(nullability.iter().copied());
         }
     }
+    let method_parameters = if env.java_parameters {
+        declared_method_parameters(ir, fid, &param_tys)
+    } else {
+        Vec::new()
+    };
     e.cw.reserve_method_pool_with_annotations(
         &f.name,
         &reserved_desc,
         reserved_sig.as_deref(),
         &ann_types,
         &declared_annotations,
+        &method_parameters,
     );
     let mut code = CodeBuilder::new(e.next_slot);
     // kotlinc guards each non-null reference parameter of a visible function with
@@ -11847,10 +11881,7 @@ fn emit_method_inner_with_holder(
     // `ret` are erased.
     let desc = reserved_desc;
     e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
-    if env.java_parameters {
-        let parameters = declared_method_parameters(ir, fid, &param_tys);
-        e.cw.set_method_parameters(&f.name, &desc, &parameters);
-    }
+    e.cw.set_method_parameters(&f.name, &desc, &method_parameters);
     // kotlinc annotates a reference return and each reference parameter of a declared method.
     if nullability_annotated
         && (ret_ann.is_some() || emitted_param_anns.iter().any(Option::is_some))
