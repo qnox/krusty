@@ -4,7 +4,10 @@ use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,
 };
-use crate::ir::{Callee, ExprId, IrCheckedArgument, IrConst, IrExpr, IrTypeOp};
+use crate::ir::{
+    Callee, ExprId, IrCheckedArgument, IrConst, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole,
+    IrTypeOp,
+};
 use crate::types::Ty;
 
 use super::checked_arguments::{
@@ -480,6 +483,7 @@ impl BodyLowering<'_> {
             crate::fir::FirInlineBodyPlan::CollectionTransform {
                 lambda_parameter,
                 flatten,
+                local_names,
                 iterator_ty,
                 iterator,
                 has_next,
@@ -494,6 +498,7 @@ impl BodyLowering<'_> {
                 return self.external_inline_collection_transform(
                     *lambda_parameter,
                     *flatten,
+                    local_names,
                     *iterator_ty,
                     iterator,
                     has_next,
@@ -842,6 +847,7 @@ impl BodyLowering<'_> {
         &mut self,
         lambda_parameter: u32,
         flatten: bool,
+        local_names: &crate::fir::FirInlineCollectionLocalNames,
         iterator_ty: ResolvedTy,
         iterator: &crate::fir::FirIteratorCall,
         has_next: &crate::fir::FirIteratorCall,
@@ -960,11 +966,8 @@ impl BodyLowering<'_> {
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
 
-        // kotlinc's expansion is TWO inline frames deep (`map` → `mapTo`, `flatMap` → `flatMapTo`),
-        // and each binds the receiver to its own local — `$this$map$iv`, then `$this$mapTo$iv$iv`
-        // (one `$iv` per frame). Both are in scope at a suspension inside the lambda, so both take a
-        // continuation spill field and a name in the `@DebugMetadata` arrays.
-        let outer_name = if flatten { "flatMap" } else { "map" };
+        // Preserve the provider-recorded inline frame locals as source names plus typed
+        // role/depth. The JVM backend owns their eventual debug spelling.
         let receiver_ty = receiver_ty.map_or_else(|| accumulator_ty.get(), ResolvedTy::get);
         let outer_slot = self.allocate_temporary();
         let outer_declaration = self.ir.add_expr(IrExpr::Variable {
@@ -975,7 +978,11 @@ impl BodyLowering<'_> {
         });
         self.ir
             .value_names
-            .insert(outer_declaration, format!("$this${outer_name}$iv"));
+            .insert(outer_declaration, local_names.outer_receiver.to_string());
+        self.ir.set_debug_local_provenance(
+            outer_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 1),
+        );
         statements.push(outer_declaration);
         let outer_read = self.ir.add_expr(IrExpr::GetValue(outer_slot));
         let inner_slot = self.allocate_temporary();
@@ -987,7 +994,11 @@ impl BodyLowering<'_> {
         });
         self.ir
             .value_names
-            .insert(inner_declaration, format!("$this${outer_name}To$iv$iv"));
+            .insert(inner_declaration, local_names.inner_receiver.to_string());
+        self.ir.set_debug_local_provenance(
+            inner_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 2),
+        );
         statements.push(inner_declaration);
 
         let factory_call = self.ir.add_expr(IrExpr::New {
@@ -1008,7 +1019,11 @@ impl BodyLowering<'_> {
         });
         self.ir
             .value_names
-            .insert(accumulator_declaration, "destination$iv$iv".to_string());
+            .insert(accumulator_declaration, local_names.destination.to_string());
+        self.ir.set_debug_local_provenance(
+            accumulator_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 2),
+        );
         statements.push(accumulator_declaration);
 
         let iterable = self.ir.add_expr(IrExpr::GetValue(inner_slot));
@@ -1024,10 +1039,9 @@ impl BodyLowering<'_> {
         let condition = self.iterator_call(has_next, iterator_read).ok()?;
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
         let element = self.iterator_call(next, iterator_read).ok()?;
-        // The expansion's loop ELEMENT and the lambda's own PARAMETER are separate locals in
-        // kotlinc's output — `element$iv$iv` / `item$iv$iv` holds what the iterator returned, and the
-        // lambda's formal reads it under the name the source gave it. Both are live at a suspension
-        // in the lambda body, so both are spilled and named.
+        // The expansion's provider-recorded loop element and the lambda's own parameter are
+        // separate locals. Both are live at a suspension in the lambda body, so preserve both
+        // source/debug identities; the target decides their rendered names.
         let element_iv_slot = self.allocate_temporary();
         let element_iv_declaration = self.ir.add_expr(IrExpr::Variable {
             index: element_iv_slot,
@@ -1035,13 +1049,12 @@ impl BodyLowering<'_> {
             init: Some(element),
             named: true,
         });
-        self.ir.value_names.insert(
+        self.ir
+            .value_names
+            .insert(element_iv_declaration, local_names.element.to_string());
+        self.ir.set_debug_local_provenance(
             element_iv_declaration,
-            if flatten {
-                "element$iv$iv".to_string()
-            } else {
-                "item$iv$iv".to_string()
-            },
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 2),
         );
         let element_read = self.ir.add_expr(IrExpr::GetValue(element_iv_slot));
         let element_declaration = self.ir.add_expr(IrExpr::Variable {

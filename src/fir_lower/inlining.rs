@@ -13,8 +13,9 @@ use crate::fir::{
     ResolvedTy,
 };
 use crate::ir::{
-    Callee, ExprId, IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrConst, IrExpr,
-    IrIntrinsic, IrSamTarget, IrValueClassSuspendResult,
+    Callee, ExprId, IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrConst,
+    IrDebugLocalProvenance, IrExpr, IrInlineLocalRole, IrIntrinsic, IrSamTarget,
+    IrValueClassSuspendResult,
 };
 use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
@@ -59,11 +60,9 @@ impl BodyLowering<'_> {
             .iter()
             .map(|operand| self.specialized_inline_operand(*operand, &bindings))
             .collect::<Vec<_>>();
-        // kotlinc keeps every local an inline expansion materializes — the callee's own parameters
-        // and body locals — under its source name with one `$iv` per expansion depth, and they are in
-        // scope (so spilled) at a suspension inside the spliced body. The dispatch receiver takes the
-        // callee's `$this$<name>` form.
-        let mut parameter_names: Vec<String> = Vec::new();
+        // Preserve the source name and semantic role/depth of every local this expansion
+        // materializes. Target-specific decoration is deferred until debug-info emission.
+        let mut parameter_names = Vec::new();
         if self
             .ir
             .functions
@@ -71,13 +70,18 @@ impl BodyLowering<'_> {
             .dispatch_receiver
             .is_some()
         {
-            parameter_names.push(format!(
-                "$this${}",
-                self.ir.functions[function as usize].name
+            parameter_names.push((
+                self.ir.functions[function as usize].name.clone(),
+                IrInlineLocalRole::DispatchReceiver,
             ));
         }
         if let Some(names) = self.ir.param_names(function) {
-            parameter_names.extend(names.iter().cloned());
+            parameter_names.extend(
+                names
+                    .iter()
+                    .cloned()
+                    .map(|name| (name, IrInlineLocalRole::Value)),
+            );
         }
         let mut operand_declarations = Vec::new();
         let operand_slots = operands
@@ -97,8 +101,12 @@ impl BodyLowering<'_> {
                             init: Some(*operand),
                             named: true,
                         });
-                        if let Some(name) = parameter_names.get(index) {
-                            self.ir.value_names.insert(declaration, inline_name(name));
+                        if let Some((name, role)) = parameter_names.get(index) {
+                            self.ir.value_names.insert(declaration, name.clone());
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::inline_value(*role, 1),
+                            );
                         }
                         operand_declarations.push(declaration);
                         Some(slot)
@@ -190,9 +198,18 @@ impl BodyLowering<'_> {
                     }
                 }
             }
-            // A cloned declaration keeps the source local's name, decorated for this expansion.
-            if let Some(name) = self.ir.value_names.get(&source).cloned() {
-                self.ir.value_names.insert(copy, inline_name(&name));
+            // A cloned declaration keeps its source name and gains one inline frame. Cloning has
+            // already copied any existing provenance, so nested expansion increments the typed
+            // depth instead of parsing a previously formatted target name.
+            if self.ir.value_names.contains_key(&source) {
+                let provenance = self
+                    .ir
+                    .debug_local_provenance(source)
+                    .map(IrDebugLocalProvenance::nested_inline)
+                    .unwrap_or_else(|| {
+                        IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 1)
+                    });
+                self.ir.set_debug_local_provenance(copy, provenance);
             }
             if protected.contains(&source) {
                 continue;
@@ -354,20 +371,49 @@ impl BodyLowering<'_> {
             return None;
         }
 
+        let receiver_parameter = self
+            .ir
+            .lambda_origins
+            .get(&impl_fn)
+            .and_then(|origin| origin.receiver_parameter);
         let mut declarations = Vec::new();
         let mut formal_slots = Vec::with_capacity(parameter_types.len());
-        for (value, ty) in captures.into_iter().chain(args).zip(parameter_types) {
-            let slot = match self.ir.expr(value) {
-                IrExpr::GetValue(slot) => *slot,
-                _ => {
-                    let slot = self.allocate_temporary();
-                    declarations.push(self.ir.add_expr(IrExpr::Variable {
-                        index: slot,
-                        ty,
-                        init: Some(value),
-                        named: false,
-                    }));
-                    slot
+        for (parameter, (value, ty)) in captures
+            .into_iter()
+            .chain(args)
+            .zip(parameter_types)
+            .enumerate()
+        {
+            let parameter = u32::try_from(parameter).ok()?;
+            let slot = if receiver_parameter == Some(parameter) {
+                let slot = self.allocate_temporary();
+                let declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: slot,
+                    ty,
+                    init: Some(value),
+                    named: true,
+                });
+                self.ir.set_debug_local_provenance(
+                    declaration,
+                    IrDebugLocalProvenance::InlineLambdaReceiver {
+                        implementation: impl_fn,
+                    },
+                );
+                declarations.push(declaration);
+                slot
+            } else {
+                match self.ir.expr(value) {
+                    IrExpr::GetValue(slot) => *slot,
+                    _ => {
+                        let slot = self.allocate_temporary();
+                        declarations.push(self.ir.add_expr(IrExpr::Variable {
+                            index: slot,
+                            ty,
+                            init: Some(value),
+                            named: false,
+                        }));
+                        slot
+                    }
                 }
             };
             formal_slots.push(slot);
@@ -390,22 +436,6 @@ impl BodyLowering<'_> {
         };
         Some(())
     }
-}
-
-/// The name an inline expansion gives a local it materializes: the source name with one `$iv`
-/// appended per expansion depth (a body spliced into an already-spliced body is decorated twice),
-/// and a `$` inside the source name itself escaped the way kotlinc escapes it.
-fn inline_name(name: &str) -> String {
-    let (base, suffix) = match name.find("$iv") {
-        Some(at) => (&name[..at], &name[at..]),
-        None => (name, ""),
-    };
-    let decorated = if let Some(rest) = base.strip_prefix("$this$") {
-        format!("$this${}", rest.replace('$', "_u24"))
-    } else {
-        base.replace('$', "_u24")
-    };
-    format!("{decorated}{suffix}$iv")
 }
 
 fn mark_subtree(ir: &crate::ir::IrFile, root: ExprId, marked: &mut HashSet<ExprId>) {

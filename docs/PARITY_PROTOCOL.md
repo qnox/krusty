@@ -1849,9 +1849,8 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   inside the name itself as `_u24`. krusty lost both halves: the callee's parameters became unnamed
   temps, and the cloned body declarations lost the names their originals carried, so a continuation's
   `@DebugMetadata` held only the caller's own locals and the fields came out short.
-  Still open: kotlinc also spills the inline LAMBDA's receiver under the lambda's synthetic method
-  name (`$this$<fn>$lambda$<n>`), which needs a kotlinc-compatible per-function lambda ordinal krusty
-  does not compute yet; it takes a position with no name for now. Classpath inline functions splice as
-  BYTECODE (`src/jvm/inline.rs`), which carries no local names at all — the corpus's largest remaining
-   continuation family is that shape.
+  The inline LAMBDA receiver retains its stable implementation identity and parameter coordinate;
+  the JVM boundary renders the matching `$this$<fn>_u24lambda_u24<n>` local without common lowering
+  learning that spelling. Classpath inline functions splice as BYTECODE (`src/jvm/inline.rs`) and
+  remain a separate provider-side local-table migration.
    `tests/suspend_inline_splice_names_e2e.rs`.

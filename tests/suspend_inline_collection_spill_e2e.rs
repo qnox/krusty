@@ -17,7 +17,7 @@ fn debug_metadata(bytes: &[u8], file_name: &str) -> Vec<String> {
     rows
 }
 
-fn kotlinc_class(source_name: &str, source: &str, class_name: &str) -> Option<Vec<u8>> {
+fn kotlinc_class(source_name: &str, source: &str, class_name: &str) -> Vec<u8> {
     let root = common::scratch_dir().expect("reference scratch dir");
     let out = root.join("classes");
     std::fs::create_dir_all(&out).expect("reference output dir");
@@ -28,24 +28,18 @@ fn kotlinc_class(source_name: &str, source: &str, class_name: &str) -> Option<Ve
         out.to_string_lossy().into_owned(),
         source_path.to_string_lossy().into_owned(),
     ]);
-    let Some((code, stderr)) = compiled else {
-        let _ = std::fs::remove_dir_all(root);
-        return None;
-    };
+    let (code, stderr) = compiled.expect("reference kotlinc unavailable under the test harness");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     let bytes = std::fs::read(out.join(format!("{class_name}.class")))
         .unwrap_or_else(|error| panic!("read kotlinc class {class_name}: {error}"));
     let _ = std::fs::remove_dir_all(root);
-    Some(bytes)
+    bytes
 }
 
 fn assert_spill_names(name: &str, source: &str, class_name: &str) {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(reference) = kotlinc_class(name, source, class_name) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    let reference = kotlinc_class(name, source, class_name);
     let classes = common::compile_in_process_files(
         &[(name, source)],
         &[stdlib, jdk.clone()],
