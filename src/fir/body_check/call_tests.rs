@@ -3,7 +3,7 @@ use super::test_support::{
     checked_function_body_with_platform, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
-use crate::fir::{FirInlineBodyPlan, FirInlineDefaultValue};
+use crate::fir::{FirInlineBodyPlan, FirInlineDefault, FirInlineDefaultValue, FirInlineValue};
 
 #[test]
 fn legacy_context_receiver_supplies_an_unqualified_extension_call() {
@@ -3823,24 +3823,50 @@ fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         };
         matches!(
             plan.as_ref(),
-            FirInlineBodyPlan::SuspendBeforeLambdaFinally { .. }
+            FirInlineBodyPlan::InvokeLambda { cleanup, .. } if !cleanup.is_empty()
         )
         .then_some(plan.as_ref())
     });
-    let Some(FirInlineBodyPlan::SuspendBeforeLambdaFinally {
+    let Some(FirInlineBodyPlan::InvokeLambda {
         lambda_parameter,
-        state,
-        enter,
+        arguments,
+        prologue,
         cleanup,
+        records_cause,
+        defaults,
+        result,
     }) = plan
     else {
         panic!("withLock must publish its selected structural plan in checked FIR")
     };
-    let state = state
-        .as_ref()
-        .expect("withLock threads its `owner` through lock/unlock");
-    assert_eq!((*lambda_parameter, state.parameter), (1, 0));
-    assert_eq!(state.default, FirInlineDefaultValue::Null);
+    let ([enter], [cleanup]) = (&prologue[..], &cleanup[..]) else {
+        panic!("withLock enters its region once and leaves it once")
+    };
+    assert_eq!(
+        (*lambda_parameter, arguments.len(), *records_cause, *result),
+        (1, 0, false, None)
+    );
+    assert_eq!(
+        defaults.as_ref(),
+        [FirInlineDefault {
+            parameter: 0,
+            value: FirInlineDefaultValue::Null,
+        }]
+    );
+    assert_eq!(
+        (enter.dispatch, enter.arguments.as_ref()),
+        (
+            Some(FirInlineValue::Receiver),
+            [FirInlineValue::Parameter(0)].as_slice()
+        )
+    );
+    assert_eq!(
+        (cleanup.dispatch, cleanup.arguments.as_ref()),
+        (
+            Some(FirInlineValue::Receiver),
+            [FirInlineValue::Parameter(0)].as_slice()
+        )
+    );
     assert_eq!(enter.parameters.len(), 1);
     assert_eq!(cleanup.parameters.len(), 1);
     assert!(enter.suspend);

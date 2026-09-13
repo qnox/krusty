@@ -16813,19 +16813,13 @@ impl<'a> Lower<'a> {
         callable: &crate::libraries::LibraryCallable,
         plan: &crate::libraries::InlineBodyPlan,
     ) -> Option<u32> {
-        let crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            argument_parameters,
-            return_parameter,
-        } = plan
-        else {
-            return None;
-        };
+        let (lambda_parameter, argument_parameters, return_parameter) =
+            plan.plain_invoke_lambda()?;
         let slots = self.info.resolved_call_arg_slots.get(&call)?;
         if slots.len() != callable.params.len() {
             return None;
         }
-        let lambda = slots.get(*lambda_parameter).copied().flatten()?;
+        let lambda = slots.get(lambda_parameter).copied().flatten()?;
         if !matches!(self.afile.expr(lambda), Expr::Lambda { .. }) {
             return None;
         }
@@ -20992,28 +20986,49 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let parameters =
             self.extension_plan_arguments(call, receiver, args, callable.params.len())?;
+        if let Some((lambda_parameter, argument_parameters, return_parameter)) =
+            plan.plain_invoke_lambda()
+        {
+            let lambda = parameters.get(lambda_parameter).copied().flatten()?;
+            let arguments = argument_parameters
+                .iter()
+                .map(|parameter| parameters.get(*parameter).copied().flatten())
+                .collect::<Option<Vec<_>>>()?;
+            let label = self.lambda_label(lambda, source_label);
+            let returned =
+                return_parameter.and_then(|parameter| parameters.get(parameter).copied().flatten());
+            return self.lower_invoke_lambda_plan(lambda, &arguments, label, returned);
+        }
         match plan {
             crate::libraries::InlineBodyPlan::InvokeLambda {
                 lambda_parameter,
-                argument_parameters,
-                return_parameter,
-            } => {
-                let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
-                let arguments = argument_parameters
-                    .iter()
-                    .map(|parameter| parameters.get(*parameter).copied().flatten())
-                    .collect::<Option<Vec<_>>>()?;
-                let label = self.lambda_label(lambda, source_label);
-                let returned = return_parameter
-                    .and_then(|parameter| parameters.get(parameter).copied().flatten());
-                self.lower_invoke_lambda_plan(lambda, &arguments, label, returned)
-            }
-            crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-                lambda_parameter,
-                state,
-                enter,
+                prologue,
                 cleanup,
+                records_cause,
+                defaults,
+                ..
             } => {
+                use crate::libraries::InlineBodyValue;
+                // This pass expands only the guarded form it has always supported: one prologue call
+                // and one cleanup call, both on the extension receiver, threading at most one shared
+                // argument and recording no cause. Everything else is expanded in full by the
+                // checked-FIR path, which is what production lowering runs.
+                let ([enter], [cleanup]) = (&prologue[..], &cleanup[..]) else {
+                    return None;
+                };
+                let on_receiver = Some(InlineBodyValue::Parameter(0));
+                if *records_cause
+                    || enter.dispatch != on_receiver
+                    || cleanup.dispatch != on_receiver
+                    || enter.arguments != cleanup.arguments
+                {
+                    return None;
+                }
+                let state = match enter.arguments[..] {
+                    [] => None,
+                    [InlineBodyValue::Parameter(parameter)] => Some(parameter),
+                    _ => return None,
+                };
                 if !self.cur_fn_suspend {
                     return self.bail("selected inline body plan requires a suspend function");
                 }
@@ -21038,17 +21053,18 @@ impl<'a> Lower<'a> {
                     ty_to_ir(receiver_ty),
                     Some(receiver_value),
                 );
-                // The state argument is optional: `withLock` threads its `owner` into
-                // `lock`/`unlock`, `withPermit` threads nothing into `acquire`/`release`.
                 let state_slot = match state {
-                    Some(state) => {
-                        let state_ty = *callable.params.get(state.parameter)?;
+                    Some(parameter) => {
+                        let state_ty = *callable.params.get(parameter)?;
                         let state_value = if let Some(expression) =
-                            parameters.get(state.parameter).copied().flatten()
+                            parameters.get(parameter).copied().flatten()
                         {
                             self.lower_arg(expression, &ty_to_ir(state_ty))?
                         } else {
-                            match state.default {
+                            let default = defaults
+                                .iter()
+                                .find(|default| default.parameter == parameter)?;
+                            match default.value {
                                 crate::libraries::DefaultValue::Null => {
                                     self.emit_const(IrConst::Null)
                                 }
@@ -21069,18 +21085,18 @@ impl<'a> Lower<'a> {
                 let state_slot = state_slot.map(|(slot, _)| slot);
                 let enter_receiver = self.emit_get_value(receiver_slot);
                 let enter_state = state_slot.map(|slot| self.emit_get_value(slot));
-                let enter_owner = enter.owner?;
+                let enter_owner = enter.member.owner?;
                 let enter_call = self.emit_virtual_call(
                     enter_owner,
-                    enter.name.clone(),
-                    enter.descriptor.clone(),
-                    enter.is_interface(),
+                    enter.member.name.clone(),
+                    enter.member.descriptor.clone(),
+                    enter.member.is_interface(),
                     enter_receiver,
                     enter_state.into_iter().collect(),
                 );
                 self.ir
                     .suspend_calls
-                    .insert(enter_call, ty_to_ir(enter.ret));
+                    .insert(enter_call, ty_to_ir(enter.member.ret));
 
                 let result_ty = self.info.ty(call);
                 let result_slot = self.fresh_value();
@@ -21116,12 +21132,12 @@ impl<'a> Lower<'a> {
                     self.emit_while(condition, loop_body, None, false, Some(break_label));
                 let cleanup_receiver = self.emit_get_value(receiver_slot);
                 let cleanup_state = state_slot.map(|slot| self.emit_get_value(slot));
-                let cleanup_owner = cleanup.owner?;
+                let cleanup_owner = cleanup.member.owner?;
                 let cleanup_call = self.emit_virtual_call(
                     cleanup_owner,
-                    cleanup.name.clone(),
-                    cleanup.descriptor.clone(),
-                    cleanup.is_interface(),
+                    cleanup.member.name.clone(),
+                    cleanup.member.descriptor.clone(),
+                    cleanup.member.is_interface(),
                     cleanup_receiver,
                     cleanup_state.into_iter().collect(),
                 );
@@ -27380,16 +27396,15 @@ impl<'a> Lower<'a> {
                     return Some(r);
                 }
                 let member = resolved.member;
-                if let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                    lambda_parameter,
-                    argument_parameters,
-                    return_parameter,
-                }) = member.inline_body_plan.as_deref()
+                if let Some((lambda_parameter, argument_parameters, return_parameter)) = member
+                    .inline_body_plan
+                    .as_deref()
+                    .and_then(crate::libraries::InlineBodyPlan::plain_invoke_lambda)
                 {
                     let parameters = std::iter::once(Some(receiver))
                         .chain(args.iter().copied().map(Some))
                         .collect::<Vec<_>>();
-                    let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
+                    let lambda = parameters.get(lambda_parameter).copied().flatten()?;
                     let arguments = argument_parameters
                         .iter()
                         .map(|parameter| parameters.get(*parameter).copied().flatten())

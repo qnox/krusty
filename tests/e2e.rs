@@ -1314,6 +1314,7 @@ mod suspend_inline_hof_suspending_lambda_reject_e2e;
 mod suspend_inline_splice_names_e2e;
 #[path = "suspend_inline_stateless_finally_e2e.rs"]
 mod suspend_inline_stateless_finally_e2e;
+
 #[path = "suspend_inline_statementless_block_e2e.rs"]
 mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_interface_delegation_e2e.rs"]
@@ -1450,6 +1451,8 @@ mod unsigned_ext_e2e;
 mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
+#[path = "use_inline_finally_e2e.rs"]
+mod use_inline_finally_e2e;
 #[path = "use_site_variance_e2e.rs"]
 mod use_site_variance_e2e;
 #[path = "utf16_string_constant_e2e.rs"]

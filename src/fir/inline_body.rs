@@ -9,13 +9,47 @@ use super::signature::ResolvedTy;
 pub enum FirInlineValue {
     Receiver,
     Parameter(u32),
+    /// The throwable that left the lambda invocation, and `null` on the normal exit.
+    Cause,
+}
+
+/// One call a checked inline plan makes around its lambda invocation. The declaration is an opaque
+/// identity; target-specific owners, descriptors and invocation opcodes remain provider data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineCall {
+    pub declaration: ExternalCallableId,
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
+    pub suspend: bool,
+    /// Dispatch receiver, for a call on a member; `None` for a top-level function.
+    pub dispatch: Option<FirInlineValue>,
+    pub arguments: Box<[FirInlineValue]>,
+}
+
+/// A parameter the caller may leave out, with the value the declaration's own default supplies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirInlineDefault {
+    pub parameter: u32,
+    pub value: FirInlineDefaultValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirInlineBodyPlan {
+    /// Invoke one function-typed parameter, optionally entering a region before it and leaving that
+    /// region from `finally`.
+    ///
+    /// Every "set up, call the lambda, tear down" declaration checks to this one shape; they differ
+    /// only in which fields are populated. `let`/`run`/`with` have neither prologue nor cleanup,
+    /// `apply`/`also` return a parameter instead of the invocation result, `Mutex.withLock` and
+    /// `Semaphore.withPermit` enter a suspending region and leave it from `finally`, and
+    /// `Closeable.use` hands its cleanup the throwable that left the body.
     InvokeLambda {
         lambda_parameter: u32,
         arguments: Box<[FirInlineValue]>,
+        prologue: Box<[FirInlineCall]>,
+        cleanup: Box<[FirInlineCall]>,
+        records_cause: bool,
+        defaults: Box<[FirInlineDefault]>,
         result: Option<FirInlineValue>,
     },
     /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
@@ -46,24 +80,6 @@ pub enum FirInlineBodyPlan {
         append_parameter: ResolvedTy,
         append_result: ResolvedTy,
     },
-    /// Inline a declaration whose checked body enters a suspending region, invokes a zero-argument
-    /// lambda, and leaves the region from `finally`. The selected member identities are opaque;
-    /// target-specific owners, descriptors, and invocation opcodes remain provider/backend data.
-    SuspendBeforeLambdaFinally {
-        lambda_parameter: u32,
-        /// The optional argument both members take besides the receiver, with the value the
-        /// declaration's own default supplies when the caller omits it. `withLock` threads its
-        /// `owner`; `withPermit` threads nothing.
-        state: Option<FirInlineBodyState>,
-        enter: FirInlineMemberCall,
-        cleanup: FirInlineMemberCall,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirInlineBodyState {
-    pub parameter: u32,
-    pub default: FirInlineDefaultValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,12 +104,4 @@ impl From<&crate::libraries::InlineCollectionLocalNames> for FirInlineCollection
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirInlineDefaultValue {
     Null,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirInlineMemberCall {
-    pub declaration: ExternalCallableId,
-    pub parameters: Box<[ResolvedTy]>,
-    pub result: ResolvedTy,
-    pub suspend: bool,
 }

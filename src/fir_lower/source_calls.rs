@@ -459,7 +459,15 @@ impl BodyLowering<'_> {
             extension_receiver,
             arguments,
         } = request;
-        let (lambda_parameter, invocation_arguments, returned_value) = match plan {
+        let (
+            lambda_parameter,
+            invocation_arguments,
+            prologue,
+            cleanup,
+            records_cause,
+            plan_defaults,
+            returned_value,
+        ) = match plan {
             crate::fir::FirInlineBodyPlan::ForEach {
                 lambda_parameter,
                 iterator_ty,
@@ -516,105 +524,28 @@ impl BodyLowering<'_> {
                     arguments,
                 );
             }
-            crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
-                lambda_parameter,
-                state,
-                enter,
-                cleanup,
-            } => {
-                return self.external_suspend_finally_inline_call(
-                    *lambda_parameter,
-                    state.as_ref(),
-                    enter,
-                    cleanup,
-                    receiver_ty,
-                    parameter_types,
-                    result,
-                    dispatch_receiver,
-                    extension_receiver,
-                    arguments,
-                );
-            }
             crate::fir::FirInlineBodyPlan::InvokeLambda {
                 lambda_parameter,
                 arguments,
-                result,
-            } => (*lambda_parameter, arguments, *result),
+                prologue,
+                cleanup,
+                records_cause,
+                defaults,
+                result: returned,
+            } => (
+                *lambda_parameter,
+                arguments,
+                prologue,
+                cleanup,
+                *records_cause,
+                defaults,
+                *returned,
+            ),
         };
         let lambda_parameter = lambda_parameter as usize;
-        let (mut statements, receiver, args, defaults) =
+        let (mut statements, receiver, mut args, defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
-        debug_assert!(defaults.is_empty());
-        let invocation_operands = invocation_arguments
-            .iter()
-            .map(|operand| {
-                Some(match operand {
-                    crate::fir::FirInlineValue::Receiver => (receiver?, receiver_ty?.get()),
-                    crate::fir::FirInlineValue::Parameter(parameter) => (
-                        *args.get(*parameter as usize)?,
-                        *parameter_types.get(*parameter as usize)?,
-                    ),
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let inline_body = self.materialize_external_inline_lambda(
-            &mut statements,
-            &args,
-            lambda_parameter,
-            &invocation_operands,
-        )?;
-
-        if let Some(returned_value) = returned_value {
-            statements.push(inline_body);
-            let value = match returned_value {
-                crate::fir::FirInlineValue::Receiver => receiver?,
-                crate::fir::FirInlineValue::Parameter(parameter) => {
-                    *args.get(parameter as usize)?
-                }
-            };
-            return Some(self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(value),
-            }));
-        }
-        Some(if statements.is_empty() {
-            inline_body
-        } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(inline_body),
-            })
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn external_suspend_finally_inline_call(
-        &mut self,
-        lambda_parameter: u32,
-        state: Option<&crate::fir::FirInlineBodyState>,
-        enter: &crate::fir::FirInlineMemberCall,
-        cleanup: &crate::fir::FirInlineMemberCall,
-        receiver_ty: Option<ResolvedTy>,
-        parameter_types: &[Ty],
-        result: ResolvedTy,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> Option<ExprId> {
-        let receiver_ty = receiver_ty?.get();
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty: ResolvedTy::new(receiver_ty).ok(),
                 parameter_types,
                 dispatch_receiver,
                 extension_receiver,
@@ -624,131 +555,224 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter: None,
                 mode: SelectedOperandMode::Materialized,
             })?;
-        let receiver = receiver?;
-        // The state argument is optional: `withLock` threads its `owner` into `lock`/`unlock`,
-        // `withPermit` threads nothing into `acquire`/`release`. Only that one parameter may be
-        // omitted at the call site — any other default means this is not the recognized shape.
-        let state_parameter = state.map(|state| state.parameter as usize);
-        if defaults
-            .iter()
-            .any(|default| Some(*default as usize) != state_parameter)
-        {
-            return None;
+        // Only a parameter the DECLARATION defaults may be omitted, and only to the value the plan
+        // decoded from its `$default` bridge. Any other omission means the call site is not this
+        // expansion, so the ordinary non-inline call must handle it.
+        for omitted in &defaults {
+            let default = plan_defaults
+                .iter()
+                .find(|default| default.parameter == *omitted)?;
+            let value = match default.value {
+                crate::fir::FirInlineDefaultValue::Null => {
+                    self.ir.add_expr(IrExpr::Const(IrConst::Null))
+                }
+            };
+            *args.get_mut(*omitted as usize)? = value;
         }
-        let state_slot = match (state, state_parameter) {
-            (Some(state), Some(parameter)) => {
-                let state_ty = *parameter_types.get(parameter)?;
-                let state_value = if defaults.iter().any(|default| *default as usize == parameter) {
-                    match state.default {
-                        crate::fir::FirInlineDefaultValue::Null => {
-                            self.ir.add_expr(IrExpr::Const(IrConst::Null))
-                        }
-                    }
-                } else {
-                    *args.get(parameter)?
-                };
+
+        // A cleanup may read the throwable that left the invocation, so its local is declared before
+        // anything the plan emits can reach it. Its type is the one the cleanup DECLARES for that
+        // parameter — the same fact that names the handler's caught class, so neither is invented
+        // here.
+        let cause = match records_cause {
+            false => None,
+            true => {
+                let cause_ty = cleanup.iter().find_map(|call| {
+                    let position = call
+                        .arguments
+                        .iter()
+                        .position(|value| *value == crate::fir::FirInlineValue::Cause)?;
+                    Some(call.parameters.get(position)?.get())
+                })?;
                 let slot = self.allocate_temporary();
+                let initial = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 statements.push(self.ir.add_expr(IrExpr::Variable {
                     index: slot,
-                    ty: state_ty,
-                    init: Some(state_value),
+                    ty: cause_ty,
+                    init: Some(initial),
                     named: false,
                 }));
-                Some(slot)
+                Some((slot, cause_ty))
             }
-            _ => None,
         };
+        let plan_value = |lowering: &mut Self, value: crate::fir::FirInlineValue| match value {
+            crate::fir::FirInlineValue::Receiver => Some((receiver?, receiver_ty?.get())),
+            crate::fir::FirInlineValue::Parameter(parameter) => Some((
+                *args.get(parameter as usize)?,
+                *parameter_types.get(parameter as usize)?,
+            )),
+            crate::fir::FirInlineValue::Cause => {
+                let (slot, ty) = cause?;
+                Some((lowering.ir.add_expr(IrExpr::GetValue(slot)), ty))
+            }
+        };
+        for call in prologue {
+            let call = self.external_inline_plan_call(call, plan_value)?;
+            statements.push(call);
+        }
+
+        let invocation_operands = invocation_arguments
+            .iter()
+            .map(|operand| plan_value(self, *operand))
+            .collect::<Option<Vec<_>>>()?;
         let inline_body = self.materialize_external_inline_lambda(
             &mut statements,
             &args,
-            lambda_parameter as usize,
-            &[],
+            lambda_parameter,
+            &invocation_operands,
         )?;
 
-        let enter_state = state_slot.map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)));
-        let enter_call = self.external_inline_member_call(
-            enter,
-            receiver,
-            receiver_ty,
-            enter_state.into_iter().collect(),
-        )?;
-        statements.push(enter_call);
+        let value = if cleanup.is_empty() {
+            inline_body
+        } else {
+            self.guard_inline_body(inline_body, cleanup, cause, result.get(), plan_value)?
+        };
+        if let Some(returned_value) = returned_value {
+            statements.push(value);
+            let (returned, _) = plan_value(self, returned_value)?;
+            return Some(self.ir.add_expr(IrExpr::Block {
+                stmts: statements,
+                value: Some(returned),
+            }));
+        }
+        Some(if statements.is_empty() {
+            value
+        } else {
+            self.ir.add_expr(IrExpr::Block {
+                stmts: statements,
+                value: Some(value),
+            })
+        })
+    }
 
-        let result_ty = result.get();
+    /// Wrap one already-spliced inline body in the `try` its plan's cleanup describes:
+    ///
+    /// ```text
+    /// try { result = body }
+    /// catch (t: Throwable) { cause = t; throw t }   // only when the plan records a cause
+    /// finally { cleanup… }
+    /// result
+    /// ```
+    ///
+    /// The result travels through a local because the `finally` runs between producing the value and
+    /// consuming it, exactly as the declaration's own compiled body does.
+    fn guard_inline_body(
+        &mut self,
+        body: ExprId,
+        cleanup: &[crate::fir::FirInlineCall],
+        cause: Option<(u32, Ty)>,
+        result_ty: Ty,
+        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
+    ) -> Option<ExprId> {
         let result_slot = self.allocate_temporary();
         let initial = self
             .ir
             .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
-        statements.push(self.ir.add_expr(IrExpr::Variable {
+        let declaration = self.ir.add_expr(IrExpr::Variable {
             index: result_slot,
             ty: result_ty,
             init: Some(initial),
             named: false,
-        }));
+        });
         let store_result = self.ir.add_expr(IrExpr::SetValue {
             var: result_slot,
-            value: inline_body,
+            value: body,
         });
         let try_body = self.ir.add_expr(IrExpr::Block {
             stmts: vec![store_result],
             value: None,
         });
-        let cleanup_state = state_slot.map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)));
-        let cleanup_call = self.external_inline_member_call(
-            cleanup,
-            receiver,
-            receiver_ty,
-            cleanup_state.into_iter().collect(),
-        )?;
+        let catches = match cause {
+            None => Vec::new(),
+            Some((cause_slot, cause_ty)) => {
+                let caught = self.allocate_temporary();
+                let caught_value = self.ir.add_expr(IrExpr::GetValue(caught));
+                let record = self.ir.add_expr(IrExpr::SetValue {
+                    var: cause_slot,
+                    value: caught_value,
+                });
+                let rethrown = self.ir.add_expr(IrExpr::GetValue(caught));
+                let rethrow = self.ir.add_expr(IrExpr::Throw { operand: rethrown });
+                vec![crate::ir::IrCatch {
+                    var: caught,
+                    name: None,
+                    exc_internal: cause_ty.non_null().obj_internal()?,
+                    body: self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![record, rethrow],
+                        value: None,
+                    }),
+                }]
+            }
+        };
+        let cleanup_calls = cleanup
+            .iter()
+            .map(|call| self.external_inline_plan_call(call, plan_value))
+            .collect::<Option<Vec<_>>>()?;
         let finally = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![cleanup_call],
+            stmts: cleanup_calls,
             value: None,
         });
-        statements.push(self.ir.add_expr(IrExpr::Try {
+        let guarded = self.ir.add_expr(IrExpr::Try {
             body: try_body,
-            catches: Vec::new(),
+            catches,
             finally: Some(finally),
             result: Ty::Unit,
-        }));
+        });
         let value = self.ir.add_expr(IrExpr::GetValue(result_slot));
         Some(self.ir.add_expr(IrExpr::Block {
-            stmts: statements,
+            stmts: vec![declaration, guarded],
             value: Some(value),
         }))
     }
 
-    fn external_inline_member_call(
+    /// Emit one call a plan makes around its lambda invocation. Whether the first operand is a
+    /// dispatch receiver or an ordinary argument is the plan's fact, decoded from the declaration's
+    /// own body; lowering neither re-derives it nor consults the target ABI.
+    fn external_inline_plan_call(
         &mut self,
-        plan: &crate::fir::FirInlineMemberCall,
-        receiver: ExprId,
-        receiver_ty: Ty,
-        args: Vec<ExprId>,
+        call: &crate::fir::FirInlineCall,
+        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)>,
     ) -> Option<ExprId> {
-        if plan.parameters.len() != args.len() {
+        let dispatch = match call.dispatch {
+            None => None,
+            Some(value) => Some(plan_value(self, value)?),
+        };
+        let args = call
+            .arguments
+            .iter()
+            .map(|value| Some(plan_value(self, *value)?.0))
+            .collect::<Option<Vec<_>>>()?;
+        if call.parameters.len() != args.len() {
             return None;
         }
-        let call = self.ir.add_expr(IrExpr::Call {
+        let call_expression = self.ir.add_expr(IrExpr::Call {
             callee: Callee::External {
-                target: plan.declaration,
+                target: call.declaration,
                 default_provider: None,
-                params: plan
+                params: call
                     .parameters
                     .iter()
                     .map(|parameter| parameter.get())
                     .collect(),
-                ret: plan.result.get(),
+                ret: call.result.get(),
                 substitutions: Vec::new(),
                 defaults: Vec::new(),
                 extension_receiver_parameter: None,
             },
-            dispatch_receiver: Some(receiver),
+            dispatch_receiver: dispatch.map(|(receiver, _)| receiver),
             args,
         });
-        self.ir.ext_call_source_receiver.insert(call, receiver_ty);
-        if plan.suspend {
-            self.ir.suspend_calls.insert(call, plan.result.get());
+        if let Some((_, receiver_ty)) = dispatch {
+            self.ir
+                .ext_call_source_receiver
+                .insert(call_expression, receiver_ty);
         }
-        Some(call)
+        if call.suspend {
+            self.ir
+                .suspend_calls
+                .insert(call_expression, call.result.get());
+        }
+        Some(call_expression)
     }
 
     /// Replace one already-evaluated lambda operand with its checked inline-body template. Capture

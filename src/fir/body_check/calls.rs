@@ -50,10 +50,12 @@ pub(super) fn fir_inline_body_plan(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
 ) -> Option<Box<crate::fir::FirInlineBodyPlan>> {
-    let map_value = |parameter: usize| {
-        if receiver_parameter == Some(parameter) {
-            crate::fir::FirInlineValue::Receiver
-        } else {
+    let map_value = |value: crate::libraries::InlineBodyValue| match value {
+        crate::libraries::InlineBodyValue::Cause => crate::fir::FirInlineValue::Cause,
+        crate::libraries::InlineBodyValue::Parameter(parameter) => {
+            if receiver_parameter == Some(parameter) {
+                return crate::fir::FirInlineValue::Receiver;
+            }
             let parameter = parameter
                 .checked_sub(usize::from(
                     receiver_parameter.is_some_and(|receiver| parameter > receiver),
@@ -65,14 +67,16 @@ pub(super) fn fir_inline_body_plan(
             )
         }
     };
-    let map_parameter = |parameter| match map_value(parameter) {
-        crate::fir::FirInlineValue::Parameter(parameter) => Some(parameter),
-        crate::fir::FirInlineValue::Receiver => None,
-    };
-    let member_call = |member: &crate::libraries::LibraryMember| {
-        Some(crate::fir::FirInlineMemberCall {
-            declaration: member.external_identity?,
-            parameters: member
+    let map_parameter =
+        |parameter| match map_value(crate::libraries::InlineBodyValue::Parameter(parameter)) {
+            crate::fir::FirInlineValue::Parameter(parameter) => Some(parameter),
+            crate::fir::FirInlineValue::Receiver | crate::fir::FirInlineValue::Cause => None,
+        };
+    let call = |call: &crate::libraries::InlineBodyCall| {
+        Some(crate::fir::FirInlineCall {
+            declaration: call.member.external_identity?,
+            parameters: call
+                .member
                 .params
                 .iter()
                 .copied()
@@ -80,46 +84,47 @@ pub(super) fn fir_inline_body_plan(
                 .collect::<Result<Vec<_>, _>>()
                 .ok()?
                 .into_boxed_slice(),
-            result: ResolvedTy::new(member.ret).ok()?,
-            suspend: member.suspend(),
+            result: ResolvedTy::new(call.member.ret).ok()?,
+            suspend: call.member.suspend(),
+            dispatch: call.dispatch.map(map_value),
+            arguments: call.arguments.iter().copied().map(map_value).collect(),
         })
     };
     Some(Box::new(match plan? {
         crate::libraries::InlineBodyPlan::InvokeLambda {
             lambda_parameter,
-            argument_parameters,
-            return_parameter,
+            arguments,
+            prologue,
+            cleanup,
+            records_cause,
+            defaults,
+            result,
         } => crate::fir::FirInlineBodyPlan::InvokeLambda {
             lambda_parameter: map_parameter(*lambda_parameter)?,
-            arguments: argument_parameters
+            arguments: arguments.iter().copied().map(map_value).collect(),
+            prologue: prologue
                 .iter()
-                .copied()
-                .map(map_value)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            result: return_parameter.map(map_value),
-        },
-        crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter,
-            state,
-            enter,
-            cleanup,
-        } => crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter: map_parameter(*lambda_parameter)?,
-            state: match state {
-                None => None,
-                Some(state) => Some(crate::fir::FirInlineBodyState {
-                    parameter: map_parameter(state.parameter)?,
-                    default: match state.default {
-                        crate::libraries::DefaultValue::Null => {
-                            crate::fir::FirInlineDefaultValue::Null
-                        }
-                        _ => return None,
-                    },
-                }),
-            },
-            enter: member_call(enter)?,
-            cleanup: member_call(cleanup)?,
+                .map(call)
+                .collect::<Option<Vec<_>>>()?
+                .into(),
+            cleanup: cleanup.iter().map(call).collect::<Option<Vec<_>>>()?.into(),
+            records_cause: *records_cause,
+            defaults: defaults
+                .iter()
+                .map(|default| {
+                    Some(crate::fir::FirInlineDefault {
+                        parameter: map_parameter(default.parameter)?,
+                        value: match default.value {
+                            crate::libraries::DefaultValue::Null => {
+                                crate::fir::FirInlineDefaultValue::Null
+                            }
+                            _ => return None,
+                        },
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into(),
+            result: result.map(map_value),
         },
         // This plan also needs the call-site-selected iterator protocol and applied element type.
         // `selected_extension_call` publishes the complete checked variant below.

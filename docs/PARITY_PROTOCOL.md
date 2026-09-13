@@ -2012,3 +2012,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   receives a continuation, and emission fails with "call arity mismatch" — which bails the whole
   FILE, so one `withPermit` cost a module every class it would have emitted.
   `tests/suspend_inline_stateless_finally_e2e.rs::with_permit_hosts_a_suspension_in_its_lambda`.
+- **One inline-body plan instead of one per library shape (fix).** krusty expands a RECOGNIZED
+  classpath inline body at IR level, which is what lets a suspension inside the lambda join the
+  CALLER's state machine. The recogniser had grown a variant per library shape — an unguarded
+  `InvokeLambda` and an enter/lambda/finally `SuspendBeforeLambdaFinally` — and anything else was
+  rejected outright, so `Closeable.use` decoded to nothing at all.
+  Those are ONE shape: invoke a function-typed parameter, optionally set up before it, optionally
+  tear down after it. `let`/`run`/`with` populate neither optional part, `apply`/`also` return a
+  parameter instead of the invocation result, `Mutex.withLock`/`Semaphore.withPermit` enter a
+  suspending region and leave it from `finally`, and `use` hands its cleanup the throwable that left
+  the body so a failing `close()` is suppressed onto it rather than replacing it. The plan now
+  carries a prologue, a cleanup, a recorded cause and the defaults its calls may read, and each
+  decoded call learns from the OPCODE whether it dispatches on a receiver or is a top-level
+  function, and from its DESCRIPTOR whether it suspends — two more facts that were previously fixed
+  per variant.
+  Without a plan the call keeps its lambda as a real function object, a suspend call inside it never
+  receives a continuation, and emission fails with "call arity mismatch" — which bails the whole
+  FILE, so one `use` cost a module every class it would have emitted.
+  `tests/use_inline_finally_e2e.rs::use_hosts_a_suspension_in_its_lambda`,
+  `use_suppresses_a_close_failure_onto_the_body_exception`.
