@@ -668,9 +668,37 @@ Two cheaper levers exist and are worth taking whichever host language wins:
 * **Emit compact text.** The cost is proportional to source size, so fewer temporaries and less
   redundant spelling cut it directly.
 
-What remains unmeasured, and should be before this decides anything: the tax as a share of *total*
-build time, krusty's own frontend and lowering included. 2.6 s of Go compile matters if krusty took
-0.5 s to produce that module and does not if it took 10 s.
+**Measured against a real module: the tax is ~5 %, not ~40 %.** The share above is of the *host
+compile*, which is the wrong denominator — what matters is the share of the whole build, krusty's
+own frontend and lowering included. Measured end to end on a 24,204-line Kotlin module compiled by
+the native backend, which produced 44,211 lines of C (a **1.83×** expansion) that compiles, links
+and runs correctly:
+
+| stage | time |
+|---|---|
+| krusty: frontend + lowering + emit (release build) | **10.1 s** |
+| clang: full build and link of the emitted C | 1.70 s |
+| …of which parse and sema — the duplicated work | **~0.6 s** |
+| **round-trip tax as a share of total build** | **~5 %** |
+
+At the matched generated size Go's own numbers give 2.64 s total with 1.09 s of parse, so the same
+module through a Go emitter would be roughly 1.09 s of 12.7 s — **~9 %**. Both are single-digit
+percentages of a real build, because krusty's frontend is the expensive part by an order of
+magnitude: it runs at about **2,300 lines/s on real Kotlin** (measured on 9,151 lines of the Kotlin
+standard library's own sources, an optimized build, process startup netted out), against roughly
+24,000 lines/s for the whole Go compile and 16,500 for clang.
+
+Two cautions on those figures, pulling in opposite directions and neither yet bounded. Stdlib
+sources are unusually hard Kotlin — generics, `inline`, `expect`/`actual` — which raises krusty's
+share and so *understates* the tax. The 1.83× expansion comes from simple top-level functions, the
+only subset the native backend currently accepts; real Kotlin with classes and generics will expand
+further and so *overstates* it. Treat ~5 % as the right order of magnitude rather than a precise
+number, and re-measure once the backend can compile classes.
+
+One measurement note worth keeping: the first attempt used the `gate` profile, which is
+`opt-level = 0`. That put krusty at 477 lines/s instead of 2,342 — a 4.9× error, in the direction
+that would have made the tax look negligible. Compiler throughput comparisons must use an optimized
+build.
 
 #### Settled: GraalVM is the oracle, not the pipeline
 
