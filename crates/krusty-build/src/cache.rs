@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::abi::AbiFingerprint;
-use crate::fnv1a;
+use crate::digest::{digest_bytes, Digest, Hasher};
 use crate::model::ModuleId;
 
 /// Environment variables known to change emitted output. Named explicitly rather than hashing the
@@ -45,27 +45,37 @@ pub const OUTPUT_AFFECTING_ENVIRONMENT: &[&str] =
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileDigest {
     pub path: PathBuf,
-    /// Hash of the file's bytes.
-    pub content: u64,
+    /// Digest of the file's bytes.
+    pub content: Digest,
 }
 
 impl FileDigest {
-    pub fn new(path: impl Into<PathBuf>, content: u64) -> Self {
+    pub fn new(path: impl Into<PathBuf>, content: Digest) -> Self {
         Self {
             path: path.into(),
             content,
         }
     }
 
+    /// Digest the given bytes as this path's content.
+    pub fn of_bytes(path: impl Into<PathBuf>, bytes: &[u8]) -> Self {
+        Self::new(path, digest_bytes(bytes))
+    }
+
     /// Digest a file on disk.
     pub fn of_file(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path)?;
-        Ok(Self::new(path, fnv1a(&bytes)))
+        Ok(Self::of_bytes(path, &bytes))
     }
 
     fn render(&self, out: &mut String) {
-        out.push_str(&format!("{}:{:016x}\n", self.path.display(), self.content));
+        out.push_str(&format!("{}:{}\n", self.path.display(), self.content));
+    }
+
+    fn absorb(&self, hasher: &mut Hasher, tag: &str) {
+        hasher.field(tag, self.path.as_os_str().as_encoded_bytes());
+        hasher.nested("content", self.content);
     }
 }
 
@@ -157,31 +167,73 @@ impl CacheKeyInputs {
         out
     }
 
-    /// Hash the rendering.
+    /// The key.
+    ///
+    /// Hashes length-delimited fields rather than [`Self::render`]: the rendering exists so a human
+    /// can see why two builds differ, and is NOT an injective encoding — a flag or path containing
+    /// a newline could render exactly like two of them. See `crate::digest`.
     pub fn key(&self) -> CacheKey {
-        CacheKey(fnv1a(self.render().as_bytes()))
+        let mut hasher = Hasher::new();
+        hasher.text("compiler", &self.compiler);
+        hasher.count("flags", self.compiler_flags.len());
+        for flag in &self.compiler_flags {
+            hasher.text("flag", flag);
+        }
+        hasher.count("environment", self.environment.len());
+        for (name, value) in &self.environment {
+            hasher.text("env-name", name);
+            hasher.text("env-value", value);
+        }
+        hasher.text("jdk", &self.jdk_identity);
+        hasher.count("sources", self.sources.len());
+        for source in &self.sources {
+            source.absorb(&mut hasher, "source");
+        }
+        hasher.count("classpath", self.classpath.len());
+        for entry in &self.classpath {
+            entry.absorb(&mut hasher, "classpath");
+        }
+        hasher.count("friends", self.friend_paths.len());
+        for entry in &self.friend_paths {
+            entry.absorb(&mut hasher, "friend");
+        }
+        hasher.count("dependencies", self.dependency_abis.len());
+        for (id, abi) in &self.dependency_abis {
+            hasher.text("dependency", id.as_str());
+            hasher.nested("abi", abi.digest());
+        }
+        hasher.count("plugins", self.plugins.len());
+        for plugin in &self.plugins {
+            plugin.absorb(&mut hasher, "plugin");
+        }
+        hasher.count("plugin-options", self.plugin_options.len());
+        for option in &self.plugin_options {
+            hasher.text("plugin-option", option);
+        }
+        hasher.text("target", &self.target);
+        CacheKey(hasher.finish())
     }
 }
 
 /// A module's cache key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CacheKey(u64);
+pub struct CacheKey(Digest);
 
 impl CacheKey {
-    pub fn value(self) -> u64 {
+    pub fn digest(self) -> Digest {
         self.0
     }
 
     /// Rebuild a key from a previously rendered value. Not for minting keys: those come from
     /// [`CacheKeyInputs::key`], which is what guarantees every input is covered.
-    pub fn from_raw(value: u64) -> Self {
+    pub fn from_digest(value: Digest) -> Self {
         Self(value)
     }
 }
 
 impl std::fmt::Display for CacheKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:016x}", self.0)
+        self.0.fmt(f)
     }
 }
 
@@ -199,10 +251,10 @@ mod tests {
             environment: vec![],
             jdk_identity: "21.0.10/modules:deadbeef".into(),
             sources: vec![
-                FileDigest::new("/repo/app/Alpha.kt", 1),
-                FileDigest::new("/repo/app/Beta.kt", 2),
+                FileDigest::of_bytes("/repo/app/Alpha.kt", b"1"),
+                FileDigest::of_bytes("/repo/app/Beta.kt", b"2"),
             ],
-            classpath: vec![FileDigest::new("/m2/kotlin-stdlib-2.4.10.jar", 10)],
+            classpath: vec![FileDigest::of_bytes("/m2/kotlin-stdlib-2.4.10.jar", b"10")],
             friend_paths: vec![],
             dependency_abis: vec![(ModuleId::new("core"), fingerprint_of(7))],
             plugins: vec![],
@@ -240,22 +292,27 @@ mod tests {
                     .push(("KRUSTY_NO_CLASS_METADATA".into(), "1".into()))
             }),
             ("jdk", |i| i.jdk_identity = "17.0.9/modules:feedface".into()),
-            ("source content", |i| i.sources[0].content = 99),
+            ("source content", |i| {
+                i.sources[0].content = digest_bytes(b"99")
+            }),
             ("source path", |i| {
                 i.sources[0].path = PathBuf::from("/repo/app/Renamed.kt")
             }),
-            ("classpath content", |i| i.classpath[0].content = 99),
+            ("classpath content", |i| {
+                i.classpath[0].content = digest_bytes(b"99")
+            }),
             ("classpath path", |i| {
                 i.classpath[0].path = PathBuf::from("/m2/kotlin-stdlib-2.4.0.jar")
             }),
             ("friend paths", |i| {
-                i.friend_paths.push(FileDigest::new("/out/main", 5))
+                i.friend_paths.push(FileDigest::of_bytes("/out/main", b"5"))
             }),
             ("dependency abi", |i| {
                 i.dependency_abis[0].1 = fingerprint_of(8)
             }),
             ("plugins", |i| {
-                i.plugins.push(FileDigest::new("/m2/ksp-processor.jar", 3))
+                i.plugins
+                    .push(FileDigest::of_bytes("/m2/ksp-processor.jar", b"3"))
             }),
             ("plugin options", |i| {
                 i.plugin_options.push("verbose=true".into())
@@ -298,7 +355,7 @@ mod tests {
         let mut forward = baseline();
         forward
             .classpath
-            .push(FileDigest::new("/m2/other-1.0.jar", 11));
+            .push(FileDigest::of_bytes("/m2/other-1.0.jar", b"11"));
         let mut reversed = forward.clone();
         reversed.classpath.reverse();
         assert_ne!(forward.key(), reversed.key());
@@ -318,8 +375,8 @@ mod tests {
     fn same_content_at_different_paths_does_not_collide() {
         let mut a = baseline();
         let mut b = baseline();
-        a.sources = vec![FileDigest::new("/repo/app/Main.kt", 42)];
-        b.sources = vec![FileDigest::new("/repo/lib/Main.kt", 42)];
+        a.sources = vec![FileDigest::of_bytes("/repo/app/Main.kt", b"42")];
+        b.sources = vec![FileDigest::of_bytes("/repo/lib/Main.kt", b"42")];
         assert_ne!(a.key(), b.key());
     }
 
@@ -359,7 +416,7 @@ mod tests {
     #[test]
     fn key_displays_as_fixed_width_hex() {
         let rendered = baseline().key().to_string();
-        assert_eq!(rendered.len(), 16);
+        assert_eq!(rendered.len(), 64, "SHA-256 renders as 64 hex characters");
         assert!(rendered.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
