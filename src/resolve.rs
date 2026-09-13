@@ -28029,7 +28029,61 @@ impl<'a> Checker<'a> {
                                 return result;
                             }
                         }
-                        let arg_tys = self.arg_tys(scope, args);
+                        // A FQ call shapes its trailing lambda exactly as the imported spelling
+                        // does. The callee's block parameter may be a RECEIVER function type
+                        // (`Cfg.() -> Unit`), and typing the lambda without that shape leaves every
+                        // member named inside the block unresolved — a diagnostic no later re-typing
+                        // retracts. So the leading arguments are typed first, the callee's shape is
+                        // read from them, and the lambda is typed ONCE, already shaped.
+                        let arg_tys = match args.split_last() {
+                            Some((&last_arg, leading_args))
+                                if self.file.call_has_trailing_lambda.contains(&call.0)
+                                    && matches!(self.file.expr(last_arg), Expr::Lambda { .. }) =>
+                            {
+                                let mut arg_tys = self.arg_tys(scope, leading_args);
+                                let mut partial: Vec<Option<Ty>> =
+                                    arg_tys.iter().map(|ty| Some(*ty)).collect();
+                                partial.push(None);
+                                let explicit_type_args =
+                                    self.resolved_explicit_type_args(scope, call);
+                                let shape = self.top_level_lambda_shape_in_scope(
+                                    scope,
+                                    &name,
+                                    (args, &partial),
+                                    arg_names.as_deref(),
+                                    true,
+                                    Some(&pkg_scope),
+                                    &explicit_type_args,
+                                    None,
+                                );
+                                let last = args.len() - 1;
+                                let receiver = shape
+                                    .as_ref()
+                                    .and_then(|shape| shape.receivers.as_ref())
+                                    .and_then(|receivers| receivers.get(last).copied().flatten());
+                                let lambda = match receiver {
+                                    Some(receiver) => {
+                                        let parameters = shape
+                                            .as_ref()
+                                            .and_then(|shape| shape.param_types.as_ref())
+                                            .and_then(|types| types.get(last))
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        self.check_lambda_with_receiver_labeled(
+                                            scope,
+                                            last_arg,
+                                            receiver,
+                                            parameters.get(1..).unwrap_or_default(),
+                                            Some(&name),
+                                        )
+                                    }
+                                    None => self.expr(scope, last_arg),
+                                };
+                                arg_tys.push(lambda);
+                                arg_tys
+                            }
+                            _ => self.arg_tys(scope, args),
+                        };
                         let targs: Vec<Ty> = self
                             .file
                             .call_type_args

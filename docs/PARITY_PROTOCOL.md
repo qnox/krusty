@@ -1869,3 +1869,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
   parameter descriptors and every constant the body introduces.
   `tests/java_parameters_attribute_e2e.rs`.
+- **A fully-qualified call shapes its trailing lambda (fix).** `pkg.Build { … }` typed its trailing
+  lambda through the plain argument pass, with no shape, so a RECEIVER function-type parameter
+  (`Cfg.() -> Unit`) never bound the block's `this` and every member named inside it was "unresolved
+  reference". The imported spelling (`Build { … }`) always worked.
+  A later re-typing does NOT repair it: the shapeless pass has already recorded the diagnostic. So the
+  leading arguments are typed first, the callee's shape is read from them in the package scope, and
+  the lambda is typed ONCE, already shaped — the same order the bare-name path uses.
+  The existing FQ trailing-lambda block stays for its own case (leading parameters DEFAULTED, which
+  makes the positional path miss the callee entirely).
+  `tests/fully_qualified_receiver_lambda_e2e.rs`.
