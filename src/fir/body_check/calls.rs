@@ -787,9 +787,7 @@ impl BodyFirChecker<'_> {
             // by the call expression. Both forms are consumed here and embedded into checked FIR.
             let protocol_source = source_receiver.unwrap_or(expression);
             // The resolver records the declaration-scoped iterator protocol only when this call can
-            // actually splice a lambda body. A callable-reference argument is an ordinary function
-            // value: keep the already-selected external `forEach` call and do not invent iterator
-            // convention decisions during FIR construction.
+            // Only a lambda literal uses the checked structural plan; references remain calls.
             if let Some(protocol) = self.info.iterator_protocol(protocol_source) {
                 let span = self.file.expr_span(expression);
                 let origin = self.expression_origin(expression)?;
@@ -820,6 +818,7 @@ impl BodyFirChecker<'_> {
                         let Some(crate::libraries::InlineBodyPlan::CollectionTransform {
                             lambda_parameter,
                             flatten,
+                            local_names,
                             factory,
                             append,
                         }) = extension.callable.inline_body_plan.as_deref()
@@ -865,6 +864,7 @@ impl BodyFirChecker<'_> {
                                 self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                             })?,
                             flatten: *flatten,
+                            local_names: local_names.into(),
                             iterator_ty,
                             iterator,
                             has_next,

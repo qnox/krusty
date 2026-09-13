@@ -1,8 +1,10 @@
 //! Library metadata shared by symbol sources.
 
 mod array_factories;
+mod inline_body;
 
 pub(crate) use array_factories::kotlin_array_factory_kind;
+pub use inline_body::{InlineBodyPlan, InlineCollectionLocalNames};
 
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
@@ -496,41 +498,6 @@ pub enum PrimitiveBinaryIntrinsic {
 pub enum PrimitiveUnaryIntrinsic {
     Identity,
     Negate,
-}
-
-/// A declaration-defined inline body whose source-independent control-flow shape must be expanded
-/// before backend coroutine lowering. Providers decode this from the exact selected declaration's
-/// compiled inline body; source spelling never participates.
-#[derive(Clone, Debug)]
-pub enum InlineBodyPlan {
-    /// Invoke one function-typed parameter with values loaded from other callable parameters and return
-    /// the invocation result.
-    InvokeLambda {
-        lambda_parameter: usize,
-        argument_parameters: Vec<usize>,
-        /// A callable parameter returned after the invocation (`apply` returns its receiver). `None`
-        /// means the invocation result itself is returned (`let`, `run`, `with`).
-        return_parameter: Option<usize>,
-    },
-    /// Invoke a suspending member on the extension receiver, invoke one lambda parameter, and invoke a
-    /// cleanup member with the same state argument on normal and exceptional exits.
-    SuspendBeforeLambdaFinally {
-        lambda_parameter: usize,
-        state_parameter: usize,
-        state_default: DefaultValue,
-        enter: Box<LibraryMember>,
-        cleanup: Box<LibraryMember>,
-    },
-    /// Iterate the extension receiver, invoke one lambda for each element, and append its result to
-    /// a fresh collection. The provider owns the exact factory and append declarations; consumers
-    /// see only their stable identities after selection. `flatten` chooses one-element append versus
-    /// append-all, matching the selected declaration's compiled inline body.
-    CollectionTransform {
-        lambda_parameter: usize,
-        flatten: bool,
-        factory: Box<LibraryMember>,
-        append: Box<LibraryMember>,
-    },
 }
 
 /// Opaque compiler-plugin implementation identity attached to one declared callable.

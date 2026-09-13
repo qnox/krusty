@@ -4,7 +4,10 @@ use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,
 };
-use crate::ir::{Callee, ExprId, IrCheckedArgument, IrConst, IrExpr, IrTypeOp};
+use crate::ir::{
+    Callee, ExprId, IrCheckedArgument, IrConst, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole,
+    IrTypeOp,
+};
 use crate::types::Ty;
 
 use super::checked_arguments::{
@@ -480,6 +483,7 @@ impl BodyLowering<'_> {
             crate::fir::FirInlineBodyPlan::CollectionTransform {
                 lambda_parameter,
                 flatten,
+                local_names,
                 iterator_ty,
                 iterator,
                 has_next,
@@ -494,6 +498,7 @@ impl BodyLowering<'_> {
                 return self.external_inline_collection_transform(
                     *lambda_parameter,
                     *flatten,
+                    local_names,
                     *iterator_ty,
                     iterator,
                     has_next,
@@ -842,6 +847,7 @@ impl BodyLowering<'_> {
         &mut self,
         lambda_parameter: u32,
         flatten: bool,
+        local_names: &crate::fir::FirInlineCollectionLocalNames,
         iterator_ty: ResolvedTy,
         iterator: &crate::fir::FirIteratorCall,
         has_next: &crate::fir::FirIteratorCall,
@@ -916,6 +922,14 @@ impl BodyLowering<'_> {
                 formal_slots.push(*slot);
                 continue;
             }
+            // A capture that is already a plain local READ needs no copy: the spliced body can read
+            // that local directly, exactly as kotlinc's inlining does. Copying it would put a second
+            // live value on the same data at every suspension in the lambda — an extra spill field
+            // kotlinc never allocates.
+            if let IrExpr::GetValue(slot) = self.ir.expr(capture) {
+                formal_slots.push(*slot);
+                continue;
+            }
             let slot = self.allocate_temporary();
             let ty = *self
                 .ir
@@ -952,6 +966,41 @@ impl BodyLowering<'_> {
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
 
+        // Preserve the provider-recorded inline frame locals as source names plus typed
+        // role/depth. The JVM backend owns their eventual debug spelling.
+        let receiver_ty = receiver_ty.map_or_else(|| accumulator_ty.get(), ResolvedTy::get);
+        let outer_slot = self.allocate_temporary();
+        let outer_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: outer_slot,
+            ty: receiver_ty,
+            init: Some(iterable),
+            named: true,
+        });
+        self.ir
+            .value_names
+            .insert(outer_declaration, local_names.outer_receiver.to_string());
+        self.ir.set_debug_local_provenance(
+            outer_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 1),
+        );
+        statements.push(outer_declaration);
+        let outer_read = self.ir.add_expr(IrExpr::GetValue(outer_slot));
+        let inner_slot = self.allocate_temporary();
+        let inner_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: inner_slot,
+            ty: receiver_ty,
+            init: Some(outer_read),
+            named: true,
+        });
+        self.ir
+            .value_names
+            .insert(inner_declaration, local_names.inner_receiver.to_string());
+        self.ir.set_debug_local_provenance(
+            inner_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 2),
+        );
+        statements.push(inner_declaration);
+
         let factory_call = self.ir.add_expr(IrExpr::New {
             internal: factory_classifier,
             args: Vec::new(),
@@ -962,13 +1011,22 @@ impl BodyLowering<'_> {
             default_prefix_count: 0,
         });
         let accumulator_slot = self.allocate_temporary();
-        statements.push(self.ir.add_expr(IrExpr::Variable {
+        let accumulator_declaration = self.ir.add_expr(IrExpr::Variable {
             index: accumulator_slot,
             ty: accumulator_ty.get(),
             init: Some(factory_call),
             named: true,
-        }));
+        });
+        self.ir
+            .value_names
+            .insert(accumulator_declaration, local_names.destination.to_string());
+        self.ir.set_debug_local_provenance(
+            accumulator_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 2),
+        );
+        statements.push(accumulator_declaration);
 
+        let iterable = self.ir.add_expr(IrExpr::GetValue(inner_slot));
         let iterator_value = self.iterator_call(iterator, iterable).ok()?;
         let iterator_slot = self.allocate_temporary();
         statements.push(self.ir.add_expr(IrExpr::Variable {
@@ -981,12 +1039,38 @@ impl BodyLowering<'_> {
         let condition = self.iterator_call(has_next, iterator_read).ok()?;
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
         let element = self.iterator_call(next, iterator_read).ok()?;
-        let element_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: element_slot,
+        // The expansion's provider-recorded loop element and the lambda's own parameter are
+        // separate locals. Both are live at a suspension in the lambda body, so preserve both
+        // source/debug identities; the target decides their rendered names.
+        let element_iv_slot = self.allocate_temporary();
+        let element_iv_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: element_iv_slot,
             ty: element_ty,
             init: Some(element),
             named: true,
         });
+        self.ir
+            .value_names
+            .insert(element_iv_declaration, local_names.element.to_string());
+        self.ir.set_debug_local_provenance(
+            element_iv_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 2),
+        );
+        let element_read = self.ir.add_expr(IrExpr::GetValue(element_iv_slot));
+        let element_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: element_slot,
+            ty: element_ty,
+            init: Some(element_read),
+            named: true,
+        });
+        if let Some(name) = self
+            .ir
+            .param_names(implementation)
+            .and_then(|names| names.get(formal_slots.len() - 1))
+            .cloned()
+        {
+            self.ir.value_names.insert(element_declaration, name);
+        }
 
         let (mut body_statements, body_value) = match self.ir.expr(inline_body).clone() {
             IrExpr::Block {
@@ -1031,7 +1115,8 @@ impl BodyLowering<'_> {
             .ext_call_source_receiver
             .insert(append_call, accumulator_ty.get());
         body_statements.push(append_call);
-        let mut loop_statements = Vec::with_capacity(body_statements.len() + 1);
+        let mut loop_statements = Vec::with_capacity(body_statements.len() + 2);
+        loop_statements.push(element_iv_declaration);
         loop_statements.push(element_declaration);
         loop_statements.extend(body_statements);
         let loop_body = self.ir.add_expr(IrExpr::Block {

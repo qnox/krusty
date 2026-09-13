@@ -6249,7 +6249,7 @@ impl ScopeWalk<'_> {
                 self.scope.push(ScopeEntry {
                     slot: index,
                     ty: spill_field_ty(local_storage_ty(self.ir, ty, init)),
-                    name: self.ir.value_names.get(&st).cloned(),
+                    name: super::debug_local_names::name(self.ir, st),
                     named,
                 });
             }
@@ -6483,8 +6483,8 @@ fn collect_slot_names(ir: &IrFile, e: ExprId, out: &mut std::collections::HashMa
             index, named: true, ..
         } = ir.exprs[cur as usize]
         {
-            if let Some(name) = ir.value_names.get(&cur) {
-                out.entry(index).or_insert_with(|| name.clone());
+            if let Some(name) = super::debug_local_names::name(ir, cur) {
+                out.entry(index).or_insert(name);
             }
         }
         for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
