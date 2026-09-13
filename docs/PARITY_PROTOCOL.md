@@ -2007,3 +2007,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `requireNoNulls` — was unusable on any starred collection. A NON-nullable formal `Iterable<T>` with
   the same bound still rejects `List<*>`, matching kotlinc.
   `tests/star_projection_nullable_receiver_e2e.rs::a_star_projection_satisfies_a_nullable_formal_receiver`.
+- **A `try` expression joins its branches against the expected type (fix).** `if` and `when` in value
+  position join through `join_conditional`, which consults the EXPECTATION before falling back to a
+  structural join; `try` used the blind join. Two generic branches then produced an out-projection
+  (`R<out Any!>`), which no INVARIANT declared type can take — so an expression-bodied
+  `try { f() } catch (…) { g().body(x) }` returning `R<Any>` was rejected where kotlinc infers each
+  branch's type parameter FROM that expectation and accepts.
+  One such file cost its whole module every class.
+  `tests/try_expected_type_join_e2e.rs`.
