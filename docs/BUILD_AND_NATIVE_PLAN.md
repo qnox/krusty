@@ -745,6 +745,47 @@ One measurement note worth keeping: the first attempt used the `gate` profile, w
 that would have made the tax look negligible. Compiler throughput comparisons must use an optimized
 build.
 
+#### Decided: krusty owns its runtime
+
+The measurements in this section answer "what is cheapest". They do not answer the question that
+actually governs, which is what krusty is *for*. Emitting Go makes krusty a transpiler in front of
+someone else's toolchain: the collector, the object model, the scheduler and the target list would
+all belong to the Go project, and krusty would own none of the parts that decide how a Kotlin
+program behaves at run time. **The decision is that krusty owns its runtime.** No benchmark
+overrides that, and the sections below should be read as cost information for a choice already made,
+not as an open argument.
+
+One structural consequence is worth stating, because it is an argument *for* this choice that the
+cost analysis misses:
+
+**The runtime is the durable asset; the emitter is disposable.** A runtime krusty owns — object
+model, allocator, collector, strings, collections, exceptions, threads — survives a change of code
+generator. The C emitter can be replaced by Cranelift, or by a hand-written backend, and the runtime
+carries over unchanged. Emitting Go has the opposite shape: nothing accumulates, and there is no
+incremental path from it to owning anything. It is all-or-nothing in both directions.
+
+That makes the sequencing clear, and it is not the multi-year path if taken in the right order:
+
+1. **Keep the C emitter as the scaffold.** It exists, it cross-compiles, and its output runs. It is
+   explicitly not the destination (see *The collector is where emitting C stops being viable*).
+2. **Build the runtime krusty owns, in dependency order** — object model and type descriptors, then
+   allocator, then a **conservative** mark-sweep collector, then strings as real objects, then
+   classes and vtables, closures, exceptions, collections. A conservative collector is the enabling
+   choice here: it needs no stack maps and therefore no code generator, so the runtime can be built
+   and tested *while* the emitter is still C.
+3. **Own the code generator when precise collection is worth it.** At that point the stack maps
+   become available, the collector can move to precise and generational, and every other part of the
+   runtime is already written and tested.
+
+The cost of step 2 is real but it is not the multi-year item: the multi-year item is a *precise*
+collector, and what makes it multi-year is the compiler-side stack-map, safepoint and barrier work,
+not the collector's own lines. Deferring precision defers that, without deferring ownership.
+
+What this concedes, honestly: no macOS or Windows targets while the runtime is freestanding-Linux
+(a stable syscall ABI is what makes sysroot-free cross-compilation work), no moving or generational
+collection until step 3, and strings, collections and exceptions written by hand. Those are the
+price of owning the thing, and they are paid deliberately.
+
 #### The decision criterion: delete the multi-year item, keep the emitter lean
 
 Stated plainly, the goal for the native target is to **remove the multi-year part of the
@@ -784,11 +825,11 @@ Measured against the criterion:
 | own code generator + MMTk | no — stack maps, safepoints and barriers remain | no, this *is* the multi-year item |
 | port Go's runtime sources | no — and inherits a compiler-coupled codebase | no |
 
-Only the first row satisfies both halves. Its price is a Go toolchain dependency, ~2 MB binaries,
-and the ~5–9 % round-trip tax measured above — all of which the thesis already accepts, since it
-trades binary size and optimization quality for build speed. The second row is the fallback if a Go
-toolchain is unacceptable as a dependency; it buys Linux-only targets and a conservative collector,
-and it keeps the runtime ours.
+Only the first row satisfies both halves *on cost alone*. It is not the chosen row: emitting Go
+makes krusty a transpiler rather than the owner of its runtime, which the section above settles
+against. The second row — emit C, own a conservative collector — is the chosen shape, and this table
+is the honest statement of what it costs: vtables, closures, unwinding and collections are ours to
+write, and the target list is Linux-only until a code generator of our own arrives.
 
 #### Settled: GraalVM is the oracle, not the pipeline
 
