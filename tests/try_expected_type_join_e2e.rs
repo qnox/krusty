@@ -48,11 +48,102 @@ fn a_try_expression_joins_its_branches_against_the_expected_type() {
         \x20\x20 }\n\
         }\n";
     let classpath = vec![library, common::stdlib_jar(), common::jdk_modules()];
-    let classes = common::compile_in_process_files(&[("TryJoin", source)], &classpath, None)
-        .expect("krusty compiles a try-expression whose branches need the expected type");
-    assert!(
-        classes.iter().any(|(name, _)| name == "demo/Api"),
-        "expected demo/Api among {:?}",
-        classes.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    let result = common::compiler_diagnostics(&[("TryJoin.kt", source)], &classpath);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc accepts the classpath try-join shape"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty accepts exactly the source set kotlinc accepts"
+    );
+}
+
+/// The expected join is shared by every value-producing catch, while an initializer without an
+/// annotation and a statement-position `try` retain their ordinary inference rules.
+#[test]
+fn expected_multi_catch_and_unexpected_controls_match_kotlinc() {
+    let source = "class Box<T>\n\
+        fun <T> boxed(value: T): Box<T> = Box()\n\
+        fun expected(flag: Boolean): Box<Any> = try {\n\
+        \x20 if (flag) throw IllegalArgumentException()\n\
+        \x20 boxed(1)\n\
+        } catch (_: IllegalArgumentException) {\n\
+        \x20 boxed(\"text\")\n\
+        } catch (_: RuntimeException) {\n\
+        \x20 boxed(false)\n\
+        }\n\
+        fun inferred(flag: Boolean) {\n\
+        \x20 val value = try {\n\
+        \x20\x20 if (flag) throw RuntimeException()\n\
+        \x20\x20 boxed(1)\n\
+        \x20 } catch (_: RuntimeException) { boxed(\"text\") }\n\
+        \x20 println(value)\n\
+        }\n\
+        fun number(): Int = 1\n\
+        fun text(): String = \"recovered\"\n\
+        fun statement(flag: Boolean) {\n\
+        \x20 try {\n\
+        \x20\x20 if (flag) throw RuntimeException()\n\
+        \x20\x20 number()\n\
+        \x20 } catch (_: RuntimeException) { text() }\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Controls.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc accepts the conditional-result controls"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty preserves no-expectation and statement-position behavior"
+    );
+}
+
+#[test]
+fn an_incompatible_expected_type_rejects_the_try_result_exactly_once() {
+    let source = "class Box<T>\n\
+        fun <T> boxed(value: T): Box<T> = Box()\n\
+        fun bad(): Box<String> = try {\n\
+        \x20 boxed(1)\n\
+        } catch (_: RuntimeException) {\n\
+        \x20 boxed(\"text\")\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Bad.kt", source)], &[common::stdlib_jar()]);
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc names the rejected file");
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:3:26: error: return type mismatch: expected 'Box<String>', actual \
+                 'Box<out Comparable<*> & Serializable>'.\nfun bad(): Box<String> = try {{\n\
+                 \x20                        ^^^^^\n"
+            )
+            .as_str()
+        ),
+    );
+    let krusty_path = result
+        .krusty_stderr
+        .split(':')
+        .next()
+        .expect("krusty names the rejected file");
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{krusty_path}:3:26: error: return type mismatch: expected 'Box<String>', actual \
+                 'Box<out Any>'.\nkrusty: 1 error(s)\n"
+            )
+            .as_str()
+        ),
     );
 }
