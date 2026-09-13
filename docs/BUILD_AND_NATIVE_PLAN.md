@@ -847,6 +847,45 @@ For calibration at the other end: the C runtime this repository currently ships 
 has no collector, no threads and no exceptions. The distance from there to the first tier is the
 quantity in question.
 
+**Can we take Go's runtime sources and build our own library from them?** Legally yes — Go is
+BSD-3-Clause, so vendoring or deriving is permitted with attribution. Technically it is not a
+library. It is a program written in a private dialect of Go that only Go's own compiler implements:
+**362 of 445** non-test runtime files carry `//go:` pragmas, among them 986 `//go:nosplit` (omit the
+stack-growth check), 766 `//go:linkname` (alias a symbol across packages), 283 `//go:nowritebarrier`
+(assert to the compiler that no barrier is needed here), 211 `systemstack(` calls (switch to the
+scheduler's stack) and 484 `getg()` (read the current goroutine from a reserved register). Every one
+of those is an instruction *to the Go compiler*. "Build a library from these sources" begins with
+implementing that pragma set in whatever is going to compile them.
+
+What separates cleanly and what does not:
+
+* **The allocator** (~6,280 lines — size classes, spans, per-P caches, tcmalloc-derived) is the
+  portable part. Porting it is transliteration against our own thread model, not copying.
+* **The collector does not port.** Its write barriers are *compiler-inserted* — the 237
+  `gcWriteBarrier` sites are generated, not written; its stack scanning consumes Go's own stack-map
+  format; and its pacer is welded to the P/M scheduler.
+
+And it leaves the expensive half untouched: stack maps, barrier insertion and safepoints are
+compiler-side no matter whose collector runs.
+
+**The precedent is discouraging.** TinyGo exists to compile Go, has every incentive to reuse Go's
+runtime, and wrote its own anyway — a conservative mark/sweep collector and LLVM coroutines in place
+of Go's scheduler, because Go's runtime assumes preemptive multi-threaded scheduling and stack
+switching it could not provide.
+
+**The better version of the idea is to take a collector built to be embedded, not one welded to a
+compiler.** [MMTk](https://www.mmtk.io/) is a Rust crate of production collectors (Immix,
+mark-sweep, generational copying) designed for exactly this: it makes no assumption about the host
+runtime's implementation language, and has bindings for OpenJDK, V8, Julia and Ruby. It is dual
+MIT/Apache-2.0. That it is *Rust* matters here more than anywhere — krusty is Rust, so it links
+directly rather than through a foreign-function boundary. It does not remove the compiler-side work
+— we would still supply roots and stack maps — but it removes writing a collector, which is the
+part of the runtime estimate above with no oracle and the worst failure modes.
+
+The caveat is a project-values one, not a technical one: MMTk is a substantial dependency, and
+`CLAUDE.md` keeps this tree deliberately dependency-lean. That is the same explicit decision the
+code generator poses, and it should be made the same way — deliberately, not by drifting into it.
+
 **The one cheap option, and its price.** A conservative Boehm-style collector needs no compiler
 support at all — no stack maps, no safepoints — and would work with emitted C. Perhaps 1–3k lines,
 or a vendored dependency. It buys a working GC today and permanently forecloses moving collection:
