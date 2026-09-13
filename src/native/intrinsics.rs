@@ -88,6 +88,9 @@ pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
         (_, "toString", []) => Some("kt_to_string"),
+        // `kotlin.Any`'s other two members, dispatched through the receiver's vtable.
+        (_, "hashCode", []) => Some("kt_hash_code"),
+        (_, "equals", [_]) => Some("kt_equals"),
         _ => None,
     }
 }
@@ -157,6 +160,14 @@ mod tests {
         assert_eq!(
             runtime_member("kotlin/Int", "toString", &[]),
             Some("kt_to_string")
+        );
+        assert_eq!(
+            runtime_member("kotlin/Any", "hashCode", &[]),
+            Some("kt_hash_code")
+        );
+        assert_eq!(
+            runtime_member("kotlin/Any", "equals", &[any]),
+            Some("kt_equals")
         );
         assert_eq!(
             runtime_member("kotlin/String", "repeat", &[Ty::Int]),

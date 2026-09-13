@@ -223,3 +223,130 @@ fn a_three_level_hierarchy_inherits_fields_and_overrides_at_each_level() {
         "30\n35\n4\n"
     );
 }
+
+#[test]
+fn is_and_safe_casts_follow_the_superclass_chain() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // Three levels: a `C` is a `B` and an `A`; an `A` is not a `B`. `as?` yields the object or
+    // `null`, and a successful `as` keeps the identity (the cast object is still a `C`).
+    assert_eq!(
+        run("open class A\n\
+             open class B : A()\n\
+             class C : B()\n\
+             fun main() {\n\
+             \x20   val x: A = C()\n\
+             \x20   val y: A = A()\n\
+             \x20   println(x is B)\n\
+             \x20   println(x is C)\n\
+             \x20   println(y !is B)\n\
+             \x20   println(y is A)\n\
+             \x20   val failed = y as? B\n\
+             \x20   println(failed == null)\n\
+             \x20   val passed = x as? B\n\
+             \x20   println(passed != null)\n\
+             \x20   val w = x as B\n\
+             \x20   println(w is C)\n\
+             \x20   val anything: Any = C()\n\
+             \x20   println(anything is A)\n\
+             \x20   println(anything is String)\n\
+             \x20   println(\"text\" is String)\n\
+             \x20   if (x is C) println(\"smart cast\")\n\
+             }\n"),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\nsmart cast\n"
+    );
+}
+
+#[test]
+fn a_failed_cast_fails_loudly_naming_both_types() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // There are no exceptions yet, so a failed `as` cannot throw ClassCastException; the honest
+    // realization is a diagnosable exit naming both types, the same way unboxing `null` already
+    // fails. A silent pass-through would let the program read `B`'s fields off an `A`.
+    let (artifacts, diagnostics) = compile(
+        "open class A\n\
+         class B : A()\n\
+         fun main() {\n\
+         \x20   println(\"before\")\n\
+         \x20   val a: A = A()\n\
+         \x20   val b = a as B\n\
+         \x20   println(b)\n\
+         }\n",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let scratch = Scratch::new("cast");
+    let executable = scratch.path().join("program");
+    krusty::native::link_executable(
+        &artifacts,
+        scratch.path(),
+        &executable,
+        NativeTarget::host().expect("checked by `available`"),
+    )
+    .unwrap_or_else(|error| panic!("the generated C must compile: {error}"));
+    let output = std::process::Command::new(&executable)
+        .output()
+        .expect("run the built executable");
+    assert!(
+        !output.status.success(),
+        "a failed cast must not let the program continue"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("A") && stderr.contains("cannot be cast to") && stderr.contains("B"),
+        "the failure must name both types: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_user_to_string_is_reached_through_println_templates_and_explicit_calls() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // Three routes to the same override: `println(obj)` renders through the runtime, `"$obj"`
+    // renders inside string concatenation, and `obj.toString()` is a direct member call. All must
+    // reach `P.toString`, including through a base-typed value.
+    assert_eq!(
+        run("open class P(val x: Int) { override fun toString(): String = \"P($x)\" }\n\
+             class Q(x: Int) : P(x) { override fun toString(): String = \"Q<${super.toString()}>\" }\n\
+             fun main() {\n\
+             \x20   val p = P(1)\n\
+             \x20   println(p)\n\
+             \x20   println(\"[$p]\")\n\
+             \x20   println(p.toString())\n\
+             \x20   val q: P = Q(2)\n\
+             \x20   println(q)\n\
+             \x20   println(\"$q!\")\n\
+             }\n"),
+        "P(1)\n[P(1)]\nP(1)\nQ<P(2)>\nQ<P(2)>!\n"
+    );
+    // A class without one prints Kotlin's `Name@hash` default; the hash is an identity derived
+    // from the address, so only the prefix is asserted — and it is the same object twice.
+    let rendered = run("class Plain\n\
+         fun main() {\n\
+         \x20   val a = Plain()\n\
+         \x20   println(a)\n\
+         \x20   println(a.toString().equals(a.toString()))\n\
+         \x20   println(a.hashCode() == a.hashCode())\n\
+         \x20   println(a.equals(a))\n\
+         \x20   println(a.equals(Plain()))\n\
+         }\n");
+    let mut lines = rendered.lines();
+    let first = lines.next().unwrap_or_default();
+    assert!(
+        first.starts_with("Plain@"),
+        "expected Kotlin's `Name@hash` default, got {first:?}"
+    );
+    assert_eq!(
+        lines.collect::<Vec<_>>(),
+        vec!["true", "true", "true", "false"],
+        "two renderings of one object are equal strings, the default hash is stable, and \
+         default equality is identity"
+    );
+}

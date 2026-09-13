@@ -693,6 +693,27 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// The runtime descriptor for a type an `is`/`as` names: an in-file class or a built-in.
+    fn type_descriptor(&self, ty: Ty) -> Result<Option<String>, Unsupported> {
+        let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.type_symbol(class)));
+        }
+        Ok(match target {
+            Ty::String => Some("kt_type_string".to_string()),
+            Ty::Boolean => Some("kt_type_boolean".to_string()),
+            Ty::Byte => Some("kt_type_byte".to_string()),
+            Ty::Short => Some("kt_type_short".to_string()),
+            Ty::Int => Some("kt_type_int".to_string()),
+            Ty::Long => Some("kt_type_long".to_string()),
+            Ty::Char => Some("kt_type_char".to_string()),
+            _ => None,
+        })
+    }
+
     // ---- types -------------------------------------------------------------------------------
 
     /// The Kotlin type an expression produces, as far as the emitter needs it: enough to decide
@@ -1245,20 +1266,64 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// The coercions the frontend inserts, and casts between carriers. A check against a class
-    /// (`is`, `as?`) needs the runtime to walk the class hierarchy, which comes next.
+    /// `is`, `as`, `as?` and the coercions the frontend inserts.
     fn type_operation(
         &mut self,
         op: IrTypeOp,
         arg: u32,
         type_operand: Ty,
     ) -> Result<String, Unsupported> {
+        let class_target = type_operand
+            .non_null()
+            .obj_internal()
+            .and_then(|name| self.ir.class_id_by_name(name));
         match op {
-            IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Err(format!(
-                "an `is` check against `{}`",
-                type_name_of(type_operand)
-            )),
-            IrTypeOp::SafeCast => Err(format!("an `as?` to `{}`", type_name_of(type_operand))),
+            IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
+                let Some(descriptor) = self.type_descriptor(type_operand)? else {
+                    return Err(format!(
+                        "an `is` check against `{}`",
+                        type_name_of(type_operand)
+                    ));
+                };
+                if self.ty_of(arg).is_some_and(|ty| c_kind(ty) != CKind::Ref) {
+                    return Err("an `is` check on a scalar".to_string());
+                }
+                let operand = self.expression(arg)?;
+                let check = if type_operand.is_nullable() {
+                    let temp = self.temp();
+                    format!(
+                        "({{ KRef {temp} = {operand}; ({temp} == NULL || kt_is_instance({temp}, \
+                         &{descriptor})); }})"
+                    )
+                } else {
+                    format!("kt_is_instance({operand}, &{descriptor})")
+                };
+                Ok(if op == IrTypeOp::InstanceOf {
+                    check
+                } else {
+                    format!("(!{check})")
+                })
+            }
+            IrTypeOp::Cast | IrTypeOp::CastNonNull if class_target.is_some() => {
+                let descriptor = self.type_symbol(class_target.expect("checked"));
+                let helper = if op == IrTypeOp::Cast || type_operand.is_nullable() {
+                    "kt_cast"
+                } else {
+                    "kt_cast_non_null"
+                };
+                let operand = self.reference(arg)?;
+                Ok(format!("{helper}({operand}, &{descriptor})"))
+            }
+            IrTypeOp::SafeCast => {
+                let Some(class) = class_target else {
+                    return Err(format!("an `as?` to `{}`", type_name_of(type_operand)));
+                };
+                let operand = self.reference(arg)?;
+                Ok(format!(
+                    "kt_safe_cast({operand}, &{})",
+                    self.type_symbol(class)
+                ))
+            }
             IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull => {
                 self.coerce(arg, type_operand)
             }

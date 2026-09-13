@@ -270,6 +270,15 @@ KRef kt_any_to_string(KRef self);
 kt_boolean kt_equals(KRef a, KRef b);
 kt_int kt_hash_code(KRef value);
 
+/* `obj is type`: false for null, else true when `type` is on the object's superclass chain. */
+kt_boolean kt_is_instance(KRef object, const KType *type);
+/* `obj as type?` — null passes; `obj as type` — null fails; `obj as? type` — the object or null.
+   A failed cast exits loudly, naming both types: the placeholder for ClassCastException until the
+   runtime has exceptions. */
+KRef kt_cast(KRef object, const KType *type);
+KRef kt_cast_non_null(KRef object, const KType *type);
+KRef kt_safe_cast(KRef object, const KType *type);
+
 /* The vtable entry for an abstract method: never reached in a type-correct program, but a loud
    failure rather than a jump through NULL. */
 void kt_abstract_method_called(void);
@@ -836,6 +845,49 @@ static kt_int kt_builtin_hash_code(KRef self) {
         return (kt_int)(uint32_t)(bits ^ (bits >> 32));
     }
     return kt_any_hash_code(self);
+}
+
+kt_boolean kt_is_instance(KRef object, const KType *type) {
+    if (object == NULL) {
+        return false;
+    }
+    for (const KType *at = object->header.type; at != NULL; at = at->super) {
+        if (at == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void kt_fail_cast(KRef object, const KType *type) {
+    kt_write(2, "krusty: class ", 14);
+    if (object == NULL) {
+        kt_write(2, "null", 4);
+    } else {
+        kt_write(2, object->header.type->name, object->header.type->name_length);
+    }
+    kt_write(2, " cannot be cast to ", 19);
+    kt_write(2, type->name, type->name_length);
+    kt_write(2, "\n", 1);
+    kt_sys_exit(134);
+}
+
+KRef kt_cast(KRef object, const KType *type) {
+    if (object != NULL && !kt_is_instance(object, type)) {
+        kt_fail_cast(object, type);
+    }
+    return object;
+}
+
+KRef kt_cast_non_null(KRef object, const KType *type) {
+    if (!kt_is_instance(object, type)) {
+        kt_fail_cast(object, type);
+    }
+    return object;
+}
+
+KRef kt_safe_cast(KRef object, const KType *type) {
+    return kt_is_instance(object, type) ? object : NULL;
 }
 
 void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n"); }
