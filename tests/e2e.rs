@@ -1300,6 +1300,8 @@ mod suspend_in_try_body_hoist_e2e;
 mod suspend_inline_collection_spill_e2e;
 #[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
+#[path = "suspend_inline_splice_names_e2e.rs"]
+mod suspend_inline_splice_names_e2e;
 #[path = "suspend_inline_statementless_block_e2e.rs"]
 mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_interface_delegation_e2e.rs"]
