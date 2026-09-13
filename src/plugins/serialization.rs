@@ -494,7 +494,7 @@ fn class_ty(fq: &str) -> Ty {
 /// placeholder's arena slot is overwritten in place (the index-based IR makes this a local edit):
 /// encode becomes the `encodeToString` call; decode becomes the `decodeFromString` call wrapped in a
 /// `checkcast` to the decoded class (the member returns erased `Object`).
-fn specialize_reified_placeholders(ir: &mut IrFile) {
+fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
     let markers: Vec<usize> = ir
         .exprs
         .iter()
@@ -524,6 +524,20 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
             let class_internal = *class_internal;
             let Some(accessor) = generated_serializer_accessor(ir, class_internal, exprs.len())
             else {
+                // The accessor lookup searches THIS file's classes. A `@Serializable` class declared
+                // in a SIBLING file of the same module (or on the classpath) has its generated
+                // serializer elsewhere, and the singleton is what kotlinc reads for the non-generic
+                // shape — the same resolution an element serializer uses.
+                if exprs.is_empty() {
+                    if let Some(serializer) = ctx
+                        .external_serializer(&class_internal.render())
+                        .map(str::to_string)
+                    {
+                        let realized =
+                            ir.external_static_instance(&serializer, &serializer, "INSTANCE");
+                        ir.exprs[mid] = ir.exprs[realized as usize].clone();
+                    }
+                }
                 continue;
             };
             let realized = call_generated_serializer(ir, class_internal, accessor, exprs.clone());
@@ -2358,7 +2372,7 @@ impl IrPlugin for SerializationPlugin {
         // Specialize the generic reified-serialization placeholders core emitted in user bodies
         // (`fmt.encodeToString(x)` / `fmt.decodeFromString<C>(s)`) into the concrete `StringFormat`
         // member calls — the kotlinx descriptors live here, not in core lowering.
-        specialize_reified_placeholders(ir);
+        specialize_reified_placeholders(ir, ctx);
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             // `@Serializable(with=X)` classes have no generated `$serializer` to fill (handled wholly in
             // `generate_declarations`).
@@ -3301,7 +3315,7 @@ mod tests {
     #[test]
     fn reified_encode_placeholder_specialized() {
         let (mut ir, mid, [recv, ser, arg]) = placeholder("encodeToString");
-        specialize_reified_placeholders(&mut ir);
+        specialize_reified_placeholders(&mut ir, &PluginContext::default());
         match &ir.exprs[mid as usize] {
             IrExpr::Call {
                 callee:
@@ -3329,7 +3343,7 @@ mod tests {
     #[test]
     fn reified_decode_placeholder_specialized_with_checkcast() {
         let (mut ir, mid, [recv, ser, arg]) = placeholder("decodeFromString");
-        specialize_reified_placeholders(&mut ir);
+        specialize_reified_placeholders(&mut ir, &PluginContext::default());
         // The slot becomes a checkcast to the decoded class wrapping the decode member call.
         let inner = match &ir.exprs[mid as usize] {
             IrExpr::TypeOp {
@@ -3369,7 +3383,7 @@ mod tests {
             "a surviving PluginPlaceholder must be declined by jvm_can_emit"
         );
         // After specialization the file is emittable again.
-        specialize_reified_placeholders(&mut ir);
+        specialize_reified_placeholders(&mut ir, &PluginContext::default());
         assert!(crate::jvm::ir_emit::jvm_can_emit(&ir));
     }
 }

@@ -1887,3 +1887,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   krusty still emits no `decodeSequentially` fast path, so its decoder-call set is kotlinc's minus
   that one — the remaining difference in this method.
   `tests/serialization_companion_byte_parity_e2e.rs::a_nullable_serializable_element_is_actually_decoded`.
+- **A file that only USES serialization still needs the plugin pass (fix).** `run_enabled` returned
+  early whenever the file DECLARED no `@Serializable` class. A file that merely calls
+  `Row.serializer()` on a sibling's class declares none, so the plugin never ran, the placeholder core
+  left for that accessor survived to emission, and `jvm_can_emit` declined the whole file — its module
+  then emitted nothing. Three things had to line up: the pass must run when a serialization
+  PLACEHOLDER is present; the external-serializer candidates must include the classes those
+  placeholders NAME (the old seed walked only class FIELD types, and a class used as a type argument
+  or a bare `X.serializer()` receiver is in neither); and the accessor lookup, which searches only
+  THIS file's classes, must fall back to that external serializer's singleton for the non-generic
+  shape.
+  `tests/sibling_file_serializer_accessor_e2e.rs`.

@@ -375,9 +375,22 @@ pub fn run_enabled(
     generated_serializer_exists: &dyn Fn(&str) -> Option<String>,
 ) {
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
-    if ctx
-        .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
-        .is_empty()
+    // A file that DECLARES no `@Serializable` class can still USE one: `Row.serializer()` leaves a
+    // placeholder core cannot specialize on its own. Skipping such a file left that placeholder in
+    // the IR, and the backend then declined the whole file.
+    let uses_serialization = ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            crate::ir::IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                ..
+            }
+        )
+    });
+    if !uses_serialization
+        && ctx
+            .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
+            .is_empty()
     {
         return;
     }
@@ -401,6 +414,28 @@ fn external_serializers(
         .collect();
     let mut seen = std::collections::HashSet::new();
     let mut external = std::collections::HashMap::new();
+    // A placeholder NAMES the class whose serializer this file needs (`Row.serializer()` in a body).
+    // That class need not appear as any field's type here — the seed above would miss it, and the
+    // plugin would then find no serializer for a perfectly ordinary sibling-file declaration.
+    for expression in &ir.exprs {
+        let crate::ir::IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            data,
+            ..
+        } = expression
+        else {
+            continue;
+        };
+        for classifier in data {
+            let internal = classifier.render();
+            if !seen.insert(internal.clone()) || declared.contains(&internal) {
+                continue;
+            }
+            if let Some(serializer) = generated_serializer_exists(&internal) {
+                external.insert(internal, serializer);
+            }
+        }
+    }
     while let Some(ty) = candidates.pop() {
         // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
         candidates.extend(ty.non_null().type_args().iter().copied());
