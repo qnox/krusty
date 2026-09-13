@@ -39,6 +39,7 @@ mod delegated_properties;
 mod dependency_platform;
 mod finalized_projection;
 mod interface_delegation;
+mod lambda_expectation;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
@@ -64,6 +65,7 @@ pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
+use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
@@ -2911,126 +2913,6 @@ fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
         CallArgKind::integer_literal(ty, value.value())
     } else {
         CallArgKind::Typed(ty)
-    }
-}
-
-/// The functional shape at one argument position of a selected provider candidate. Lambdas consume
-/// the split context/receiver/value inputs; callable references consume `callable_type`. Keeping one
-/// carrier prevents the two syntax forms from running separate candidate selection paths.
-#[derive(Clone, Debug)]
-struct FunctionalArgumentExpectation {
-    context_types: Vec<Ty>,
-    value_params: Vec<Ty>,
-    receiver: Option<Ty>,
-    /// The parameter's declared RESULT. A lambda whose expected result is `Unit` ends in statement
-    /// position, which is what makes a trailing `when` with no `else` legal in every builder block.
-    /// `None` when the parameter shape was recovered from metadata alone and carries no result.
-    result: Option<Ty>,
-    callable_type: Option<Ty>,
-    sam_conversion: bool,
-}
-
-/// The expected shape of a lambda argument against the selected candidate's `param`: a Kotlin
-/// function-typed parameter contributes its input types — the receiver of an
-/// `@ExtensionFunctionType` parameter (`Recv.() -> R`, marked on the call sig's
-/// `lambda_receiver_params`) split from the leading position — and a Java SAM interface
-/// contributes its single method's parameter types. Any other parameter gives no expectation.
-fn functional_argument_expectation(
-    lib: &dyn crate::libraries::SemanticPlatform,
-    call_sig: &crate::libraries::CallSig,
-    index: usize,
-    param: Ty,
-) -> Option<FunctionalArgumentExpectation> {
-    let has_receiver = call_sig
-        .lambda_receiver_params
-        .get(index)
-        .copied()
-        .unwrap_or(false);
-    let metadata_receiver = call_sig.lambda_receivers.get(index).copied().flatten();
-    match param.non_null() {
-        Ty::Fun(sig) => {
-            let (receiver, skip) = if has_receiver {
-                // A receiver mark without a receiver parameter means the call sig and the
-                // decoded type disagree — decline rather than type the lambda against a
-                // truncated shape. Prefer the call-site-substituted function input because it
-                // retains declaration type arguments and nullability (`List<String>`, not raw
-                // `List`). The compact metadata receiver stores only a classifier, so it is a
-                // recovery source when the function shape has been erased, never a precision
-                // upgrade. A generic `T.() -> R` also necessarily resolves through this
-                // substituted input because metadata has no receiver classifier for `T`.
-                let receiver = sig
-                    .params
-                    .get(sig.context_count)
-                    .copied()
-                    .or(metadata_receiver)?;
-                (Some(receiver), sig.context_count + 1)
-            } else {
-                (None, sig.context_count)
-            };
-            Some(FunctionalArgumentExpectation {
-                context_types: sig.params[..sig.context_count.min(sig.params.len())].to_vec(),
-                value_params: sig.params.get(skip..).unwrap_or_default().to_vec(),
-                receiver,
-                result: Some(sig.ret),
-                callable_type: Some(Ty::Fun(sig)),
-                sam_conversion: false,
-            })
-        }
-        param if has_receiver => {
-            // A metadata-primary receiver mark can outlive an absent JVM `Signature` (including a
-            // krusty-emitted provider). Preserve that semantic fact instead of dropping back to a
-            // standalone lambda. If CallSig carries decoded input types, split them exactly; else
-            // retain the erased FunctionN arity with `Error` placeholders so explicit lambda
-            // parameters still get the right count without inventing concrete types.
-            let receiver = metadata_receiver?;
-            let context_count = call_sig
-                .lambda_context_counts
-                .get(index)
-                .copied()
-                .unwrap_or_default();
-            let decoded = call_sig.lambda_param_types.get(index);
-            let value_params = decoded
-                .filter(|params| !params.is_empty())
-                .map(|params| params.get(context_count + 1..).unwrap_or_default().to_vec())
-                .unwrap_or_else(|| {
-                    let arity = lib.function_like_arity(param).unwrap_or(1);
-                    vec![Ty::Error; arity.saturating_sub(context_count + 1)]
-                });
-            Some(FunctionalArgumentExpectation {
-                context_types: decoded
-                    .map(|params| {
-                        params
-                            .get(..context_count.min(params.len()))
-                            .unwrap_or_default()
-                            .to_vec()
-                    })
-                    .unwrap_or_default(),
-                value_params,
-                receiver: Some(receiver),
-                // This arm exists precisely because the function TYPE was lost; metadata keeps the
-                // receiver classifier and the input types, not the result.
-                result: None,
-                callable_type: None,
-                sam_conversion: false,
-            })
-        }
-        param => crate::symbol_resolver::semantic_sam_signature(lib, param).map(|sam| {
-            let callable_type = Ty::fun_with_shape(
-                sam.params.clone(),
-                sam.ret,
-                sam.context_count,
-                sam.has_receiver,
-                sam.suspend,
-            );
-            FunctionalArgumentExpectation {
-                context_types: Vec::new(),
-                value_params: sam.params,
-                receiver: None,
-                result: Some(sam.ret),
-                callable_type: Some(callable_type),
-                sam_conversion: true,
-            }
-        }),
     }
 }
 
