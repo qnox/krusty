@@ -1263,13 +1263,21 @@ impl<'a> CommonIrBodySink<'a> {
             );
         }
         let roots = lowered.roots.into_vec();
-        let body = if declaration_header
+        let tailrec = declaration_header
             .flags
-            .has(crate::fir::DeclarationFlags::TAILREC)
+            .has(crate::fir::DeclarationFlags::TAILREC);
+        // The loop rewrite below covers a tail self-call reached as `f(args)` with no receiver to
+        // re-bind. An extension, a context-parameter or a member `tailrec` is left recursing, and a
+        // backend that cannot make that constant-stack on its own has to hear about it rather than
+        // discover it as a stack overflow at run time.
+        let loopable = tailrec
             && self.ir.functions[function as usize].is_static
             && callable.shape.extension_receiver.is_none()
-            && callable.shape.context_parameter_count == 0
-        {
+            && callable.shape.context_parameter_count == 0;
+        if tailrec && !loopable {
+            self.ir.unlooped_tailrec.insert(function);
+        }
+        let body = if loopable {
             finish_tailrec_body(
                 self.ir,
                 roots,

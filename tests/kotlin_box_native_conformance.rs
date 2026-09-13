@@ -315,6 +315,15 @@ fn kotlin_codegen_box_native_conformance() {
         "no Kotlin sources under {}",
         corpus.display()
     );
+    // Triage knob: scan only the cases whose path contains this substring. The expected-failure
+    // checks below cover the cases actually scanned, so a narrowed run stays self-consistent.
+    let files = match std::env::var("KRUSTY_NATIVE_BOX_ONLY") {
+        Ok(pattern) => files
+            .into_iter()
+            .filter(|file| file.to_string_lossy().contains(&pattern))
+            .collect(),
+        Err(_) => files,
+    };
     let limit = std::env::var("KRUSTY_NATIVE_BOX_LIMIT")
         .ok()
         .and_then(|value| value.parse().ok())

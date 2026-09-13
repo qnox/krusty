@@ -2005,6 +2005,11 @@ pub enum FirStatementKind {
         declaration: BodyLocalCallableDeclarationId,
         callable: LocalCallableId,
         suspend: bool,
+        /// The source declared this local function `tailrec`. Carried like `suspend` because a
+        /// body-local declaration has no module header to read the modifier back from, and a
+        /// consumer has to know that the constant-stack promise is unmet: no phase rewrites a
+        /// LOCAL `tailrec` body into a loop.
+        tailrec: bool,
         body: Box<FirBody>,
     },
 }

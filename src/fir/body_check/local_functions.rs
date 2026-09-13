@@ -258,6 +258,7 @@ impl BodyFirChecker<'_> {
                 declaration,
                 callable,
                 suspend: function.is_suspend(),
+                tailrec: function.is_tailrec(),
                 body: Box::new(nested.body),
             },
         }))

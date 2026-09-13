@@ -1625,6 +1625,7 @@ fn local_function_is_lifted_once_and_receives_its_checked_capture() {
             declaration: crate::fir::BodyLocalCallableDeclarationId::new(body.owner(), 0),
             callable,
             suspend: false,
+            tailrec: false,
             body: Box::new(nested),
         },
     });
@@ -2957,6 +2958,7 @@ fn block_bodied_local_function_keeps_its_explicit_return() {
             declaration: crate::fir::BodyLocalCallableDeclarationId::new(body.owner(), 0),
             callable,
             suspend: false,
+            tailrec: false,
             body: Box::new(nested),
         },
     });

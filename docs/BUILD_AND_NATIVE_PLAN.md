@@ -1143,6 +1143,17 @@ before:**
    evaluation where Kotlin makes it a singleton — plus five more corpus cases traced to common
    lowering (its `++`/`--` shape, a context parameter's receiver, an extension call's evaluation
    order) by getting the same wrong answer from krusty's JVM backend.
+   Arrays, `Unit` as a value and callable references followed, taking the lane to **813 pass**.
+   The last of those slices ended with a lesson about the gate itself: three corpus cases passed in
+   CI and failed in this container, because both were compiling a `tailrec` the checked lowering
+   does not turn into a loop and whether a million frames fit is the machine's business, not the
+   compiler's. A gate must not depend on that. So `IrFile::unlooped_tailrec` now records every
+   `tailrec` left recursive — a member, an extension, a context-parameter or a local one — and the
+   generator declines it rather than emitting a program that dies on a guard page. The same
+   investigation closed a real gap: a `Unit` call whose only successor is `return` IS a tail call in
+   Kotlin, and the checked lowering now rewrites it, which makes `unitBlocks.kt` pass outright. The
+   expected-failures list dropped from 14 entries to 8, and every one that remains is a wrong ANSWER
+   krusty's JVM backend gives too, not a crash that depends on where it runs.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

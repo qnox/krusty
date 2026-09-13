@@ -4314,6 +4314,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
   parses as an expression name (`src/frontend.rs::modifier_prefixed_local_functions_parse_in_bodies`).
 
+- **A `Unit` call before a bare `return` is in tail position.** In a `Unit`-returning `tailrec`
+  function the tail call is written as a statement, and Kotlin still counts it as a tail call when
+  the only thing after it is `return` — `f(x); return` and `if (c) { f(x) }; return` both cost no
+  stack. The checked lowering rewrites the statement immediately before a trailing bare `return`,
+  and only that one: anything earlier has code after it and stays an ordinary call, which is what
+  the corpus marks `NON_TAIL_RECURSIVE_CALL`. Descent is into blocks, `when` branches and returns
+  alone, so a self-call guarded by a loop or a `try` is left recursive
+  (`src/fir_lower/tailrec.rs`,
+  `tests/native_codegen_e2e.rs::a_unit_tail_call_before_a_bare_return_becomes_a_loop`).
+
+- **A `tailrec` that is not rewritten into a loop is declined, not compiled.** Only a top-level,
+  non-extension, non-context `tailrec` has its tail self-calls turned into a loop; a member, an
+  extension and a local one still recurse. `tailrec` is a promise about stack, and the sources that
+  use it recurse past any stack, so emitting the recursion means emitting a program that dies on a
+  guard page where it should print its answer — and whether it dies depends on the machine's stack
+  limit, which makes a gate that accepts it unreproducible. The checked lowering records these
+  functions in `IrFile::unlooped_tailrec` and the native backend declines them; the JVM lane
+  reaches the same conclusion by skipping the file in `ir_lower`
+  (`src/fir_lower/sink.rs`, `src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::a_tailrec_the_checked_lowering_leaves_recursive_is_declined`).
+
+- **Equality on a function value is declined natively.** Kotlin answers `::f == ::f` with `true`:
+  a callable reference compares by the declaration it names and the receiver it binds, not by
+  identity. A lambda's `equals`/`hashCode` ARE identity, which the native backend would answer
+  correctly — but by the time a value reaches a comparison its type no longer says which it is
+  (`val f: (Int) -> Int = ::double` wears the same `Function1` a lambda wears), so the one type
+  they share is declined for both rather than answered wrongly for one. Identity through `===`
+  stays available, and a capture-free lambda is one object
+  (`src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::comparing_two_function_values_is_declined`).
+
 - **Element-form vararg calls select and lower against classpath extensions.** `"a.b".trim('.')`
   expands `trim(vararg chars: Char)` element-wise (an exact element type beats an assignable one, so
   the `Char` overload wins over `String`); `fq.split('.')` additionally requires every parameter

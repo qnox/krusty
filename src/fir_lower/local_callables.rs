@@ -28,6 +28,7 @@ impl BodyLowering<'_> {
                 declaration,
                 callable,
                 suspend,
+                tailrec,
                 body,
             } = &statement.kind
             else {
@@ -36,6 +37,11 @@ impl BodyLowering<'_> {
             let (function, owner) = self.predeclare_local_function(body, *callable)?;
             if *suspend && !self.ir.suspend_funs.contains(&function) {
                 self.ir.suspend_funs.push(function);
+            }
+            // A local `tailrec` body is never loop-transformed, so its constant-stack promise is
+            // unmet and a backend that cannot supply one itself must decline it.
+            if *tailrec {
+                self.ir.unlooped_tailrec.insert(function);
             }
             let realization = LocalCallableRealization {
                 function,

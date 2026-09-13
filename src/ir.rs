@@ -2789,6 +2789,14 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. ir_lower itself lowers a
     /// `suspend fun` as a plain function (mirroring how value classes stay plain until their pass).
     pub suspend_funs: Vec<u32>,
+    /// `FunId`s the source declared `tailrec` whose body the checked lowering did NOT rewrite into a
+    /// loop: an extension, a context-parameter, a member or a local function. The declaration
+    /// promises constant stack and the body still recurses, so a backend that cannot supply the
+    /// guarantee itself must decline the function rather than emit a program that overflows the
+    /// stack at a depth the source expects to survive. (The JVM lane reaches the same conclusion by
+    /// skipping the file in `ir_lower`; this table is how the CHECKED lowering states the same fact
+    /// to its own consumers.) A `tailrec` function that WAS loop-transformed is absent here.
+    pub unlooped_tailrec: std::collections::HashSet<u32>,
     /// Methods the source declares WITHOUT `override` — a fresh declaration rather than an override of a
     /// supertype member. A language fact nothing else in the IR records: `IrFunction` carries a signature,
     /// not the modifier, and a SYNTHESIZED method (absent here) is deliberately indistinguishable from an

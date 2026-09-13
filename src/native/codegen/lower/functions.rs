@@ -27,6 +27,55 @@ use super::*;
 /// function value answers `equals`/`hashCode`/`toString` like any other object.
 const INVOKE_SLOT: u32 = 3;
 
+/// A site that creates a function value. A lambda and a callable reference differ in how they are
+/// written and in nothing else that matters here: each names a function holding the body and a list
+/// of values to carry, and `obj::method`'s bound receiver is simply the first of those. Common
+/// lowering has already synthesized the adapter that calls the referenced function, so a reference
+/// is a lambda whose body someone else wrote.
+struct Site {
+    impl_fn: u32,
+    captures: Vec<u32>,
+}
+
+/// The site an expression creates, or `None` when it creates none.
+fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
+    match expr {
+        // The declared arity is deliberately not read here: the implementation function's own
+        // parameters are the source of truth, and a suspend lambda's body carries a continuation
+        // the arity does not count.
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            sam,
+            ..
+        } => Some(if sam.is_some() {
+            Err("a lambda for a functional interface".to_string())
+        } else {
+            Ok(Site {
+                impl_fn: *impl_fn,
+                captures: captures.clone(),
+            })
+        }),
+        IrExpr::CallableReference(reference) => Some(if reference.adaptation.is_some() {
+            // A reference adapted on the way in — a vararg spread, a defaulted parameter, a result
+            // coerced to `Unit`. The adapter describes work the generator does not do yet.
+            Err("an adapted callable reference".to_string())
+        } else if reference.declaration_suspend {
+            Err("a suspend callable reference".to_string())
+        } else {
+            Ok(Site {
+                impl_fn: reference.adapter,
+                captures: reference
+                    .bound_receiver
+                    .into_iter()
+                    .chain(reference.captures.iter().copied())
+                    .collect(),
+            })
+        }),
+        _ => None,
+    }
+}
+
 /// The emitted pieces of one lambda site.
 pub(super) struct LambdaItems {
     descriptor: DataId,
@@ -108,31 +157,36 @@ impl<'a> FileLowering<'a> {
     /// Declare a type and a thunk for every lambda in the file, before any body is compiled.
     pub(super) fn declare_lambdas(&mut self) -> Result<(), Unsupported> {
         for index in 0..self.ir.exprs.len() {
-            let IrExpr::Lambda {
-                impl_fn,
-                arity,
-                captures,
-                sam,
-                ..
-            } = &self.ir.exprs[index]
-            else {
+            let Some(site) = closure_site(&self.ir.exprs[index]) else {
                 continue;
             };
-            if sam.is_some() {
-                return Err("a lambda for a functional interface".to_string());
-            }
-            let (impl_fn, arity, captures) = (*impl_fn, usize::from(*arity), captures.clone());
+            let Site { impl_fn, captures } = site?;
             let body = self
                 .ir
                 .functions
                 .get(impl_fn as usize)
-                .ok_or_else(|| "a lambda with no body function".to_string())?;
-            if body.params.len() != captures.len() + arity {
+                .ok_or_else(|| "a function value with no body function".to_string())?;
+            // What the body takes beyond the captures is what a caller supplies. A SUSPEND lambda's
+            // body takes a continuation nobody here can pass, and that is what this catches.
+            let Some(arity) = body.params.len().checked_sub(captures.len()) else {
                 return Err(format!(
-                    "a lambda whose body takes {} parameters for {} captures and arity {arity}",
+                    "a function value whose body takes {} parameters for {} captures",
                     body.params.len(),
                     captures.len()
                 ));
+            };
+            if let IrExpr::Lambda {
+                arity: declared, ..
+            } = &self.ir.exprs[index]
+            {
+                if usize::from(*declared) != arity {
+                    return Err(format!(
+                        "a lambda of arity {declared} whose body takes {} parameters for {} \
+                         captures",
+                        body.params.len(),
+                        captures.len()
+                    ));
+                }
             }
             let capture_types: Vec<Ty> =
                 carried_parameters(self.ir, body)[..captures.len()].to_vec();
@@ -281,12 +335,8 @@ impl<'a> FileLowering<'a> {
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Allocate a function value and fill in what it captured.
     pub(super) fn lambda(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
-        let IrExpr::Lambda {
-            impl_fn, captures, ..
-        } = self.file.ir.expr(site).clone()
-        else {
-            unreachable!("only a lambda site reaches here");
-        };
+        let Site { impl_fn, captures } =
+            closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
         let items = self
             .file
             .lambdas

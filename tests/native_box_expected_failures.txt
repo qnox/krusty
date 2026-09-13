@@ -3,15 +3,10 @@
 # A case not listed here that fails, or a case listed here that passes, fails the test — so this list
 # can only shrink honestly. See tests/kotlin_box_native_conformance.rs.
 casts/kt83324.kt	the frontend smart-casts a `var` that the loop reassigns, so the IR carries a cast to the first assignment's class; the cast fails at runtime (a frontend defect, not a lowering one)
-diagnostics/functions/tailRecursion/extensionTailCall.kt	common lowering turns only top-level non-extension `tailrec` functions into loops; an extension `tailrec` recurses a million deep and overflows the stack
-diagnostics/functions/tailRecursion/infixCall.kt	common lowering turns only top-level non-extension `tailrec` functions into loops; an infix extension `tailrec` recurses a million deep
-diagnostics/functions/tailRecursion/infixRecursiveCall.kt	common lowering turns only top-level non-extension `tailrec` functions into loops; an infix extension `tailrec` recurses a million deep
-diagnostics/functions/tailRecursion/recursiveInnerFunction.kt	common lowering does not loop-transform a local `tailrec` function; it recurses a million deep
-diagnostics/functions/tailRecursion/thisReferences.kt	common lowering does not loop-transform a member `tailrec` function; it recurses a million deep
-diagnostics/functions/tailRecursion/unitBlocks.kt	common lowering loops only `return f(...)` tail calls; a Unit-typed tail call without `return` stays a call and recurses a million deep
 intrinsics/prefixIncDec.kt	`++prop` on a property with custom accessors reads it once where kotlinc reads it twice, so the accessor side effect is counted 2 instead of 3 — krusty's JVM backend prints the identical "fail in prefix increment: 2 != 3", so this is common lowering's, not the generator's
 statics/incInObject.kt	`r2++`/`++r2` on an object property with a custom getter counts three getter calls where kotlinc counts four — krusty's JVM backend prints the identical "fail 2:  3 getR2getR2getR2", so this is common lowering's increment shape, not the generator's
 statics/incInClassObject.kt	same increment shape as statics/incInObject.kt; krusty's JVM backend prints the identical failure
 contextParameters/classMemberAndTopLevelWithContext.kt	a context parameter picks the wrong receiver — krusty's JVM backend prints the identical "NOK", so this is the frontend's, not the generator's
 extensionFunctions/executionOrder.kt	an extension call evaluates its receiver and function in the wrong order — krusty's JVM backend prints the identical "fail getReceiver->getFun()->End"
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt	a name-based destructuring with a renamed underscore binds the wrong component — krusty's JVM backend prints the identical "FAIL: 0", so this is the frontend's
+super/superConstructor/kt13846.kt	a reference to an object's member, used as a superclass constructor argument, binds `this` as its receiver instead of the singleton — krusty's JVM backend emits bytecode the verifier rejects for exactly that ("uninitializedThis is not assignable"), so the bound receiver is common lowering's. Natively there is no verifier, so the same wrong IR crashes instead of failing to load

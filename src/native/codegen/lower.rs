@@ -386,6 +386,17 @@ impl<'a> FileLowering<'a> {
         let Some(body) = function.body else {
             return Err(format!("a body-less function `{}`", function.name));
         };
+        // A `tailrec` the checked lowering could not rewrite into a loop still recurses, and this
+        // generator emits an ordinary call for that recursion. The source wrote `tailrec` because
+        // it recurses to a depth no stack survives, so accepting the function means emitting a
+        // program that segfaults where it should print its answer. Decline instead: how deep a
+        // native stack goes is the machine's business, and a gate must not depend on it.
+        if self.ir.unlooped_tailrec.contains(&(index as u32)) {
+            return Err(format!(
+                "a `tailrec` function `{}` common lowering leaves recursive",
+                function.name
+            ));
+        }
         let signature = self.function_signature(function)?;
         // `this`, when there is one, is value slot 0 and the parameters follow it.
         let mut slots: Vec<Ty> = Vec::with_capacity(function.params.len() + 1);
@@ -961,7 +972,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 spreads,
                 elements,
             } => self.vararg(array_type, &spreads, &elements),
-            IrExpr::Lambda { .. } => self.lambda(id),
+            IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => self.lambda(id),
             IrExpr::InvokeFunction {
                 func,
                 args,
@@ -1048,6 +1059,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             &[pointer, length],
         )?;
         Ok(string.expect("`kt_string_utf8` returns a string"))
+    }
+
+    /// Whether an expression produces a function value: a lambda, a `::f`, or anything typed as
+    /// one. Every site that would realize equality asks here first, because Kotlin's answer for a
+    /// callable reference is structural and this generator's is identity.
+    fn is_function_expression(&self, id: u32) -> bool {
+        matches!(
+            self.file.ir.expr(id),
+            IrExpr::Lambda { .. } | IrExpr::CallableReference(_)
+        ) || self.type_of(id).is_some_and(is_function_value)
     }
 
     /// The Kotlin type of an expression, as far as the lowering needs it: enough to decide the
@@ -1145,6 +1166,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::InvokeFunction { ret, .. } => *ret,
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             // A function value and a captured-variable holder are both objects.
+            // A reference knows the function type it stands for, which is what makes an `equals`
+            // on it recognisable as one between function values.
+            IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
                 self.file.ir.checked_properties.get(target)?.ty
@@ -1343,6 +1367,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let right = self.reference(rhs)?;
                 let condition = comparison(op, true).expect("equality");
                 return Ok(Some(self.builder.ins().icmp(condition, left, right)));
+            }
+            if self.is_function_expression(lhs) || self.is_function_expression(rhs) {
+                // Kotlin compares two callable references by the DECLARATION they name and the
+                // receiver they bind, so `::f == ::f` is true even though each `::f` is its own
+                // object. The generator gives one `kotlin.Any`'s identity equality, which answers
+                // that `false` — so the comparison is declined rather than answered wrongly. What
+                // it needs is one emitted type per referenced declaration, with an `equals` that
+                // compares the type and the bound receiver.
+                return Err("equality on a function value".to_string());
             }
             if on_references {
                 // Kotlin's `==` on references is `equals`, dispatched through the receiver's
@@ -1617,6 +1650,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
+                        // `f.equals(…)` and `f.hashCode()` on a function value answer by the
+                        // declaration named, not by identity — the same reason `==` on one is
+                        // declined above, and undecidable for the same reason: the receiver's type
+                        // no longer says whether a lambda or a reference produced it.
+                        if matches!(name.as_str(), "equals" | "hashCode")
+                            && self.is_function_expression(receiver)
+                        {
+                            return Err("equality on a function value".to_string());
+                        }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)
                         else {
@@ -1745,6 +1787,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         Ok(values)
     }
+}
+
+/// Whether a value is a function value — a lambda or a callable reference. Spelled several ways:
+/// `(Int) -> Int` is `Ty::Fun`, while a reference stored in a `val` takes the `KFunction1` its
+/// declaration names. Equality has to treat all of them alike, and the reason is that by the time
+/// a value reaches a comparison its spelling no longer says WHICH it is: `val f: (Int) -> Int =
+/// ::double` erases the reference to the same `Function1` a lambda gets. A lambda's `equals` is
+/// identity, which this generator would answer correctly; a reference's is structural, which it
+/// would answer wrongly — so the one type they share has to be declined for both.
+fn is_function_value(ty: Ty) -> bool {
+    if matches!(ty.non_null(), Ty::Fun(_)) {
+        return true;
+    }
+    ty.non_null().obj_internal().is_some_and(|name| {
+        let name = name.render();
+        name.starts_with("kotlin/Function") || name.starts_with("kotlin/reflect/KFunction")
+    })
 }
 
 /// `Any?`: the type every runtime reference parameter is declared as.

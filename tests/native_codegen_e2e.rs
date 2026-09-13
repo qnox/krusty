@@ -941,20 +941,21 @@ fn a_lambda_that_captures_nothing_is_one_object() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     }
-    // `{}` written once is one object however often it is evaluated — Kotlin lets a program see
-    // that through `hashCode` and `===`. With nothing to capture there is nothing to allocate, so
-    // the instance is static storage. A lambda that DOES capture is a fresh object each time,
-    // because each holds its own captured values.
+    // `{}` written once is one object however often it is evaluated — with nothing to capture
+    // there is nothing to allocate, so the instance is static storage and `===` sees it. A lambda
+    // that DOES capture is a fresh object each time, because each holds its own captured values.
+    // `hashCode` is not asserted here: `equals`/`hashCode` on a function value are declined for
+    // now, because a value of function type no longer says whether a lambda or a callable
+    // reference produced it, and the two want different answers.
     assert_eq!(
         run("fun generate(): () -> Unit = {}\n\
              fun adder(by: Int): (Int) -> Int = { x -> x + by }\n\
              fun main() {\n\
              \x20   println(generate() === generate())\n\
-             \x20   println(generate().hashCode() == generate().hashCode())\n\
              \x20   println(adder(1) === adder(1))\n\
              \x20   println(adder(1)(10))\n\
              }\n"),
-        "true\ntrue\nfalse\n11\n"
+        "true\nfalse\n11\n"
     );
 }
 
@@ -1120,4 +1121,155 @@ fn a_reference_array_of_a_primitive_boxes_at_the_element_boundary() {
              }\n"),
         "15\n15\n"
     );
+}
+
+#[test]
+fn a_callable_reference_is_a_function_value_like_any_other() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `::f` and `obj::m` differ from a lambda in how they are written and in nothing else that
+    // matters: common lowering synthesizes the adapter that calls the referenced function, and a
+    // bound receiver is simply the first value the reference carries. So a reference with nothing
+    // bound is one object, as `{}` is.
+    assert_eq!(
+        run("class Greeter(val name: String) {\n\
+             \x20   fun greet(): String = \"hi ${name}\"\n\
+             \x20   fun loud(n: Int): String = \"HI ${name} $n\"\n\
+             }\n\
+             fun double(n: Int): Int = n * 2\n\
+             fun applyTo(f: (Int) -> Int, n: Int): Int = f(n)\n\
+             fun call(f: () -> String): String = f()\n\
+             fun callWith(f: (Int) -> String, n: Int): String = f(n)\n\
+             fun main() {\n\
+             \x20   println(applyTo(::double, 5))\n\
+             \x20   val g = Greeter(\"k\")\n\
+             \x20   println(call(g::greet))\n\
+             \x20   println(callWith(g::loud, 7))\n\
+             \x20   val f = ::double\n\
+             \x20   println(f(21))\n\
+             \x20   var total = 0\n\
+             \x20   val fns = arrayOfNulls<(Int) -> Int>(3)\n\
+             \x20   val ref: (Int) -> Int = ::double\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 3) { fns[i] = ref; i = i + 1 }\n\
+             \x20   i = 0\n\
+             \x20   while (i < 3) { total = total + fns[i]!!(i); i = i + 1 }\n\
+             \x20   println(total)\n\
+             }\n"),
+        "10\nhi k\nHI k 7\n42\n6\n",
+        "a reference is stored, passed and called like any other function value"
+    );
+}
+
+#[test]
+fn comparing_two_function_values_is_declined() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // Kotlin compares function values by the DECLARATION they name and the receiver they bind, so
+    // `::f == ::f` is true even though each `::f` is its own object. A function value here has
+    // `kotlin.Any`'s identity equality, which would answer `false` — so the comparison is refused
+    // rather than answered wrongly. What it needs is one emitted type per referenced declaration,
+    // carrying an `equals` that compares the type and the bound receiver.
+    let (_, diagnostics) = compile(
+        &[(
+            "Main",
+            "fun double(n: Int): Int = n * 2\n\
+             fun main() {\n\
+             \x20   val a: (Int) -> Int = ::double\n\
+             \x20   val b: (Int) -> Int = ::double\n\
+             \x20   println(a == b)\n\
+             }\n",
+        )],
+        target,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("equality on a function value")),
+        "expected the backend to decline, got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_unit_tail_call_before_a_bare_return_becomes_a_loop() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // In a `Unit` function a call with nothing after it but `return` IS in tail position, so
+    // `tailrec` promises it costs no stack. A million frames is far past what any stack holds, so
+    // this program printing its answer is the whole assertion: were the call left recursive the
+    // process would die on its stack guard page instead. The non-tail call is the control — it
+    // stays an ordinary call, and recurses only the one level the source asks for.
+    assert_eq!(
+        run("var reached = 0\n\
+             tailrec fun countDown(n: Int) {\n\
+             \x20   if (n == 0) return\n\
+             \x20   if (n == 500000) reached = n\n\
+             \x20   countDown(n - 1)\n\
+             \x20   return\n\
+             }\n\
+             tailrec fun branchy(n: Int) {\n\
+             \x20   if (n > 500000) {\n\
+             \x20       branchy(n - 1)\n\
+             \x20   } else if (n > 0) {\n\
+             \x20       branchy(n - 1)\n\
+             \x20       return\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   countDown(1000000)\n\
+             \x20   println(reached)\n\
+             \x20   branchy(1000000)\n\
+             \x20   println(\"deep\")\n\
+             }\n"),
+        "500000\ndeep\n"
+    );
+}
+
+#[test]
+fn a_tailrec_the_checked_lowering_leaves_recursive_is_declined() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // `tailrec` is a promise about STACK, and only a top-level non-extension function has its tail
+    // calls rewritten into a loop today. A member, an extension or a local `tailrec` still recurses,
+    // and the source wrote the modifier because it recurses past any stack — so accepting one means
+    // emitting a program that dies on a guard page at a depth the source expects to survive. How
+    // deep a native stack goes is the machine's business, and a gate must not depend on it, so the
+    // generator declines these instead of compiling them into a crash.
+    for (label, source) in [
+        (
+            "a member",
+            "class Counter {\n\
+             \x20   tailrec fun down(n: Int) { if (n > 0) down(n - 1) }\n\
+             }\n\
+             fun main() { Counter().down(1000000) }\n",
+        ),
+        (
+            "an extension",
+            "tailrec fun Int.down(n: Int) { if (n > 0) this.down(n - 1) }\n\
+             fun main() { 1.down(1000000) }\n",
+        ),
+        (
+            "a local",
+            "fun main() {\n\
+             \x20   tailrec fun down(n: Int) { if (n > 0) down(n - 1) }\n\
+             \x20   down(1000000)\n\
+             }\n",
+        ),
+    ] {
+        let (_, diagnostics) = compile(&[("Main", source)], target);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("common lowering leaves recursive")),
+            "expected {label} `tailrec` to be declined, got {diagnostics:?}"
+        );
+    }
 }
