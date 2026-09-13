@@ -38,7 +38,7 @@ use crate::ir::{
 use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
 
-use super::super::classes::{self as model, ClassModel, Slot, Symbols};
+use super::super::classes::{self as model, ClassModel, Slot, Symbols, ValueMember};
 use super::super::target::NativeTarget;
 use super::{Entry, PROGRAM_ENTRY};
 
@@ -1151,8 +1151,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
                 // Kotlin has no `Byte.plus(Byte): Byte`: arithmetic on the narrow integer types
-                // produces `Int`, and a result typed `Byte` here would pick the wrong carrier.
-                _ => match self.type_of(*lhs)? {
+                // produces `Int`, and a result typed `Byte` here would pick the wrong carrier. An
+                // operand of a bounded type parameter is read through its bound for the same
+                // reason: the operator unboxes it, so the RESULT is that primitive and not the
+                // reference the declaration spells — a caller told otherwise would skip the boxing
+                // the next parameter needs, and the mismatch reaches the verifier, or worse.
+                _ => match scalar_bound(self.type_of(*lhs)?)? {
                     Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
                     other => other,
                 },
@@ -1341,6 +1345,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// An operator's operand as the primitive it is: a reference-carried one is a box, opened to
+    /// the type its own bound names.
+    fn unboxed_operand(&mut self, value: Value, ty: Option<Ty>) -> Result<Value, Unsupported> {
+        let Some(ty) = ty else {
+            return Ok(value);
+        };
+        if carrier(ty) != Carrier::Ref {
+            return Ok(value);
+        }
+        let Some(scalar) = scalar_bound(ty) else {
+            return Err("an operator on a reference operand".to_string());
+        };
+        Ok(self
+            .convert(value, Some(any()), scalar)?
+            .expect("a scalar target yields a value"))
+    }
+
     /// Two scalar operands brought to one width, as Kotlin's operator overloads do (`Byte + Int`
     /// is `Int + Int`). Returns the values, their common type, and whether comparisons are signed.
     fn unify(
@@ -1350,6 +1371,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         rhs: Value,
         rhs_ty: Option<Ty>,
     ) -> Result<(Value, Value, Type, bool), Unsupported> {
+        // Kotlin's arithmetic and comparison operators are the PRIMITIVE ones, so an operand whose
+        // type carries as a reference here is a boxed primitive: a value of a generic type whose
+        // bound is a number, which the JVM boxes for the same reason. It has to be unboxed before
+        // either side's machine type means anything — this function unifies by machine type, and a
+        // pointer and an `Int` unify into pointer arithmetic that reads like an answer and is not
+        // one.
+        let lhs = self.unboxed_operand(lhs, lhs_ty)?;
+        let rhs = self.unboxed_operand(rhs, rhs_ty)?;
         let left = self.builder.func.dfg.value_type(lhs);
         let right = self.builder.func.dfg.value_type(rhs);
         if left.is_float() != right.is_float() {
@@ -1835,6 +1864,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
+        self.value_hash(operand, ty).map(Some)
+    }
+
+    /// The hash of a value already in hand, by the same rules.
+    pub(super) fn value_hash(&mut self, operand: Value, ty: Ty) -> Result<Value, Unsupported> {
+        if carrier(ty) == Carrier::Ref {
+            return Ok(self
+                .runtime_call("kt_hash_code", &[any()], Ty::Int, &[operand])?
+                .expect("`kt_hash_code` returns an Int"));
+        }
         let hash = match ty.non_null() {
             Ty::Boolean => {
                 let yes = self.builder.ins().iconst(types::I32, 1231);
@@ -1857,7 +1896,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             other => return Err(format!("a data-class field of type `{other:?}`")),
         };
-        Ok(Some(hash))
+        Ok(hash)
     }
 
     /// `(value xor (value ushr 32)).toInt()` — how Kotlin folds 64 bits into a hash.
@@ -1893,14 +1932,32 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             let (Some(left), Some(right)) = (left, right) else {
                 return Err("a `Unit` data-class field".to_string());
             };
-            return Ok(Some(self.builder.ins().icmp(IntCC::Equal, left, right)));
+            return self.values_equal(left, right, ty).map(Some);
         }
         let left = self.reference(left)?;
         let right = self.reference(right)?;
         if self.terminated {
             return Ok(None);
         }
-        self.runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])
+        self.values_equal(left, right, ty).map(Some)
+    }
+
+    /// Whether two values already in hand are `equals`, by the same rules.
+    pub(super) fn values_equal(
+        &mut self,
+        left: Value,
+        right: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        if !ty.is_nullable() && matches!(ty.non_null(), Ty::Float | Ty::Double) {
+            return Err("a field holding a floating-point value".to_string());
+        }
+        if carrier(ty) != Carrier::Ref {
+            return Ok(self.builder.ins().icmp(IntCC::Equal, left, right));
+        }
+        Ok(self
+            .runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])?
+            .expect("`kt_equals` returns a Boolean"))
     }
 
     /// Arguments coerced to the parameter carriers they are passed as.
@@ -1938,6 +1995,26 @@ fn is_function_value(ty: Ty) -> bool {
         let name = name.render();
         name.starts_with("kotlin/Function") || name.starts_with("kotlin/reflect/KFunction")
     })
+}
+
+/// The primitive a reference-carried type REPRESENTS, or `None` when it represents no primitive.
+///
+/// A type parameter is the case that matters: `T : Int` is carried as a reference — a boxed `Int`,
+/// exactly as the JVM carries it — and its bound is what says which primitive is in the box. The
+/// chain is peeled because a bound can name another parameter, and the step count is capped so a
+/// cyclic one cannot spin.
+fn scalar_bound(ty: Ty) -> Option<Ty> {
+    let mut at = ty.non_null();
+    for _ in 0..16 {
+        if carrier(at) != Carrier::Ref {
+            return Some(at);
+        }
+        match at {
+            Ty::TyParam(_, bound) => at = bound.non_null(),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// `Any?`: the type every runtime reference parameter is declared as.

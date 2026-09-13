@@ -1198,6 +1198,16 @@ before:**
    miscompiled. An interface member a concrete class implements but this model cannot find is a
    decline too, not an abstract trap: the implementation is in the source, so failing to find it is
    this model's defect and belongs at compile time.
+   Value classes came back next, for **1460 pass**, and this time they stayed. What made them a
+   miscompile before was never the class — it was the three members: Kotlin answers `equals`,
+   `hashCode` and `toString` by the value inside, and an ordinary class answers all three by
+   identity. Synthesizing them beside the object is about a hundred lines and needs none of the
+   JVM's erasure, mangling or box adapters, because the object here is already ours and the
+   collector already traces it. The corpus then caught a defect that had nothing to do with value
+   classes and had been sitting behind their decline: `T : Int` is carried as a boxed `Int`, and
+   the operator path unified operands by MACHINE type, so a pointer and an integer "unified" into
+   pointer arithmetic that printed as an answer. Operators now unbox through the bound, and the
+   result of one is the primitive rather than the reference the declaration spells.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

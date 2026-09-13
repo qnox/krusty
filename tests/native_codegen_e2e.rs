@@ -1493,3 +1493,65 @@ fn an_override_that_needs_a_bridge_is_declined() {
         "expected the backend to decline, got {diagnostics:?}"
     );
 }
+
+#[test]
+fn a_value_class_answers_by_the_value_it_wraps() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A `value class` is not a one-field class: Kotlin answers `equals`, `hashCode` and `toString`
+    // by the value inside, where an ordinary class answers all three by identity. The JVM reaches
+    // that by erasing the class to its underlying value; here the object stays and the three
+    // members are synthesized instead, which is the same answer by a different road. A member
+    // function still sees the wrapper, and a `String` inside compares by content.
+    assert_eq!(
+        run("@JvmInline value class Count(val n: Int) {\n\
+             \x20   fun doubled(): Int = n * 2\n\
+             }\n\
+             @JvmInline value class Label(val text: String)\n\
+             fun main() {\n\
+             \x20   println(Count(1) == Count(1))\n\
+             \x20   println(Count(1) == Count(2))\n\
+             \x20   println(Count(1).hashCode() == Count(1).hashCode())\n\
+             \x20   println(Count(1).toString())\n\
+             \x20   println(Count(21).doubled())\n\
+             \x20   println(Label(\"a\" + \"b\") == Label(\"ab\"))\n\
+             \x20   println(Label(\"ab\").toString())\n\
+             }\n"),
+        "true\nfalse\ntrue\nCount(n=1)\n42\ntrue\nLabel(text=ab)\n"
+    );
+}
+
+#[test]
+fn an_operand_of_a_bounded_type_parameter_is_unboxed() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `T : Int` is carried as a REFERENCE — a boxed `Int`, exactly as the JVM carries it — and
+    // Kotlin's `+` is the primitive operator. Unifying the operands by their machine types without
+    // opening the box first adds a pointer to an integer and prints the result as an answer: the
+    // corpus's generic value classes are where that surfaced, but nothing about it is specific to
+    // them, as the top-level function here shows.
+    assert_eq!(
+        run("var total = 0\n\
+             fun <T : Int> add(a: T, b: T): Int = a + b\n\
+             fun <T : Int> accumulate(v: T) { total += v }\n\
+             class Holder<T : Int>(val v: T) {\n\
+             \x20   fun twice(): Int = v + v\n\
+             }\n\
+             @JvmInline value class Wrapped<T : Int>(val v: T) {\n\
+             \x20   fun plus(other: Wrapped<T>) = Wrapped(v + other.v)\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(add(1, 2))\n\
+             \x20   accumulate(40)\n\
+             \x20   accumulate(2)\n\
+             \x20   println(total)\n\
+             \x20   println(Holder(21).twice())\n\
+             \x20   println(Wrapped(10).plus(Wrapped(20)).v)\n\
+             }\n"),
+        "3\n42\n42\n30\n"
+    );
+}

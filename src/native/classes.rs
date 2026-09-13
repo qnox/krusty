@@ -104,6 +104,17 @@ pub(super) enum Slot {
     FieldGetter { class: ClassId, field: u32 },
     /// A synthesized setter, likewise.
     FieldSetter { class: ClassId, field: u32 },
+    /// A `value class`'s `equals`, `hashCode` or `toString`, answered by its underlying value —
+    /// which is what makes it a value class rather than a one-field class.
+    ValueMember { class: ClassId, member: ValueMember },
+}
+
+/// Which of `kotlin.Any`'s three a synthesized value-class member answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum ValueMember {
+    Equals,
+    HashCode,
+    ToString,
 }
 
 /// The identity of a virtual member, independent of which class's implementation fills it.
@@ -202,12 +213,6 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
         "an inner class"
     } else if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
         "an enum class"
-    } else if class.is_value {
-        // A `value class` is not a one-field class: Kotlin gives it equality, hashing and rendering
-        // by its underlying value, and the JVM erases it to that value entirely. Common IR carries
-        // it as an ordinary class, and treating it as one compiles — and answers `IC(1) == IC(1)`
-        // with identity, which is false. Declined until the generator realizes those members.
-        "a value class"
     } else if !class.secondary_ctors.is_empty() {
         "a secondary constructor"
     } else if ir
@@ -790,6 +795,41 @@ fn layout_class(
     }
 
     register_inherited_interface_members(ir, class, &mut slots)?;
+
+    // A `value class` is not a one-field class. Kotlin answers `equals`, `hashCode` and `toString`
+    // by the value it wraps — `IC(1) == IC(1)` is true, and `IC(1).toString()` is `IC(n=1)` —
+    // where an ordinary class answers all three by identity. The JVM reaches that by erasing the
+    // class to its underlying value entirely; here the object stays, and the three members are
+    // synthesized instead. A value class that DECLARES one of them keeps its own: the loop above
+    // has already replaced that slot, and only `kotlin.Any`'s own default is overwritten here.
+    if class.is_value {
+        if class.fields.len() != 1 {
+            return Err(format!(
+                "a value class with {} fields (`{}`)",
+                class.fields.len(),
+                class.fq_name()
+            ));
+        }
+        if matches!(
+            c_kind(class.fields[0].ty),
+            CKind::Scalar("kt_float" | "kt_double")
+        ) {
+            // Its `toString` would have to render the value, which the runtime cannot do.
+            return Err(format!(
+                "a value class wrapping a floating-point value (`{}`)",
+                class.fq_name()
+            ));
+        }
+        for (slot, member) in [
+            (0, ValueMember::Equals),
+            (1, ValueMember::HashCode),
+            (2, ValueMember::ToString),
+        ] {
+            if matches!(vtable[slot], Slot::Runtime(_)) {
+                vtable[slot] = Slot::ValueMember { class: id, member };
+            }
+        }
+    }
 
     Ok(ClassLayout {
         superclass,

@@ -4335,6 +4335,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/fir_lower/sink.rs`, `src/native/codegen/lower.rs`,
   `tests/native_codegen_e2e.rs::a_tailrec_the_checked_lowering_leaves_recursive_is_declined`).
 
+- **A `value class` answers by the value it wraps.** `IC(1) == IC(1)` is true, `IC(1).toString()`
+  is `IC(n=1)`, and the hash is the wrapped value's — where an ordinary class answers all three by
+  identity. The JVM reaches that by erasing the class to its underlying value entirely; natively
+  the object stays and the three members are synthesized beside it, which is the same answer by a
+  different road and needs none of the JVM's mangling or box adapters. A value class that declares
+  one of the three keeps its own (`src/native/classes.rs`, `src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::a_value_class_answers_by_the_value_it_wraps`).
+
+- **An operand of a bounded type parameter is a box, and operators unbox it.** `T : Int` is carried
+  as a reference, exactly as the JVM carries it, while Kotlin's `+` is the primitive operator. The
+  operand is therefore unboxed through its bound before the two sides are unified, and the RESULT
+  of the operation is that primitive rather than the reference the declaration spells — a caller
+  told otherwise skips the boxing the next parameter needs. Unifying by machine type without this
+  adds a pointer to an integer and prints the sum as an answer
+  (`src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::an_operand_of_a_bounded_type_parameter_is_unboxed`).
+
 - **An interface member has one slot number, program-wide.** A call through an interface-typed
   value knows the interface and not the class, so the number it dispatches on has to mean the same
   member in every implementation. Each class's table is therefore its own slots, padded to a common

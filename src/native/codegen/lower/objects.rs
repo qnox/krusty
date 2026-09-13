@@ -180,10 +180,30 @@ impl<'a> FileLowering<'a> {
             .layouts
             .iter()
             .flat_map(|layout| layout.vtable.iter().cloned())
-            .filter(|slot| matches!(slot, Slot::FieldGetter { .. } | Slot::FieldSetter { .. }))
+            .filter(|slot| {
+                matches!(
+                    slot,
+                    Slot::FieldGetter { .. } | Slot::FieldSetter { .. } | Slot::ValueMember { .. }
+                )
+            })
             .collect();
         for slot in synthesized {
             if self.accessors.contains_key(&slot) {
+                continue;
+            }
+            if let Slot::ValueMember { class, member } = &slot {
+                let base = self.class_base(*class).to_string();
+                let (suffix, params, ret) = match member {
+                    ValueMember::Equals => ("equals", vec![any(), any()], Ty::Boolean),
+                    ValueMember::HashCode => ("hash_code", vec![any()], Ty::Int),
+                    ValueMember::ToString => ("to_string", vec![any()], any()),
+                };
+                let id = self.declare_local_function(
+                    &format!("kt_{base}__value_{suffix}"),
+                    &params,
+                    ret,
+                )?;
+                self.accessors.insert(slot, id);
                 continue;
             }
             let (Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field }) = &slot
@@ -362,7 +382,9 @@ impl<'a> FileLowering<'a> {
                     self.functions[*fid as usize].expect("a vtable entry has a body")
                 }
                 Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
-                Slot::FieldGetter { .. } | Slot::FieldSetter { .. } => self.accessors[slot],
+                Slot::FieldGetter { .. } | Slot::FieldSetter { .. } | Slot::ValueMember { .. } => {
+                    self.accessors[slot]
+                }
             });
         }
         let name = self.kotlin_name(class);
@@ -392,6 +414,9 @@ impl<'a> FileLowering<'a> {
     /// A synthesized accessor: the field load or store an open property without a source
     /// accessor dispatches to.
     fn define_accessor(&mut self, slot: &Slot, id: FuncId) -> Result<(), Unsupported> {
+        if let Slot::ValueMember { class, member } = slot {
+            return self.define_value_member(*class, *member, id);
+        }
         let (Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field }) = slot else {
             unreachable!("only field accessors are synthesized");
         };
@@ -419,6 +444,118 @@ impl<'a> FileLowering<'a> {
                     .store(trusted(), params[1], params[0], offset);
                 Ok(())
             })
+        }
+    }
+
+    /// A `value class`'s `equals`, `hashCode` or `toString`: the same answer Kotlin gives, which is
+    /// the WRAPPED value's, not the wrapper's.
+    ///
+    /// `equals` is the one with a shape of its own. It has to check the other operand's type before
+    /// reading its field — a `KRef` that is not one of these has no field at that offset — so it
+    /// branches: not an instance yields `false`, and an instance compares the two underlying
+    /// values by the same rule a data class compares a field by. `hashCode` is that field's hash.
+    /// `toString` renders `IC(n=1)`: the class's Kotlin name, the property's name, and the value
+    /// through the runtime's own rendering.
+    fn define_value_member(
+        &mut self,
+        class: ClassId,
+        member: ValueMember,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let offset = self.model.layout(class).fields[0].offset as i32;
+        let declaration = &self.ir.classes[class as usize];
+        let ty = declaration.fields[0].ty;
+        let field_name = declaration.fields[0].name.clone();
+        let kotlin_name = self.kotlin_name(class);
+        let name = format!("{}.{member:?}", declaration.fq_name());
+        let clif = carrier(ty).clif().expect("a field is never `Unit`");
+        let descriptor = self.classes[class as usize].descriptor;
+        match member {
+            ValueMember::Equals => {
+                let signature = self.signature_of(&[any(), any()], Ty::Boolean)?;
+                self.emit_function(
+                    id,
+                    signature,
+                    carrier(Ty::Boolean),
+                    &name,
+                    &mut |body, params| {
+                        let (left, right) = (params[0], params[1]);
+                        let type_address = body.data_address(descriptor);
+                        let same_type = body
+                            .runtime_call(
+                                "kt_is_instance",
+                                &[any(), any()],
+                                Ty::Boolean,
+                                &[right, type_address],
+                            )?
+                            .expect("`kt_is_instance` returns a Boolean");
+                        let merge = body.builder.create_block();
+                        body.builder.append_block_param(merge, types::I8);
+                        let compare = body.builder.create_block();
+                        let other = body.builder.create_block();
+                        body.builder.ins().brif(same_type, compare, &[], other, &[]);
+
+                        body.continue_in(other);
+                        body.builder.seal_block(other);
+                        let no = body.builder.ins().iconst(types::I8, 0);
+                        body.builder.ins().jump(merge, &[BlockArg::Value(no)]);
+
+                        body.continue_in(compare);
+                        body.builder.seal_block(compare);
+                        let mine = body.builder.ins().load(clif, trusted(), left, offset);
+                        let theirs = body.builder.ins().load(clif, trusted(), right, offset);
+                        let equal = body.values_equal(mine, theirs, ty)?;
+                        body.builder.ins().jump(merge, &[BlockArg::Value(equal)]);
+
+                        body.continue_in(merge);
+                        body.builder.seal_block(merge);
+                        let answer = body.builder.block_params(merge)[0];
+                        body.builder.ins().return_(&[answer]);
+                        body.terminate();
+                        Ok(())
+                    },
+                )
+            }
+            ValueMember::HashCode => {
+                let signature = self.signature_of(&[any()], Ty::Int)?;
+                self.emit_function(
+                    id,
+                    signature,
+                    carrier(Ty::Int),
+                    &name,
+                    &mut |body, params| {
+                        let value = body.builder.ins().load(clif, trusted(), params[0], offset);
+                        let hash = body.value_hash(value, ty)?;
+                        body.builder.ins().return_(&[hash]);
+                        body.terminate();
+                        Ok(())
+                    },
+                )
+            }
+            ValueMember::ToString => {
+                let opening = format!("{kotlin_name}({field_name}=");
+                let signature = self.signature_of(&[any()], any())?;
+                self.emit_function(id, signature, Carrier::Ref, &name, &mut |body, params| {
+                    let value = body.builder.ins().load(clif, trusted(), params[0], offset);
+                    let boxed = body
+                        .convert(value, Some(ty), any())?
+                        .expect("a field is never `Unit`");
+                    let rendered = body
+                        .runtime_call("kt_to_string", &[any()], any(), &[boxed])?
+                        .expect("`kt_to_string` returns a string");
+                    let head = body.string_literal(opening.as_bytes())?;
+                    let joined = body
+                        .runtime_call("kt_string_plus", &[any(), any()], any(), &[head, rendered])?
+                        .expect("`kt_string_plus` returns a string");
+                    let tail = body.string_literal(b")")?;
+                    let whole = body
+                        .runtime_call("kt_string_plus", &[any(), any()], any(), &[joined, tail])?
+                        .expect("`kt_string_plus` returns a string");
+                    body.builder.ins().return_(&[whole]);
+                    body.terminate();
+                    Ok(())
+                })
+            }
         }
     }
 
