@@ -1217,6 +1217,13 @@ before:**
    defines, and the link failed with a duplicate symbol that said nothing about the Kotlin name
    behind it. The generator now reserves the symbols the prebuilt runtime defines, read out of the
    runtime objects rather than listed beside them.
+   SAM conversions followed for **1508 pass**, and they were cheap only because interfaces had
+   landed first: a lambda converted to a `fun interface` is the same object holding the same
+   captures, wearing that interface's table instead of the single invoke slot. The corpus insisted
+   on two details — the table starts from the interface's OWN, so a default method answers, and a
+   `fun interface` that overrides `toString` keeps `kotlin.Any`'s slot 2, which is where the
+   runtime's rendering looks — and on one piece of Kotlin semantics: converting a nullable function
+   value yields null, not a wrapper around nothing.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

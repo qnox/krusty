@@ -36,7 +36,7 @@ const TYPE_OFFSET: i32 = 0;
 /// The emitted items of one class.
 pub(super) struct ClassItems {
     /// Its `KType`.
-    descriptor: DataId,
+    pub(super) descriptor: DataId,
     /// `kt_<class>__init(this, args…)`.
     constructor: FuncId,
     /// For an `object` declaration: the static slot holding the instance, and its getter.
@@ -357,6 +357,14 @@ impl<'a> FileLowering<'a> {
     }
 
     /// `kotlin.Any`'s three vtable entries, the prefix of every table.
+    /// One of `kotlin.Any`'s defaults, imported by its runtime symbol.
+    pub(super) fn runtime_member_import(&mut self, symbol: &str) -> Result<FuncId, Unsupported> {
+        let (params, ret) = any_member(symbol).ok_or_else(|| {
+            format!("a vtable entry naming the unknown runtime symbol `{symbol}`")
+        })?;
+        self.import(symbol, &params, ret)
+    }
+
     pub(super) fn any_vtable(&mut self) -> Result<Vec<FuncId>, Unsupported> {
         let mut entries = Vec::with_capacity(3);
         for symbol in ["kt_any_equals", "kt_any_hash_code", "kt_any_to_string"] {

@@ -35,6 +35,10 @@ const INVOKE_SLOT: u32 = 3;
 struct Site {
     impl_fn: u32,
     captures: Vec<u32>,
+    /// The `fun interface` this lambda was converted to, when it was. A SAM conversion is still a
+    /// function value carrying captures; what differs is the TYPE it wears, and therefore which
+    /// vtable a caller dispatches through.
+    sam: Option<crate::ir::IrSamTarget>,
 }
 
 /// The site an expression creates, or `None` when it creates none.
@@ -48,14 +52,11 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
             captures,
             sam,
             ..
-        } => Some(if sam.is_some() {
-            Err("a lambda for a functional interface".to_string())
-        } else {
-            Ok(Site {
-                impl_fn: *impl_fn,
-                captures: captures.clone(),
-            })
-        }),
+        } => Some(Ok(Site {
+            impl_fn: *impl_fn,
+            captures: captures.clone(),
+            sam: sam.clone(),
+        })),
         IrExpr::CallableReference(reference) => Some(if reference.adaptation.is_some() {
             // A reference adapted on the way in — a vararg spread, a defaulted parameter, a result
             // coerced to `Unit`. The adapter describes work the generator does not do yet.
@@ -70,6 +71,9 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
                     .into_iter()
                     .chain(reference.captures.iter().copied())
                     .collect(),
+                // A callable reference converted to a `fun interface` arrives as a lambda with a
+                // SAM target, not as a reference, so there is none to carry here.
+                sam: None,
             })
         }),
         _ => None,
@@ -160,7 +164,11 @@ impl<'a> FileLowering<'a> {
             let Some(site) = closure_site(&self.ir.exprs[index]) else {
                 continue;
             };
-            let Site { impl_fn, captures } = site?;
+            let Site {
+                impl_fn,
+                captures,
+                sam,
+            } = site?;
             let body = self
                 .ir
                 .functions
@@ -201,27 +209,49 @@ impl<'a> FileLowering<'a> {
 
             let base = format!("kt_fn_{index}");
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
-            let thunk = self.declare_local_function(
-                &format!("{base}_invoke"),
-                &vec![any(); arity + 1],
-                any(),
-            )?;
-            let mut vtable = self.any_vtable()?;
-            vtable.push(thunk);
-            // `toString` on a function value prints this name, as `Function1` would on the JVM.
-            let kotlin_name = format!("kotlin.Function{arity}");
             let any_type = self.import_data("kt_type_any")?;
-            self.define_type_descriptor(
-                descriptor,
-                &base,
-                &kotlin_name,
-                instance_size,
-                &references,
-                &vtable,
-                any_type,
-                &[],
-            )?;
-            self.define_thunk(thunk, &base, impl_fn, &capture_offsets, arity)?;
+            match &sam {
+                // Converted to a `fun interface`: the object wears that interface's type, so its
+                // table has to be one a caller can dispatch through — full length, with the
+                // interface's own member pointing at this lambda's body.
+                Some(target) => {
+                    let (vtable, interfaces, kotlin_name) =
+                        self.sam_table(target, &base, impl_fn, &capture_offsets)?;
+                    self.define_type_descriptor(
+                        descriptor,
+                        &base,
+                        &kotlin_name,
+                        instance_size,
+                        &references,
+                        &vtable,
+                        any_type,
+                        &interfaces,
+                    )?;
+                }
+                None => {
+                    let thunk = self.declare_local_function(
+                        &format!("{base}_invoke"),
+                        &vec![any(); arity + 1],
+                        any(),
+                    )?;
+                    let mut vtable = self.any_vtable()?;
+                    vtable.push(thunk);
+                    // `toString` on a function value prints this name, as `Function1` would on the
+                    // JVM.
+                    let kotlin_name = format!("kotlin.Function{arity}");
+                    self.define_type_descriptor(
+                        descriptor,
+                        &base,
+                        &kotlin_name,
+                        instance_size,
+                        &references,
+                        &vtable,
+                        any_type,
+                        &[],
+                    )?;
+                    self.define_thunk(thunk, &base, impl_fn, &capture_offsets, arity)?;
+                }
+            }
             let singleton = if captures.is_empty() {
                 let instance = self.declare_local_data(&format!("{base}_instance"), false)?;
                 let mut description = DataDescription::new();
@@ -249,6 +279,174 @@ impl<'a> FileLowering<'a> {
             );
         }
         Ok(())
+    }
+
+    /// The table, interface list and name of the object a lambda becomes when it is converted to a
+    /// `fun interface`.
+    ///
+    /// A SAM conversion changes the TYPE a function value wears, and a type is a table here. The
+    /// object holds its captures exactly as a lambda's does; what differs is that a caller reaches
+    /// it through the interface's own member number rather than through the single invoke slot, so
+    /// the table must be as long as every class's — the interface region included — with that one
+    /// member filled. The rest is the abstract trap, and unreachable for the same reason it is in
+    /// a class: nothing can name a member through a type this object does not have.
+    fn sam_table(
+        &mut self,
+        target: &crate::ir::IrSamTarget,
+        base: &str,
+        impl_fn: u32,
+        capture_offsets: &[u32],
+    ) -> Result<(Vec<FuncId>, Vec<DataId>, String), Unsupported> {
+        if target.suspend {
+            return Err("a suspend functional interface".to_string());
+        }
+        if target.has_receiver || target.context_count > 0 {
+            return Err("a functional interface method with a receiver".to_string());
+        }
+        let Some(interface) = self.ir.class_id_by_name(target.classifier) else {
+            return Err(format!(
+                "a functional interface declared outside this file (`{}`)",
+                target.classifier.render()
+            ));
+        };
+        let declaration = &self.ir.classes[interface as usize];
+        let method = declaration
+            .methods
+            .iter()
+            .copied()
+            .find(|&fid| self.ir.functions[fid as usize].name == target.method)
+            .ok_or_else(|| {
+                format!(
+                    "a functional interface without its own `{}` (`{}`)",
+                    target.method,
+                    target.classifier.render()
+                )
+            })?;
+        let key = model::function_key(self.ir, interface, method);
+        let slot = self.model.slot(interface, &key).ok_or_else(|| {
+            format!(
+                "a functional interface member with no slot (`{}.{}`)",
+                target.classifier.render(),
+                target.method
+            )
+        })? as usize;
+
+        // The thunk wears the interface member's own signature, because that is what the call site
+        // dispatches with — not the boxed one an ordinary function value's invoke slot uses.
+        let parameters = self.ir.functions[method as usize].params.clone();
+        let result = self.ir.functions[method as usize].ret;
+        let mut signature = vec![any()];
+        signature.extend(parameters.iter().copied());
+        let thunk = self.declare_local_function(&format!("{base}_invoke"), &signature, result)?;
+        self.define_sam_thunk(thunk, base, impl_fn, capture_offsets, &parameters, result)?;
+
+        // Start from the table the interface itself defines — its default methods, and any
+        // `kotlin.Any` member it overrides — so a SAM object answers `result()` or `toString()`
+        // the way an ordinary implementor would, and only then fill in the member the lambda is.
+        let template = self.model.layout(interface).vtable.clone();
+        let mut vtable = Vec::with_capacity(template.len());
+        for entry in &template {
+            vtable.push(match entry {
+                model::Slot::Runtime(symbol) => self.runtime_member_import(symbol)?,
+                model::Slot::Function(fid) => match self.functions[*fid as usize] {
+                    Some(id) => id,
+                    None => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
+                },
+                model::Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
+                model::Slot::FieldGetter { .. }
+                | model::Slot::FieldSetter { .. }
+                | model::Slot::ValueMember { .. } => {
+                    return Err("a functional interface with a synthesized member".to_string())
+                }
+            });
+        }
+        if slot >= vtable.len() {
+            return Err("a functional interface member outside the vtable".to_string());
+        }
+        vtable[slot] = thunk;
+
+        let interfaces: Vec<DataId> = std::iter::once(interface)
+            .chain(self.model.interfaces[interface as usize].iter().copied())
+            .map(|id| self.classes[id as usize].descriptor)
+            .collect();
+        let kotlin_name = declaration.fq_name().replace(['/', '$'], ".");
+        Ok((vtable, interfaces, kotlin_name))
+    }
+
+    /// A SAM object's entry point: the captures it carries, then the interface method's own
+    /// arguments converted to what the lambda body declares.
+    fn define_sam_thunk(
+        &mut self,
+        thunk: FuncId,
+        base: &str,
+        impl_fn: u32,
+        capture_offsets: &[u32],
+        parameters: &[Ty],
+        result: Ty,
+    ) -> Result<(), Unsupported> {
+        let body = &self.ir.functions[impl_fn as usize];
+        let declared = carried_parameters(self.ir, body);
+        let produced = body.ret;
+        let target = self.functions[impl_fn as usize]
+            .ok_or_else(|| "a lambda whose body has no code".to_string())?;
+        if declared.len() != capture_offsets.len() + parameters.len() {
+            return Err("a functional interface method of a different arity".to_string());
+        }
+        let mut signature = vec![any()];
+        signature.extend(parameters.iter().copied());
+        let signature = self.signature_of(&signature, result)?;
+        let capture_offsets = capture_offsets.to_vec();
+        let incoming = parameters.to_vec();
+        let name = format!("{base}_invoke");
+        self.emit_function(
+            thunk,
+            signature,
+            carrier(result),
+            &name,
+            &mut |body, params| {
+                let mut arguments = Vec::with_capacity(declared.len());
+                for (offset, ty) in capture_offsets.iter().zip(&declared) {
+                    let clif = carrier(*ty).clif().expect("a capture is never `Unit`");
+                    arguments.push(body.builder.ins().load(
+                        clif,
+                        trusted(),
+                        params[0],
+                        *offset as i32,
+                    ));
+                }
+                for (index, ty) in declared[capture_offsets.len()..].iter().enumerate() {
+                    let Some(value) =
+                        body.convert(params[index + 1], Some(incoming[index]), *ty)?
+                    else {
+                        return Err("a `Unit` argument to a functional interface".to_string());
+                    };
+                    arguments.push(value);
+                }
+                let func_ref = body.func_ref(target);
+                let call = body.builder.ins().call(func_ref, &arguments);
+                let returned = body.builder.inst_results(call).first().copied();
+                match (returned, carrier(result)) {
+                    (_, Carrier::Void) => {}
+                    (Some(value), _) => {
+                        let value = body
+                            .convert(value, Some(produced), result)?
+                            .expect("a non-void carrier");
+                        body.builder.ins().return_(&[value]);
+                        body.terminate();
+                    }
+                    // A `Unit` body answering an interface that declares a value: the runtime's
+                    // singleton is that value.
+                    (None, _) => {
+                        let unit = body
+                            .runtime_call("kt_unit", &[], any(), &[])?
+                            .expect("`kt_unit` returns the singleton");
+                        body.builder.ins().return_(&[unit]);
+                        body.terminate();
+                    }
+                }
+                Ok(())
+            },
+        )
     }
 
     /// The uniform entry point: unpack the captures this object carries, convert each argument
@@ -344,8 +542,34 @@ impl<'a> FileLowering<'a> {
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Allocate a function value and fill in what it captured.
     pub(super) fn lambda(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
-        let Site { impl_fn, captures } =
-            closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
+        let Site {
+            impl_fn,
+            captures,
+            sam,
+        } = closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
+        // Converting a NULLABLE function value to a `fun interface` yields null when the value is
+        // null — `isNull(nullableFun(true))` must answer true, not call `invoke` on a wrapper
+        // around nothing. The checked lowering expresses such a conversion as a lambda whose one
+        // capture is the value being converted, so the null test is on that capture.
+        if sam.is_some() {
+            if let [operand] = captures.as_slice() {
+                let converts = self.file.ir.functions[impl_fn as usize]
+                    .name
+                    .starts_with("$fir_sam_delegate_");
+                let nullable = self.type_of(*operand).is_some_and(|ty| ty.is_nullable());
+                if converts && nullable {
+                    return self.nullable_sam(site, *operand);
+                }
+            }
+        }
+        self.wrap_closure(site)
+    }
+
+    /// Build the object a closure site makes: its captures, then the allocation that holds them.
+    fn wrap_closure(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
+        let Site {
+            impl_fn, captures, ..
+        } = closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
         let items = self
             .file
             .lambdas
@@ -419,6 +643,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),
             _ => Ok(None),
         }
+    }
+
+    /// A SAM conversion whose operand may be null: null in, null out; anything else takes the
+    /// ordinary path and is wrapped.
+    fn nullable_sam(&mut self, site: u32, operand: u32) -> Result<Option<Value>, Unsupported> {
+        let value = self.reference(operand)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let is_null = self.builder.ins().icmp(IntCC::Equal, value, zero);
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I64);
+        let wrap = self.builder.create_block();
+        let empty = self.builder.create_block();
+        self.builder.ins().brif(is_null, empty, &[], wrap, &[]);
+
+        self.continue_in(empty);
+        self.builder.seal_block(empty);
+        let null = self.builder.ins().iconst(types::I64, 0);
+        self.builder.ins().jump(merge, &[BlockArg::Value(null)]);
+
+        self.continue_in(wrap);
+        self.builder.seal_block(wrap);
+        let Some(object) = self.wrap_closure(site)? else {
+            return Ok(None);
+        };
+        self.builder.ins().jump(merge, &[BlockArg::Value(object)]);
+
+        self.continue_in(merge);
+        self.builder.seal_block(merge);
+        Ok(Some(self.builder.block_params(merge)[0]))
     }
 
     /// Call a function value that is already a `Value`, with arguments that already are too:

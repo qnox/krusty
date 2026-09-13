@@ -1555,3 +1555,65 @@ fn an_operand_of_a_bounded_type_parameter_is_unboxed() {
         "3\n42\n42\n30\n"
     );
 }
+
+#[test]
+fn a_lambda_becomes_the_fun_interface_it_is_converted_to() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A SAM conversion changes the TYPE a function value wears, and a type is a table here: the
+    // object holds its captures like any lambda, but a caller reaches it through the interface's
+    // own member number. What it inherits from the interface matters too — a default method, and a
+    // `kotlin.Any` member the interface overrides, both answer as an ordinary implementor's would.
+    assert_eq!(
+        run("fun interface Mapper {\n\
+             \x20   fun map(n: Int): Int\n\
+             \x20   fun twice(n: Int): Int = map(map(n))\n\
+             }\n\
+             fun interface Named { override fun toString(): String }\n\
+             var seen = 0\n\
+             fun interface Action { fun run() }\n\
+             fun apply(m: Mapper, n: Int) = m.map(n)\n\
+             fun render(value: Any) = value.toString()\n\
+             fun main() {\n\
+             \x20   println(apply({ it + 1 }, 20))\n\
+             \x20   val by = 5\n\
+             \x20   println(apply({ it + by }, 20))\n\
+             \x20   val doubler = Mapper { it * 2 }\n\
+             \x20   println(doubler.twice(3))\n\
+             \x20   println(render(Named { \"named\" }))\n\
+             \x20   val action = Action { seen = 7 }\n\
+             \x20   action.run()\n\
+             \x20   println(seen)\n\
+             }\n"),
+        "21\n25\n12\nnamed\n7\n"
+    );
+}
+
+#[test]
+fn converting_a_null_function_value_to_a_fun_interface_yields_null() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin converts a nullable function value to a `fun interface` by yielding null when it is
+    // null — not a wrapper around nothing, which would answer `!= null` and then call `invoke` on
+    // the null inside.
+    assert_eq!(
+        run("var ran = 0\n\
+             fun interface Runner { fun go() }\n\
+             fun isNull(r: Runner?): Boolean {\n\
+             \x20   if (r == null) return true\n\
+             \x20   r.go()\n\
+             \x20   return false\n\
+             }\n\
+             fun maybe(empty: Boolean): (() -> Unit)? = if (empty) null else {{ ran = ran + 1 }}\n\
+             fun main() {\n\
+             \x20   println(isNull(maybe(true)))\n\
+             \x20   println(isNull(maybe(false)))\n\
+             \x20   println(ran)\n\
+             }\n"),
+        "true\nfalse\n1\n"
+    );
+}

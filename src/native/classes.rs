@@ -154,6 +154,11 @@ pub(super) struct ClassLayout {
 pub(super) struct ClassModel {
     pub layouts: Vec<ClassLayout>,
     pub order: Vec<ClassId>,
+    /// How long every non-interface class's table is: the shared base plus one entry per interface
+    /// member in the program. A type synthesized outside the IR's class list — the object a lambda
+    /// becomes when it is converted to a `fun interface` — needs a table of exactly this length, or
+    /// a call through the interface reads past its end.
+    pub vtable_length: usize,
     /// Every interface each class implements, transitively — what its descriptor carries so `is`
     /// can answer for a type that is not on the single-inheritance chain. Indexed by `ClassId`.
     pub interfaces: Vec<Vec<ClassId>>,
@@ -266,10 +271,11 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
         .map(|layout| layout.expect("every class was laid out"))
         .collect();
     let interfaces = interface_closure(ir);
-    place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
+    let vtable_length = place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
     Ok(ClassModel {
         layouts,
         order,
+        vtable_length,
         interfaces,
     })
 }
@@ -348,7 +354,7 @@ fn place_interface_slots(
     order: &[ClassId],
     layouts: &mut [ClassLayout],
     interfaces: &[Vec<ClassId>],
-) -> Result<(), Unsupported> {
+) -> Result<usize, Unsupported> {
     let is_interface = |id: ClassId| ir.classes[id as usize].is_interface;
     // Relative numbering, assigned interface by interface so an extending interface inherits the
     // slots of the one it extends.
@@ -367,7 +373,13 @@ fn place_interface_slots(
         let mut provisional: Vec<(&SlotKey, &u32)> = layout.slots.iter().collect();
         provisional.sort_by_key(|(_, slot)| **slot);
         for (key, slot) in provisional {
-            if matches!(key, SlotKey::Any(_)) {
+            // A member occupying one of `kotlin.Any`'s slots is already numbered, and numbered the
+            // same way for every object there is: a `fun interface` that overrides `toString`
+            // wants slot 2, which is where the runtime's own rendering looks. Numbering it again in
+            // the interface region would leave the slot every caller actually uses empty. Both
+            // spellings of such a member — `Any(2)` and the method's own key — are skipped here and
+            // carried through below.
+            if *slot < ANY_SLOTS {
                 continue;
             }
             let inherited = interfaces[id as usize]
@@ -419,21 +431,44 @@ fn place_interface_slots(
         .max(ANY_SLOTS);
     for id in 0..layouts.len() as ClassId {
         if is_interface(id) {
-            // An interface has no instances, so its table is never loaded; what its layout carries
-            // is the NUMBERING, which is what a call through it looks up.
-            let slots = relative[id as usize]
+            // An interface has no instances of its own, so this table is never the table of an
+            // object the program constructs. It is still worth building: it is what an implementor
+            // that supplies nothing of its own would have — every member this interface DEFINES a
+            // body for, and the abstract trap elsewhere — and the object a lambda becomes when it
+            // is converted to this interface starts from exactly that and fills in the one member
+            // the lambda is.
+            let own = relative[id as usize].clone();
+            let mut slots: HashMap<SlotKey, u32> = own
                 .iter()
                 .map(|(key, slot)| (key.clone(), base + slot))
-                .chain(
-                    layouts[id as usize]
-                        .slots
-                        .iter()
-                        .filter(|(key, _)| matches!(key, SlotKey::Any(_)))
-                        .map(|(key, slot)| (key.clone(), *slot)),
-                )
                 .collect();
+            let mut table = layouts[id as usize].vtable.clone();
+            for (key, slot) in &layouts[id as usize].slots {
+                if *slot < ANY_SLOTS {
+                    slots.insert(key.clone(), *slot);
+                }
+            }
+            let mut defaults = vec![Slot::Abstract; base as usize + members.len()];
+            defaults[..ANY_SLOTS as usize].clone_from_slice(&any_vtable().0);
+            // An `Any` member the interface itself overrides keeps `Any`'s slot, which is where
+            // every caller looks for it — including the runtime's own `toString`.
+            for slot in 0..ANY_SLOTS as usize {
+                if let Some(entry) = table.get(slot) {
+                    defaults[slot] = entry.clone();
+                }
+            }
+            for (member_slot, member) in members.iter().enumerate() {
+                let mine = own
+                    .get(&member.key)
+                    .is_some_and(|slot| *slot == member_slot as u32);
+                if !mine {
+                    continue;
+                }
+                defaults[base as usize + member_slot] = member.default.clone();
+            }
+            table = defaults;
             layouts[id as usize].slots = slots;
-            layouts[id as usize].vtable = Vec::new();
+            layouts[id as usize].vtable = table;
             continue;
         }
         let mut vtable = std::mem::take(&mut layouts[id as usize].vtable);
@@ -474,7 +509,7 @@ fn place_interface_slots(
         }
         layouts[id as usize].vtable = vtable;
     }
-    Ok(())
+    Ok(base as usize + members.len())
 }
 
 /// How a diagnostic names an interface member.

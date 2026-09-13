@@ -4364,6 +4364,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
   `::an_override_that_needs_a_bridge_is_declined`).
 
+- **A SAM conversion changes which table a function value wears.** A lambda converted to a `fun
+  interface` is still an object holding its captures; what differs is that a caller reaches it
+  through the interface's own member number rather than a single invoke slot, so its table is as
+  long as every class's and starts from the INTERFACE's own — default methods included, and any
+  `kotlin.Any` member the interface overrides kept in `Any`'s slot, where the runtime's own
+  rendering looks. Converting a NULLABLE function value yields null when it is null, rather than a
+  wrapper around nothing (`src/native/codegen/lower/functions.rs`, `src/native/classes.rs`,
+  `tests/native_codegen_e2e.rs::a_lambda_becomes_the_fun_interface_it_is_converted_to`,
+  `::converting_a_null_function_value_to_a_fun_interface_yields_null`).
+
 - **`is` finds an interface in the type, not on the chain.** Single inheritance gives one superclass
   chain, and an interface is not on it, so each type descriptor carries the interfaces it implements
   — transitively, so an interface's own bases and a superclass's interfaces answer too
