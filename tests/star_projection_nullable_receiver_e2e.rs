@@ -76,6 +76,23 @@ fn an_unbounded_formal_keeps_the_stars_nullability() {
     );
 }
 
+/// Use-site variance is not interchangeable. A covariant actual contributes its readable upper
+/// bound, while a contravariant actual can only be read as `Any?`; opening `in String` to `String`
+/// would invent a more precise result than Kotlin permits.
+#[test]
+fn nullable_formals_respect_use_site_projection_direction() {
+    assert_both_accept(
+        &[(
+            "Variance.kt",
+            "class Box<T>\n\
+             fun <T : Any> Iterable<T?>.boxed(): Box<T> = Box()\n\
+             fun fromIn(xs: MutableList<in String>): Box<Any> = xs.boxed()\n\
+             fun fromOut(xs: MutableList<out Number?>): Box<Number> = xs.boxed()\n",
+        )],
+        "nullable formal with contravariant and covariant actuals",
+    );
+}
+
 /// Control: a NON-nullable formal `Iterable<T>` with `T : Any` genuinely does not accept `List<*>`.
 /// kotlinc rejects it, and so must krusty — with exactly this one diagnostic, so the fix cannot make
 /// every star fit a non-null bound.
@@ -89,33 +106,43 @@ fn a_star_projection_still_fails_a_non_nullable_formal_receiver() {
         )],
         &[common::stdlib_jar()],
     );
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a non-null formal against a starred receiver"
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc names the rejected file");
+    const SOURCE_LINE: &str = "fun use(xs: List<*>): List<Any> = xs.only()";
+    const RETURN_CARET: &str = "                                  ^^^^^^^^^";
+    const RECEIVER_CARET: &str = "                                     ^^^^";
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:2:35: error: return type mismatch: expected 'List<Any>', actual \
+                 'List<Any?>'.\n{SOURCE_LINE}\n{RETURN_CARET}\n{reference_path}:2:38: error: \
+                 unresolved reference. None of the following candidates is applicable because of \
+                 a receiver type mismatch:\nfun <T : Any> Iterable<T>.only(): \
+                 List<T>\n{SOURCE_LINE}\n{RECEIVER_CARET}\n"
+            )
+            .as_str()
+        ),
     );
-    let krusty = result
-        .krusty_stderr
-        .replace(char::is_whitespace, " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     let path = result
         .krusty_stderr
         .split(':')
         .next()
-        .expect("krusty names the rejected file")
-        .to_string();
+        .expect("krusty names the rejected file");
     assert_eq!(
-        (result.krusty_code, krusty.as_str()),
+        (result.krusty_code, result.krusty_stderr.as_str()),
         (
             1,
             format!(
-                "{path}:2:38: error: none of the following candidates is applicable: \
-                 fun Iterable<T>.only(): List<T> krusty: 1 error(s)"
+                "{path}:2:38: error: none of the following candidates is applicable:\n\nfun \
+                 Iterable<T>.only(): List<T>\nkrusty: 1 error(s)\n"
             )
             .as_str()
         ),
-        "krusty must reject with exactly one receiver-mismatch diagnostic"
     );
 }
 
