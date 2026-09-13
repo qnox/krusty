@@ -115,10 +115,7 @@ run_coverage_test_binary() {
   local binary="$1" status_root="$2" threads="$3" seconds="$4" e2e_seconds="$5"
   local name="$(basename "$binary")"
   local result="$status_root/$name"
-  # The e2e suite and krusty-build's hello_world both drive the compiler repeatedly — hello_world
-  # SPAWNS the instrumented binary once per module per build, which is far slower than the
-  # uninstrumented ~8s. Both get the long deadline.
-  if [[ "$name" == e2e-* || "$name" == hello_world-* ]]; then
+  if [[ "$name" == e2e-* ]]; then
     seconds="$e2e_seconds"
   fi
   mkdir -p "$result"
