@@ -5403,6 +5403,29 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_codegen_e2e.rs`
   (`a_when_whose_arms_have_different_types_is_carried_as_a_reference`).
 
+- **A function value is an object, and calling one is a vtable dispatch.** Common lowering has
+  already made a lambda's body a top-level function whose LEADING parameters are the captured
+  values, so what remains is an object holding those captures, with its body in the vtable slot
+  after `kotlin.Any`'s three. The thunk in that slot takes and returns references and converts at
+  the boundary — Kotlin's own `FunctionN.invoke` convention, and for the same reason: a call site
+  knows the arity but not which lambda it holds, so every function value of an arity has to be
+  callable one way. A `Unit`-returning lambda answers with the runtime's `Unit`.
+  **A lambda that captures nothing is one object**, not one per evaluation — `{}` has the same
+  `hashCode` every time, which a program can see — and with no fields to hold it needs no
+  allocation at all, so it lives in static storage. One that does capture is a fresh object each
+  time, because each holds its own values, and those are traced through its descriptor like any
+  other field.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_lambda_is_an_object_that_can_be_passed_called_and_returned`,
+  `a_lambda_that_captures_nothing_is_one_object`,
+  `a_function_value_survives_collection_with_its_captures`).
+
+- **A captured `var` is one cell, shared.** Common lowering boxes a mutable local that a closure
+  captures into a holder and rewrites its reads and writes to go through it, so the closure and the
+  frame that made it see each other's writes rather than a copy. That holder is a one-field object
+  here, traced when the field holds a reference.
+  Tests: `tests/native_codegen_e2e.rs` (`a_lambda_captures_a_mutable_local_by_reference`).
+
 - **A companion object is initialized when its class is first constructed.** That is the moment the
   JVM would have run the class's `<clinit>`, and what a `<clinit>` does for a class with a companion
   is create the companion instance, running its initializers — so they run before the constructed

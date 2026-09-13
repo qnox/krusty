@@ -233,18 +233,26 @@ impl<'a> FileLowering<'a> {
             .replace(['/', '$'], ".")
     }
 
-    /// The reference-offset table, the vtable and the `KType` of one class.
-    fn define_descriptor(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let layout = self.model.layout(class).clone();
-        let base = self.class_base(class).to_string();
-
-        let references = if layout.reference_offsets.is_empty() {
+    /// Define a `KType` and the two tables it points at, byte for byte as `krusty_rt.h` declares
+    /// the struct. Every emitted type goes through here — a class, a lambda, a captured-variable
+    /// holder — so the descriptor the collector reads and the layout the code uses are written by
+    /// one piece of code.
+    pub(super) fn define_type_descriptor(
+        &mut self,
+        descriptor: DataId,
+        base: &str,
+        kotlin_name: &str,
+        instance_size: u32,
+        reference_offsets: &[u32],
+        vtable: &[FuncId],
+        superclass: DataId,
+    ) -> Result<(), Unsupported> {
+        let references = if reference_offsets.is_empty() {
             None
         } else {
             let id = self.declare_local_data(&format!("kt_refs_{base}"), false)?;
             let mut description = DataDescription::new();
-            let bytes: Vec<u8> = layout
-                .reference_offsets
+            let bytes: Vec<u8> = reference_offsets
                 .iter()
                 .flat_map(|offset| offset.to_le_bytes())
                 .collect();
@@ -256,12 +264,69 @@ impl<'a> FileLowering<'a> {
             Some(id)
         };
 
-        let vtable = self.declare_local_data(&format!("kt_vtable_{base}"), false)?;
+        let table = self.declare_local_data(&format!("kt_vtable_{base}"), false)?;
         let mut description = DataDescription::new();
-        description.define(vec![0; layout.vtable.len() * 8].into_boxed_slice());
+        description.define(vec![0; vtable.len() * 8].into_boxed_slice());
         description.set_align(8);
-        for (index, slot) in layout.vtable.iter().enumerate() {
-            let function = match slot {
+        for (index, function) in vtable.iter().enumerate() {
+            let func_ref = self
+                .module
+                .declare_func_in_data(*function, &mut description);
+            description.write_function_addr(index as u32 * 8, func_ref);
+        }
+        self.module
+            .define_data(table, &description)
+            .map_err(|error| format!("defining `kt_vtable_{base}` ({error})"))?;
+
+        let name_data = self.string_data(kotlin_name.as_bytes())?;
+        let mut bytes = vec![0u8; ktype::SIZE];
+        write_u32(&mut bytes, ktype::NAME_LENGTH, kotlin_name.len() as u32);
+        write_u32(&mut bytes, ktype::INSTANCE_SIZE, instance_size);
+        write_u32(
+            &mut bytes,
+            ktype::REFERENCE_COUNT,
+            reference_offsets.len() as u32,
+        );
+        write_u32(&mut bytes, ktype::VTABLE_LENGTH, vtable.len() as u32);
+        let mut description = DataDescription::new();
+        description.define(bytes.into_boxed_slice());
+        description.set_align(8);
+        for (offset, data) in [
+            (ktype::NAME, Some(name_data)),
+            (ktype::REFERENCE_OFFSETS, references),
+            (ktype::SUPER, Some(superclass)),
+            (ktype::VTABLE, Some(table)),
+        ] {
+            let Some(data) = data else {
+                continue;
+            };
+            let global = self.module.declare_data_in_data(data, &mut description);
+            description.write_data_addr(offset, global, 0);
+        }
+        self.module
+            .define_data(descriptor, &description)
+            .map_err(|error| format!("defining `kt_type_{base}` ({error})"))?;
+        Ok(())
+    }
+
+    /// `kotlin.Any`'s three vtable entries, the prefix of every table.
+    pub(super) fn any_vtable(&mut self) -> Result<Vec<FuncId>, Unsupported> {
+        let mut entries = Vec::with_capacity(3);
+        for symbol in ["kt_any_equals", "kt_any_hash_code", "kt_any_to_string"] {
+            let (params, ret) = any_member(symbol).expect("a kotlin.Any member");
+            entries.push(self.import(symbol, &params, ret)?);
+        }
+        Ok(entries)
+    }
+
+    /// The reference-offset table, the vtable and the `KType` of one class.
+    fn define_descriptor(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let layout = self.model.layout(class).clone();
+        let base = self.class_base(class).to_string();
+
+        let mut vtable = Vec::with_capacity(layout.vtable.len());
+        for slot in &layout.vtable {
+            vtable.push(match slot {
                 Slot::Runtime(symbol) => {
                     let (params, ret) = any_member(symbol).expect("a kotlin.Any member");
                     self.import(symbol, &params, ret)?
@@ -271,48 +336,24 @@ impl<'a> FileLowering<'a> {
                 }
                 Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
                 Slot::FieldGetter { .. } | Slot::FieldSetter { .. } => self.accessors[slot],
-            };
-            let func_ref = self.module.declare_func_in_data(function, &mut description);
-            description.write_function_addr(index as u32 * 8, func_ref);
+            });
         }
-        self.module
-            .define_data(vtable, &description)
-            .map_err(|error| format!("defining `kt_vtable_{base}` ({error})"))?;
-
         let name = self.kotlin_name(class);
-        let name_data = self.string_data(name.as_bytes())?;
-        let parent = match layout.superclass {
+        let descriptor = self.classes[class as usize].descriptor;
+        // A class's `super` is its superclass where it has one, because `is` walks that chain.
+        let superclass = match layout.superclass {
             Some(parent) => self.classes[parent as usize].descriptor,
             None => self.import_data("kt_type_any")?,
         };
-        let mut bytes = vec![0u8; ktype::SIZE];
-        write_u32(&mut bytes, ktype::NAME_LENGTH, name.len() as u32);
-        write_u32(&mut bytes, ktype::INSTANCE_SIZE, layout.instance_size);
-        write_u32(
-            &mut bytes,
-            ktype::REFERENCE_COUNT,
-            layout.reference_offsets.len() as u32,
-        );
-        write_u32(&mut bytes, ktype::VTABLE_LENGTH, layout.vtable.len() as u32);
-        let mut description = DataDescription::new();
-        description.define(bytes.into_boxed_slice());
-        description.set_align(8);
-        for (offset, data) in [
-            (ktype::NAME, Some(name_data)),
-            (ktype::REFERENCE_OFFSETS, references),
-            (ktype::SUPER, Some(parent)),
-            (ktype::VTABLE, Some(vtable)),
-        ] {
-            let Some(data) = data else {
-                continue;
-            };
-            let global = self.module.declare_data_in_data(data, &mut description);
-            description.write_data_addr(offset, global, 0);
-        }
-        self.module
-            .define_data(self.classes[class as usize].descriptor, &description)
-            .map_err(|error| format!("defining `kt_type_{base}` ({error})"))?;
-        Ok(())
+        self.define_type_descriptor(
+            descriptor,
+            &base,
+            &name,
+            layout.instance_size,
+            &layout.reference_offsets,
+            &vtable,
+            superclass,
+        )
     }
 
     /// A synthesized accessor: the field load or store an open property without a source
@@ -517,7 +558,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A fresh, zeroed instance of the class `descriptor` describes.
-    fn allocate(&mut self, descriptor: DataId, size: u32) -> Result<Value, Unsupported> {
+    pub(super) fn allocate(&mut self, descriptor: DataId, size: u32) -> Result<Value, Unsupported> {
         let descriptor = self.data_address(descriptor);
         let size = self.builder.ins().iconst(types::I32, i64::from(size));
         let object = self.runtime_call(
@@ -544,7 +585,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A call through the receiver's vtable: `receiver.type.vtable[slot](receiver, args…)`.
-    fn dispatch(
+    pub(super) fn dispatch(
         &mut self,
         receiver: Value,
         slot: u32,
@@ -580,7 +621,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The receiver of a member access, evaluated to a reference.
-    fn receiver(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
+    pub(super) fn receiver(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
         let value = self.reference(receiver)?;
         Ok((!self.terminated).then_some(value))
     }

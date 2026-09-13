@@ -1125,13 +1125,16 @@ before:**
    (70), reference arrays (50) and array intrinsics (85), callable references (49), data classes,
    interfaces, inner and local classes, value classes, `vararg`, `!!`, extension properties,
    floating-point rendering, `try`.
-6. **Growing the generator by that backlog, biggest first.** Top-level properties (499 declines)
-   and structural equality on references (171) landed, and both left the decline table entirely:
-   **551 pass**, still 0 unexpected failures. Realizing them exposed three native defects the gate
+6. **Growing the generator by that backlog, biggest first.** Top-level properties (499 declines),
+   structural equality on references (171), `x!!` (33) and function values — lambdas, invocation
+   and captured-variable holders, 310 between them — have landed, each leaving the decline table
+   entirely: **717 pass**, double where the lane started, with 0 unexpected failures throughout. Realizing them exposed three native defects the gate
    caught and that are now fixed with tests — a `when` whose arms disagree on a carrier was typed
    from its first arm, boxed small values were not cached so `===` on them was false, and a
-   companion object's initializers never ran — plus three more corpus cases traced to common
-   lowering's `++`/`--` shape by getting the same wrong answer from krusty's JVM backend.
+   companion object's initializers never ran; and a capture-free lambda was a fresh object per
+   evaluation where Kotlin makes it a singleton — plus five more corpus cases traced to common
+   lowering (its `++`/`--` shape, a context parameter's receiver, an extension call's evaluation
+   order) by getting the same wrong answer from krusty's JVM backend.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

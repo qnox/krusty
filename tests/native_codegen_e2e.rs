@@ -459,12 +459,14 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // Lambdas are not implemented. The contract is that the backend SAYS so: emitting a partial
+    // Interfaces are not implemented. The contract is that the backend SAYS so: emitting a partial
     // object that links and misbehaves would be far worse than refusing.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
-            "fun main() { val f = { x: Int -> x + 1 }; println(f(1)) }\n",
+            "interface Greeter { fun greet(): String }\n\
+             class English : Greeter { override fun greet(): String = \"hi\" }\n\
+             fun main() { println(English().greet()) }\n",
         )],
         target,
     );
@@ -847,5 +849,113 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
         String::from_utf8_lossy(&output.stderr).contains("null cannot be cast to a non-null type"),
         "stderr: {:?}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_lambda_is_an_object_that_can_be_passed_called_and_returned() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A function value crosses a call boundary, is stored in a local, and is invoked through a
+    // parameter that knows only its arity — so every function value of an arity has to be callable
+    // one way, which is what the boxing convention at the thunk is for.
+    assert_eq!(
+        run("fun applyTo(f: (Int) -> Int, n: Int): Int = f(n)\n\
+             fun twice(f: (Int) -> Int, n: Int): Int = f(f(n))\n\
+             fun adder(by: Int): (Int) -> Int = { x -> x + by }\n\
+             fun main() {\n\
+             \x20   val inc = { x: Int -> x + 1 }\n\
+             \x20   println(applyTo(inc, 5))\n\
+             \x20   println(twice(inc, 5))\n\
+             \x20   println(applyTo(adder(10), 5))\n\
+             \x20   println(applyTo({ x -> x * x }, 7))\n\
+             \x20   val join = { a: String, b: String -> a + b }\n\
+             \x20   println(join(\"na\", \"me\"))\n\
+             \x20   val nothing = { }\n\
+             \x20   nothing()\n\
+             \x20   println(\"done\")\n\
+             }\n"),
+        "6\n7\n15\n49\nname\ndone\n"
+    );
+}
+
+#[test]
+fn a_lambda_captures_a_mutable_local_by_reference() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A captured `var` is one cell shared by the closure and the frame that made it, not a copy:
+    // writes on either side are visible to the other. A captured `val` is just its value.
+    assert_eq!(
+        run("fun run(f: () -> Unit) { f() }\n\
+             fun main() {\n\
+             \x20   var count = 0\n\
+             \x20   val label = \"n\"\n\
+             \x20   val bump = { count = count + 1 }\n\
+             \x20   run(bump)\n\
+             \x20   run(bump)\n\
+             \x20   println(count)\n\
+             \x20   count = 10\n\
+             \x20   run(bump)\n\
+             \x20   println(count)\n\
+             \x20   var text = \"\"\n\
+             \x20   val append = { s: String -> text = text + label + s }\n\
+             \x20   append(\"a\")\n\
+             \x20   append(\"b\")\n\
+             \x20   println(text)\n\
+             }\n"),
+        "2\n11\nnanb\n"
+    );
+}
+
+#[test]
+fn a_function_value_survives_collection_with_its_captures() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The closure holds the only reference to a heap string, and the loop allocates far past the
+    // collection threshold while calling it — so the capture has to be traced through the function
+    // object's own descriptor, at the offset the generator laid it out at.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val kept = \"kept-${1 + 1}\"\n\
+             \x20   val describe = { n: Int -> \"$kept:$n\" }\n\
+             \x20   var last = \"\"\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 100000) {\n\
+             \x20       last = describe(i)\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             \x20   println(last)\n\
+             \x20   println(describe(7))\n\
+             }\n"),
+        "kept-2:99999\nkept-2:7\n"
+    );
+}
+
+#[test]
+fn a_lambda_that_captures_nothing_is_one_object() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `{}` written once is one object however often it is evaluated — Kotlin lets a program see
+    // that through `hashCode` and `===`. With nothing to capture there is nothing to allocate, so
+    // the instance is static storage. A lambda that DOES capture is a fresh object each time,
+    // because each holds its own captured values.
+    assert_eq!(
+        run("fun generate(): () -> Unit = {}\n\
+             fun adder(by: Int): (Int) -> Int = { x -> x + by }\n\
+             fun main() {\n\
+             \x20   println(generate() === generate())\n\
+             \x20   println(generate().hashCode() == generate().hashCode())\n\
+             \x20   println(adder(1) === adder(1))\n\
+             \x20   println(adder(1)(10))\n\
+             }\n"),
+        "true\ntrue\nfalse\n11\n"
     );
 }

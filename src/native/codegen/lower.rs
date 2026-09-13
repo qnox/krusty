@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod functions;
 mod objects;
 mod statics;
 
@@ -167,10 +168,13 @@ pub fn lower_file(
         classes: Vec::new(),
         accessors: HashMap::new(),
         statics: Vec::new(),
+        lambdas: HashMap::new(),
+        holders: HashMap::new(),
     };
     lowering.declare_functions()?;
     lowering.declare_classes()?;
     lowering.declare_statics()?;
+    lowering.declare_lambdas()?;
     lowering.define_classes()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
@@ -222,6 +226,10 @@ struct FileLowering<'a> {
     accessors: HashMap<Slot, FuncId>,
     /// The global slot of each top-level property, parallel to `ir.statics`.
     statics: Vec<DataId>,
+    /// The emitted pieces of each lambda, by the expression that creates it.
+    lambdas: HashMap<u32, functions::LambdaItems>,
+    /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
+    holders: HashMap<String, DataId>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -560,6 +568,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             return Ok(());
                         }
                         self.builder.ins().return_(&[]);
+                    }
+                    (Some(value), Carrier::Ref) => {
+                        // A function whose result is a reference can still be handed `Unit` — a
+                        // `Unit`-returning lambda's body returns the `Unit` OBJECT, because
+                        // `FunctionN.invoke` answers with a reference whatever the lambda does.
+                        // `reference` materializes the runtime's singleton for exactly that.
+                        let value = self.reference(value)?;
+                        if self.terminated {
+                            return Ok(());
+                        }
+                        self.builder.ins().return_(&[value]);
                     }
                     (Some(value), _) => {
                         let value = self.expression(value)?;
@@ -926,6 +945,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.field_read(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::Lambda { .. } => self.lambda(id),
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(func, &args, &params, ret),
+            IrExpr::RefNew { elem, init } => self.ref_new(elem, init),
+            IrExpr::RefGet { holder, elem } => self.ref_get(holder, elem),
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value,
+            } => self.ref_set(holder, elem, value),
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1092,6 +1125,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.file.ir.classes[*class as usize].fields[*index as usize].ty
             }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            IrExpr::InvokeFunction { ret, .. } => *ret,
+            IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
+            // A function value and a captured-variable holder are both objects.
+            IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
                 self.file.ir.checked_properties.get(target)?.ty
             }
