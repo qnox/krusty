@@ -21010,8 +21010,7 @@ impl<'a> Lower<'a> {
             }
             crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
                 lambda_parameter,
-                state_parameter,
-                state_default,
+                state,
                 enter,
                 cleanup,
             } => {
@@ -21039,22 +21038,37 @@ impl<'a> Lower<'a> {
                     ty_to_ir(receiver_ty),
                     Some(receiver_value),
                 );
-                let state_ty = *callable.params.get(*state_parameter)?;
-                let state_value = if let Some(expression) =
-                    parameters.get(*state_parameter).copied().flatten()
-                {
-                    self.lower_arg(expression, &ty_to_ir(state_ty))?
-                } else {
-                    match state_default {
-                        crate::libraries::DefaultValue::Null => self.emit_const(IrConst::Null),
-                        _ => return self.bail("selected inline body plan has unsupported default"),
+                // The state argument is optional: `withLock` threads its `owner` into
+                // `lock`/`unlock`, `withPermit` threads nothing into `acquire`/`release`.
+                let state_slot = match state {
+                    Some(state) => {
+                        let state_ty = *callable.params.get(state.parameter)?;
+                        let state_value = if let Some(expression) =
+                            parameters.get(state.parameter).copied().flatten()
+                        {
+                            self.lower_arg(expression, &ty_to_ir(state_ty))?
+                        } else {
+                            match state.default {
+                                crate::libraries::DefaultValue::Null => {
+                                    self.emit_const(IrConst::Null)
+                                }
+                                _ => {
+                                    return self
+                                        .bail("selected inline body plan has unsupported default")
+                                }
+                            }
+                        };
+                        let slot = self.fresh_value();
+                        let variable =
+                            self.emit_variable(slot, ty_to_ir(state_ty), Some(state_value));
+                        Some((slot, variable))
                     }
+                    None => None,
                 };
-                let state_slot = self.fresh_value();
-                let state_var =
-                    self.emit_variable(state_slot, ty_to_ir(state_ty), Some(state_value));
+                let state_var = state_slot.map(|(_, variable)| variable);
+                let state_slot = state_slot.map(|(slot, _)| slot);
                 let enter_receiver = self.emit_get_value(receiver_slot);
-                let enter_state = self.emit_get_value(state_slot);
+                let enter_state = state_slot.map(|slot| self.emit_get_value(slot));
                 let enter_owner = enter.owner?;
                 let enter_call = self.emit_virtual_call(
                     enter_owner,
@@ -21062,7 +21076,7 @@ impl<'a> Lower<'a> {
                     enter.descriptor.clone(),
                     enter.is_interface(),
                     enter_receiver,
-                    vec![enter_state],
+                    enter_state.into_iter().collect(),
                 );
                 self.ir
                     .suspend_calls
@@ -21101,7 +21115,7 @@ impl<'a> Lower<'a> {
                 let body_loop =
                     self.emit_while(condition, loop_body, None, false, Some(break_label));
                 let cleanup_receiver = self.emit_get_value(receiver_slot);
-                let cleanup_state = self.emit_get_value(state_slot);
+                let cleanup_state = state_slot.map(|slot| self.emit_get_value(slot));
                 let cleanup_owner = cleanup.owner?;
                 let cleanup_call = self.emit_virtual_call(
                     cleanup_owner,
@@ -21109,16 +21123,16 @@ impl<'a> Lower<'a> {
                     cleanup.descriptor.clone(),
                     cleanup.is_interface(),
                     cleanup_receiver,
-                    vec![cleanup_state],
+                    cleanup_state.into_iter().collect(),
                 );
                 let try_body = self.emit_block(vec![body_loop], None);
                 let finally = self.emit_block(vec![cleanup_call], None);
                 let guarded = self.emit_try(try_body, Vec::new(), Some(finally), Ty::Unit);
                 let result = self.emit_get_value(result_slot);
-                Some(self.emit_block(
-                    vec![receiver_var, state_var, enter_call, result_var, guarded],
-                    Some(result),
-                ))
+                let mut statements = vec![receiver_var];
+                statements.extend(state_var);
+                statements.extend([enter_call, result_var, guarded]);
+                Some(self.emit_block(statements, Some(result)))
             }
             // The production checked-FIR path consumes this provider plan. The legacy lowerer has
             // its pre-existing suspend-only collection expansion earlier in expression lowering.

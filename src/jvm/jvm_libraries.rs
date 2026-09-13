@@ -5650,34 +5650,53 @@ impl JvmLibraries {
         if cleanup.1 != repeated.1 {
             return None;
         }
-        let receiver_slot = instructions[..enter.0]
+        // The enter call's operands are loaded receiver-first and end with the continuation, so
+        // walking backward sees `[continuation, state?, receiver]`. How many there are is a fact of
+        // the ENTER member's own descriptor, not a fixed count: `Mutex.lock(owner, continuation)`
+        // takes a state argument, `Semaphore.acquire(continuation)` takes none. Reading a fixed
+        // position instead made the whole shape depend on that one library having an extra
+        // parameter. Intervening non-load instructions (kotlinc emits `InlineMarker.mark` between
+        // the operands and the call) are skipped, so this counts loads rather than scanning back.
+        let enter_argument_count =
+            crate::jvm::ir_emit::parse_physical_method_desc(enter.1 .2)?.0.len();
+        let enter_loads = instructions[..enter.0]
             .iter()
             .rev()
             .filter_map(crate::jvm::inline::loaded_local)
-            .nth(2)?;
+            .take(enter_argument_count + 1)
+            .collect::<Vec<_>>();
+        if enter_loads.len() != enter_argument_count + 1 {
+            return None;
+        }
+        let (&receiver_slot, leading) = enter_loads.split_last()?;
         if parameter_at(receiver_slot)? != 0 {
             return None;
         }
-        let state_slot = instructions[..enter.0]
-            .iter()
-            .rev()
-            .filter_map(crate::jvm::inline::loaded_local)
-            .nth(1)?;
-        let state_parameter = parameter_at(state_slot)?;
-        match self.inline_default_is_null(callable, parameter_slots, state_parameter) {
-            None => {
-                *body_unavailable = true;
-                return None;
+        // `leading` still reads backward: the continuation, then any state argument before it.
+        let state = match leading {
+            [_continuation] => None,
+            [_continuation, state_slot] => {
+                let parameter = parameter_at(*state_slot)?;
+                match self.inline_default_is_null(callable, parameter_slots, parameter) {
+                    None => {
+                        *body_unavailable = true;
+                        return None;
+                    }
+                    Some(false) => return None,
+                    Some(true) => {}
+                }
+                Some(crate::libraries::InlineBodyState {
+                    parameter,
+                    default: crate::libraries::DefaultValue::Null,
+                })
             }
-            Some(false) => return None,
-            Some(true) => {}
-        }
+            _ => return None,
+        };
         let enter = inline_plan_member(enter.1, true)?;
         let cleanup = inline_plan_member(cleanup.1, false)?;
         Some(InlineBodyPlan::SuspendBeforeLambdaFinally {
             lambda_parameter,
-            state_parameter,
-            state_default: crate::libraries::DefaultValue::Null,
+            state,
             enter: Box::new(enter),
             cleanup: Box::new(cleanup),
         })
@@ -7737,13 +7756,50 @@ mod tests {
                 function.callable.inline_body_plan.as_deref(),
                 Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
                     lambda_parameter: 2,
-                    state_parameter: 1,
+                    state: Some(state),
                     enter,
                     cleanup,
-                    ..
-                }) if enter.suspend() && !cleanup.suspend()
+                }) if state.parameter == 1 && enter.suspend() && !cleanup.suspend()
             )
         }));
+    }
+
+    /// The same shape with NO state argument. `Semaphore.withPermit` calls `acquire(continuation)`
+    /// and `release()`, where `Mutex.withLock` calls `lock(owner, continuation)` and
+    /// `unlock(owner)`. Reading the enter member's own descriptor is what makes both decode; a
+    /// fixed operand position recognized only the one that happens to carry an extra parameter.
+    #[test]
+    fn suspend_finally_inline_body_decodes_without_a_state_argument() {
+        let (Some(stdlib), Some(coroutines)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::coroutines_jar(),
+        ) else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, coroutines]),
+        ));
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlinx/coroutines/sync")),
+            "withPermit",
+        );
+        assert!(
+            symbols.callables.functions().iter().any(|function| {
+                matches!(
+                    function.callable.inline_body_plan.as_deref(),
+                    Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
+                        lambda_parameter: 1,
+                        state: None,
+                        enter,
+                        cleanup,
+                    }) if enter.suspend()
+                        && !cleanup.suspend()
+                        && enter.params.is_empty()
+                        && cleanup.params.is_empty()
+                )
+            }),
+            "withPermit must decode the stateless enter/cleanup shape"
+        );
     }
 
     #[test]

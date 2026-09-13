@@ -101,16 +101,22 @@ pub(super) fn fir_inline_body_plan(
         },
         crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
             lambda_parameter,
-            state_parameter,
-            state_default,
+            state,
             enter,
             cleanup,
         } => crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
             lambda_parameter: map_parameter(*lambda_parameter)?,
-            state_parameter: map_parameter(*state_parameter)?,
-            state_default: match state_default {
-                crate::libraries::DefaultValue::Null => crate::fir::FirInlineDefaultValue::Null,
-                _ => return None,
+            state: match state {
+                None => None,
+                Some(state) => Some(crate::fir::FirInlineBodyState {
+                    parameter: map_parameter(state.parameter)?,
+                    default: match state.default {
+                        crate::libraries::DefaultValue::Null => {
+                            crate::fir::FirInlineDefaultValue::Null
+                        }
+                        _ => return None,
+                    },
+                }),
             },
             enter: member_call(enter)?,
             cleanup: member_call(cleanup)?,

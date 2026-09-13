@@ -1998,3 +1998,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   block to the trailing expression that actually produces the branch's value; a block with no
   trailing expression still produces `Unit` and is still rejected against an incompatible sibling.
   `tests/conditional_block_branch_rebind_e2e.rs::a_multi_statement_branch_rebinds_against_its_sibling`.
+- **An enter/lambda/finally inline body needs no state argument (fix).** krusty expands a RECOGNIZED
+  classpath inline body at IR level, which is what lets a suspension inside the lambda join the
+  CALLER's state machine. The recogniser for the enter/lambda/finally shape read the enter call's
+  receiver from a fixed operand position, which silently assumed exactly one state argument:
+  `Mutex.withLock` passes its `owner` to `lock`/`unlock` and decoded, while `Semaphore.withPermit`
+  passes nothing to `acquire`/`release` and did not.
+  How many operands the enter call takes is a fact of that member's own descriptor, so read it there.
+  Intervening non-load instructions are skipped — kotlinc emits `InlineMarker.mark` between the
+  operands and the call in the `$$forInline` body, which is why a backward scan that stopped at the
+  first non-load found nothing at all.
+  Without a plan the call keeps its lambda as a real function object, a suspend call inside it never
+  receives a continuation, and emission fails with "call arity mismatch" — which bails the whole
+  FILE, so one `withPermit` cost a module every class it would have emitted.
+  `tests/suspend_inline_stateless_finally_e2e.rs::with_permit_hosts_a_suspension_in_its_lambda`.

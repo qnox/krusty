@@ -51,11 +51,19 @@ pub enum FirInlineBodyPlan {
     /// target-specific owners, descriptors, and invocation opcodes remain provider/backend data.
     SuspendBeforeLambdaFinally {
         lambda_parameter: u32,
-        state_parameter: u32,
-        state_default: FirInlineDefaultValue,
+        /// The optional argument both members take besides the receiver, with the value the
+        /// declaration's own default supplies when the caller omits it. `withLock` threads its
+        /// `owner`; `withPermit` threads nothing.
+        state: Option<FirInlineBodyState>,
         enter: FirInlineMemberCall,
         cleanup: FirInlineMemberCall,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineBodyState {
+    pub parameter: u32,
+    pub default: FirInlineDefaultValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
