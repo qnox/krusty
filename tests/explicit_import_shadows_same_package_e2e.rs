@@ -12,7 +12,7 @@ use super::common;
 /// must be the ones that bind.
 #[test]
 fn explicit_import_wins_over_same_package_class() {
-    let Some(diags) = common::module_front_end_diagnostics(&[
+    let sources = [
         (
             "Payload.kt",
             "package app.dto\ndata class Payload(val alpha: String, val beta: String)\n",
@@ -27,12 +27,17 @@ fn explicit_import_wins_over_same_package_class() {
              import app.dto.Payload\n\
              fun make(): Payload = Payload(alpha = \"a\", beta = \"b\")\n",
         ),
-    ]) else {
-        return;
-    };
-    assert!(
-        diags.is_empty(),
-        "an explicit import must outrank the same-package declaration, got: {diags:?}"
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc rejected the explicit-import precedence fixture"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty must accept the exact source set kotlinc accepts"
     );
 }
 
@@ -94,33 +99,24 @@ fn same_package_class_outranks_a_star_import() {
 /// emits classes rather than failing on the sibling's parameter names.
 #[test]
 fn explicit_import_shadowing_compiles() {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let classes = common::compile_in_process_files(
+    common::expect_box_ok_files_with_stdlib(
         &[
             (
-                "Payload",
+                "Payload.kt",
                 "package app.dto\ndata class Payload(val alpha: String, val beta: String)\n",
             ),
             (
-                "Local",
+                "Local.kt",
                 "package app.ctl\ndata class Payload(val gamma: String)\n",
             ),
             (
-                "Use",
+                "Use.kt",
                 "package app.ctl\n\
                  import app.dto.Payload\n\
-                 fun make(): Payload = Payload(alpha = \"a\", beta = \"b\")\n",
+                 fun make(): Payload = Payload(alpha = \"a\", beta = \"b\")\n\
+                 fun box(): String = if (make().alpha == \"a\") \"OK\" else \"wrong class\"\n",
             ),
         ],
-        std::slice::from_ref(&stdlib),
-        Some(&jdk),
-    );
-    assert!(
-        classes.is_some(),
-        "the imported class must supply the constructor, so the module compiles"
+        "ExplicitImportShadowsSamePackage",
     );
 }
