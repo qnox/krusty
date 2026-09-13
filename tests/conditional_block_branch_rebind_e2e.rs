@@ -125,7 +125,7 @@ fn a_when_arm_written_as_a_block_rebinds_too() {
 }
 
 /// Control: a branch whose block produces NO value is still `Unit`, so a genuinely incompatible
-/// pair is still rejected. Both compilers reject; kotlinc pins the verdict.
+/// pair is still rejected. Both compilers' complete diagnostics are pinned independently.
 #[test]
 fn an_incompatible_block_branch_is_still_rejected() {
     let java = JAVA
@@ -142,17 +142,47 @@ fn an_incompatible_block_branch_is_still_rejected() {
             "Use.kt",
             &format!(
                 "{PRELUDE}fun use(m: Mono<String>): Pub<Auth> =\n\
-                 \x20 m.flatMap {{ s -> if (s.isEmpty()) {{ \"text\" }} else {{ Mono.empty() }} }}\n"
+                 \x20 m.flatMap {{ s -> if (s.isEmpty()) {{}} else {{ Mono.empty() }} }}\n"
             ),
         )],
         &classpath,
     );
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject an incompatible block branch"
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc names the rejected file");
+    const SOURCE_LINE: &str = "  m.flatMap { s -> if (s.isEmpty()) {} else { Mono.empty() } }";
+    const BRANCH_CARET: &str = "                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^";
+    const CALL_CARET: &str = "                                                   ^^^^^";
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:5:20: error: return type mismatch: expected 'Mono<out Auth!>!', \
+                 actual 'Any!'.\n{SOURCE_LINE}\n{BRANCH_CARET}\n{reference_path}:5:52: error: \
+                 cannot infer type for type parameter 'T'. Specify it explicitly.\n{SOURCE_LINE}\n\
+                 {CALL_CARET}\n"
+            )
+            .as_str()
+        ),
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty must reject an incompatible block branch"
+    let path = result
+        .krusty_stderr
+        .split(':')
+        .next()
+        .expect("krusty names the rejected file");
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{path}:5:13: error: argument type mismatch: actual type is '(String!) -> Any!', \
+                 but 'Function<in String, out Mono<out Auth>!>!' was expected.\nkrusty: \
+                 1 error(s)\n"
+            )
+            .as_str()
+        ),
     );
 }
