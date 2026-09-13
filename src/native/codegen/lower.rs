@@ -999,6 +999,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 elem,
                 value,
             } => self.ref_set(holder, elem, value),
+            IrExpr::EnclosingInstance {
+                receiver, inner, ..
+            } => self.enclosing_instance(receiver, inner),
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,

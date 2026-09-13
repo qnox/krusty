@@ -630,6 +630,21 @@ impl<'a> FileLowering<'a> {
             for &statement in &declaration.super_arg_prelude {
                 body.statement(statement)?;
             }
+            // An `inner` class stores its outer reference BEFORE the superclass constructor runs.
+            // The JVM needs that order to satisfy its verifier; here it is kept because it is
+            // Kotlin's own order and a superclass constructor can observe it — an `init` in the
+            // base calling an overridden method that reads the outer instance sees it set.
+            for &(parameter, field) in &declaration.pre_super_param_fields {
+                let Some(&(variable, _)) = body.values.get(&(parameter + 1)) else {
+                    return Err(format!(
+                        "a pre-super store from an unknown parameter (`{}`)",
+                        declaration.fq_name()
+                    ));
+                };
+                let value = body.builder.use_var(variable);
+                let offset = body.file.model.layout(class).fields[field as usize].offset as i32;
+                body.builder.ins().store(trusted(), value, this, offset);
+            }
             if let Some((constructor, parent_params)) = &parent {
                 let mut arguments = vec![this];
                 for (&argument, ty) in declaration.super_args.iter().zip(parent_params) {
@@ -936,6 +951,43 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The property a checked operation names, as (class, property index).
+    /// Follow one enclosing-instance edge: `this@Outer` from inside an `inner` class.
+    ///
+    /// An `inner` class carries its outer instance in a field, written before the superclass
+    /// constructor runs — the same store the JVM spells `this$0`. Which field it is, the IR says:
+    /// the pre-super store from the constructor's leading prefix parameter is that field, and the
+    /// node is one EDGE, so a nested `inner` class follows one node per level rather than needing a
+    /// path here.
+    pub(super) fn enclosing_instance(
+        &mut self,
+        receiver: u32,
+        inner: TypeName,
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.class_of(inner, "the enclosing instance of")?;
+        let declaration = &self.file.ir.classes[class as usize];
+        let Some(&(_, field)) = declaration
+            .pre_super_param_fields
+            .iter()
+            .find(|(parameter, _)| *parameter == 0)
+        else {
+            return Err(format!(
+                "an enclosing instance with no stored field (`{}`)",
+                declaration.fq_name()
+            ));
+        };
+        let offset = self.file.model.layout(class).fields[field as usize].offset as i32;
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        self.null_check(object)?;
+        Ok(Some(self.builder.ins().load(
+            types::I64,
+            trusted(),
+            object,
+            offset,
+        )))
+    }
+
     pub(super) fn checked_property(
         &self,
         target: &crate::fir::PropertyId,

@@ -459,13 +459,15 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // An `inner` class is not implemented. The contract is that the backend SAYS so: emitting a
-    // partial object that links and misbehaves would be far worse than refusing.
+    // A secondary constructor is not implemented. The contract is that the backend SAYS so:
+    // emitting a partial object that links and misbehaves would be far worse than refusing.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
-            "class Outer(val n: Int) { inner class Inner { fun value() = n + 1 } }\n\
-             fun main() { println(Outer(1).Inner().value()) }\n",
+            "class Point(val x: Int, val y: Int) {\n\
+             \x20   constructor(both: Int) : this(both, both)\n\
+             }\n\
+             fun main() { println(Point(3).y) }\n",
         )],
         target,
     );
@@ -1615,5 +1617,44 @@ fn converting_a_null_function_value_to_a_fun_interface_yields_null() {
              \x20   println(ran)\n\
              }\n"),
         "true\nfalse\n1\n"
+    );
+}
+
+#[test]
+fn an_inner_class_reaches_its_enclosing_instance() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An `inner` class carries its outer instance in a field, stored before the superclass
+    // constructor runs — Kotlin's own order, which a base-class `init` can observe. Reading
+    // `this@Outer`, or an outer member without qualifying it, is a load of that field; writing one
+    // reaches the same object the outer still holds, which is what the counter shows.
+    assert_eq!(
+        run("open class Base(val tag: String)\n\
+             class Outer(var n: Int) {\n\
+             \x20   inner class Inner : Base(\"inner\") {\n\
+             \x20       fun sum(): Int = n + 1\n\
+             \x20       fun qualified(): Int = this@Outer.n * 2\n\
+             \x20       fun bump() { n = n + 5 }\n\
+             \x20       fun label(): String = tag\n\
+             \x20   }\n\
+             \x20   inner class Deep {\n\
+             \x20       inner class Deeper {\n\
+             \x20           fun reach(): Int = this@Outer.n\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val outer = Outer(20)\n\
+             \x20   val inner = outer.Inner()\n\
+             \x20   println(inner.sum())\n\
+             \x20   println(inner.qualified())\n\
+             \x20   println(inner.label())\n\
+             \x20   inner.bump()\n\
+             \x20   println(outer.n)\n\
+             \x20   println(outer.Deep().Deeper().reach())\n\
+             }\n"),
+        "21\n40\ninner\n25\n25\n"
     );
 }

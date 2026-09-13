@@ -1224,6 +1224,12 @@ before:**
    `fun interface` that overrides `toString` keeps `kotlin.Any`'s slot 2, which is where the
    runtime's rendering looks — and on one piece of Kotlin semantics: converting a nullable function
    value yields null, not a wrapper around nothing.
+   `inner` classes took the lane to **1574 pass** and were two declines standing in front of one
+   small realization: the outer instance is a field, written before the superclass constructor
+   because that is Kotlin's order, and `this@Outer` is a load of it. The corpus then produced two
+   cases where an `inner` class also EXTENDS its outer, and krusty's JVM backend gets both wrong in
+   its own way — one answers `this@Outer` with `this`, the other emits bytecode the verifier
+   rejects — so both are listed with that evidence rather than chased in the generator.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

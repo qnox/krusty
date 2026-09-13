@@ -4364,6 +4364,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
   `::an_override_that_needs_a_bridge_is_declined`).
 
+- **An `inner` class carries its outer instance in a field, written first.** `this@Outer` and an
+  unqualified read of an outer member are both loads of that field, and one enclosing-instance edge
+  is one load, so a doubly nested `inner` class follows one per level. The store runs BEFORE the
+  superclass constructor — Kotlin's own order, which a base-class `init` calling an overridden
+  method can observe. The JVM needs that order for its verifier; here it is kept because it is the
+  language's (`src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::an_inner_class_reaches_its_enclosing_instance`).
+
 - **A SAM conversion changes which table a function value wears.** A lambda converted to a `fun
   interface` is still an object holding its captures; what differs is that a caller reaches it
   through the interface's own member number rather than a single invoke slot, so its table is as

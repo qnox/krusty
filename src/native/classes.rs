@@ -154,11 +154,6 @@ pub(super) struct ClassLayout {
 pub(super) struct ClassModel {
     pub layouts: Vec<ClassLayout>,
     pub order: Vec<ClassId>,
-    /// How long every non-interface class's table is: the shared base plus one entry per interface
-    /// member in the program. A type synthesized outside the IR's class list — the object a lambda
-    /// becomes when it is converted to a `fun interface` — needs a table of exactly this length, or
-    /// a call through the interface reads past its end.
-    pub vtable_length: usize,
     /// Every interface each class implements, transitively — what its descriptor carries so `is`
     /// can answer for a type that is not on the single-inheritance chain. Indexed by `ClassId`.
     pub interfaces: Vec<Vec<ClassId>>,
@@ -214,9 +209,7 @@ fn any_slot_signature(slot: u32) -> (&'static [CKind], CKind) {
 /// Reject, by name, a class this step does not lower.
 pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
-    let construct = if class.is_inner_class || class.constructor_prefix_count > 0 {
-        "an inner class"
-    } else if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
+    let construct = if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
         "an enum class"
     } else if !class.secondary_ctors.is_empty() {
         "a secondary constructor"
@@ -235,8 +228,6 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
         "a local or anonymous class"
     } else if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
-    } else if !class.pre_super_param_fields.is_empty() {
-        "a field stored before the superclass constructor"
     } else if class.ctor_args.iter().any(|argument| argument.is_vararg) {
         "a vararg constructor parameter"
     } else {
@@ -271,11 +262,10 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
         .map(|layout| layout.expect("every class was laid out"))
         .collect();
     let interfaces = interface_closure(ir);
-    let vtable_length = place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
+    place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
     Ok(ClassModel {
         layouts,
         order,
-        vtable_length,
         interfaces,
     })
 }
@@ -354,7 +344,7 @@ fn place_interface_slots(
     order: &[ClassId],
     layouts: &mut [ClassLayout],
     interfaces: &[Vec<ClassId>],
-) -> Result<usize, Unsupported> {
+) -> Result<(), Unsupported> {
     let is_interface = |id: ClassId| ir.classes[id as usize].is_interface;
     // Relative numbering, assigned interface by interface so an extending interface inherits the
     // slots of the one it extends.
@@ -452,9 +442,9 @@ fn place_interface_slots(
             defaults[..ANY_SLOTS as usize].clone_from_slice(&any_vtable().0);
             // An `Any` member the interface itself overrides keeps `Any`'s slot, which is where
             // every caller looks for it — including the runtime's own `toString`.
-            for slot in 0..ANY_SLOTS as usize {
-                if let Some(entry) = table.get(slot) {
-                    defaults[slot] = entry.clone();
+            for (slot, entry) in defaults.iter_mut().take(ANY_SLOTS as usize).enumerate() {
+                if let Some(own) = table.get(slot) {
+                    *entry = own.clone();
                 }
             }
             for (member_slot, member) in members.iter().enumerate() {
@@ -509,7 +499,7 @@ fn place_interface_slots(
         }
         layouts[id as usize].vtable = vtable;
     }
-    Ok(base as usize + members.len())
+    Ok(())
 }
 
 /// How a diagnostic names an interface member.
@@ -1590,10 +1580,12 @@ mod tests {
     fn out_of_scope_classes_are_declined_by_name() {
         let mut ir = IrFile::default();
         let id = class(&mut ir, "D", "kotlin/Any", 0);
-        // A `data class` and an interface are deliberately absent from this list: a data class's
-        // synthesized members are ordinary functions in common IR, and an interface's members have
-        // slots of their own, so both lower like the classes they are.
-        ir.classes[id as usize].is_inner_class = true;
-        assert!(build(&ir).expect_err("declined").contains("an inner class"));
+        // A data class, an interface, a value class and an `inner` class are deliberately absent
+        // from this list: each lowers like the class it is now. What remains are constructs with
+        // no realization at all yet.
+        ir.classes[id as usize].is_annotation = true;
+        assert!(build(&ir)
+            .expect_err("declined")
+            .contains("an annotation class"));
     }
 }
