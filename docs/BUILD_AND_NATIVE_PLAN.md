@@ -625,6 +625,70 @@ The emitter is a printer over checked common IR, and the lowering, tests and tar
 target-agnostic, so a Go emitter is a sibling of the C one rather than a rewrite. That is the
 experiment to run, and this section stays open until it has been.
 
+#### Settled: GraalVM is the oracle, not the pipeline
+
+krusty already emits JVM bytecode byte-identical to kotlinc's, so `krusty → bytecode →
+native-image` is a pipeline that exists today and needs no new backend at all. It was measured
+rather than reasoned about. Same `fun main() { println(…) }`, this host (4 cores, 15 GB):
+
+| pipeline | build, cold | build after a one-character edit | peak RSS | binary | startup |
+|---|---|---|---|---|---|
+| krusty → C → clang + lld | 0.2 s | 0.2 s | negligible | 10 KB | 0.9 ms |
+| krusty → Go → `go build` | 0.2 s (warm target) | 0.2 s | ~0.3 GB | 2.2 MB | ~1 ms |
+| krusty → bytecode → `native-image` | 40.3 s | **40.1 s** | **1.4 GB** | 13.6 MB | 4.4 ms |
+| krusty → bytecode → JVM | 1.2 s | 1.2 s | — | — | 39 ms |
+
+**The decisive number is the second column, not the first.** `native-image` has no incrementality:
+its closed-world analysis re-runs in full for a one-character change, so the edit-compile loop costs
+39 seconds every time. That is structural, not a tuning problem — the analysis is what produces the
+binary. And these are floor numbers for a single class with no reflection and no framework; real
+applications are minutes and many gigabytes. Against a stated goal of competing with Go on build
+time and resource use, this is ~200× on time and ~5× on memory, in the wrong direction.
+
+So native-image is not the build path. It is, however, the **native correctness oracle**, and a good
+one — which the native track otherwise lacks entirely, since Kotlin/Native's output cannot be
+compared byte-wise against anything. The same source compiled by krusty and run under a
+native-image binary has exact JVM semantics: the JVM memory model, a real collector, and the whole
+stdlib. Comparing our fast native output against it differentially mirrors what kotlinc already
+does for the JVM backend, and it costs 40 seconds in CI rather than 40 seconds per keystroke.
+
+#### The collector is where emitting C stops being viable
+
+A precise collector has to enumerate the live references on the stack at a safepoint, which needs
+stack maps, which needs control over frame layout. Emitting C gives that control to the C compiler,
+so the stack maps cannot be produced. That leaves exactly two options, and both are bad:
+
+* **Conservative scanning** (Boehm-style): read every stack word and treat anything that looks like
+  a heap pointer as one. It works, and it forecloses moving collection — so no compaction, no
+  bump-allocating nursery, no generational copying — and retains garbage whenever an integer
+  happens to look like an address.
+* **A shadow stack**: emit an explicit push and pop of every live reference into a side stack.
+  Precise, at the cost of a store and a load per reference per call, everywhere.
+
+This matters because "precise versus conservative GC" is listed below as one of the three decisions
+that shape the low native IR. Emitting C does not leave it open — it answers it *conservative*, by
+construction, without anyone deciding. That is the clearest argument that the C backend is a
+scaffold with an expiry date rather than a target to grow features on. Go's collector is precise and
+concurrent because the Go compiler emits the stack maps; SubstrateVM's is precise too, at 39 seconds
+a build.
+
+#### The JVM memory model is emittable, but only explicitly
+
+Worth stating plainly: Kotlin/Native does **not** reproduce the JVM memory model, so requiring it is
+a stronger goal than Kotlin/Native itself holds. It is a defensible one here, because krusty's
+entire correctness story is agreeing with kotlinc. What it costs on each path:
+
+| | `@Volatile` | final-field freeze (safe publication) | `synchronized` |
+|---|---|---|---|
+| C | `<stdatomic.h>` seq-cst — compiler-provided, works freestanding | emitted release fence at constructor exit | emitted monitor |
+| Go | `sync/atomic` seq-cst | no equivalent; emitted fence at constructor exit | `sync.Mutex` |
+| native-image | exact, free | exact, free | exact, free |
+
+Neither C nor Go gives it for free, and neither makes it impossible. The emitter knows which fields
+are `@Volatile` — it is a declaration fact, already in the IR — so the work is emitting an atomic
+access instead of a plain one, not inferring anything. Go's gap is the final-field rule specifically:
+its memory model has no freeze, so publication of an immutable object needs a fence krusty emits.
+
 ---
 
 ## Correctness strategy
@@ -666,7 +730,10 @@ the low native IR and must be answered when it is designed, independently of Cra
 hand-written: (1) precise versus conservative GC — precise requires explicit safepoint and stack-map
 nodes in the IR; (2) exception propagation — table-driven unwinding versus explicit result
 propagation; (3) whether `suspend` lowers through the existing CPS transform or to native stack
-switching.
+switching. Note that emitting a *host language* answers all three by inheritance rather than by
+design: C forces conservative GC (see above), and Go would supply its collector, `panic`/`recover`
+and goroutines. That is most of the argument in Go's favour and the whole of the reason not to let
+the C scaffold drift into being the answer.
 
 **The C backend must not become the answer by inertia.** It was built to keep the code-generator
 question open, and a working thing has a way of settling questions no one meant to settle. C cannot
