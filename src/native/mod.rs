@@ -26,7 +26,7 @@ mod prebuilt;
 pub mod runtime;
 mod target;
 
-pub use codegen::CraneliftBackend;
+pub use codegen::{CraneliftBackend, Entry};
 pub use linker::{can_link, link_program, ProgramLinkError};
 pub use prebuilt::{prebuilt_available, runtime_objects};
 pub use target::{Arch, NativeTarget, Os};

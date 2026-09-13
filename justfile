@@ -367,6 +367,14 @@ conformance-run BIN VERSION:
     set -euo pipefail
     bash scripts/conformance-run.sh "{{BIN}}" "{{VERSION}}"
 
+# Run the NATIVE lane of a prebuilt conformance binary (path BIN) against Kotlin VERSION's box corpus
+# and print its report: the `box()` cases krusty's own code generator accepts must all print `OK`;
+# the rest are declined by construct, most frequent first. Needs the corpus, not kotlinc.
+conformance-native-run BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/conformance-native-run.sh "{{BIN}}" "{{VERSION}}"
+
 # Write the shields.io endpoint badges (docs/badges/*.json) from current numbers. CI commits these
 # on master; safe to run locally to preview. Color ramps with the conformance percentage.
 conformance-badge:

@@ -35,7 +35,7 @@ use crate::types::Ty;
 
 use super::super::classes::{self as model, ClassModel, Slot, Symbols};
 use super::super::target::NativeTarget;
-use super::PROGRAM_ENTRY;
+use super::{Entry, PROGRAM_ENTRY};
 
 /// The construct a lowering declined, phrased for a diagnostic.
 pub type Unsupported = String;
@@ -81,6 +81,17 @@ impl Carrier {
             Self::Ref => Some(AbiParam::new(types::I64)),
         }
     }
+}
+
+/// Types the generator carries at all. The unsigned integers are declined: Kotlin defines them as
+/// value classes over the signed primitives, and carrying `UInt` as the `Int` it wraps would make
+/// `1u as? Int` succeed and `4294967295u.toString()` print `-1` — silently wrong, which is the one
+/// thing this backend never is.
+fn check_carried(ty: Ty) -> Result<(), Unsupported> {
+    if ty.non_null().is_unsigned() {
+        return Err(format!("an unsigned integer type (`{ty:?}`)"));
+    }
+    Ok(())
 }
 
 /// A nullable primitive is a reference: `Int?` has to represent `null`, so it boxes, exactly as it
@@ -129,6 +140,7 @@ pub fn lower_file(
     classpath: &Rc<Classpath>,
     target: NativeTarget,
     stem: &str,
+    entry: Entry,
 ) -> Result<Lowered, Unsupported> {
     if !ir.statics.is_empty() {
         return Err("a top-level property".to_string());
@@ -164,7 +176,14 @@ pub fn lower_file(
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
         let function = &ir.functions[index];
-        if function.name == "main" && function.params.is_empty() && function.is_static {
+        let is_entry = function.params.is_empty()
+            && function.is_static
+            && function.dispatch_receiver.is_none()
+            && match entry {
+                Entry::Main => function.name == "main",
+                Entry::Box => function.name == "box" && carrier(function.ret) == Carrier::Ref,
+            };
+        if is_entry {
             lowering.define_program_entry(index)?;
             defines_entry = true;
         }
@@ -205,6 +224,9 @@ struct FileLowering<'a> {
 impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
+        for param in params.iter().chain(std::iter::once(&ret)) {
+            check_carried(*param)?;
+        }
         for param in params {
             match carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),
@@ -377,7 +399,9 @@ impl<'a> FileLowering<'a> {
     }
 
     /// `kt_program_entry`: what the runtime's `_start` calls. Records the stack bottom for the
-    /// collector, runs `main`, exits through the kernel — it never returns to `_start`.
+    /// collector, runs the entry function — printing its result when it has one, which is how a
+    /// `box()` case reports its verdict — and exits through the kernel; it never returns to
+    /// `_start`.
     fn define_program_entry(&mut self, main_index: usize) -> Result<(), Unsupported> {
         let void = Signature::new(CallConv::SystemV);
         let entry_id = self
@@ -386,7 +410,13 @@ impl<'a> FileLowering<'a> {
             .map_err(|error| format!("declaring `{PROGRAM_ENTRY}` ({error})"))?;
         let init = self.import("kt_runtime_init", &[Ty::obj("kotlin/Any")], Ty::Unit)?;
         let exit = self.import("kt_exit", &[Ty::Int], Ty::Unit)?;
-        let main = self.functions[main_index].expect("`main` has a body");
+        let prints_result = carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
+        let println = if prints_result {
+            Some(self.import("kt_println_any", &[any()], Ty::Unit)?)
+        } else {
+            None
+        };
+        let main = self.functions[main_index].expect("the entry function has a body");
         let frontend_config = self.module.target_config();
 
         let mut context = self.module.make_context();
@@ -408,7 +438,12 @@ impl<'a> FileLowering<'a> {
             let init_ref = self.module.declare_func_in_func(init, builder.func);
             builder.ins().call(init_ref, &[bottom]);
             let main_ref = self.module.declare_func_in_func(main, builder.func);
-            builder.ins().call(main_ref, &[]);
+            let call = builder.ins().call(main_ref, &[]);
+            if let Some(println) = println {
+                let result = builder.inst_results(call)[0];
+                let println_ref = self.module.declare_func_in_func(println, builder.func);
+                builder.ins().call(println_ref, &[result]);
+            }
             let zero = builder.ins().iconst(types::I32, 0);
             let exit_ref = self.module.declare_func_in_func(exit, builder.func);
             builder.ins().call(exit_ref, &[zero]);
@@ -450,6 +485,7 @@ struct BodyLowering<'a, 'b, 'c> {
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
+        check_carried(ty)?;
         let Some(clif) = carrier(ty).clif() else {
             return Err("a `Unit`-typed local".to_string());
         };
@@ -1026,9 +1062,27 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         source: Option<Ty>,
         target: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        check_carried(target)?;
+        if let Some(source) = source {
+            check_carried(source)?;
+        }
         let target = carrier(target);
         match (source.map(carrier), target) {
-            (None, _) | (Some(Carrier::Ref), Carrier::Ref) => Ok(Some(value)),
+            (None, target) => {
+                // The lowering could not type the expression. Its machine type is still known,
+                // and when that already is the target's carrier nothing needs doing; otherwise a
+                // conversion would be a guess, and a guess is declined.
+                let actual = self.builder.func.dfg.value_type(value);
+                match target.clif() {
+                    Some(clif) if clif == actual => Ok(Some(value)),
+                    None => Ok(None),
+                    Some(clif) => Err(format!(
+                        "a value of undetermined type (carried as `{actual}`) where a `{clif}` is \
+                         required"
+                    )),
+                }
+            }
+            (Some(Carrier::Ref), Carrier::Ref) => Ok(Some(value)),
             (Some(source), target) if source == target => Ok(Some(value)),
             (Some(Carrier::Scalar(_, _)), Carrier::Ref) => {
                 let ty = source.expect("known scalar");
@@ -1066,19 +1120,55 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
-    /// Widen or narrow an integer value between scalar carriers.
+    /// Convert a scalar between carriers, as Kotlin's `toInt()`/`toFloat()`/`toChar()` family and
+    /// its widening conversions do: integers extend by the source's signedness or truncate;
+    /// integer to float rounds; float to integer SATURATES with `NaN` to zero (`fcvt_to_sint_sat`
+    /// is exactly Kotlin's rule, where the machine's plain conversion would trap or produce the
+    /// indefinite value); a narrower integer target goes through `Int` first, as `Double.toByte()`
+    /// is defined to.
     fn resize(&mut self, value: Value, from: Type, signed: bool, to: Type) -> Value {
-        if from == to || from.is_float() || to.is_float() {
+        if from == to {
             return value;
         }
-        if from.bits() < to.bits() {
-            if signed {
-                self.builder.ins().sextend(to, value)
-            } else {
-                self.builder.ins().uextend(to, value)
+        match (from.is_float(), to.is_float()) {
+            (false, false) => {
+                if from.bits() < to.bits() {
+                    if signed {
+                        self.builder.ins().sextend(to, value)
+                    } else {
+                        self.builder.ins().uextend(to, value)
+                    }
+                } else {
+                    self.builder.ins().ireduce(to, value)
+                }
             }
-        } else {
-            self.builder.ins().ireduce(to, value)
+            (false, true) => {
+                if signed {
+                    self.builder.ins().fcvt_from_sint(to, value)
+                } else {
+                    self.builder.ins().fcvt_from_uint(to, value)
+                }
+            }
+            (true, false) => {
+                let wide = if to.bits() > 32 {
+                    types::I64
+                } else {
+                    types::I32
+                };
+                let integer = self.builder.ins().fcvt_to_sint_sat(wide, value);
+                if wide == to {
+                    integer
+                } else {
+                    self.builder.ins().ireduce(to, integer)
+                }
+            }
+            (true, true) => {
+                if to.bits() > from.bits() {
+                    self.builder.ins().fpromote(to, value)
+                } else {
+                    self.builder.ins().fdemote(to, value)
+                }
+            }
         }
     }
 
@@ -1136,6 +1226,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
         }
         if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) {
+            // `===` between two values of a primitive type compares the VALUES (Kotlin: identity
+            // equality on primitives is `==`, with a deprecation warning); boxing each side and
+            // comparing the boxes' addresses would say `0L !== 0L`. Floating-point identity has
+            // its own rules (`-0.0`, `NaN`) that nothing here implements yet, so it is declined.
+            let both_scalars = matches!(lhs_ty.map(carrier), Some(Carrier::Scalar(..)))
+                && matches!(rhs_ty.map(carrier), Some(Carrier::Scalar(..)));
+            if both_scalars {
+                let Some(left) = self.expression(lhs)? else {
+                    return Err("a `Unit` operand".to_string());
+                };
+                let Some(right) = self.expression(rhs)? else {
+                    return Err("a `Unit` operand".to_string());
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                let (left, right, ty, _) = self.unify(left, lhs_ty, right, rhs_ty)?;
+                if ty.is_float() {
+                    return Err("identity equality on floating-point values".to_string());
+                }
+                let condition = comparison(op, true).expect("identity");
+                return Ok(Some(self.builder.ins().icmp(condition, left, right)));
+            }
             let left = self.reference(lhs)?;
             let right = self.reference(rhs)?;
             let condition = comparison(op, true).expect("identity");

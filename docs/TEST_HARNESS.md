@@ -243,6 +243,31 @@ the gate). Tests with `.java` sources are the one exception: they need the harne
 javac runner, so the survey reports them under a dedicated `javac-dependent` category instead of a
 first compiler error.
 
+### Native lane
+
+The same corpus runs through krusty's own code generator and linker
+(`tests/kotlin_box_native_conformance.rs`, in the `conformance` binary):
+
+```sh
+./run-tests.sh --test conformance kotlin_codegen_box_native_conformance -- --nocapture
+just conformance-native-run "$(just conformance-bin)" 2.4.10   # CI's form; prints the report
+```
+
+Each single-file case is compiled with a program entry that prints `box()`'s result, linked against
+the prebuilt runtime, and RUN; it must print `OK`. **Skipping is permitted, miscompiling is not:** a
+construct the generator declines is counted by name (the sorted list printed with the report is the
+backlog), a frontend rejection is counted, multi-file and non-native-targeted cases are set aside —
+and any case the generator ACCEPTS that prints anything else, exits nonzero, panics the compiler or
+does not finish in ten seconds fails the test — unless it is listed in
+`tests/native_box_expected_failures.txt` with the reason it is a KNOWN defect shared with the JVM
+lane (a listed case that starts passing fails the test until the line is removed). A compiler
+panic outside `src/native/` is reported as a frontend panic, not a native failure. There is no
+percentage floor yet.
+`KRUSTY_NATIVE_BOX_LIMIT=<n>` samples the corpus evenly; `KRUSTY_KOTLIN_BOX_DIR` selects it (the
+vendored `tests/box_data/` is the fallback); `KRUSTY_NATIVE_CONFORMANCE_REPORT=<file>` writes the
+report line and the decline table. The lane skips, and says so in its report, when this build of
+krusty carries no prebuilt runtime (no clang at build time).
+
 ## JVM-Running Tests
 
 Do not spawn `javac` or `java` per test unless the test is explicitly about the CLI/process boundary.

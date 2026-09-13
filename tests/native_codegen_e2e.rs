@@ -580,3 +580,48 @@ fn a_string_literal_with_an_unpaired_surrogate_is_declined() {
     );
     assert!(artifacts.is_empty());
 }
+
+#[test]
+fn identity_equality_on_primitives_compares_values() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `===` between two `Long`s is value equality in Kotlin (identity on primitives is `==`, with
+    // a deprecation warning). Boxing each side and comparing the boxes would answer `false`.
+    assert_eq!(
+        run("fun id(x: Long) = x\n\
+             fun add(a: Long, b: Long) = a + b\n\
+             fun main() {\n\
+             \x20   println(id(0L) === id(0L))\n\
+             \x20   println(id(add(123456789L, 1L)) !== id(123456790L))\n\
+             \x20   val s = \"x\"\n\
+             \x20   println(s === s)\n\
+             }\n"),
+        "true\nfalse\ntrue\n"
+    );
+}
+
+#[test]
+fn unsigned_integers_are_declined_rather_than_carried_as_signed() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // `UInt` is a value class over `Int`. Carrying it as the `Int` it wraps would make
+    // `1u as? Int` succeed and `UInt.MAX_VALUE` print as `-1`; until the generator models the
+    // wrapper, the file declines.
+    let (_, diagnostics) = compile(
+        &[(
+            "Main",
+            "fun same(x: UInt) = x as? Int\nfun main() { println(same(1u) == null) }\n",
+        )],
+        target,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unsigned integer type")),
+        "expected the backend to decline, got {diagnostics:?}"
+    );
+}

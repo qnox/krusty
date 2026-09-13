@@ -31,17 +31,39 @@ use super::target::NativeTarget;
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
 
+/// Which top-level function a program starts in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    /// Kotlin's `fun main()`.
+    Main,
+    /// A `codegen/box` conformance case: `fun box(): String`, whose result the entry prints — so
+    /// the case's verdict (`OK`, or what went wrong) is the program's output, with no `main` written
+    /// into the corpus.
+    Box,
+}
+
 pub struct CraneliftBackend {
     /// The symbol provider. A JVM classpath because that is krusty's only provider today; only
     /// *signatures* come from it — see `super::intrinsics` for the two spellings it leaks and where
     /// they are normalized.
     classpath: Rc<Classpath>,
     target: NativeTarget,
+    entry: Entry,
 }
 
 impl CraneliftBackend {
     pub fn new(classpath: Rc<Classpath>, target: NativeTarget) -> Self {
-        Self { classpath, target }
+        Self {
+            classpath,
+            target,
+            entry: Entry::Main,
+        }
+    }
+
+    /// Start the program in `entry` instead of `main`.
+    pub fn with_entry(mut self, entry: Entry) -> Self {
+        self.entry = entry;
+        self
     }
 }
 
@@ -76,21 +98,24 @@ impl Backend for CraneliftBackend {
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
-        let lowered = match lower::lower_file(&file.ir, &self.classpath, self.target, &stem) {
-            Ok(lowered) => lowered,
-            Err(unsupported) => {
-                diags.error(
-                    crate::diag::Span::new(0, 0),
-                    format!("krusty: the native backend does not support {unsupported} yet"),
-                );
-                return Vec::new();
-            }
-        };
+        let lowered =
+            match lower::lower_file(&file.ir, &self.classpath, self.target, &stem, self.entry) {
+                Ok(lowered) => lowered,
+                Err(unsupported) => {
+                    diags.error(
+                        crate::diag::Span::new(0, 0),
+                        format!("krusty: the native backend does not support {unsupported} yet"),
+                    );
+                    return Vec::new();
+                }
+            };
         if lowered.defines_entry {
             if let Some(first) = &state.entry_file {
                 diags.error(
                     crate::diag::Span::new(0, 0),
-                    format!("krusty: this module declares `main` in both {first} and {stem}"),
+                    format!(
+                        "krusty: this module declares the entry point in both {first} and {stem}"
+                    ),
                 );
                 return Vec::new();
             }

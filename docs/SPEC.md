@@ -5371,6 +5371,17 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_codegen_e2e.rs`
   (`structural_equality_on_references_is_declined_rather_than_compared_by_address`).
 
+- **`===` between two primitives compares the values.** Kotlin defines identity equality on values
+  of a primitive type as `==` (it warns that the distinction is meaningless there). Boxing each
+  side and comparing the boxes' addresses would say `0L !== 0L`, which the corpus caught. Identity
+  on floating-point values (`-0.0`, `NaN`) is declined until the runtime pins its rules.
+  Tests: `tests/native_codegen_e2e.rs` (`identity_equality_on_primitives_compares_values`).
+
+- **The unsigned integers are declined.** `UInt` is a value class over `Int`; carrying it as the
+  `Int` it wraps made `1u as? Int` succeed. Until the generator models the wrapper, any unsigned
+  type in a carried position declines the file.
+  Tests: `tests/native_codegen_e2e.rs` (`unsigned_integers_are_declined_rather_than_carried_as_signed`).
+
 - **Arithmetic on `Byte`/`Short`/`Char` produces `Int`.** Kotlin has no `Byte.plus(Byte): Byte`, so
   the operands of a built-in arithmetic operator on a narrow integer type are widened to `i32`
   first (sign-extended, or zero-extended for `Char`) and the result is an `Int`. Only `Char` against

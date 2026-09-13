@@ -1106,8 +1106,22 @@ before:**
    and nothing in the tree drives a C compiler at a user's build. The cross-architecture link
    carries a class hierarchy for every target.
 4. Per-module objects and ABI-hash caching — the incremental half.
-5. The `codegen/box` corpus through the native pipeline as the conformance gate: skipping permitted,
-   miscompiling never; declined reasons sorted by frequency are the backlog.
+5. **Landed (first cut).** The `codegen/box` corpus runs through the native pipeline
+   (`tests/kotlin_box_native_conformance.rs`, the native lane of the `conformance` binary, run by
+   CI next to the JVM lane): each single-file case compiles with a program entry that prints
+   `box()`, links against the prebuilt runtime, and runs; skipping is permitted, miscompiling
+   never. First full run against Kotlin 2.4.10's 7,352 cases, in 63 s on one machine: **359
+   pass**, 2,974 declined by construct, 1,828 rejected by the frontend, 2,182 outside the lane
+   (multi-file, multi-module, other backends, unmodeled flags), 2 frontend panics, 7 known
+   failures shared with the JVM lane and listed with their reasons in
+   `tests/native_box_expected_failures.txt` (a listed case that starts passing fails the test until
+   it is removed), **0 unexpected failures**. The first run found and fixed two native defects —
+   `===` on primitives boxed both sides and compared addresses; `UInt` was carried as the `Int` it
+   wraps — which is what the gate is for. The backlog, by frequency: top-level properties (499),
+   structural `==` on references (152), lambdas and function values (264), checked operations
+   (70), reference arrays (50) and array intrinsics (85), callable references (49), data classes,
+   interfaces, inner and local classes, value classes, `vararg`, `!!`, extension properties,
+   floating-point rendering, `try`.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

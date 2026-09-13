@@ -16,6 +16,8 @@ mod box_vendored_e2e;
 mod ir_blockers;
 #[path = "kotlin_box_ir_jvm_conformance.rs"]
 mod kotlin_box_ir_jvm_conformance;
+#[path = "kotlin_box_native_conformance.rs"]
+mod kotlin_box_native_conformance;
 #[path = "ksp_real_e2e.rs"]
 mod ksp_real_e2e;
 #[path = "serialization_conformance.rs"]
