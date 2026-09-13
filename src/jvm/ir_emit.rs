@@ -6258,13 +6258,10 @@ fn emit_class(
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
         let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
-        if is_continuation {
-            // Continuation fields are registered without interning `this$0`/`result`/`label`, so the
-            // constructor must expose its HEADER before its body first references `this$0`. ASM-based
-            // kotlinc visits `<init>`, its descriptor, and its generic signature before `visitCode`;
-            // building the body first inverted `<init>` and `this$0` for member continuations.
-            cw.reserve_method_pool("<init>", &ctor_desc, ctor_signature.as_deref(), &[]);
-        }
+        // ASM-based kotlinc visits a constructor's header before `visitCode`, so every body reference
+        // follows the method name, descriptor, and generic signature in the pool. Continuations made
+        // the old inversion visible because their body first touches the deferred `this$0` field.
+        cw.reserve_method_pool("<init>", &ctor_desc, ctor_signature.as_deref(), &[]);
         let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut ctor = CodeBuilder::new(1 + params_words);
         // The superclass constructor's parameter types (empty for the erased top type — the front end
@@ -6498,6 +6495,37 @@ fn emit_class(
             &ctor,
             ctor_signature.as_deref(),
         );
+        // A continuation's constructor table is attached HERE, not in the trailing debug pass:
+        // kotlinc interns a method's `LocalVariableTable` names with that method, before it visits
+        // the next one, so batching every table at the end reordered the pool from `<init>` onward.
+        if let Some(metadata) = continuation_metadata {
+            let has_this0 = c.fields.iter().any(|field| field.name == "this$0");
+            let mut ctor_locals: Vec<(String, String, u16)> =
+                vec![("this".to_string(), format!("L{fq_name};"), 0)];
+            let mut slot = 1u16;
+            if has_this0 {
+                ctor_locals.push((
+                    "this$0".to_string(),
+                    format!("L{};", metadata.enclosing_class),
+                    slot,
+                ));
+                slot += 1;
+            }
+            ctor_locals.push((
+                "$completion".to_string(),
+                "Lkotlin/coroutines/Continuation;".to_string(),
+                slot,
+            ));
+            let ctor_desc = if has_this0 {
+                format!(
+                    "(L{};Lkotlin/coroutines/Continuation;)V",
+                    metadata.enclosing_class
+                )
+            } else {
+                "(Lkotlin/coroutines/Continuation;)V".to_string()
+            };
+            cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
+        }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
         let primary_annotations = &c.primary_ctor_annotations;
@@ -7033,34 +7061,8 @@ fn emit_class(
         attach_declared_method_debug(ir, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
-    if let Some(metadata) = continuation_metadata {
+    if continuation_metadata.is_some() {
         let self_desc = format!("L{fq_name};");
-        let has_this0 = c.fields.iter().any(|f| f.name == "this$0");
-        let mut ctor_locals: Vec<(String, String, u16)> =
-            vec![("this".to_string(), self_desc.clone(), 0)];
-        let mut slot = 1u16;
-        if has_this0 {
-            ctor_locals.push((
-                "this$0".to_string(),
-                format!("L{};", metadata.enclosing_class),
-                slot,
-            ));
-            slot += 1;
-        }
-        ctor_locals.push((
-            "$completion".to_string(),
-            "Lkotlin/coroutines/Continuation;".to_string(),
-            slot,
-        ));
-        let ctor_desc = if has_this0 {
-            format!(
-                "(L{};Lkotlin/coroutines/Continuation;)V",
-                metadata.enclosing_class
-            )
-        } else {
-            "(Lkotlin/coroutines/Continuation;)V".to_string()
-        };
-        cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
         cw.set_method_debug(
             "invokeSuspend",
             "(Ljava/lang/Object;)Ljava/lang/Object;",
