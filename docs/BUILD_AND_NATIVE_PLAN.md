@@ -745,6 +745,51 @@ One measurement note worth keeping: the first attempt used the `gate` profile, w
 that would have made the tax look negligible. Compiler throughput comparisons must use an optimized
 build.
 
+#### The decision criterion: delete the multi-year item, keep the emitter lean
+
+Stated plainly, the goal for the native target is to **remove the multi-year part of the
+implementation while keeping a small, fast emitter**. That criterion is sharper than "C or Go", and
+it settles the question, because the two halves are not independent: *where the multi-year work goes
+determines how large the emitter has to be.*
+
+The emitter is small only when Kotlin's constructs map onto constructs the target already has. Where
+they do not, the cost does not vanish — it splits across the emitter *and* a runtime we then own:
+
+| Kotlin construct | emitting C | emitting Go |
+|---|---|---|
+| `String` | runtime type, concatenation, rendering | native `string` |
+| `class`, `open`/`override` | hand-emitted vtables | struct + interface |
+| lambda / closure | environment structs + function pointers | native closure |
+| `throw` / `try`-`catch` | an unwinder (freestanding C has none) | `panic` / `recover` |
+| `List`, `Map`, `Set` | write the collections | slices / maps |
+| allocation | write a collector — the multi-year item | precise and concurrent, free |
+| threads, atomics | raw `clone()` and futexes, per architecture | goroutines, `sync` |
+| targets | Linux only, by syscall ABI | 48 `GOOS`/`GOARCH` |
+
+Every row in the C column is emitter work *plus* runtime work. Every row in the Go column is a
+lowering the emitter already knows how to write. So the Go emitter is not merely a same-sized
+sibling of the C one — it is **structurally smaller**, because more of Kotlin lands on something
+that already exists.
+
+The C emitter in this tree is 1,110 lines and supports top-level functions, arithmetic, control flow
+and strings-through-a-runtime. Adding classes, closures, exceptions and collections to it grows both
+columns; adding them to a Go emitter grows only the first, and less.
+
+Measured against the criterion:
+
+| approach | multi-year item removed? | emitter stays lean? |
+|---|---|---|
+| **emit Go** | yes — collector, threads, exceptions, collections, 48 targets | yes, and smaller than the C one |
+| emit C + a conservative collector | mostly — Boehm needs no compiler support | no: vtables, closures, unwinding, collections are all ours |
+| own code generator + MMTk | no — stack maps, safepoints and barriers remain | no, this *is* the multi-year item |
+| port Go's runtime sources | no — and inherits a compiler-coupled codebase | no |
+
+Only the first row satisfies both halves. Its price is a Go toolchain dependency, ~2 MB binaries,
+and the ~5–9 % round-trip tax measured above — all of which the thesis already accepts, since it
+trades binary size and optimization quality for build speed. The second row is the fallback if a Go
+toolchain is unacceptable as a dependency; it buys Linux-only targets and a conservative collector,
+and it keeps the runtime ours.
+
 #### Settled: GraalVM is the oracle, not the pipeline
 
 krusty already emits JVM bytecode byte-identical to kotlinc's, so `krusty → bytecode →
