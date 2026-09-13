@@ -270,6 +270,8 @@ pub struct EmitEnv<'a> {
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
     inner_classes: crate::jvm::inner_classes::InnerClasses,
+    /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
+    java_parameters: bool,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -485,12 +487,20 @@ pub struct EmitOptions {
     /// Independent `-Xlambdas` / `-Xsam-conversions` strategies for this invocation.
     pub lambda_modes: LambdaModes,
     pub inner_class_resolver: Option<InnerClassResolver>,
+    /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
+    pub java_parameters: bool,
 }
 
 impl EmitOptions {
     /// Select the `-jvm-default` mode, keeping every other field as configured.
     pub fn with_jvm_default(mut self, mode: JvmDefaultMode) -> Self {
         self.jvm_default = mode;
+        self
+    }
+
+    /// Enable `-java-parameters`, keeping every other field as configured.
+    pub fn with_java_parameters(mut self, enabled: bool) -> Self {
+        self.java_parameters = enabled;
         self
     }
 
@@ -510,6 +520,7 @@ impl Default for EmitOptions {
             emit_class_metadata: true,
             jvm_default: JvmDefaultMode::Enable,
             param_assertions: true,
+            java_parameters: false,
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
         }
@@ -3793,6 +3804,7 @@ pub fn emit_all(
         signature_symbols: &signature_symbols,
         jvm_default: JvmDefaultMode::default(),
         lambda_modes: LambdaModes::default(),
+        java_parameters: false,
         property_realizations: &property_realizations,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
@@ -3906,6 +3918,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         signature_symbols,
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
+        java_parameters: opts.java_parameters,
         property_realizations,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
@@ -6516,6 +6529,9 @@ fn emit_class(
                 "(Lkotlin/coroutines/Continuation;)V".to_string()
             };
             cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
+        if env.java_parameters {
+            let parameters = declared_constructor_parameters(c, &param_tys);
+            cw.set_method_parameters("<init>", &ctor_desc, &parameters);
         }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
@@ -11400,6 +11416,50 @@ fn emit_method_inner(
     emit_method_inner_with_holder(ir, fid, owner, facade, cw, instance, env, None);
 }
 
+/// The `MethodParameters` entries for a primary constructor: its declared parameter names, in
+/// order. Empty (no attribute) when any parameter is compiler-supplied and therefore unnamed — a
+/// captured outer instance or a synthesized layout — because kotlinc flags those rather than naming
+/// them, and a wrong name is worse than a missing attribute.
+fn declared_constructor_parameters(class: &IrClass, param_tys: &[Ty]) -> Vec<(String, u16)> {
+    if class.ctor_args.len() != param_tys.len() {
+        return Vec::new();
+    }
+    let mut names = Vec::with_capacity(param_tys.len());
+    for arg in &class.ctor_args {
+        match &arg.name {
+            Some(name) if !name.is_empty() => names.push((name.clone(), 0)),
+            _ => return Vec::new(),
+        }
+    }
+    names
+}
+
+/// The `MethodParameters` entries kotlinc writes for a DECLARED function under `-java-parameters`:
+/// the source parameter names, plus `$completion` for the continuation a `suspend fun` appends. No
+/// flags — only a parameter the compiler itself introduces is `mandated`/`synthetic`, and a declared
+/// function's are all its own.
+///
+/// Returns an empty list when the recorded names do not line up with the physical parameters: a wrong
+/// name is worse than a missing attribute, and the caller writes nothing for an empty list.
+fn declared_method_parameters(ir: &IrFile, fid: u32, param_tys: &[Ty]) -> Vec<(String, u16)> {
+    let Some(declared) = ir.param_names(fid) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = declared.to_vec();
+    if names.len() + 1 == param_tys.len()
+        && param_tys.last().is_some_and(|ty| {
+            ty.obj_internal()
+                .is_some_and(|internal| internal.render() == "kotlin/coroutines/Continuation")
+        })
+    {
+        names.push("$completion".to_string());
+    }
+    if names.len() != param_tys.len() || names.iter().any(String::is_empty) {
+        return Vec::new();
+    }
+    names.into_iter().map(|name| (name, 0)).collect()
+}
+
 /// `holder_receiver` is `Some(interface)` when the body is being written onto that interface's
 /// `$DefaultImpls` holder: the code and slots are the instance method's, but the method is `static`
 /// and its descriptor carries the receiver as parameter 0.
@@ -11771,6 +11831,10 @@ fn emit_method_inner_with_holder(
     // `ret` are erased.
     let desc = reserved_desc;
     e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
+    if env.java_parameters {
+        let parameters = declared_method_parameters(ir, fid, &param_tys);
+        e.cw.set_method_parameters(&f.name, &desc, &parameters);
+    }
     // kotlinc annotates a reference return and each reference parameter of a declared method.
     if nullability_annotated
         && (ret_ann.is_some() || emitted_param_anns.iter().any(Option::is_some))

@@ -1854,3 +1854,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   learning that spelling. Classpath inline functions splice as BYTECODE (`src/jvm/inline.rs`) and
   remain a separate provider-side local-table migration.
    `tests/suspend_inline_splice_names_e2e.rs`.
+- **`-java-parameters` writes a `MethodParameters` attribute (feature).** The flag was on krusty's
+  IGNORED list, so a module built with it differed on EVERY class. kotlinc names each DECLARED
+  parameter — the source names, `$this$<fn>` for an extension receiver, `$completion` for the
+  continuation a `suspend fun` appends — and writes the attribute AFTER the annotation attributes.
+  A method with no parameters gets none, and neither does a compiler-manufactured one: a `$default`
+  bridge, `copy$default`, or the `DefaultConstructorMarker` constructor. A parameter the compiler
+  introduces carries a flag instead of a source name (`this$0` is `mandated`, an enum constructor's
+  `$enum$name`/`$enum$ordinal` are `synthetic`).
+  Typed source/provenance records cover declared functions (including `suspend`), primary and
+  secondary constructors, inner/local/anonymous captures, enums, data/value-class generated members,
+  continuations, and `$DefaultImpls` forwards; mismatched physical arity fails explicitly.
+  `tests/java_parameters_attribute_e2e.rs`.

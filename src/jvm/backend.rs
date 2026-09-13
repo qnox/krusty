@@ -352,6 +352,7 @@ pub struct JvmBackend {
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
+    java_parameters: bool,
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
@@ -367,6 +368,7 @@ impl JvmBackend {
             cp,
             class_major: None,
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
+            java_parameters: false,
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             param_assertions: true,
             call_assertions: true,
@@ -389,6 +391,12 @@ impl JvmBackend {
     /// `-jvm-default`: which JVM shape an interface's members with bodies are compiled into.
     pub fn with_jvm_default(mut self, mode: crate::jvm::ir_emit::JvmDefaultMode) -> JvmBackend {
         self.jvm_default = mode;
+        self
+    }
+
+    /// `-java-parameters`: write a `MethodParameters` attribute naming each declared parameter.
+    pub fn with_java_parameters(mut self, enabled: bool) -> JvmBackend {
+        self.java_parameters = enabled;
         self
     }
 
@@ -435,6 +443,7 @@ pub fn shipping_emit_options(
         module_name: (module_name != "main").then(|| module_name.to_string()),
         // Per-invocation strategies; the CLI overrides them on the backend.
         lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
+        java_parameters: false,
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
         // second compilation sees no constructor/member parameter names (named arguments) and no
@@ -831,7 +840,8 @@ impl JvmBackend {
             shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
                 .with_jvm_default(self.jvm_default)
                 .with_lambda_modes(self.lambda_modes)
-                .with_param_assertions(self.param_assertions);
+                .with_param_assertions(self.param_assertions)
+                .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
         let emit_metadata = crate::jvm::ir_emit::EmitMetadata {
