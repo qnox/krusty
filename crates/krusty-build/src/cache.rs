@@ -171,6 +171,12 @@ impl CacheKey {
     pub fn value(self) -> u64 {
         self.0
     }
+
+    /// Rebuild a key from a previously rendered value. Not for minting keys: those come from
+    /// [`CacheKeyInputs::key`], which is what guarantees every input is covered.
+    pub fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 impl std::fmt::Display for CacheKey {
