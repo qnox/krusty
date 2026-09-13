@@ -1962,3 +1962,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   (`fun <T : Cfg> Holder<T>.engine(block: T.() -> Unit)`) reaches a plan whose `expected_types` entry
   is `None`, so the result is unknown there for a different reason.
   `tests/classpath_member_lambda_unit_e2e.rs::a_classpath_member_receiver_lambda_is_a_statement_position`.
+- **A decomposed lambda shape still needs its declared result (fix).** Once a functional parameter's
+  shape is decomposed into context types, a receiver and value parameters, nothing left in it says
+  whether the body ends in statement position — and only the declared result does. Three carriers
+  reach the same decomposed fall-through, and each had to be taught to keep it: the member-extension
+  plan (which recorded no expected type at all), the extension lambda shape (which had the
+  instantiated `Ty::Fun` and never read it), and the provider expectation.
+  The visible failure is a builder block: `h.configure { when { … } }` against
+  `fun configure(block: T.() -> Unit)` judged the trailing `when` in value position and reported it
+  non-exhaustive, on source kotlinc accepts. The body is checked TWICE — once on the decomposed
+  carrier and once with the result known — and the first pass's diagnostic was never retracted, so
+  the later correct pass could not save it.
+  `tests/generic_member_extension_lambda_result_e2e.rs::a_member_lambda_typed_by_a_class_type_parameter_is_a_statement_position`.

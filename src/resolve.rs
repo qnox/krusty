@@ -22600,6 +22600,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let mut lambda_params = vec![Vec::new(); args.len()];
+            let mut lambda_expected = vec![None; args.len()];
             let mut lambda_receivers = vec![None; args.len()];
             let mut lambda_context_counts = vec![0; args.len()];
             for &(parameter_index, source_index) in &instantiated.argument_parameters {
@@ -22608,6 +22609,7 @@ impl<'a> Checker<'a> {
                 };
                 if let Ty::Fun(signature) = parameter {
                     lambda_params[source_index] = signature.params.clone();
+                    lambda_expected[source_index] = Some(*parameter);
                     lambda_context_counts[source_index] = signature.context_count;
                     if instantiated
                         .call_sig
@@ -22629,6 +22631,7 @@ impl<'a> Checker<'a> {
                     priority: shape.priority,
                     score: instantiated.score,
                     param_types: lambda_params,
+                    expected_types: lambda_expected,
                     receivers: lambda_receivers,
                     context_counts: lambda_context_counts,
                 });
@@ -29265,6 +29268,21 @@ impl<'a> Checker<'a> {
                                             call_fn_name.as_deref(),
                                         );
                                     }
+                                    // The decomposed inputs below cannot answer the body's
+                                    // POSITION. Only the declared result says whether the last
+                                    // expression is a statement, which is what makes a trailing
+                                    // `when` with no `else` legal in a `T.() -> Unit` builder block.
+                                    let coerce_return_to_unit = ext_callable_types
+                                        .as_ref()
+                                        .and_then(|types| types.get(i))
+                                        .copied()
+                                        .flatten()
+                                        .is_some_and(|expected| {
+                                            matches!(
+                                                expected.non_null(),
+                                                Ty::Fun(signature) if signature.ret == Ty::Unit
+                                            )
+                                        });
                                     let receiver = ext_lambda_recvs
                                         .as_ref()
                                         .and_then(|recvs| recvs.get(i))
@@ -29281,23 +29299,29 @@ impl<'a> Checker<'a> {
                                         context_count + usize::from(receiver.is_some());
                                     let values = pts[i].get(value_start..).unwrap_or_default();
                                     if !contexts.is_empty() || receiver.is_some() {
-                                        return c.check_lambda_with_implicit_receivers_labeled(
-                                            scope,
-                                            a,
-                                            LambdaShape {
-                                                context_types: contexts,
-                                                extension_receiver: receiver,
-                                                value_types: values,
-                                            },
-                                            false,
-                                            call_fn_name.as_deref(),
-                                        );
+                                        return c
+                                            .check_lambda_with_implicit_receivers_and_return_labeled(
+                                                scope,
+                                                a,
+                                                LambdaShape {
+                                                    context_types: contexts,
+                                                    extension_receiver: receiver,
+                                                    value_types: values,
+                                                },
+                                                call_fn_name.as_deref(),
+                                                LambdaCheckMode {
+                                                    suspend: false,
+                                                    coerce_return_to_unit,
+                                                    expected_return: None,
+                                                },
+                                            );
                                     }
                                     let pt = pts[i].clone();
-                                    return c.check_lambda_with_types_labeled(
+                                    return c.check_lambda_with_types_and_return(
                                         scope,
                                         a,
                                         &pt,
+                                        coerce_return_to_unit,
                                         call_fn_name.as_deref(),
                                     );
                                 }
@@ -31328,6 +31352,16 @@ impl<'a> Checker<'a> {
                                     )
                                 });
                             }
+                            // Past the function-type branch the shape is decomposed, and decomposed
+                            // inputs cannot answer the body's POSITION: only the declared result
+                            // says whether the last expression is a statement, which is what makes a
+                            // trailing `when` with no `else` legal in a `T.() -> Unit` builder
+                            // block. The provider expectation is the carrier that still has it.
+                            let coerce_return_to_unit = implicit_provider_member_lambda_pts
+                                .as_ref()
+                                .and_then(|slots| slots.get(i))
+                                .and_then(|slot| slot.as_ref())
+                                .is_some_and(|expectation| expectation.result == Some(Ty::Unit));
                             // Contexts sit ahead of the receiver, which sits ahead of what the
                             // author wrote; reading past one entry only would hand a
                             // `context(P) R.(X) -> T` lambda its own receiver as a value parameter.
@@ -31340,7 +31374,7 @@ impl<'a> Checker<'a> {
                             if context_count > 0 {
                                 let value_start = context_count + usize::from(receiver.is_some());
                                 return self.with_lambda_mutation(inline, |checker| {
-                                    checker.check_lambda_with_implicit_receivers_labeled(
+                                    checker.check_lambda_with_implicit_receivers_and_return_labeled(
                                         scope,
                                         a,
                                         LambdaShape {
@@ -31348,19 +31382,31 @@ impl<'a> Checker<'a> {
                                             extension_receiver: receiver,
                                             value_types: pt.get(value_start..).unwrap_or_default(),
                                         },
-                                        false,
                                         call_fn_name.as_deref(),
+                                        LambdaCheckMode {
+                                            suspend: false,
+                                            coerce_return_to_unit,
+                                            expected_return: None,
+                                        },
                                     )
                                 });
                             }
                             if let Some(receiver) = receiver {
                                 return self.with_lambda_mutation(inline, |checker| {
-                                    checker.check_lambda_with_receiver_labeled(
+                                    checker.check_lambda_with_implicit_receivers_and_return_labeled(
                                         scope,
                                         a,
-                                        receiver,
-                                        pt.get(1..).unwrap_or_default(),
+                                        LambdaShape {
+                                            context_types: &[],
+                                            extension_receiver: Some(receiver),
+                                            value_types: pt.get(1..).unwrap_or_default(),
+                                        },
                                         call_fn_name.as_deref(),
+                                        LambdaCheckMode {
+                                            suspend: false,
+                                            coerce_return_to_unit,
+                                            expected_return: None,
+                                        },
                                     )
                                 });
                             }
@@ -49306,6 +49352,10 @@ struct MemberExtensionLambdaPlan {
     priority: MemberExtensionPriority,
     score: (usize, std::cmp::Reverse<usize>, bool),
     param_types: Vec<Vec<Ty>>,
+    /// The instantiated function type of each lambda argument's parameter. The decomposed inputs
+    /// above cannot answer the body's POSITION: only the declared result says whether the last
+    /// expression is a statement, which is what makes a trailing `when` with no `else` legal.
+    expected_types: Vec<Option<Ty>>,
     receivers: Vec<Option<Ty>>,
     context_counts: Vec<usize>,
 }
@@ -76756,7 +76806,11 @@ impl<'a> Checker<'a> {
                     generic_formals: Vec::new(),
                     argument_parameters: Vec::new(),
                     param_types: Some(plan.param_types),
-                    expected_types: None,
+                    expected_types: plan
+                        .expected_types
+                        .iter()
+                        .any(Option::is_some)
+                        .then_some(plan.expected_types),
                     fixed_expected_types: None,
                     receivers: plan
                         .receivers
