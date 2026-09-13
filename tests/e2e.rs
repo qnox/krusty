@@ -958,6 +958,8 @@ mod named_super_arg_e2e;
 mod narrowed_this_member_call_e2e;
 #[path = "native_classes_e2e.rs"]
 mod native_classes_e2e;
+#[path = "native_codegen_e2e.rs"]
+mod native_codegen_e2e;
 #[path = "native_gc_e2e.rs"]
 mod native_gc_e2e;
 #[path = "native_hello_world_e2e.rs"]

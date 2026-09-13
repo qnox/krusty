@@ -353,6 +353,27 @@ mod tests {
     }
 
     #[test]
+    fn the_code_generator_uses_only_ir_contract_dependencies() {
+        // `jvm` for the same one reason as the retired emitter: the only symbol provider reads a
+        // JVM classpath, so a selected dependency declaration resolves through it. Phase 7 removes
+        // it; the budget keeps it from spreading meanwhile.
+        assert_allowed_crate_modules(
+            "src/native/codegen/mod.rs",
+            &["backend", "diag", "frontend", "jvm"],
+        );
+        assert_allowed_crate_modules("src/native/codegen/lower.rs", &["ir", "jvm", "types"]);
+    }
+
+    #[test]
+    fn the_linker_knows_nothing_about_kotlin() {
+        // Objects in, an executable out. A linker that imported the IR or the type system would be
+        // a linker that had started making language decisions.
+        assert_allowed_crate_modules("src/native/linker/mod.rs", &[]);
+        assert_allowed_crate_modules("src/native/linker/elf.rs", &[]);
+        assert_allowed_crate_modules("src/native/prebuilt.rs", &[]);
+    }
+
+    #[test]
     fn the_native_backend_adapter_uses_only_common_backend_dependencies() {
         assert_allowed_crate_modules(
             "src/native/backend.rs",

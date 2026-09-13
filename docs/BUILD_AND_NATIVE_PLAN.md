@@ -1069,8 +1069,12 @@ architecture at a time if that ever becomes worth doing.
 **Sequencing, in runnable increments — every commit runs a Kotlin program that could not run
 before:**
 
-1. `fun main() { println("Hello, world!") }` through krusty's own code generator on linux-x86_64:
-   lowering, an object, a link against the prebuilt runtime, a static ELF, run, compare output.
+1. **Landed.** `fun main() { println("Hello, world!") }` runs through krusty's own code generator
+   on linux-x86_64 (`tests/native_codegen_e2e.rs`): `src/native/codegen/` lowers checked IR to
+   Cranelift and emits a relocatable object; `src/native/linker/` resolves symbols, lays out two
+   segments, applies the five x86-64 relocation kinds and writes a static `ET_EXEC` ELF by hand;
+   `build.rs` compiles the runtime once per target with clang and `src/native/prebuilt.rs` carries
+   the objects inside the compiler. The executable runs with an empty environment. No C is emitted.
 2. The same on linux-aarch64 and linux-riscv64 from the same host, with the ELF machine asserted.
 3. Re-run the landed class tests against the new generator, slice by slice, until they all pass.
 4. Per-module objects and ABI-hash caching — the incremental half.
