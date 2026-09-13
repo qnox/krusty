@@ -5306,7 +5306,8 @@ and behavior is checked by RUNNING the emitted program.
   after the ordinary comparisons, which is what `java.lang.Double.compare` does and what Kotlin's
   `Double.compareTo` is specified to do. The same operation reached through `<` (`a < b`) keeps IEEE
   semantics — the two spellings genuinely differ in Kotlin.
-  Tests: `tests/native_hello_world_e2e.rs`; the ordering itself lives in `src/native/runtime.rs`.
+  Tests: `tests/native_codegen_e2e.rs` (`comparisons_and_boolean_logic_run`); the ordering itself
+  lives in `src/native/runtime/krusty_rt.c`.
 
 - **`compareTo` is a runtime call, not an emitted `a < b ? -1 : …`.** The lowered form has the
   receiver and the argument as arbitrary expressions, and a ternary would evaluate each of them
@@ -5340,9 +5341,9 @@ and behavior is checked by RUNNING the emitted program.
   `memcpy`/`memset` itself (a compiler may synthesize calls to them), and supplies its own `_start`
   — in assembly, because at process entry the stack is aligned as if nothing had been called, which
   is not the alignment a compiled function's prologue assumes.
-  Tests: `tests/native_hello_world_e2e.rs`
-  (`one_host_builds_an_executable_for_every_supported_architecture`), which asserts each produced
-  binary's ELF machine number rather than trusting that the cross build happened.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`one_host_links_a_static_executable_for_every_supported_architecture`), which asserts each
+  produced binary's ELF machine number rather than trusting that the cross build happened.
 
 - **`String` is UTF-8 bytes in the native runtime, and exposes no `length`.** Kotlin's
   `String.length` counts UTF-16 code units, which is not the byte count for any non-ASCII text.
@@ -5351,37 +5352,48 @@ and behavior is checked by RUNNING the emitted program.
   in Kotlin, unencodable in UTF-8 — makes the backend decline the file with a diagnostic.
   Tests: `src/native/emit.rs` (`an_unpaired_surrogate_is_declined_rather_than_mangled`,
   `a_non_ascii_literal_uses_octal_escapes_with_a_fixed_width`),
-  `tests/native_hello_world_e2e.rs` (`non_ascii_text_survives_the_round_trip`).
+  `tests/native_codegen_e2e.rs` (`non_ascii_text_survives_the_round_trip`).
 
-- **`+`, `-`, `*` and unary `-` wrap; `/`, `%` and the shifts are defined where C is not.** Kotlin
-  wraps integer arithmetic on overflow; signed overflow is UNDEFINED in C, which a compiler may
-  assume never happens. The emitter therefore spells wrapping arithmetic through the unsigned type
-  of the same width, where C defines the wrap. Division by zero throws in Kotlin (the runtime aborts
-  with a message, having no exceptions yet); `Int.MIN_VALUE / -1` wraps in Kotlin and is undefined
-  in C; and a shift count outside `0..31` (or `0..63`) is masked in Kotlin and undefined in C. Each
-  of those goes through a runtime function rather than a C operator.
-  Tests: `tests/native_hello_world_e2e.rs` (`integer_arithmetic_follows_kotlin_where_c_is_undefined`).
+- **`+`, `-`, `*` and unary `-` wrap; `/` and `%` go through the runtime; shifts mask their count.**
+  Kotlin wraps integer arithmetic on overflow, and so do the machine's `iadd`/`isub`/`imul`/`ineg`,
+  so the code generator emits them directly. Division is different: the machine traps on both a zero
+  divisor and `Int.MIN_VALUE / -1`, where Kotlin throws for the first and wraps for the second, so
+  `/` and `%` are calls to `kt_div_*`/`kt_rem_*` (the runtime aborts with a message on zero, having no
+  exceptions yet). A shift count outside `0..31` (or `0..63`) is masked in Kotlin; Cranelift's
+  `ishl`/`sshr`/`ushr` mask the count to the operand width, which is the same rule, so shifts are
+  emitted directly. `%` on floating-point operands is declined until the runtime has `fmod`.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`integer_arithmetic_follows_kotlin_where_the_machine_traps_or_wraps_differently`).
 
 - **`==` on references is declined, not emitted as C's `==`.** Kotlin's `==` is `equals`; C's
   compares addresses. A structural-equality runtime does not exist yet, and emitting the address
-  comparison would compile, link, run and answer a different question.
-  Tests: `tests/native_hello_world_e2e.rs`
+  comparison would compile, link, run and answer a different question. `x == null` and `===` ARE
+  address comparisons in Kotlin, and those are emitted as one.
+  Tests: `tests/native_codegen_e2e.rs`
   (`structural_equality_on_references_is_declined_rather_than_compared_by_address`).
 
 - **Arithmetic on `Byte`/`Short`/`Char` produces `Int`.** Kotlin has no `Byte.plus(Byte): Byte`, so
-  the result of a built-in arithmetic operator on a narrow integer type is carried as `kt_int`.
+  the operands of a built-in arithmetic operator on a narrow integer type are widened to `i32`
+  first (sign-extended, or zero-extended for `Char`) and the result is an `Int`. Only `Char` against
+  `Char` compares unsigned; widened to `Int` it is non-negative and a signed compare says the same.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`integer_arithmetic_follows_kotlin_where_the_machine_traps_or_wraps_differently`, `narrow`).
 
-- **A Kotlin loop label becomes a pair of `goto` targets, and so does an ordinary `continue` in a
-  loop that has an update.** C has no labeled loop. Separately, a lowered `for` carries its step as
-  a statement SEQUENCE (the step plus an overflow guard), which cannot go in a `for` header — so the
-  update lands at the end of the body and every `continue` must jump to a point before it, or the
-  loop would never advance.
-  Tests: `tests/native_hello_world_e2e.rs` (`arithmetic_locals_and_control_flow_run`).
+- **A loop is four blocks — header, body, update, exit — and `break`/`continue` are edges.** A
+  labeled `break` targets the named loop's exit block and `continue` its update block (the header
+  when there is no update), so a lowered `for`, whose step is a statement sequence carrying its own
+  overflow guard, runs that sequence at the `continue` target and its guard's labeled `break` finds
+  the loop it names while the update is still being lowered. An `if`/`when` is a chain of
+  conditional branches into one merge block; when it is used as a value the merge block carries it
+  as a block parameter. An arm or a loop body that leaves (`return`, `break`, `continue`) simply
+  contributes no edge, and whatever the IR still puts after it lands in a block nothing reaches.
+  Tests: `tests/native_codegen_e2e.rs` (`arithmetic_locals_and_control_flow_run`,
+  `a_function_call_and_recursion_run`).
 
 - **An unsupported construct declines the whole file with a diagnostic.** The JVM backend can afford
   a best effort because `kotlinc` decides what is correct; nothing decides that for native yet, so a
   partial emission would produce a program that links and misbehaves.
-  Tests: `tests/native_hello_world_e2e.rs` (`an_unsupported_construct_is_declined_with_a_diagnostic`).
+  Tests: `tests/native_codegen_e2e.rs` (`an_unsupported_construct_is_declined_with_a_diagnostic`).
 
 - **Every heap object begins with its type, and memory is reclaimed by a mark-sweep collector whose
   roots are conservative and whose heap tracing is precise.** A `KType` descriptor names the byte
@@ -5398,7 +5410,7 @@ and behavior is checked by RUNNING the emitted program.
   whose C program pins precise heap tracing by an object referenced only from a `kt_long` field
   being reclaimed, and interior-pointer rooting, cycle reclamation, slot reuse, large-object
   unmapping and the automatic trigger);
-  `tests/native_hello_world_e2e.rs` (`a_program_that_allocates_heavily_runs_in_bounded_memory`).
+  `tests/native_codegen_e2e.rs` (`a_program_that_allocates_heavily_runs_under_collection`).
 
 - **The collector never moves an object.** A conservative root cannot be updated — the word that
   looks like a pointer may be an integer — so nothing that a root might refer to may change
@@ -5418,7 +5430,7 @@ and behavior is checked by RUNNING the emitted program.
   root.
   Tests: `tests/native_gc_e2e.rs` (a string built across repeated collections prints intact, and a
   literal and `Unit` pass through a collection untouched);
-  `tests/native_hello_world_e2e.rs` (`a_program_that_allocates_heavily_runs_in_bounded_memory`).
+  `tests/native_codegen_e2e.rs` (`a_program_that_allocates_heavily_runs_under_collection`).
 
 - **A class instance is a header followed by the superclass's fields, then its own.** The object
   header stays one word — the collector's contract is `header->type` and nothing here changes it.

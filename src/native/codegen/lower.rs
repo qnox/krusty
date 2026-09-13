@@ -13,8 +13,10 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    types, AbiParam, InstBuilder, Signature, StackSlotData, StackSlotKind,
+    types, AbiParam, Block, BlockArg, InstBuilder, Signature, StackSlotData, StackSlotKind,
+    TrapCode,
 };
 use cranelift_codegen::ir::{FuncRef, Type, Value};
 use cranelift_codegen::isa::CallConv;
@@ -23,7 +25,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
-use crate::ir::{Callee, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
 
@@ -272,7 +274,8 @@ impl<'a> FileLowering<'a> {
                     builder: &mut builder,
                     values: HashMap::new(),
                     result: carrier(function.ret),
-                    returned: false,
+                    loops: Vec::new(),
+                    terminated: false,
                 };
                 // Parameters occupy the leading value slots.
                 let params = body_lowering.builder.block_params(entry).to_vec();
@@ -281,7 +284,11 @@ impl<'a> FileLowering<'a> {
                     body_lowering.builder.def_var(variable, *value);
                 }
                 body_lowering.statement(body)?;
-                if !body_lowering.returned {
+                if body_lowering.terminated {
+                    // The builder sits in the block after the last terminator, which nothing
+                    // reaches; a trap closes it so every block is complete.
+                    body_lowering.builder.ins().trap(TrapCode::unwrap_user(1));
+                } else {
                     // Falling off the end of a `Unit` function is a `return`.
                     if body_lowering.result != Carrier::Void {
                         return Err(format!(
@@ -349,14 +356,25 @@ impl<'a> FileLowering<'a> {
     }
 }
 
+/// One enclosing loop, for `break`/`continue` to target.
+struct LoopFrame {
+    label: Option<String>,
+    break_block: Block,
+    continue_block: Block,
+}
+
 struct BodyLowering<'a, 'b, 'c> {
     file: &'b mut FileLowering<'a>,
     builder: &'b mut FunctionBuilder<'c>,
     /// Kotlin value slot → Cranelift variable and its declared type.
     values: HashMap<u32, (Variable, Ty)>,
     result: Carrier,
-    /// Whether the current block has already been terminated by a `return`.
-    returned: bool,
+    /// Loops the current position is inside, innermost last.
+    loops: Vec<LoopFrame>,
+    /// Whether control has left the current block for good — a `return`, `break` or `continue`
+    /// was emitted and the builder now sits in a fresh block nothing jumps to. Statement walkers
+    /// stop at the first terminated statement; whatever a dead block does receive is harmless.
+    terminated: bool,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
@@ -373,12 +391,40 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.file.module.declare_func_in_func(id, self.builder.func)
     }
 
+    /// Call a runtime function by symbol.
+    fn runtime_call(
+        &mut self,
+        symbol: &str,
+        params: &[Ty],
+        ret: Ty,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Unsupported> {
+        let id = self.file.import(symbol, params, ret)?;
+        let func_ref = self.func_ref(id);
+        let call = self.builder.ins().call(func_ref, arguments);
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// The current block has been terminated: move to a block nothing reaches, so that anything
+    /// the IR still puts after the terminator has somewhere to go without tripping the builder.
+    fn terminate(&mut self) {
+        self.terminated = true;
+        let dead = self.builder.create_block();
+        self.builder.switch_to_block(dead);
+    }
+
+    /// Enter `block` as a reachable position.
+    fn continue_in(&mut self, block: Block) {
+        self.builder.switch_to_block(block);
+        self.terminated = false;
+    }
+
     fn statement(&mut self, id: u32) -> Result<(), Unsupported> {
         match self.file.ir.expr(id).clone() {
             IrExpr::Block { stmts, value } => {
                 for statement in stmts {
                     self.statement(statement)?;
-                    if self.returned {
+                    if self.terminated {
                         return Ok(());
                     }
                 }
@@ -390,10 +436,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 match (value, self.result) {
                     (Some(value), Carrier::Void) => {
                         self.expression(value)?;
+                        if self.terminated {
+                            return Ok(());
+                        }
                         self.builder.ins().return_(&[]);
                     }
                     (Some(value), _) => {
-                        let Some(value) = self.expression(value)? else {
+                        let value = self.expression(value)?;
+                        if self.terminated {
+                            return Ok(());
+                        }
+                        let Some(value) = value else {
                             return Err(
                                 "a `return` of no value from a non-`Unit` function".to_string()
                             );
@@ -404,7 +457,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.builder.ins().return_(&[]);
                     }
                 }
-                self.returned = true;
+                self.terminate();
             }
             IrExpr::Variable {
                 index, ty, init, ..
@@ -417,7 +470,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 let variable = self.declare_value(index, ty)?;
                 if let Some(init) = init {
-                    let Some(value) = self.expression(init)? else {
+                    let value = self.coerce(init, ty)?;
+                    if self.terminated {
+                        return Ok(());
+                    }
+                    let Some(value) = value else {
                         return Err("a local initialized from a `Unit` value".to_string());
                     };
                     self.builder.def_var(variable, value);
@@ -429,18 +486,205 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
             }
             IrExpr::SetValue { var, value } => {
-                let Some(&(variable, _)) = self.values.get(&var) else {
+                let Some(&(variable, ty)) = self.values.get(&var) else {
                     return Err("an assignment to an undeclared local".to_string());
                 };
-                let Some(value) = self.expression(value)? else {
+                let value = self.coerce(value, ty)?;
+                if self.terminated {
+                    return Ok(());
+                }
+                let Some(value) = value else {
                     return Err("an assignment of a `Unit` value".to_string());
                 };
                 self.builder.def_var(variable, value);
+            }
+            IrExpr::When { branches } => {
+                self.when(&branches, None)?;
+            }
+            IrExpr::While {
+                cond,
+                body,
+                update,
+                post_test,
+                label,
+            } => self.loop_statement(cond, body, update, post_test, label)?,
+            IrExpr::Break { label } => {
+                let target = self.loop_frame(label.as_deref(), "break")?.break_block;
+                self.builder.ins().jump(target, &[]);
+                self.terminate();
+            }
+            IrExpr::Continue { label } => {
+                let target = self
+                    .loop_frame(label.as_deref(), "continue")?
+                    .continue_block;
+                self.builder.ins().jump(target, &[]);
+                self.terminate();
             }
             _ => {
                 self.expression(id)?;
             }
         }
+        Ok(())
+    }
+
+    /// The loop a `break`/`continue` names: the labeled one, or the innermost.
+    fn loop_frame(&self, label: Option<&str>, keyword: &str) -> Result<&LoopFrame, Unsupported> {
+        let frame = match label {
+            Some(label) => self
+                .loops
+                .iter()
+                .rev()
+                .find(|frame| frame.label.as_deref() == Some(label)),
+            None => self.loops.last(),
+        };
+        frame.ok_or_else(|| format!("a `{keyword}` outside the loop it names"))
+    }
+
+    /// `while`, `do…while`, and the shape a lowered `for` takes: a loop whose `update` runs after
+    /// the body at the `continue` target. Every jump is a real edge here — the `goto` scaffolding
+    /// the C emitter needed for labels and updates is just what a control-flow graph is.
+    fn loop_statement(
+        &mut self,
+        cond: u32,
+        body: u32,
+        update: Option<u32>,
+        post_test: bool,
+        label: Option<String>,
+    ) -> Result<(), Unsupported> {
+        let header = self.builder.create_block();
+        let body_block = self.builder.create_block();
+        let exit = self.builder.create_block();
+        let update_block = update.map(|_| self.builder.create_block());
+
+        self.builder
+            .ins()
+            .jump(if post_test { body_block } else { header }, &[]);
+
+        self.continue_in(header);
+        let condition = self.expression(cond)?;
+        if !self.terminated {
+            let Some(condition) = condition else {
+                return Err("a loop condition of no value".to_string());
+            };
+            self.builder
+                .ins()
+                .brif(condition, body_block, &[], exit, &[]);
+        }
+
+        self.loops.push(LoopFrame {
+            label,
+            break_block: exit,
+            continue_block: update_block.unwrap_or(header),
+        });
+        self.continue_in(body_block);
+        self.statement(body)?;
+        if !self.terminated {
+            self.builder.ins().jump(update_block.unwrap_or(header), &[]);
+        }
+        // The frame stays for the update: a lowered `for` puts its overflow guard's `break` there.
+        if let (Some(update), Some(update_block)) = (update, update_block) {
+            self.continue_in(update_block);
+            self.statement(update)?;
+            if !self.terminated {
+                self.builder.ins().jump(header, &[]);
+            }
+        }
+        self.loops.pop();
+
+        self.continue_in(exit);
+        Ok(())
+    }
+
+    /// `if`/`when`: a chain of conditional branches into one merge block. With `result` the merge
+    /// block carries the value as a block parameter and every arm passes its own; without, arm
+    /// values are discarded. An arm that leaves (a `return`, a `break`) simply contributes no edge.
+    fn when(
+        &mut self,
+        branches: &[(Option<u32>, u32)],
+        result: Option<Ty>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let merge = self.builder.create_block();
+        let result = result.filter(|ty| carrier(*ty) != Carrier::Void);
+        if let Some(ty) = result {
+            let clif = carrier(ty).clif().expect("non-void carrier");
+            self.builder.append_block_param(merge, clif);
+        }
+
+        let mut reaches_merge = false;
+        let mut has_else = false;
+        for (condition, body) in branches {
+            match condition {
+                Some(condition) => {
+                    let condition = self.expression(*condition)?;
+                    if self.terminated {
+                        break;
+                    }
+                    let Some(condition) = condition else {
+                        return Err("a condition of no value".to_string());
+                    };
+                    let then_block = self.builder.create_block();
+                    let else_block = self.builder.create_block();
+                    self.builder
+                        .ins()
+                        .brif(condition, then_block, &[], else_block, &[]);
+                    self.continue_in(then_block);
+                    self.arm(*body, result, merge, &mut reaches_merge)?;
+                    self.continue_in(else_block);
+                }
+                None => {
+                    has_else = true;
+                    self.arm(*body, result, merge, &mut reaches_merge)?;
+                    break;
+                }
+            }
+        }
+        if !has_else && !self.terminated {
+            if result.is_some() {
+                return Err("a `when` used as a value without an `else`".to_string());
+            }
+            self.builder.ins().jump(merge, &[]);
+            reaches_merge = true;
+        }
+
+        if !reaches_merge {
+            // Every arm left. The merge block stays unused, and so does whatever follows.
+            self.terminated = true;
+            return Ok(None);
+        }
+        self.continue_in(merge);
+        Ok(result.map(|_| self.builder.block_params(merge)[0]))
+    }
+
+    /// One arm of a `when`: its body, then the edge into `merge` unless the body left.
+    fn arm(
+        &mut self,
+        body: u32,
+        result: Option<Ty>,
+        merge: Block,
+        reaches_merge: &mut bool,
+    ) -> Result<(), Unsupported> {
+        let value = match result {
+            Some(ty) => self.coerce(body, ty)?,
+            None => {
+                self.statement(body)?;
+                None
+            }
+        };
+        if self.terminated {
+            return Ok(());
+        }
+        match (result, value) {
+            (Some(_), Some(value)) => {
+                self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
+            }
+            (Some(_), None) => {
+                return Err("a `when` arm of no value where one is needed".to_string())
+            }
+            (None, _) => {
+                self.builder.ins().jump(merge, &[]);
+            }
+        }
+        *reaches_merge = true;
         Ok(())
     }
 
@@ -467,11 +711,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Block { stmts, value } => {
                 for statement in stmts {
                     self.statement(statement)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
                 }
                 match value {
                     Some(value) => self.expression(value),
                     None => Ok(None),
                 }
+            }
+            IrExpr::When { branches } => {
+                let result = self.type_of(id);
+                self.when(&branches, result)
             }
             IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull,
@@ -483,6 +734,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 dispatch_receiver,
                 args,
             } => self.call(&callee, dispatch_receiver, &args),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
+            IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
+            IrExpr::StringConcat(parts) => self.concat(&parts),
+            IrExpr::Return(_)
+            | IrExpr::Variable { .. }
+            | IrExpr::SetValue { .. }
+            | IrExpr::While { .. }
+            | IrExpr::Break { .. }
+            | IrExpr::Continue { .. } => {
+                self.statement(id)?;
+                Ok(None)
+            }
             other => Err(describe(&other)),
         }
     }
@@ -504,23 +767,27 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let Some(text) = value.as_str() else {
                     return Err("a string constant containing an unpaired surrogate".to_string());
                 };
-                let data = self.file.string_data(text.as_bytes())?;
-                let global = self
-                    .file
-                    .module
-                    .declare_data_in_func(data, self.builder.func);
-                let pointer = self.builder.ins().symbol_value(types::I64, global);
-                let length = self.builder.ins().iconst(types::I32, text.len() as i64);
-                let make = self.file.import(
-                    "kt_string_utf8",
-                    &[Ty::obj("kotlin/Any"), Ty::Int],
-                    Ty::String,
-                )?;
-                let make_ref = self.func_ref(make);
-                let call = self.builder.ins().call(make_ref, &[pointer, length]);
-                self.builder.inst_results(call)[0]
+                self.string_literal(text.as_bytes())?
             }
         })
+    }
+
+    /// A string object for a literal's bytes.
+    fn string_literal(&mut self, bytes: &[u8]) -> Result<Value, Unsupported> {
+        let data = self.file.string_data(bytes)?;
+        let global = self
+            .file
+            .module
+            .declare_data_in_func(data, self.builder.func);
+        let pointer = self.builder.ins().symbol_value(types::I64, global);
+        let length = self.builder.ins().iconst(types::I32, bytes.len() as i64);
+        let string = self.runtime_call(
+            "kt_string_utf8",
+            &[Ty::obj("kotlin/Any"), Ty::Int],
+            Ty::String,
+            &[pointer, length],
+        )?;
+        Ok(string.expect("`kt_string_utf8` returns a string"))
     }
 
     /// The Kotlin type of an expression, as far as the lowering needs it: enough to decide the
@@ -541,10 +808,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             },
             IrExpr::UnitInstance => Ty::Unit,
             IrExpr::GetValue(slot) => self.values.get(slot)?.1,
-            IrExpr::TypeOp { type_operand, .. } => *type_operand,
+            IrExpr::TypeOp {
+                op, type_operand, ..
+            } => match op {
+                IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
+                IrTypeOp::SafeCast => Ty::nullable(*type_operand),
+                _ => *type_operand,
+            },
             IrExpr::Block {
                 value: Some(value), ..
             } => self.type_of(*value)?,
+            IrExpr::Block { value: None, .. } => Ty::Unit,
+            IrExpr::When { branches } => self.type_of(branches.first()?.1)?,
+            IrExpr::StringConcat(_) => Ty::String,
+            IrExpr::PrimitiveNeg { ty, .. } => *ty,
+            IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
+                IrBinOp::Lt
+                | IrBinOp::Le
+                | IrBinOp::Gt
+                | IrBinOp::Ge
+                | IrBinOp::Eq
+                | IrBinOp::Ne
+                | IrBinOp::RefEq
+                | IrBinOp::RefNe
+                | IrBinOp::And
+                | IrBinOp::Or => Ty::Boolean,
+                // Kotlin has no `Byte.plus(Byte): Byte`: arithmetic on the narrow integer types
+                // produces `Int`, and a result typed `Byte` here would pick the wrong carrier.
+                _ => match self.type_of(*lhs)? {
+                    Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
+                    other => other,
+                },
+            },
             IrExpr::Call { callee, .. } => match callee {
                 Callee::Local(function) => self.file.ir.functions[*function as usize].ret,
                 Callee::External { ret, .. } | Callee::Intrinsic { ret, .. } => *ret,
@@ -554,19 +849,44 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         })
     }
 
-    /// A representation change between carriers: boxing a scalar into a reference, unboxing one
-    /// out, or widening/narrowing between scalars.
+    /// An expression coerced to the carrier of `target`.
     fn coerce(&mut self, arg: u32, target: Ty) -> Result<Option<Value>, Unsupported> {
         let Some(value) = self.expression(arg)? else {
             return Ok(None);
         };
+        if self.terminated {
+            return Ok(Some(value));
+        }
+        let source = self.type_of(arg);
+        self.convert(value, source, target)
+    }
+
+    /// An expression in a position that requires a reference, boxing a scalar if necessary.
+    fn reference(&mut self, id: u32) -> Result<Value, Unsupported> {
+        match self.coerce(id, Ty::nullable(Ty::obj("kotlin/Any")))? {
+            Some(value) => Ok(value),
+            None => {
+                // `Unit` as a value is the runtime's singleton.
+                let unit = self.runtime_call("kt_unit", &[], Ty::obj("kotlin/Unit"), &[])?;
+                Ok(unit.expect("`kt_unit` returns the singleton"))
+            }
+        }
+    }
+
+    /// A representation change between carriers: boxing a scalar into a reference, unboxing one
+    /// out, or widening/narrowing between scalars. An undetermined source leaves the value alone.
+    fn convert(
+        &mut self,
+        value: Value,
+        source: Option<Ty>,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
         let target = carrier(target);
-        let source = self.type_of(arg).map(carrier);
-        match (source, target) {
+        match (source.map(carrier), target) {
             (None, _) | (Some(Carrier::Ref), Carrier::Ref) => Ok(Some(value)),
             (Some(source), target) if source == target => Ok(Some(value)),
             (Some(Carrier::Scalar(_, _)), Carrier::Ref) => {
-                let ty = self.type_of(arg).expect("known scalar");
+                let ty = source.expect("known scalar");
                 let Some(suffix) = box_suffix(ty) else {
                     return Err(format!(
                         "a `{}` in a position that requires a reference (the runtime cannot render \
@@ -574,41 +894,260 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if ty == Ty::Float { "Float" } else { "Double" }
                     ));
                 };
-                let boxer =
-                    self.file
-                        .import(&format!("kt_box_{suffix}"), &[ty], Ty::obj("kotlin/Any"))?;
-                let boxer_ref = self.func_ref(boxer);
-                let call = self.builder.ins().call(boxer_ref, &[value]);
-                Ok(Some(self.builder.inst_results(call)[0]))
+                self.runtime_call(
+                    &format!("kt_box_{suffix}"),
+                    &[ty],
+                    Ty::obj("kotlin/Any"),
+                    &[value],
+                )
             }
             (Some(Carrier::Ref), Carrier::Scalar(_, _)) => {
                 let ty = target_ty_of(target).expect("scalar carrier");
                 let Some(suffix) = box_suffix(ty) else {
                     return Err("an unboxing to a floating-point value".to_string());
                 };
-                let unboxer = self.file.import(
+                self.runtime_call(
                     &format!("kt_unbox_{suffix}"),
                     &[Ty::obj("kotlin/Any")],
                     ty,
-                )?;
-                let unboxer_ref = self.func_ref(unboxer);
-                let call = self.builder.ins().call(unboxer_ref, &[value]);
-                Ok(Some(self.builder.inst_results(call)[0]))
+                    &[value],
+                )
             }
             (Some(Carrier::Scalar(from, signed)), Carrier::Scalar(to, _)) => {
-                Ok(Some(if from.bits() < to.bits() {
-                    if signed {
-                        self.builder.ins().sextend(to, value)
-                    } else {
-                        self.builder.ins().uextend(to, value)
-                    }
-                } else {
-                    self.builder.ins().ireduce(to, value)
-                }))
+                Ok(Some(self.resize(value, from, signed, to)))
             }
             (Some(_), Carrier::Void) => Ok(None),
             (Some(Carrier::Void), _) => Err("a coercion from `Unit`".to_string()),
         }
+    }
+
+    /// Widen or narrow an integer value between scalar carriers.
+    fn resize(&mut self, value: Value, from: Type, signed: bool, to: Type) -> Value {
+        if from == to || from.is_float() || to.is_float() {
+            return value;
+        }
+        if from.bits() < to.bits() {
+            if signed {
+                self.builder.ins().sextend(to, value)
+            } else {
+                self.builder.ins().uextend(to, value)
+            }
+        } else {
+            self.builder.ins().ireduce(to, value)
+        }
+    }
+
+    /// Two scalar operands brought to one width, as Kotlin's operator overloads do (`Byte + Int`
+    /// is `Int + Int`). Returns the values, their common type, and whether comparisons are signed.
+    fn unify(
+        &mut self,
+        lhs: Value,
+        lhs_ty: Option<Ty>,
+        rhs: Value,
+        rhs_ty: Option<Ty>,
+    ) -> Result<(Value, Value, Type, bool), Unsupported> {
+        let left = self.builder.func.dfg.value_type(lhs);
+        let right = self.builder.func.dfg.value_type(rhs);
+        if left.is_float() != right.is_float() {
+            return Err("an operator mixing integer and floating-point operands".to_string());
+        }
+        let signed_of = |ty: Option<Ty>| !matches!(ty, Some(Ty::Char));
+        let width = if left.bits() >= right.bits() {
+            left
+        } else {
+            right
+        };
+        let lhs = self.resize(lhs, left, signed_of(lhs_ty), width);
+        let rhs = self.resize(rhs, right, signed_of(rhs_ty), width);
+        // Only `Char` compares unsigned, and only against another `Char`; widened to `Int` it is a
+        // non-negative `Int` and signed comparison is the same thing.
+        let signed = !(matches!(lhs_ty, Some(Ty::Char)) && matches!(rhs_ty, Some(Ty::Char)));
+        Ok((lhs, rhs, width, signed))
+    }
+
+    /// A built-in binary operator, with Kotlin's semantics where the machine's differ.
+    fn binary(&mut self, op: IrBinOp, lhs: u32, rhs: u32) -> Result<Option<Value>, Unsupported> {
+        let lhs_ty = self.type_of(lhs);
+        let rhs_ty = self.type_of(rhs);
+
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
+            let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
+                || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
+            let on_references = lhs_ty.map(carrier) == Some(Carrier::Ref)
+                || rhs_ty.map(carrier) == Some(Carrier::Ref);
+            if against_null {
+                // `x == null` is `x === null` in Kotlin: no `equals` is ever called.
+                let left = self.reference(lhs)?;
+                let right = self.reference(rhs)?;
+                let condition = comparison(op, true).expect("equality");
+                return Ok(Some(self.builder.ins().icmp(condition, left, right)));
+            }
+            if on_references {
+                return Err("structural equality on references".to_string());
+            }
+            if lhs_ty.is_none() && rhs_ty.is_none() {
+                // Neither a known scalar nor a known reference: either equality would be a guess.
+                return Err("an equality on an undetermined operand type".to_string());
+            }
+        }
+        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) {
+            let left = self.reference(lhs)?;
+            let right = self.reference(rhs)?;
+            let condition = comparison(op, true).expect("identity");
+            return Ok(Some(self.builder.ins().icmp(condition, left, right)));
+        }
+
+        let Some(left) = self.expression(lhs)? else {
+            return Err("a `Unit` operand".to_string());
+        };
+        let Some(right) = self.expression(rhs)? else {
+            return Err("a `Unit` operand".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+
+        // Shifts take an `Int` count whatever the left operand's width; Cranelift masks the count
+        // to the operand width, which is exactly Kotlin's rule (`1 shl 32 == 1`).
+        if matches!(op, IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr) {
+            if self.builder.func.dfg.value_type(left).is_float() {
+                return Err("a shift of a floating-point operand".to_string());
+            }
+            let left = self.widen_narrow_integer(left, lhs_ty);
+            return Ok(Some(match op {
+                IrBinOp::Shl => self.builder.ins().ishl(left, right),
+                IrBinOp::Shr => self.builder.ins().sshr(left, right),
+                _ => self.builder.ins().ushr(left, right),
+            }));
+        }
+
+        let (left, right, ty, signed) = self.unify(left, lhs_ty, right, rhs_ty)?;
+        if ty.is_float() {
+            return Ok(Some(match op {
+                IrBinOp::Add => self.builder.ins().fadd(left, right),
+                IrBinOp::Sub => self.builder.ins().fsub(left, right),
+                IrBinOp::Mul => self.builder.ins().fmul(left, right),
+                IrBinOp::Div => self.builder.ins().fdiv(left, right),
+                IrBinOp::Rem => return Err("`%` on floating-point operands".to_string()),
+                IrBinOp::Lt
+                | IrBinOp::Le
+                | IrBinOp::Gt
+                | IrBinOp::Ge
+                | IrBinOp::Eq
+                | IrBinOp::Ne => {
+                    let condition = float_comparison(op).expect("comparison");
+                    self.builder.ins().fcmp(condition, left, right)
+                }
+                other => return Err(format!("`{other:?}` on floating-point operands")),
+            }));
+        }
+
+        // Arithmetic on the narrow types is `Int` arithmetic; `Boolean` is not narrow arithmetic.
+        let arithmetic = !matches!(
+            op,
+            IrBinOp::Lt
+                | IrBinOp::Le
+                | IrBinOp::Gt
+                | IrBinOp::Ge
+                | IrBinOp::Eq
+                | IrBinOp::Ne
+                | IrBinOp::And
+                | IrBinOp::Or
+        );
+        let (left, right, ty) = if arithmetic && ty.bits() < 32 && lhs_ty != Some(Ty::Boolean) {
+            (
+                self.widen_narrow_integer(left, lhs_ty),
+                self.widen_narrow_integer(right, rhs_ty),
+                types::I32,
+            )
+        } else {
+            (left, right, ty)
+        };
+
+        Ok(Some(match op {
+            // `iadd`/`isub`/`imul` wrap, which is Kotlin's rule; there is nothing to guard.
+            IrBinOp::Add => self.builder.ins().iadd(left, right),
+            IrBinOp::Sub => self.builder.ins().isub(left, right),
+            IrBinOp::Mul => self.builder.ins().imul(left, right),
+            // Division by zero throws and `MIN_VALUE / -1` wraps in Kotlin; the machine traps on
+            // both, so the runtime decides.
+            IrBinOp::Div | IrBinOp::Rem => {
+                let (name, kotlin) = if ty == types::I64 {
+                    ("long", Ty::Long)
+                } else {
+                    ("int", Ty::Int)
+                };
+                let helper = if op == IrBinOp::Div { "div" } else { "rem" };
+                let result = self.runtime_call(
+                    &format!("kt_{helper}_{name}"),
+                    &[kotlin, kotlin],
+                    kotlin,
+                    &[left, right],
+                )?;
+                result.expect("division returns a value")
+            }
+            IrBinOp::BitAnd | IrBinOp::And => self.builder.ins().band(left, right),
+            IrBinOp::BitOr | IrBinOp::Or => self.builder.ins().bor(left, right),
+            IrBinOp::BitXor => self.builder.ins().bxor(left, right),
+            IrBinOp::Lt | IrBinOp::Le | IrBinOp::Gt | IrBinOp::Ge | IrBinOp::Eq | IrBinOp::Ne => {
+                let condition = comparison(op, signed).expect("comparison");
+                self.builder.ins().icmp(condition, left, right)
+            }
+            IrBinOp::RefEq | IrBinOp::RefNe | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr => {
+                unreachable!("handled above")
+            }
+        }))
+    }
+
+    /// `Byte`/`Short`/`Char` operands of arithmetic become `Int`, as Kotlin's operators declare.
+    fn widen_narrow_integer(&mut self, value: Value, ty: Option<Ty>) -> Value {
+        let from = self.builder.func.dfg.value_type(value);
+        if from.is_float() || from.bits() >= 32 {
+            return value;
+        }
+        self.resize(value, from, !matches!(ty, Some(Ty::Char)), types::I32)
+    }
+
+    /// Unary minus. `-Int.MIN_VALUE` is `Int.MIN_VALUE` in Kotlin, and `ineg` wraps the same way.
+    fn negate(&mut self, operand: u32, ty: Ty) -> Result<Option<Value>, Unsupported> {
+        let Some(value) = self.coerce(operand, ty)? else {
+            return Err("a negation of `Unit`".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        Ok(Some(if carrier(ty).clif().is_some_and(Type::is_float) {
+            self.builder.ins().fneg(value)
+        } else {
+            self.builder.ins().ineg(value)
+        }))
+    }
+
+    /// A string template: each part rendered by the runtime and joined left to right.
+    fn concat(&mut self, parts: &[u32]) -> Result<Option<Value>, Unsupported> {
+        let Some((first, rest)) = parts.split_first() else {
+            return self.string_literal(b"").map(Some);
+        };
+        let mut joined = self.reference(*first)?;
+        if rest.is_empty() {
+            // A lone `"$x"` is `x.toString()`.
+            return self.runtime_call("kt_to_string", &[any()], Ty::String, &[joined]);
+        }
+        for part in rest {
+            let part = self.reference(*part)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            joined = self
+                .runtime_call(
+                    "kt_string_plus",
+                    &[any(), any()],
+                    Ty::String,
+                    &[joined, part],
+                )?
+                .expect("`kt_string_plus` returns a string");
+        }
+        Ok(Some(joined))
     }
 
     fn call(
@@ -622,11 +1161,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if dispatch_receiver.is_some() {
                     return Err("a local call with a receiver".to_string());
                 }
-                let arguments = self.arguments(args)?;
+                let params = self.file.ir.functions[*function as usize].params.clone();
+                let arguments = self.arguments(args, &params)?;
+                if self.terminated {
+                    return Ok(None);
+                }
                 let id = self.file.functions[*function as usize];
                 let func_ref = self.func_ref(id);
                 let call = self.builder.ins().call(func_ref, &arguments);
                 Ok(self.builder.inst_results(call).first().copied())
+            }
+            Callee::Intrinsic { operation, ret } => {
+                self.intrinsic(*operation, *ret, dispatch_receiver, args)
             }
             Callee::External {
                 target,
@@ -639,37 +1185,171 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 let owner = realization.callable.owner.render();
                 let name = realization.callable.name.clone();
-                if dispatch_receiver.is_some() {
-                    return Err(format!("the member `{}.{name}`", owner.replace('/', ".")));
+                match dispatch_receiver {
+                    // A member: the receiver is the runtime function's first argument, and
+                    // everything crosses as a reference.
+                    Some(receiver) => {
+                        let Some(symbol) =
+                            super::super::intrinsics::runtime_member(&owner, &name, params)
+                        else {
+                            return Err(format!("the member `{}.{name}`", owner.replace('/', ".")));
+                        };
+                        let mut arguments = vec![self.reference(receiver)?];
+                        for argument in args {
+                            arguments.push(self.reference(*argument)?);
+                        }
+                        if self.terminated {
+                            return Ok(None);
+                        }
+                        let signature = vec![any(); arguments.len()];
+                        self.runtime_call(symbol, &signature, *ret, &arguments)
+                    }
+                    None => {
+                        let Some(symbol) =
+                            super::super::intrinsics::runtime_function(&owner, &name, params)
+                        else {
+                            return Err(format!(
+                                "the declaration `{}.{name}`",
+                                owner.replace('/', ".")
+                            ));
+                        };
+                        let arguments = self.arguments(args, params)?;
+                        if self.terminated {
+                            return Ok(None);
+                        }
+                        self.runtime_call(&symbol, params, *ret, &arguments)
+                    }
                 }
-                let Some(symbol) =
-                    super::super::intrinsics::runtime_function(&owner, &name, params)
-                else {
-                    return Err(format!(
-                        "the declaration `{}.{name}`",
-                        owner.replace('/', ".")
-                    ));
-                };
-                let arguments = self.arguments(args)?;
-                let id = self.file.import(&symbol, params, *ret)?;
-                let func_ref = self.func_ref(id);
-                let call = self.builder.ins().call(func_ref, &arguments);
-                Ok(self.builder.inst_results(call).first().copied())
             }
             other => Err(format!("a {} call", callee_kind(other))),
         }
     }
 
-    fn arguments(&mut self, args: &[u32]) -> Result<Vec<Value>, Unsupported> {
+    /// A compiler-selected operation on built-in types, realized by the runtime.
+    fn intrinsic(
+        &mut self,
+        operation: IrIntrinsic,
+        ret: Ty,
+        receiver: Option<u32>,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        match operation {
+            IrIntrinsic::PrimitiveCompare { operand } => {
+                let (Some(receiver), [argument]) = (receiver, args) else {
+                    return Err("a malformed `compareTo`".to_string());
+                };
+                let Some(suffix) = scalar_suffix(operand) else {
+                    return Err("`compareTo` on a non-scalar operand".to_string());
+                };
+                let left = self.coerce(receiver, operand)?;
+                let right = self.coerce(*argument, operand)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                let (Some(left), Some(right)) = (left, right) else {
+                    return Err("`compareTo` on `Unit`".to_string());
+                };
+                self.runtime_call(
+                    &format!("kt_compare_{suffix}"),
+                    &[operand, operand],
+                    ret,
+                    &[left, right],
+                )
+            }
+            IrIntrinsic::StringPlus => {
+                let (Some(receiver), [argument]) = (receiver, args) else {
+                    return Err("a malformed `String.plus`".to_string());
+                };
+                let left = self.reference(receiver)?;
+                let right = self.reference(*argument)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call("kt_string_plus", &[any(), any()], ret, &[left, right])
+            }
+            IrIntrinsic::NullableAnyToString => {
+                let Some(receiver) = receiver else {
+                    return Err("a malformed `toString`".to_string());
+                };
+                let value = self.reference(receiver)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call("kt_to_string", &[any()], ret, &[value])
+            }
+            other => Err(format!("the `{other:?}` intrinsic")),
+        }
+    }
+
+    /// Arguments coerced to the parameter carriers they are passed as.
+    fn arguments(&mut self, args: &[u32], parameters: &[Ty]) -> Result<Vec<Value>, Unsupported> {
         let mut values = Vec::with_capacity(args.len());
-        for argument in args {
-            let Some(value) = self.expression(*argument)? else {
+        for (index, argument) in args.iter().enumerate() {
+            let value = match parameters.get(index) {
+                Some(ty) => self.coerce(*argument, *ty)?,
+                None => self.expression(*argument)?,
+            };
+            if self.terminated {
+                return Ok(values);
+            }
+            let Some(value) = value else {
                 return Err("a `Unit` argument".to_string());
             };
             values.push(value);
         }
         Ok(values)
     }
+}
+
+/// `Any?`: the type every runtime reference parameter is declared as.
+fn any() -> Ty {
+    Ty::nullable(Ty::obj("kotlin/Any"))
+}
+
+/// The integer condition for a Kotlin comparison operator.
+fn comparison(op: IrBinOp, signed: bool) -> Option<IntCC> {
+    Some(match (op, signed) {
+        (IrBinOp::Eq | IrBinOp::RefEq, _) => IntCC::Equal,
+        (IrBinOp::Ne | IrBinOp::RefNe, _) => IntCC::NotEqual,
+        (IrBinOp::Lt, true) => IntCC::SignedLessThan,
+        (IrBinOp::Le, true) => IntCC::SignedLessThanOrEqual,
+        (IrBinOp::Gt, true) => IntCC::SignedGreaterThan,
+        (IrBinOp::Ge, true) => IntCC::SignedGreaterThanOrEqual,
+        (IrBinOp::Lt, false) => IntCC::UnsignedLessThan,
+        (IrBinOp::Le, false) => IntCC::UnsignedLessThanOrEqual,
+        (IrBinOp::Gt, false) => IntCC::UnsignedGreaterThan,
+        (IrBinOp::Ge, false) => IntCC::UnsignedGreaterThanOrEqual,
+        _ => return None,
+    })
+}
+
+/// The floating-point condition for a Kotlin comparison: ordered for `<`/`<=`/`>`/`>=`/`==` (any
+/// NaN makes them false) and unordered for `!=` (`NaN != NaN` is true), as IEEE and Kotlin agree.
+fn float_comparison(op: IrBinOp) -> Option<FloatCC> {
+    Some(match op {
+        IrBinOp::Eq => FloatCC::Equal,
+        IrBinOp::Ne => FloatCC::NotEqual,
+        IrBinOp::Lt => FloatCC::LessThan,
+        IrBinOp::Le => FloatCC::LessThanOrEqual,
+        IrBinOp::Gt => FloatCC::GreaterThan,
+        IrBinOp::Ge => FloatCC::GreaterThanOrEqual,
+        _ => return None,
+    })
+}
+
+/// The runtime's suffix for a scalar type's `kt_compare_*` and console functions.
+fn scalar_suffix(ty: Ty) -> Option<&'static str> {
+    Some(match ty {
+        Ty::Boolean => "boolean",
+        Ty::Byte => "byte",
+        Ty::Short => "short",
+        Ty::Char => "char",
+        Ty::Int => "int",
+        Ty::Long => "long",
+        Ty::Float => "float",
+        Ty::Double => "double",
+        _ => return None,
+    })
 }
 
 /// The Kotlin type a scalar carrier stands for, for naming the runtime's unboxers.

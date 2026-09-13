@@ -544,8 +544,9 @@ those targets need either a libc (and its sysroot) or a different strategy entir
 
 `src/native/` compiles checked common IR to C and links it with `cc`. `fun main() { println(…) }`
 builds to an executable that runs with `JAVA_HOME` and `PATH` emptied, and so do arithmetic, locals,
-`while`, a lowered `for`, recursion, string concatenation and string templates
-(`tests/native_hello_world_e2e.rs`).
+`while`, a lowered `for`, recursion, string concatenation and string templates. (Its tests have
+since moved to `tests/native_codegen_e2e.rs`, where the same programs run through the owned code
+generator; the C path keeps only the class and collector tests until those migrate.)
 
 **C, not Cranelift, and not LLVM.** This document's whole argument is that the code-generator choice
 deserves a decision rather than a default, and printing `Hello, world!` through either candidate
@@ -1084,7 +1085,15 @@ before:**
    (no emulator), so every call and literal-pool relocation in their program text was decoded from
    the linked image and compared against symbol addresses computed independently from the input
    objects' own tables — all match. Running them is one `qemu-user-static` install away on CI.
-3. Re-run the landed class tests against the new generator, slice by slice, until they all pass.
+3. **In progress.** Re-run the landed tests against the new generator, slice by slice, until they
+   all pass. Landed so far: the whole hello-world suite — arithmetic with Kotlin's wrapping,
+   division and shift rules, `Byte`/`Short`/`Char` widening, locals, `if`/`when` as statement and as
+   value, `while`/`do…while`/lowered `for` with labeled `break`/`continue`, early `return`,
+   recursion, `compareTo`, string templates, `String.plus`, boxing for `Any?` positions, `== null`
+   and `===`, and the 200,000-iteration allocation loop under collection. Its C-path test file is
+   deleted. Remaining: classes, vtables, `is`/`as`, `object` singletons, and the collector's
+   Kotlin-visible tests — then `emit.rs`, the emitter half of `classes.rs`, `link.rs` and
+   `backend.rs` go.
 4. Per-module objects and ABI-hash caching — the incremental half.
 5. The `codegen/box` corpus through the native pipeline as the conformance gate: skipping permitted,
    miscompiling never; declined reasons sorted by frequency are the backlog.
