@@ -1949,3 +1949,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the recorded sibling capability into `Row$$serializer.INSTANCE`; there is no accessor-name lookup
   or backend retry.
   `tests/serialization_companion_byte_parity_e2e.rs::a_sibling_files_generated_serializer_accessor_matches_kotlinc`.
+- **A lambda parameter's declared result decides its body's POSITION (fix).** A lambda whose declared
+  result is `Unit` ends in statement position, which is what makes a trailing `when` with no `else`
+  legal — the shape every Kotlin builder DSL is written around.
+  The expectation krusty builds for a functional argument carried the context types, the receiver and
+  the value parameters, but not the result, and the channel that consumes it hardcoded "a value is
+  required". A classpath TOP-LEVEL function was unaffected (a different channel reads its signature),
+  so the same block was accepted at top level and rejected on a member — with
+  `'when' expression must be exhaustive`, on source kotlinc accepts, taking the whole module's output
+  with it.
+  Still open, and deliberately not covered: a generic member EXTENSION
+  (`fun <T : Cfg> Holder<T>.engine(block: T.() -> Unit)`) reaches a plan whose `expected_types` entry
+  is `None`, so the result is unknown there for a different reason.
+  `tests/classpath_member_lambda_unit_e2e.rs::a_classpath_member_receiver_lambda_is_a_statement_position`.

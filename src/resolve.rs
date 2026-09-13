@@ -2922,6 +2922,10 @@ struct FunctionalArgumentExpectation {
     context_types: Vec<Ty>,
     value_params: Vec<Ty>,
     receiver: Option<Ty>,
+    /// The parameter's declared RESULT. A lambda whose expected result is `Unit` ends in statement
+    /// position, which is what makes a trailing `when` with no `else` legal in every builder block.
+    /// `None` when the parameter shape was recovered from metadata alone and carries no result.
+    result: Option<Ty>,
     callable_type: Option<Ty>,
     sam_conversion: bool,
 }
@@ -2967,6 +2971,7 @@ fn functional_argument_expectation(
                 context_types: sig.params[..sig.context_count.min(sig.params.len())].to_vec(),
                 value_params: sig.params.get(skip..).unwrap_or_default().to_vec(),
                 receiver,
+                result: Some(sig.ret),
                 callable_type: Some(Ty::Fun(sig)),
                 sam_conversion: false,
             })
@@ -3002,6 +3007,9 @@ fn functional_argument_expectation(
                     .unwrap_or_default(),
                 value_params,
                 receiver: Some(receiver),
+                // This arm exists precisely because the function TYPE was lost; metadata keeps the
+                // receiver classifier and the input types, not the result.
+                result: None,
                 callable_type: None,
                 sam_conversion: false,
             })
@@ -3018,6 +3026,7 @@ fn functional_argument_expectation(
                 context_types: Vec::new(),
                 value_params: sam.params,
                 receiver: None,
+                result: Some(sam.ret),
                 callable_type: Some(callable_type),
                 sam_conversion: true,
             }
@@ -76545,8 +76554,13 @@ impl<'a> Checker<'a> {
         if !matches!(self.file.expr(arg), Expr::Lambda { .. }) {
             return self.expr(scope, arg);
         }
+        // The declared result decides the body's POSITION, not just its type: a `Unit` result puts
+        // the last expression in statement position, so a trailing `when` with no `else` is legal
+        // there. Dropping it made every builder block reject the `when` a Kotlin DSL is written
+        // around.
+        let coerce_return_to_unit = expectation.result == Some(Ty::Unit);
         if !expectation.context_types.is_empty() || expectation.receiver.is_some() {
-            self.check_lambda_with_implicit_receivers_labeled(
+            self.check_lambda_with_implicit_receivers_and_return_labeled(
                 scope,
                 arg,
                 LambdaShape {
@@ -76554,11 +76568,21 @@ impl<'a> Checker<'a> {
                     extension_receiver: expectation.receiver,
                     value_types: &expectation.value_params,
                 },
-                false,
                 label,
+                LambdaCheckMode {
+                    suspend: false,
+                    coerce_return_to_unit,
+                    expected_return: None,
+                },
             )
         } else {
-            self.check_lambda_with_types_labeled(scope, arg, &expectation.value_params, label)
+            self.check_lambda_with_types_and_return(
+                scope,
+                arg,
+                &expectation.value_params,
+                coerce_return_to_unit,
+                label,
+            )
         }
     }
 
