@@ -77,6 +77,28 @@ fn the_inferred_result_keeps_the_receivers_element_type() {
     );
 }
 
+/// Type parameters owned by the caller are proper types at the nested call site. They must remain
+/// symbolic while only the result-only producer's own variables receive bottom completion.
+#[test]
+fn caller_owned_type_parameters_survive_dependent_bound_inference() {
+    assert_both_accept(
+        &[(
+            "Caller.kt",
+            "class Box<out T>(val v: T)\n\
+             fun <R, T : R> Box<T>.orElse(fallback: () -> R): R = v\n\
+             fun <E> retain(xs: List<E>): Set<E> =\n\
+             \x20   runCatching { xs.toSet() }.getOrElse { emptySet() }\n\
+             fun <U : CharSequence> bounded(u: U): CharSequence =\n\
+             \x20   Box(\"x\").orElse { u }\n\
+             fun <U> unbounded(u: U): Any? = Box(\"x\").orElse { u }\n\
+             fun <V, U : V> relational(box: Box<U>, fallback: () -> V): V =\n\
+             \x20   box.orElse(fallback)\n\
+             fun use(): Int = retain(listOf(\"ok\")).single().length\n",
+        )],
+        "caller-owned symbolic constraints",
+    );
+}
+
 /// Control: concrete lambda evidence still widens the bounded formal rather than freezing it at the
 /// receiver's binding.
 #[test]
@@ -121,6 +143,61 @@ fn the_join_holds_inside_a_string_template() {
              fun use(desc: String, k: Kind): String = \"x: ${desc.ifEmpty { k }}\"\n",
         )],
         "`ifEmpty` inside a template",
+    );
+}
+
+/// Controls: neither a caller-owned unconstrained type nor incompatible written type arguments may
+/// be erased into a successful dependent-bound call. Pin both compilers' full ordered diagnostics.
+#[test]
+fn incompatible_dependent_bound_calls_are_rejected_exactly() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Bad.kt",
+            "class Box<out T>(val v: T)\n\
+             fun <R, T : R> Box<T>.orElse(fallback: () -> R): R = v\n\
+             \n\
+             fun <U> bad(u: U): String = Box(\"x\").orElse { u }\n\
+             fun explicitBad(): String = Box(1).orElse<String, Int> { \"x\" }\n",
+        )],
+        &[common::stdlib_jar()],
+    );
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc names the rejected file");
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:4:47: error: return type mismatch: expected 'String', actual 'U \
+                 (of fun <U> bad)'.\nfun <U> bad(u: U): String = Box(\"x\").orElse {{ u \
+                 }}\n                                              ^\n{reference_path}:5:36: error: \
+                 unresolved reference. None of the following candidates is applicable because of a \
+                 receiver type mismatch:\nfun <R, T : R> Box<T>.orElse(fallback: () -> R): R\nfun \
+                 explicitBad(): String = Box(1).orElse<String, Int> {{ \"x\" }}\n                                   \
+                 ^^^^^^\n"
+            )
+            .as_str()
+        )
+    );
+    let path = result
+        .krusty_stderr
+        .split(':')
+        .next()
+        .expect("krusty names the rejected file");
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{path}:4:45: error: type mismatch: inferred type is U (of fun <U> bad) but \
+                 String was expected\n{path}:5:36: error: none of the following candidates is \
+                 applicable:\n\nfun Box<T>.orElse(fallback: () -> R): R\nkrusty: 2 error(s)\n"
+            )
+            .as_str()
+        )
     );
 }
 

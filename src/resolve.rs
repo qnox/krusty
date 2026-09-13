@@ -53249,6 +53249,7 @@ impl<'a> Checker<'a> {
             let mut identity_bindings = crate::symbol_resolver::GSigBinds::new();
             let source = self.fed_source();
             let argument_kinds = self.checked_call_arg_kinds(scope, args);
+            let mut inference_receiver = None;
             if let (Some(actual), Some(declared)) = (candidate_receiver, signature.receiver) {
                 // Receiver applicability may project a nominal callable classifier through its
                 // exact function-type supertype. Generic binding must consume that same semantic
@@ -53260,6 +53261,7 @@ impl<'a> Checker<'a> {
                 } else {
                     actual
                 };
+                inference_receiver = Some(actual);
                 crate::symbol_resolver::unify_ty_from_symbols(
                     &source,
                     declared,
@@ -53380,78 +53382,89 @@ impl<'a> Checker<'a> {
             // the lambda's independent `A = Long` constraint with a premature `A = Int` to `Any`.
             // With no other evidence the literal remains in the ordinary solver and still infers
             // `Int` for calls such as `identity(0)`.
-            let preliminary = crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
-                &source,
-                &signature,
-                inference_actuals.iter().filter_map(
-                    |&(argument, parameter, actual, whole_array)| {
-                        (!matches!(argument_kinds[argument], CallArgKind::IntegerLiteral { .. }))
-                            .then_some((parameter, actual, whole_array))
-                    },
-                ),
-                candidate.call_sig.vararg_index,
-            );
-            let inferred = crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
-                &source,
-                &signature,
-                inference_actuals.iter().filter_map(
-                    |&(argument, parameter, actual, whole_array)| {
-                        let mut actual = (parameter, actual, whole_array);
-                        let kind = match argument_kinds[argument].clone() {
-                            CallArgKind::IntegerLiteral { ty, value } => {
-                                CallArgKind::integer_literal(
-                                    self.integer_literal_semantic_type(ty),
-                                    value,
-                                )
-                            }
-                            kind => kind,
-                        };
-                        if !matches!(kind, CallArgKind::IntegerLiteral { .. }) {
-                            return Some(actual);
-                        }
-                        let literal =
-                            crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
-                                &source,
-                                &signature,
-                                [actual],
-                                candidate.call_sig.vararg_index,
-                            );
-                        let adapts_to_existing = !literal.bindings.is_empty()
-                            && literal.bindings.keys().all(|formal| {
-                                preliminary.bindings.get(formal).is_some_and(|&target| {
-                                    kind.adapts_integer_literal_to(
-                                        self.integer_literal_semantic_type(target),
+            let preliminary =
+                crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
+                    &source,
+                    &signature,
+                    inference_receiver,
+                    inference_actuals.iter().filter_map(
+                        |&(argument, parameter, actual, whole_array)| {
+                            (!matches!(
+                                argument_kinds[argument],
+                                CallArgKind::IntegerLiteral { .. }
+                            ))
+                            .then_some((
+                                parameter,
+                                actual,
+                                whole_array,
+                            ))
+                        },
+                    ),
+                    candidate.call_sig.vararg_index,
+                );
+            let inferred =
+                crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
+                    &source,
+                    &signature,
+                    inference_receiver,
+                    inference_actuals.iter().filter_map(
+                        |&(argument, parameter, actual, whole_array)| {
+                            let mut actual = (parameter, actual, whole_array);
+                            let kind = match argument_kinds[argument].clone() {
+                                CallArgKind::IntegerLiteral { ty, value } => {
+                                    CallArgKind::integer_literal(
+                                        self.integer_literal_semantic_type(ty),
+                                        value,
                                     )
-                                })
-                            });
-                        if adapts_to_existing {
-                            return None;
-                        }
-                        // When a literal is the only evidence for a directly declared type
-                        // parameter, its scalar upper bound is its contextual type. This keeps
-                        // `f(1u)` at `T = UByte` for `<T : UByte>` while an unbounded
-                        // `identity(1u)` still takes the ordinary `T = UInt` path. Library
-                        // signatures may expose the bound as its reference classifier, so ask the
-                        // semantic platform for the equivalent value form before testing the
-                        // literal range and feeding the constraint solver.
-                        let mut declared = signature.params[actual.0];
-                        if candidate.call_sig.vararg_index == Some(actual.0) && !actual.2 {
-                            declared = declared.array_read_elem().unwrap_or(declared);
-                        }
-                        let mut bounded = declared.non_null();
-                        while let Ty::TyParam(_, bound) = bounded {
-                            let value_bound = self.integer_literal_semantic_type(*bound);
-                            if kind.adapts_integer_literal_to(value_bound) {
-                                actual.1 = value_bound;
-                                break;
+                                }
+                                kind => kind,
+                            };
+                            if !matches!(kind, CallArgKind::IntegerLiteral { .. }) {
+                                return Some(actual);
                             }
-                            bounded = bound.non_null();
-                        }
-                        Some(actual)
-                    },
-                ),
-                candidate.call_sig.vararg_index,
-            );
+                            let literal =
+                                crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+                                    &source,
+                                    &signature,
+                                    [actual],
+                                    candidate.call_sig.vararg_index,
+                                );
+                            let adapts_to_existing = !literal.bindings.is_empty()
+                                && literal.bindings.keys().all(|formal| {
+                                    preliminary.bindings.get(formal).is_some_and(|&target| {
+                                        kind.adapts_integer_literal_to(
+                                            self.integer_literal_semantic_type(target),
+                                        )
+                                    })
+                                });
+                            if adapts_to_existing {
+                                return None;
+                            }
+                            // When a literal is the only evidence for a directly declared type
+                            // parameter, its scalar upper bound is its contextual type. This keeps
+                            // `f(1u)` at `T = UByte` for `<T : UByte>` while an unbounded
+                            // `identity(1u)` still takes the ordinary `T = UInt` path. Library
+                            // signatures may expose the bound as its reference classifier, so ask the
+                            // semantic platform for the equivalent value form before testing the
+                            // literal range and feeding the constraint solver.
+                            let mut declared = signature.params[actual.0];
+                            if candidate.call_sig.vararg_index == Some(actual.0) && !actual.2 {
+                                declared = declared.array_read_elem().unwrap_or(declared);
+                            }
+                            let mut bounded = declared.non_null();
+                            while let Ty::TyParam(_, bound) = bounded {
+                                let value_bound = self.integer_literal_semantic_type(*bound);
+                                if kind.adapts_integer_literal_to(value_bound) {
+                                    actual.1 = value_bound;
+                                    break;
+                                }
+                                bounded = bound.non_null();
+                            }
+                            Some(actual)
+                        },
+                    ),
+                    candidate.call_sig.vararg_index,
+                );
             let inferred_lower_inputs = inferred.lower_inputs.clone();
             // Function subtyping makes a stored function value's parameter types upper
             // constraints. A lambda literal's *written* parameter annotations are different: they
@@ -53667,35 +53680,12 @@ impl<'a> Checker<'a> {
                         // constrain the nested producer yet, so Kotlin uses the nested call's bottom
                         // instantiation and lets that concrete result constrain the outer variable.
                         // A concrete but incompatible expectation remains a real failure.
-                        None if nested_expected.mentions_ty_param() => generic_sig
-                            .formals
-                            .iter()
-                            .enumerate()
-                            .map(|(index, formal)| {
-                                // With no concrete outer expectation, a nested producer ordinarily
-                                // contributes its bottom instantiation. A declared non-trivial upper
-                                // bound is still a real constraint, however: `<Y : Any> make(): Box<Y>`
-                                // passed to `<X> take(Box<X>)` requires non-null `X`. Replacing `Y`
-                                // with bottom discards that fact and later defaults `X` to `Any?`.
-                                // Use a direct denotable bound when one exists; recursive/dependent
-                                // bounds remain postponed rather than leaking a callee-owned formal.
-                                let fallback = generic_sig
-                                    .formal_bounds
-                                    .get(index)
-                                    .and_then(|bounds| bounds.first())
-                                    .copied()
-                                    .filter(|bound| {
-                                        !generic_sig.formals.iter().any(|nested| {
-                                            crate::types::ty_mentions_param(
-                                                *bound,
-                                                std::slice::from_ref(nested),
-                                            )
-                                        })
-                                    })
-                                    .unwrap_or(Ty::Nothing);
-                                (formal.clone(), fallback)
-                            })
-                            .collect(),
+                        // With no concrete outer expectation, a nested producer contributes its
+                        // proper unconstrained result. That shared operation keeps concrete bounds
+                        // and prevents declaration-private variables from escaping this call.
+                        None if nested_expected.mentions_ty_param() => {
+                            crate::symbol_resolver::unconstrained_result_bindings(&generic_sig)
+                        }
                         None => continue,
                     };
                 // A symbolic outer expectation may bind the nested producer's formal directly to
@@ -83941,49 +83931,12 @@ impl<'a> Checker<'a> {
                 );
                 return Some(Ty::Error);
             };
-            // The realization re-derives its return from the receiver and arguments alone; a
-            // formal bound only by the EXPECTED type (a classpath reified `Resp.body(): T` under
-            // `fun readPlan(r): Plan = r.body()`) is invisible to it and the call would record the
-            // erased return. The SELECTION already inferred those bindings — substitute them when
-            // they refine a return the realization demonstrably did not learn (still
-            // type-parameter-shaped, erased to Any/Object, or erased to the formal's declared
-            // BOUND, as `<reified T : Number>` erases to Number).
-            if let Some(signature) = selected.generic_sig.as_ref() {
-                let refined = crate::symbol_resolver::instantiate_slot(
-                    &self.fed_source(),
-                    Some(signature),
-                    signature.ret,
-                    &selected.bindings,
-                    crate::symbol_resolver::TypePosition::Out,
-                    crate::symbol_resolver::UnboundSpecialization::Preserve,
-                );
-                let declared_bound_erasure = match signature.ret.non_null() {
-                    Ty::TyParam(_, bound) => Some(*bound),
-                    _ => None,
-                };
-                let unlearned = callable.ret.mentions_ty_param()
-                    || callable.ret.is_erased_top()
-                    || declared_bound_erasure
-                        .is_some_and(|bound| callable.ret.non_null() == bound.non_null());
-                if refined != signature.ret && !refined.mentions_ty_param() && unlearned {
-                    callable.ret = signature.apply_return_policy(self.libraries, refined);
-                    // The splicer reifies from `resolved_call_type_args` — an INLINE classpath
-                    // body carries reification markers, so a direct call to it throws at runtime.
-                    // Publish the selection's bindings (declaration order, only when every formal
-                    // is bound) so the expansion substitutes the same `T` the checker selected.
-                    // Deliberately narrow: recording classpath bindings unconditionally reordered
-                    // the sumOf/maxBy splice family — the guard only fires when the realization
-                    // learned nothing, which those argument-driven calls never hit.
-                    let targs: Vec<Option<Ty>> = signature
-                        .formals
-                        .iter()
-                        .map(|formal| selected.bindings.get(formal).copied())
-                        .collect();
-                    if !targs.is_empty() && targs.iter().all(Option::is_some) {
-                        self.resolved_call_type_args.insert(e, targs);
-                    }
-                }
-            }
+            // Provider realization identifies the physical target; it does not own source type
+            // inference. The selected candidate already carries the authoritative semantic return
+            // and its declaration-ordered type arguments were recorded above. Recomputing the
+            // return here from rechecked operands erased `Set<String>` back to raw `Set` whenever a
+            // postponed nested producer still exposed its private type variable.
+            callable.ret = selected.callable.ret;
             let ret = callable.ret;
             let mut resolved = ResolvedExtensionCall::library(callable.clone());
             // Preserve the call-site receiver chosen during applicability. A nominal classifier
@@ -86010,6 +85963,25 @@ impl<'a> Checker<'a> {
                 }));
             }
             let inferred_ret = self.lambda_ret_ty(scope, e, bret, mode.coerce_return_to_unit);
+            // A result-only generic call at the tail of an expectation-free lambda is still a
+            // postponed producer, not a proper symbolic type owned by the enclosing call. Publish
+            // its declaration-defined unconstrained result for this lambda constraint. If the
+            // enclosing call later fixes the lambda result, selected-argument commitment rechecks
+            // the same retained call against that exact expectation.
+            let inferred_ret =
+                if mode.expected_return.is_none() && !self.file.anon_fun_ret.contains_key(&e.0) {
+                    let result = conditional_branch::branch_value_expression(self.file, body);
+                    self.unbound_contextual_result_signature(result)
+                        .map(|signature| {
+                            crate::symbol_resolver::instantiate_unconstrained_result(
+                                &signature,
+                                inferred_ret,
+                            )
+                        })
+                        .unwrap_or(inferred_ret)
+                } else {
+                    inferred_ret
+                };
             let ret = match mode.expected_return {
                 Some(expected) => {
                     self.expect_assignable(

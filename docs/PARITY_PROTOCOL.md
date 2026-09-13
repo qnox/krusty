@@ -2024,5 +2024,5 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the symbolic `Set<T>` the empty-collection call produced, and the receiver's `Set<String>` was
   never consulted — the call was reported inapplicable against a receiver erased to `Result<Any>`.
   The edge now also applies when the argument-derived binding is absent, agrees, or still mentions a
-  type parameter; a real, disagreeing argument binding still wins.
+  type parameter; a real, disagreeing argument binding joins with the receiver evidence.
   `tests/tparam_bounded_by_tparam_e2e.rs::get_or_else_infers_from_the_receiver_without_an_expected_type`.

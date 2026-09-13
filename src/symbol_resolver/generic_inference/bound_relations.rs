@@ -6,9 +6,8 @@
 //! completes formals no argument reached and rejects bindings the declaration forbids.
 
 use super::{
+    merge_inferred_ty, ty_subst, ty_subst_keep_unbound, unify_ty_from_symbols,
     ExplicitTypeArgumentFixity, GSigBinds, GenericSig, SourceOracle, SymbolSource,
-    merge_inferred_ty, merge_inferred_ty_from_symbols, ty_subst,
-    ty_subst_keep_unbound, unify_ty_from_symbols,
 };
 use crate::types::Ty;
 
@@ -244,48 +243,6 @@ pub(crate) fn resolve_bound_violating_bindings(
         return;
     };
     let oracle = SourceOracle(source);
-    // A formal mentioned as another formal's upper bound is the join of every concrete subtype that
-    // reaches it. `T : V, U : V` with both `T` and `U` inferred must therefore widen `V`; the first
-    // completed edge is not an equality that may freeze it.
-    // `T : V` is a LOWER bound on `V`, so it holds even when `V` also occurs in a value parameter:
-    // `<R, T : R> Box<T>.orElse(fallback: () -> R): R` gets `T` from the receiver, and a fallback
-    // lambda with no evidence of its own (`{ emptySet() }`) leaves `R` unsolved without it. The
-    // contribution is joined with whatever the argument solver found, never substituted for it.
-    for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
-        let Some(actual) = bindings.get(formal).copied() else {
-            continue;
-        };
-        for bound in bounds {
-            let Ty::TyParam(bound_formal, _) = bound.non_null() else {
-                continue;
-            };
-            let Some(bound_index) = generic_sig
-                .formals
-                .iter()
-                .position(|candidate| candidate == bound_formal)
-            else {
-                continue;
-            };
-            if explicit.fixes(bound_index) || actual.mentions_ty_param() {
-                continue;
-            }
-            let solution = match bindings.get(bound_formal).copied() {
-                // No argument evidence, an agreeing one, or one that is still symbolic: the bound
-                // relation is what this formal knows. A binding that still mentions a type
-                // parameter is not an answer — `{ emptySet() }` as the fallback of
-                // `<R, T : R> Box<T>.orElse(fallback: () -> R)` leaves `R` at `Set<T>`, and joining
-                // that with the bound's `Set<String>` erases the element type instead of keeping it.
-                None => actual,
-                Some(known) if known == actual || known.mentions_ty_param() => actual,
-                // Both sides are real evidence, so the answer is their join. `ifEmpty` is the
-                // shape: `<C, R> C.ifEmpty(defaultValue: () -> R): R where C : CharSequence, C : R`
-                // called on a `String` with a lambda returning something else needs `R = Any`, and
-                // taking either side alone makes `C : R` unsatisfiable.
-                Some(known) => merge_inferred_ty_from_symbols(Some(source), known, actual),
-            };
-            bindings.insert(bound_formal.to_string(), solution);
-        }
-    }
     // Apply each concrete formal binding to its declaration bounds, then unify the actual applied
     // supertype with the still-symbolic bound. This is ordinary constraint propagation through the
     // class graph, not subtype guessing: the provider supplies the exact applied supertype and the
