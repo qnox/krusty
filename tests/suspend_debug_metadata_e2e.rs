@@ -1084,3 +1084,77 @@ fn continuation_pool_interns_spills_then_metadata_then_used_fields() {
         "continuation constant-pool visit order must exactly match kotlinc\nkrusty:\n{text}\nkotlinc:\n{reference_text}"
     );
 }
+
+/// The whole continuation class, byte for byte. Everything the other tests in this file assert
+/// separately — the `@DebugMetadata` arrays, the spill positions, the pool's visit order, the
+/// constructor's header and its `LocalVariableTable` — has to hold at once for this to pass, which is
+/// what makes it the real check: a suspending function's continuation is the single commonest
+/// generated class in a coroutine-using corpus.
+#[test]
+fn a_suspending_loops_continuation_is_byte_identical() {
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skipping: no scratch dir");
+        return;
+    };
+    let source = "package demo\n\
+        class Store {\n\
+        \x20 suspend fun find(name: String): String? = name\n\
+        }\n\
+        class Loader(private val store: Store) {\n\
+        \x20 suspend fun load(names: List<String>): List<String> {\n\
+        \x20   val out = ArrayList<String>()\n\
+        \x20   for (name in names) {\n\
+        \x20     val found = store.find(name)\n\
+        \x20     if (found != null) out.add(found)\n\
+        \x20   }\n\
+        \x20   return out\n\
+        \x20 }\n\
+        }\n";
+    let reference_dir = dir.join("ref");
+    std::fs::create_dir_all(&reference_dir).expect("reference output directory");
+    let file = dir.join("Identical.kt");
+    std::fs::write(&file, source).expect("write fixture");
+    let Some((code, stderr)) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        file.to_string_lossy().into_owned(),
+    ]) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        source,
+        "Identical",
+        &[common::stdlib_jar(), common::jdk_modules()],
+        "main",
+        Some(69),
+    )
+    .expect("krusty compiles the fixture");
+    let continuation = "demo/Loader$load$1";
+    let ours = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == continuation).then_some(bytes))
+        .expect("load continuation");
+    let theirs = std::fs::read(reference_dir.join(format!("{continuation}.class")))
+        .expect("reference continuation");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        ours.len(),
+        theirs.len(),
+        "{continuation}: {} bytes vs kotlinc's {}",
+        ours.len(),
+        theirs.len()
+    );
+    assert!(
+        ours.as_slice() == theirs.as_slice(),
+        "{continuation} differs from kotlinc at byte {}",
+        ours.iter()
+            .zip(&theirs)
+            .position(|(a, b)| a != b)
+            .unwrap_or(0)
+    );
+}
