@@ -15,6 +15,7 @@
 # SCOPE — the metric reflects krusty's OWN test suite, not imported external suites. These are
 # EXCLUDED: their INPUT is an external corpus or the reference compiler, so counting them would
 # measure kotlinc's coverage of its own testdata. To exclude a new external suite, add it here.
+# Workspace packages whose tests run: the compiler (lib + e2e), krusty-lsp, and krusty-build.
 EXCLUDE=(
   conformance   # external corpus/reference-toolchain suites (Kotlin box, serialization, KSP)
 )
@@ -92,6 +93,7 @@ mapfile -t bins < <(
   {
     "${coverage_cargo[@]}" test --no-run --profile coverage --lib --test e2e --message-format=json 2>/dev/null
     "${coverage_cargo[@]}" test --no-run --profile coverage -p krusty-lsp --all-targets --message-format=json 2>/dev/null
+    "${coverage_cargo[@]}" test --no-run --profile coverage -p krusty-build --all-targets --message-format=json 2>/dev/null
   } | jq -r 'select(.profile.test == true and .executable != null) | .executable'
 )
 
@@ -113,7 +115,10 @@ run_coverage_test_binary() {
   local binary="$1" status_root="$2" threads="$3" seconds="$4" e2e_seconds="$5"
   local name="$(basename "$binary")"
   local result="$status_root/$name"
-  if [[ "$name" == e2e-* ]]; then
+  # The e2e suite and krusty-build's hello_world both drive the compiler repeatedly — hello_world
+  # SPAWNS the instrumented binary once per module per build, which is far slower than the
+  # uninstrumented ~8s. Both get the long deadline.
+  if [[ "$name" == e2e-* || "$name" == hello_world-* ]]; then
     seconds="$e2e_seconds"
   fi
   mkdir -p "$result"
@@ -148,6 +153,14 @@ rm -rf "$status_dir"
 
 # Cargo package selection also controls which instrumented objects `llvm-cov report` discovers.
 # Export each product package separately, then combine their totals for the repository gate.
+#
+# `krusty-build`'s tests are RUN (above) but the crate is deliberately not REPORTED here: it is not
+# a `default-members` package, so the unfiltered export below does not discover it. Running it still
+# raises the measured numbers, because its tests exercise `krusty` — the ABI fingerprinter goes
+# through `jvm::classreader`, and its end-to-end test drives the instrumented compiler itself.
+# Reporting the crate as a third package would change `count` rather than only `covered`, which
+# moves the gate's denominator and needs a deliberate `scripts/coverage-bless.sh`. Do that in a
+# change that can run the gate, not as a side effect of wiring the tests in.
 IGNORE='(^|/)tests/|(^|/)src/main\.rs|(^|/)src/bin/'
 "${coverage_cargo[@]}" llvm-cov report --branch --profile coverage --ignore-filename-regex "$IGNORE" \
   --json --output-path "$compiler_raw_out"
