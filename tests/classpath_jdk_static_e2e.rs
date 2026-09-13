@@ -386,21 +386,26 @@ fn incomparable_literal_overloads_are_ambiguous() {
             "{call}: {diagnostics:?}"
         );
     }
+    // A SAM parameter is not overloaded here, so its declared result reaches the lambda body and the
+    // body's own type is what disagrees. kotlinc 2.4.10 reports exactly that — measured:
+    //   supply { "wrong" }    → "return type mismatch: expected 'Int', actual 'String'."
+    //   supplyText { 1 }      → "return type mismatch: expected 'String!', actual 'Int'."
+    // These previously asserted "unresolved Java static", which pinned a krusty-only outcome that
+    // contradicted the reference compiler: selection failed because the body was never checked
+    // against the interface's result at all.
     let source = "import fixtures.NumericApi\nfun f(): Int = NumericApi.supply { \"wrong\" }\n";
     let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("unresolved Java static")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["type mismatch: inferred type is String but Int was expected"],
+        "the lambda body, not the call, is what disagrees"
     );
     let source = "import fixtures.NumericApi\nfun f(): String = NumericApi.supplyText { 1 }\n";
     let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("unresolved Java static")),
-        "{diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["type mismatch: inferred type is Int but String! was expected"],
+        "the lambda body, not the call, is what disagrees"
     );
     let _ = std::fs::remove_dir_all(temp_root);
 }

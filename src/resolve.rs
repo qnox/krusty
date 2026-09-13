@@ -76609,6 +76609,17 @@ impl<'a> Checker<'a> {
         // there. Dropping it made every builder block reject the `when` a Kotlin DSL is written
         // around.
         let coerce_return_to_unit = expectation.result == Some(Ty::Unit);
+        // A result the declaration fixes also CONTEXTUALIZES the body: the tail expression is
+        // checked against it, which is the only thing that can bind a bare generic call there
+        // (`m.onErrorResume { Mono.empty() }` takes its element type from the SAM's own result).
+        // A result that still mentions a callee formal is not fixed yet and must not be pushed —
+        // overload inference owns it until it is.
+        let expected_return = expectation
+            .result
+            .filter(|result| *result != Ty::Unit)
+            .filter(|result| {
+                *result != Ty::Error && !result.mentions_ty_param() && !result.mentions_pending()
+            });
         if !expectation.context_types.is_empty() || expectation.receiver.is_some() {
             self.check_lambda_with_implicit_receivers_and_return_labeled(
                 scope,
@@ -76622,16 +76633,24 @@ impl<'a> Checker<'a> {
                 LambdaCheckMode {
                     suspend: false,
                     coerce_return_to_unit,
-                    expected_return: None,
+                    expected_return,
                 },
             )
         } else {
-            self.check_lambda_with_types_and_return(
+            self.check_lambda_with_implicit_receivers_and_return_labeled(
                 scope,
                 arg,
-                &expectation.value_params,
-                coerce_return_to_unit,
+                LambdaShape {
+                    context_types: &[],
+                    extension_receiver: None,
+                    value_types: &expectation.value_params,
+                },
                 label,
+                LambdaCheckMode {
+                    suspend: false,
+                    coerce_return_to_unit,
+                    expected_return,
+                },
             )
         }
     }

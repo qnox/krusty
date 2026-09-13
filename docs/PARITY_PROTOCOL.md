@@ -1974,3 +1974,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   carrier and once with the result known — and the first pass's diagnostic was never retracted, so
   the later correct pass could not save it.
   `tests/generic_member_extension_lambda_result_e2e.rs::a_member_lambda_typed_by_a_class_type_parameter_is_a_statement_position`.
+- **A fixed result also CONTEXTUALIZES the lambda body (fix).** The declared result decides more than
+  statement-vs-expression position: it is the expected type the body's tail is checked against, and
+  for a bare generic call there that is the only evidence its type argument can have.
+  `m.onErrorResume { Mono.empty() }` — the reactive fallback shape — left the body at `Mono<T>` with
+  `T` unsolved, and the argument was then reported as `(Throwable!) -> Mono<T>!` against
+  `Function<Throwable!, Mono<Auth>!>!`. A result still mentioning a callee formal is deliberately NOT
+  pushed; overload inference owns it until it is fixed.
+  This also corrects a diagnostic that had diverged: `NumericApi.supply { "wrong" }` reported
+  "unresolved Java static" because the body was never checked against the interface's result at all.
+  kotlinc 2.4.10 reports a body mismatch there, and krusty now does too —
+  `tests/classpath_jdk_static_e2e.rs::incomparable_literal_overloads_are_ambiguous` was asserting the
+  krusty-only outcome and is updated with the measured reference wording.
+  `tests/sam_lambda_expected_result_e2e.rs::a_reactive_chain_binds_its_element_type_through_to_the_fallback`.
