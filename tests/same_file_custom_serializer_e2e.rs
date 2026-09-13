@@ -139,3 +139,55 @@ fn a_generic_same_file_custom_serializer_takes_its_argument_serializers() {
         "the custom serializer must receive its type argument's serializer:\n{text}"
     );
 }
+
+/// A SEALED class (or interface) naming its own serializer must get THAT serializer, not the
+/// `SealedClassSerializer`/`PolymorphicSerializer` its shape would otherwise imply: the custom
+/// serializer decides ahead of every structural rule.
+#[test]
+fn a_sealed_classs_custom_serializer_wins_over_the_sealed_rule() {
+    let Some(classpath) = serialization_classpath() else {
+        eprintln!("skipping: kotlinx-serialization-core not in the Gradle cache");
+        return;
+    };
+    let source = "package demo\n\
+        import kotlinx.serialization.KSerializer\n\
+        import kotlinx.serialization.Serializable\n\
+        import kotlinx.serialization.descriptors.PrimitiveKind\n\
+        import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+        import kotlinx.serialization.descriptors.SerialDescriptor\n\
+        import kotlinx.serialization.encoding.Decoder\n\
+        import kotlinx.serialization.encoding.Encoder\n\
+        @Serializable(with = FlexSerializer::class)\n\
+        sealed interface Flex {\n\
+        \x20 data class Text(val raw: String) : Flex\n\
+        }\n\
+        object FlexSerializer : KSerializer<Flex> {\n\
+        \x20 override val descriptor: SerialDescriptor =\n\
+        \x20\x20 PrimitiveSerialDescriptor(\"Flex\", PrimitiveKind.STRING)\n\
+        \x20 override fun serialize(encoder: Encoder, value: Flex) =\n\
+        \x20\x20 encoder.encodeString((value as Flex.Text).raw)\n\
+        \x20 override fun deserialize(decoder: Decoder): Flex = Flex.Text(decoder.decodeString())\n\
+        }\n\
+        @Serializable\n\
+        data class Holder(val flex: Flex)\n";
+    let classes = common::compile_in_process_files(
+        &[("SealedCustom", source)],
+        &classpath,
+        Some(common::jdk_modules().as_path()),
+    )
+    .expect("krusty compiles a sealed @Serializable(with = …) element");
+
+    let serializer = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/Holder$$serializer").then_some(bytes))
+        .expect("Holder's generated serializer");
+    let text = disassemble(serializer, "SealedHolder$$serializer.class");
+    assert!(
+        text.contains("demo/FlexSerializer"),
+        "the sealed type's own `with` serializer must win:\n{text}"
+    );
+    assert!(
+        !text.contains("SealedClassSerializer"),
+        "a class naming its serializer never gets the sealed runtime serializer:\n{text}"
+    );
+}

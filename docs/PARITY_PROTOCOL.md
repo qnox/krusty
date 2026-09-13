@@ -1827,4 +1827,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   Non-generic → the serializer's singleton `object` (or its no-arg construction); GENERIC → one
   `KSerializer` constructor argument per type parameter, each derived recursively — the contract a
   custom serializer for a generic class is written to. The derivability gate mirrors both.
+  The check runs AHEAD of every structural rule: `with = X` on a SEALED class or an interface means
+  `X`, not the `SealedClassSerializer`/`PolymorphicSerializer` those shapes would otherwise get.
+  Still open: the same `with` on a class in ANOTHER FILE of the same module. Module facts carry a
+  classifier's annotation TYPE NAMES only (`BackendClassifierFact::annotations`), not the class
+  literal the annotation names, so `generated_serializer_exists` still answers `<Class>$serializer`
+  for such a sibling — a serializer that will never be emitted.
   `tests/same_file_custom_serializer_e2e.rs`.

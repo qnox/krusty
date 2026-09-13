@@ -795,6 +795,41 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     let fq_name = ty.kotlin_class_internal()?;
     let fq_internal = fq_name.render();
     let type_args = nn.type_args();
+    // A same-file class that names its OWN serializer decides for itself, ahead of every structural
+    // rule below: `@Serializable(with = X::class)` on a SEALED class or an interface means `X`, not
+    // the `SealedClassSerializer`/`PolymorphicSerializer` those shapes would otherwise get.
+    // It has no generated `$serializer` at all: the
+    // element serializer is that class. Non-generic — a singleton `object` or a no-arg class; generic
+    // — one `KSerializer` constructor argument per type parameter, each derived recursively, which is
+    // the contract a custom serializer for a generic class is written to.
+    if let Some(custom) = declared_custom_serializer(ir, fq_name) {
+        let declared_type_params = ir
+            .classes
+            .iter()
+            .find(|c| c.fq_name_id() == fq_name)
+            .map(|c| c.type_params.len())
+            .unwrap_or(0);
+        if declared_type_params == 0 {
+            return Some(build_field_serializer_instance(ir, &custom));
+        }
+        let mut arg_sers = Vec::with_capacity(declared_type_params);
+        for argument in type_args.iter().take(declared_type_params) {
+            let readable = match argument {
+                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
+                Ty::InProjection(_) => return None,
+                _ => *argument,
+            };
+            arg_sers.push(element_serializer_expr(ir, &readable)?);
+        }
+        if arg_sers.len() != declared_type_params {
+            return None;
+        }
+        let descriptor = format!(
+            "({})V",
+            "Lkotlinx/serialization/KSerializer;".repeat(declared_type_params)
+        );
+        return Some(ir.new_external(&custom, &descriptor, arg_sers));
+    }
     // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
     // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
     // generated `serializer()` accessor (i.e. the class IS `@Serializable`) — else a plain sealed type
@@ -872,38 +907,6 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
                             .any(|&m| ir.functions[m as usize].name == "serializer"))))
     }) {
         return Some(build_polymorphic_serializer(ir, &fq_internal));
-    }
-    // A same-file class that names its OWN serializer has no generated `$serializer` at all: the
-    // element serializer is that class. Non-generic — a singleton `object` or a no-arg class; generic
-    // — one `KSerializer` constructor argument per type parameter, each derived recursively, which is
-    // the contract a custom serializer for a generic class is written to.
-    if let Some(custom) = declared_custom_serializer(ir, fq_name) {
-        let declared_type_params = ir
-            .classes
-            .iter()
-            .find(|c| c.fq_name_id() == fq_name)
-            .map(|c| c.type_params.len())
-            .unwrap_or(0);
-        if declared_type_params == 0 {
-            return Some(build_field_serializer_instance(ir, &custom));
-        }
-        let mut arg_sers = Vec::with_capacity(declared_type_params);
-        for argument in type_args.iter().take(declared_type_params) {
-            let readable = match argument {
-                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
-                Ty::InProjection(_) => return None,
-                _ => *argument,
-            };
-            arg_sers.push(element_serializer_expr(ir, &readable)?);
-        }
-        if arg_sers.len() != declared_type_params {
-            return None;
-        }
-        let descriptor = format!(
-            "({})V",
-            "Lkotlinx/serialization/KSerializer;".repeat(declared_type_params)
-        );
-        return Some(ir.new_external(&custom, &descriptor, arg_sers));
     }
     let serializer_name = fq_name.nested_child("$serializer");
     if let Some(sid) = ir
@@ -1028,16 +1031,6 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
         return false;
     };
     let type_args = nn.type_args();
-    // A sealed `@Serializable` class uses `Class.serializer()` (a runtime SealedClassSerializer) — only
-    // when the generated `serializer()` accessor exists (the class IS `@Serializable`).
-    if ir
-        .classes
-        .iter()
-        .any(|c| c.fq_name_id() == fq_name && c.is_sealed)
-        && generated_serializer_accessor(ir, fq_name, 0).is_some()
-    {
-        return true;
-    }
     // A same-file class that names its own serializer (mirrors `element_serializer_expr`): derivable,
     // provided every type argument the custom serializer's constructor takes is derivable too.
     if declared_custom_serializer(ir, fq_name).is_some() {
@@ -1057,6 +1050,16 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
                 }
                 _ => can_derive_element_serializer(ir, argument),
             });
+    }
+    // A sealed `@Serializable` class uses `Class.serializer()` (a runtime SealedClassSerializer) — only
+    // when the generated `serializer()` accessor exists (the class IS `@Serializable`).
+    if ir
+        .classes
+        .iter()
+        .any(|c| c.fq_name_id() == fq_name && c.is_sealed)
+        && generated_serializer_accessor(ir, fq_name, 0).is_some()
+    {
+        return true;
     }
     // A standard COLLECTION field (mirrors `element_serializer_expr`): derivable iff every element type is.
     if let Some((_, n)) = collection_serializer_builder(fq_name) {
