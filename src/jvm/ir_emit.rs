@@ -23,6 +23,7 @@ use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod enum_metadata;
 mod field_write;
+mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
 mod secondary_constructor;
@@ -270,6 +271,8 @@ pub struct EmitEnv<'a> {
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
     inner_classes: crate::jvm::inner_classes::InnerClasses,
+    /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
+    java_parameters: bool,
 }
 
 /// A built `@kotlin.Metadata` annotation for a file facade: the `k`/`mv`/`xi` ints and the `d1` (the
@@ -485,12 +488,20 @@ pub struct EmitOptions {
     /// Independent `-Xlambdas` / `-Xsam-conversions` strategies for this invocation.
     pub lambda_modes: LambdaModes,
     pub inner_class_resolver: Option<InnerClassResolver>,
+    /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
+    pub java_parameters: bool,
 }
 
 impl EmitOptions {
     /// Select the `-jvm-default` mode, keeping every other field as configured.
     pub fn with_jvm_default(mut self, mode: JvmDefaultMode) -> Self {
         self.jvm_default = mode;
+        self
+    }
+
+    /// Enable `-java-parameters`, keeping every other field as configured.
+    pub fn with_java_parameters(mut self, enabled: bool) -> Self {
+        self.java_parameters = enabled;
         self
     }
 
@@ -510,6 +521,7 @@ impl Default for EmitOptions {
             emit_class_metadata: true,
             jvm_default: JvmDefaultMode::Enable,
             param_assertions: true,
+            java_parameters: false,
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
         }
@@ -2336,6 +2348,14 @@ fn instance_field_jvm_name(
     class: &crate::ir::IrClass,
     field: &crate::ir::IrField,
 ) -> String {
+    let field_index = class
+        .fields
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, field))
+        .expect("an instance field name must belong to its class");
+    if let Some(capture) = super::method_parameters::capture_field_name(class, field_index) {
+        return capture;
+    }
     let owner = class.fq_name();
     let descriptor = type_descriptor(jvm_declared_ty(&field.ty));
     let conflicts_with_static = ir.statics.iter().any(|static_field| {
@@ -3793,6 +3813,7 @@ pub fn emit_all(
         signature_symbols: &signature_symbols,
         jvm_default: JvmDefaultMode::default(),
         lambda_modes: LambdaModes::default(),
+        java_parameters: false,
         property_realizations: &property_realizations,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
@@ -3906,6 +3927,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         signature_symbols,
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
+        java_parameters: opts.java_parameters,
         property_realizations,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
@@ -6249,10 +6271,27 @@ fn emit_class(
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
         let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
-        // ASM-based kotlinc visits a constructor's header before `visitCode`, so every body reference
-        // follows the method name, descriptor, and generic signature in the pool. Continuations made
-        // the old inversion visible because their body first touches the deferred `this$0` field.
-        cw.reserve_method_pool("<init>", &ctor_desc, ctor_signature.as_deref(), &[]);
+        let ctor_parameters = if env.java_parameters {
+            if is_continuation {
+                super::method_parameters::continuation_constructor(
+                    c.fields.iter().any(|field| field.name == "this$0"),
+                )
+            } else {
+                super::method_parameters::primary_constructor(c, &param_tys)
+            }
+        } else {
+            Vec::new()
+        };
+        // A `MethodParameters` name is interned with the method HEADER, before the body's constants
+        // and before the `@NotNull`/`@Nullable` parameter descriptors — ASM's `visitParameter` order.
+        cw.reserve_method_pool_with_annotations(
+            "<init>",
+            &ctor_desc,
+            ctor_signature.as_deref(),
+            &[],
+            &crate::ir::DeclarationAnnotations::default(),
+            &ctor_parameters,
+        );
         let params_words: u16 = param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut ctor = CodeBuilder::new(1 + params_words);
         // The superclass constructor's parameter types (empty for the erased top type — the front end
@@ -6486,6 +6525,7 @@ fn emit_class(
             &ctor,
             ctor_signature.as_deref(),
         );
+        cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
         // A continuation's constructor table is attached HERE, not in the trailing debug pass:
         // kotlinc interns a method's `LocalVariableTable` names with that method, before it visits
         // the next one, so batching every table at the end reordered the pool from `<init>` onward.
@@ -7063,6 +7103,16 @@ fn emit_class(
                 ("$result".to_string(), "Ljava/lang/Object;".to_string(), 1),
             ],
         );
+        // A continuation's `invokeSuspend` is compiler-manufactured, but kotlinc still names its
+        // parameter under `-java-parameters`. (Its `<init>` is named where that constructor's own
+        // debug tables are attached, with the descriptor in scope there.)
+        if env.java_parameters {
+            cw.set_method_parameters(
+                "invokeSuspend",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                &super::method_parameters::continuation_invoke_suspend(),
+            );
+        }
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -9515,7 +9565,7 @@ fn emit_interface_class(
                 } else {
                     Vec::new()
                 };
-                emit_jd_holder_forward(
+                interface_compatibility::emit_holder_forward(
                     di,
                     c.fq_name,
                     &f.name,
@@ -9538,6 +9588,7 @@ fn emit_interface_class(
                             .map(|property| property.decl_line)
                             .unwrap_or(0)
                     }),
+                    opts.java_parameters,
                     JdHolderTarget::AccessBridge,
                 );
             }
@@ -9745,6 +9796,25 @@ fn emit_enum_class(
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
     let n_params = c.ctor_param_count as usize;
     let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
+    let all_param_tys = class_ctor_jvm_tys(c);
+    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
+        .into_iter()
+        .chain(all_param_tys.iter().copied())
+        .collect();
+    let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
+    // The generic signature omits the enum ABI prefix and retains only source parameters.
+    let ctor_sig = format!(
+        "({})V",
+        all_param_tys
+            .iter()
+            .map(|ty| type_descriptor(*ty))
+            .collect::<String>()
+    );
+    let ctor_parameters = if env.java_parameters {
+        super::method_parameters::enum_constructor(c).to_vec()
+    } else {
+        Vec::new()
+    };
     // Property backing fields are private (kotlinc), reached through the synthesized `getX()`/`setX()`
     // accessors — for both the primary-constructor fields and body member-property fields
     // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
@@ -9800,9 +9870,14 @@ fn emit_enum_class(
     // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
     // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
     // LocalVariableTable strings. `add_field` would otherwise claim those slots for the first entry.
-    cw.reserve_method_name("<init>");
-    cw.reserve_descriptor(&format!("(Ljava/lang/String;I{})V", ctor_field_descs(c)));
-    cw.reserve_descriptor(&format!("({})V", ctor_field_descs(c)));
+    cw.reserve_method_pool_with_annotations(
+        "<init>",
+        &ctor_desc,
+        Some(&ctor_sig),
+        &[],
+        &crate::ir::DeclarationAnnotations::default(),
+        &ctor_parameters,
+    );
     // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
     cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     // The property backing fields intern AFTER the constructor's names, descriptors and its
@@ -9848,8 +9923,20 @@ fn emit_enum_class(
     cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
     // `values()` casts the `clone()` result back: `checkcast [LE;`.
     cw.class_ref(&arr_desc);
-    cw.reserve_method_name("valueOf");
-    cw.reserve_descriptor(&format!("(Ljava/lang/String;){self_desc}"));
+    let value_of_desc = format!("(Ljava/lang/String;){self_desc}");
+    let value_of_parameters = if env.java_parameters {
+        super::method_parameters::enum_value_of().to_vec()
+    } else {
+        Vec::new()
+    };
+    cw.reserve_method_pool_with_annotations(
+        "valueOf",
+        &value_of_desc,
+        None,
+        &[],
+        &crate::ir::DeclarationAnnotations::default(),
+        &value_of_parameters,
+    );
     cw.methodref(
         "java/lang/Enum",
         "valueOf",
@@ -9891,12 +9978,6 @@ fn emit_enum_class(
     // property params / run the body-property initializers. The user params are ALL primary-ctor params
     // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope
     // for a body-property initializer), so `all_param_tys` can be wider than the `n_params` fields.
-    let all_param_tys = class_ctor_jvm_tys(c);
-    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
-        .into_iter()
-        .chain(all_param_tys.iter().copied())
-        .collect();
-    let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + ctor_words);
     ctor.aload(0);
@@ -9959,15 +10040,8 @@ fn emit_enum_class(
     // leading `(String, int)` are excluded) — e.g. `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
     // javap reads it to display `Color()` instead of `Color(String, int)`; without it the synthetic
     // params leak into the disassembly (a per-enum divergence from kotlinc).
-    let ctor_sig = {
-        let mut s = String::from("(");
-        for t in &all_param_tys {
-            s.push_str(&type_descriptor(*t));
-        }
-        s.push_str(")V");
-        s
-    };
     cw.add_method_sig(base_ctor_acc, "<init>", &ctor_desc, &ctor, Some(&ctor_sig));
+    cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
     {
         let header = c.decl_line;
         let start = if c.decl_start_line == 0 {
@@ -10087,13 +10161,8 @@ fn emit_enum_class(
     let cc = cw.class_ref(&fq);
     vof.checkcast(cc);
     vof.areturn();
-    finish_code::<0x0009>(
-        &mut cw,
-        "valueOf",
-        &format!("(Ljava/lang/String;){self_desc}"),
-        &mut vof,
-        1,
-    );
+    finish_code::<0x0009>(&mut cw, "valueOf", &value_of_desc, &mut vof, 1);
+    cw.set_method_parameters("valueOf", &value_of_desc, &value_of_parameters);
 
     // getEntries(): the `entries` property accessor → `return $ENTRIES`. Carries the generic
     // `Signature` `()Lkotlin/enums/EnumEntries<LSelf;>;` kotlinc emits.
@@ -10955,121 +11024,6 @@ fn emit_jd_access_bridge(
     cw.set_method_debug(&name, &bridge_desc, None, &locals);
 }
 
-/// One `enable`-mode `$DefaultImpls` entry: a `public static` forward that reloads its arguments
-/// and calls the realization `target` (the interface's `access$…$jd` bridge, or — for a member
-/// inherited from a `disable`-compiled dependency — that dependency's own holder static, behind a
-/// `checkcast` to the declaring interface). kotlinc marks the bridge-routed forwards with BOTH the
-/// `Deprecated` attribute and a runtime-visible `@java.lang.Deprecated` (the holder exists only for
-/// legacy consumers), but leaves dependency-holder forwards unmarked — measured on 2.4.10.
-#[allow(clippy::too_many_arguments)]
-fn emit_jd_holder_forward(
-    cw: &mut ClassWriter,
-    interface: crate::types::TypeName,
-    member_name: &str,
-    param_tys: &[Ty],
-    semantic_params: &[Ty],
-    param_names: &[String],
-    guards: &[Option<String>],
-    ret: Ty,
-    semantic_ret: Ty,
-    signature: Option<&str>,
-    decl_line: u32,
-    target: JdHolderTarget<'_>,
-) {
-    let fq = interface.render();
-    let mut with_receiver = vec![Ty::obj_name(interface)];
-    with_receiver.extend_from_slice(param_tys);
-    let desc = method_descriptor(&with_receiver, ret);
-    // Pool order is part of the holder's byte identity: kotlinc (ASM) interns the method name,
-    // descriptor, and Signature at `visitMethod`, then the annotation types, and only then the
-    // code's own constants — seed in that order before building the body.
-    cw.seed_utf8(member_name);
-    cw.seed_utf8(&desc);
-    if let Some(signature) = signature {
-        cw.seed_utf8(signature);
-    }
-    let deprecated = matches!(target, JdHolderTarget::AccessBridge);
-    if deprecated {
-        cw.seed_utf8("Ljava/lang/Deprecated;");
-    }
-    let ret_ann = jd_nullability_annotation(&semantic_ret);
-    if let Some(ann) = ret_ann {
-        cw.seed_utf8(ann);
-    }
-    let mut parameter_annotations = vec![Some("Lorg/jetbrains/annotations/NotNull;")];
-    parameter_annotations.extend(semantic_params.iter().map(jd_nullability_annotation));
-    for ann in parameter_annotations.iter().flatten() {
-        cw.seed_utf8(ann);
-    }
-    let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
-    let mut code = CodeBuilder::new(argument_words);
-    // kotlinc re-emits the `checkNotNullParameter` guard for each guarded parameter (never the
-    // receiver) ahead of the forward, and its LineNumberTable maps the member's line to the
-    // POST-guard pc — the caller clears `guards` under `-Xno-param-assertions`.
-    let mut slot = 1u16;
-    for (index, guard) in guards.iter().enumerate().take(param_tys.len()) {
-        if let Some(parameter_name) = guard {
-            code.aload(slot);
-            code.push_string(parameter_name, cw);
-            let check = cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "checkNotNullParameter",
-                "(Ljava/lang/Object;Ljava/lang/String;)V",
-            );
-            code.invokestatic(check, 2, 0);
-        }
-        slot += slot_words(param_tys[index]);
-    }
-    if decl_line != 0 {
-        code.mark_line(decl_line);
-    }
-    code.aload(0);
-    if let JdHolderTarget::DependencyHolder { declaring, .. } = &target {
-        let declaring_class = cw.class_ref(&declaring.render());
-        code.checkcast(declaring_class);
-    }
-    let mut slot = 1u16;
-    for ty in param_tys {
-        load(*ty, slot, &mut code);
-        slot += slot_words(*ty);
-    }
-    match target {
-        JdHolderTarget::AccessBridge => {
-            let bridge = cw.interface_methodref(&fq, &format!("access${member_name}$jd"), &desc);
-            code.invokestatic(bridge, argument_words as i32, slot_words(ret) as i32);
-        }
-        JdHolderTarget::DependencyHolder {
-            holder, descriptor, ..
-        } => {
-            let target = cw.methodref(&holder.render(), member_name, descriptor);
-            code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
-        }
-    }
-    emit_return(ret, &mut code);
-    code.ensure_locals(argument_words);
-    code.link();
-    cw.add_method_sig(0x0009, member_name, &desc, &code, signature); // PUBLIC | STATIC
-    let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
-    let mut slot = 1u16;
-    for (index, parameter) in param_tys.iter().enumerate() {
-        let parameter_name = param_names
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("p{index}"));
-        locals.push((parameter_name, local_variable_desc(*parameter), slot));
-        slot += slot_words(*parameter);
-    }
-    // The LineNumberTable came from `mark_line` (at the post-guard pc); fill only the locals here.
-    cw.set_method_debug(member_name, &desc, None, &locals);
-    if deprecated {
-        cw.mark_method_deprecated(member_name, &desc);
-        cw.add_method_visible_marker_annotation(member_name, &desc, "Ljava/lang/Deprecated;");
-    }
-    if ret_ann.is_some() || parameter_annotations.iter().any(Option::is_some) {
-        cw.set_method_nullability(member_name, &desc, ret_ann, &parameter_annotations);
-    }
-}
-
 /// Under `enable`, an interface REPUBLISHES the compatibility surface for every non-abstract,
 /// non-private member it inherits and does not redeclare: kotlinc gives even an empty
 /// `interface B : A` its own `access$f$jd` bridge (an `invokespecial` through B itself, which the
@@ -11206,7 +11160,7 @@ fn emit_inherited_default_surface(
             } else {
                 Vec::new()
             };
-            emit_jd_holder_forward(
+            interface_compatibility::emit_holder_forward(
                 di,
                 c.fq_name,
                 name,
@@ -11221,6 +11175,7 @@ fn emit_inherited_default_surface(
                 // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
                 None,
                 c.decl_line,
+                opts.java_parameters,
                 target,
             );
         };
@@ -11575,12 +11530,18 @@ fn emit_method_inner_with_holder(
             ann_types.extend(nullability.iter().copied());
         }
     }
+    let method_parameters = if env.java_parameters {
+        super::method_parameters::function(ir, fid, &param_tys, holder_receiver)
+    } else {
+        Vec::new()
+    };
     e.cw.reserve_method_pool_with_annotations(
         &f.name,
         &reserved_desc,
         reserved_sig.as_deref(),
         &ann_types,
         &declared_annotations,
+        &method_parameters,
     );
     let mut code = CodeBuilder::new(e.next_slot);
     // kotlinc guards each non-null reference parameter of a visible function with
@@ -11771,6 +11732,7 @@ fn emit_method_inner_with_holder(
     // `ret` are erased.
     let desc = reserved_desc;
     e.cw.add_method_sig(access, &f.name, &desc, &code, reserved_sig.as_deref());
+    e.cw.set_method_parameters(&f.name, &desc, &method_parameters);
     // kotlinc annotates a reference return and each reference parameter of a declared method.
     if nullability_annotated
         && (ret_ann.is_some() || emitted_param_anns.iter().any(Option::is_some))
