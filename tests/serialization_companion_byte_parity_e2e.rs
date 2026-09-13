@@ -2189,36 +2189,40 @@ fn a_nullable_serializable_element_is_actually_decoded() {
     };
     // The decoder calls `deserialize` makes: a class that decodes nothing calls none of them.
     let decoder_calls = |text: &str| {
-        let mut calls: Vec<String> = text
-            .lines()
+        text.lines()
             .skip_while(|line| !line.contains("Account deserialize("))
             .take_while(|line| !line.contains("public java.lang.Object deserialize("))
             .filter_map(|line| line.split("CompositeDecoder.").nth(1))
             .filter_map(|call| call.split(':').next())
             .map(str::to_string)
-            .collect();
-        calls.sort();
-        calls.dedup();
-        calls
+            .collect::<Vec<String>>()
     };
-    let want = decoder_calls(&built.reference);
-    assert!(
-        want.iter()
-            .any(|call| call == "decodeNullableSerializableElement"),
-        "reference must decode the nullable elements — that is the rule under test:\n{}",
-        built.reference
+    assert_eq!(
+        decoder_calls(&built.reference),
+        vec![
+            "decodeSequentially",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeElementIndex",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "endStructure",
+        ],
+        "reference decoder contract changed"
     );
     // krusty has no `decodeSequentially` fast path yet, so its call set is kotlinc's minus that one;
     // what this test pins is that the nullable elements are decoded at all.
-    let got = decoder_calls(&built.krusty);
-    assert!(
-        got.iter()
-            .any(|call| call == "decodeNullableSerializableElement"),
-        "krusty must decode the nullable elements instead of default-constructing the class:\n{}",
-        built.krusty
-    );
-    assert!(
-        got.iter().all(|call| want.contains(call)),
-        "krusty calls a decoder method kotlinc does not: {got:?} vs {want:?}"
+    assert_eq!(
+        decoder_calls(&built.krusty),
+        vec![
+            "decodeElementIndex",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "endStructure",
+        ],
+        "krusty must decode all three nullable elements in declaration order"
     );
 }
