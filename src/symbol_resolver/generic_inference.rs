@@ -1167,6 +1167,12 @@ fn null_only(actual: Ty) -> bool {
 }
 
 fn nullable_generic_actual(actual: Ty) -> Ty {
+    // A NULLABLE formal position absorbs the actual's nullability, so a projected actual has to be
+    // opened first: `List<*>` reads as `List<out Any?>`, and against `Iterable<T?>` it is the `?`
+    // in the formal that carries the star's nullability — `T` is `Any`. Leaving the projection on
+    // makes the variable itself nullable and a `T : Any` bound then rejects the very receiver that
+    // produced it. The projection would be discarded by the variable arm below in any case.
+    let actual = actual.projection_inner().unwrap_or(actual);
     if null_only(actual) {
         Ty::Nothing
     } else {

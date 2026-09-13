@@ -1998,3 +1998,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   block to the trailing expression that actually produces the branch's value; a block with no
   trailing expression still produces `Unit` and is still rejected against an incompatible sibling.
   `tests/conditional_block_branch_rebind_e2e.rs::a_multi_statement_branch_rebinds_against_its_sibling`.
+- **A nullable formal absorbs a projected actual (fix).** `List<*>` reads as `List<out Any?>`, so an
+  extension receiver `Iterable<T?>` with `T : Any` binds `T = Any` — the `?` in the FORMAL carries
+  the star's nullability. krusty's nullable-formal step called `non_null()` on an actual still
+  wrapped in its projection, so the star survived, the variable arm below opened it to `Any?`, and
+  the `T : Any` bound then rejected the very receiver that produced it.
+  The whole `<T : Any> Iterable<T?>` stdlib family — `filterNotNull`, `mapNotNull`,
+  `requireNoNulls` — was unusable on any starred collection. A NON-nullable formal `Iterable<T>` with
+  the same bound still rejects `List<*>`, matching kotlinc.
+  `tests/star_projection_nullable_receiver_e2e.rs::a_star_projection_satisfies_a_nullable_formal_receiver`.
