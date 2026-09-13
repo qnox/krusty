@@ -336,15 +336,28 @@ fn continuation_metadata_uses_returned_expression_end_line() {
         return;
     };
 
+    // The arms must be consumed, not returned: an `if` whose arms are tail suspend calls needs no
+    // continuation at all — kotlinc emits none for it, so its resume lines have no ground truth.
     let source = "package demo\n\
-        suspend fun leaf(value: Int): Int = value\n\
-        suspend fun choose(flag: Boolean): Int {\n\
-        \x20 return if (flag) {\n\
-        \x20\x20 leaf(1)\n\
-        \x20 } else {\n\
-        \x20\x20 leaf(2)\n\
+        class Leafs {\n\
+        \x20 suspend fun leaf(value: Int): Int = value\n\
+        }\n\
+        class Chooser(private val leafs: Leafs) {\n\
+        \x20 suspend fun choose(flag: Boolean): Int {\n\
+        \x20\x20 val base = 1\n\
+        \x20\x20 val picked = if (flag) {\n\
+        \x20\x20\x20 leafs.leaf(1)\n\
+        \x20\x20 } else {\n\
+        \x20\x20\x20 leafs.leaf(2)\n\
+        \x20\x20 }\n\
+        \x20\x20 return picked + base\n\
         \x20 }\n\
         }\n";
+    let Some(reference) = kotlinc_class("ReturnedExpression", source, "demo/Chooser$choose$1")
+    else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
     let classes = common::compile_in_process_files(
         &[("ReturnedExpression", source)],
         &[stdlib, jdk.clone()],
@@ -353,25 +366,33 @@ fn continuation_metadata_uses_returned_expression_end_line() {
     .expect("compile returned expression continuation");
     let bytes = classes
         .iter()
-        .find_map(|(name, bytes)| (name == "demo/ReturnedExpressionKt$choose$1").then_some(bytes))
+        .find_map(|(name, bytes)| (name == "demo/Chooser$choose$1").then_some(bytes))
         .expect("choose continuation");
     let text = disassemble(
         &javap,
         bytes,
-        "ReturnedExpressionKt$choose$1.class",
+        "Chooser$choose$1.class",
         "returned_expression",
     );
-    let annotation = text
-        .rsplit_once("RuntimeVisibleAnnotations:")
-        .map(|(_, annotation)| annotation)
-        .expect("runtime-visible annotations");
+    let reference_text = disassemble(
+        &javap,
+        &reference,
+        "ref-Chooser$choose$1.class",
+        "returned_expression_reference",
+    );
+    let lines = |text: &str| -> Vec<String> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("l=[") || line.starts_with("nl=["))
+            .map(str::to_string)
+            .collect()
+    };
 
-    for expected in ["l=[5,7]", "nl=[8,8]"] {
-        assert!(
-            annotation.contains(expected),
-            "missing {expected:?}:\n{text}"
-        );
-    }
+    assert_eq!(
+        lines(&text),
+        lines(&reference_text),
+        "suspension and resume lines must match kotlinc\nkrusty:\n{text}\nkotlinc:\n{reference_text}"
+    );
 }
 
 #[test]
