@@ -2505,7 +2505,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_generic_serializer_plan_keeps_the_declaring_classifier() {
+    fn generated_generic_serializer_plan_keeps_classifier_and_selected_owner() {
         let inner = Ty::obj("demo/Inner");
         let boxed = Ty::obj_args("demo/Box", &[inner]);
         let serializer = |value| Ty::obj_args(KSERIALIZER_FQ, &[value]);
@@ -2532,7 +2532,10 @@ mod tests {
         let mut plans = Vec::new();
         SerializationPlugin::default().plan_frontend_expressions(&context, &mut plans);
         assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].1.data, [type_name("demo/Box")]);
+        assert_eq!(
+            plans[0].1.data,
+            [type_name("demo/Box"), type_name("demo/Box$Companion")]
+        );
         assert_eq!(plans[0].1.operands, [(argument, serializer(inner))]);
     }
 
