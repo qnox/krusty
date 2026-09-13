@@ -5443,11 +5443,30 @@ and behavior is checked by RUNNING the emitted program.
   `a_lambda_that_captures_nothing_is_one_object`,
   `a_function_value_survives_collection_with_its_captures`).
 
-- **A captured `var` is one cell, shared.** Common lowering boxes a mutable local that a closure
-  captures into a holder and rewrites its reads and writes to go through it, so the closure and the
-  frame that made it see each other's writes rather than a copy. That holder is a one-field object
-  here, traced when the field holds a reference.
-  Tests: `tests/native_codegen_e2e.rs` (`a_lambda_captures_a_mutable_local_by_reference`).
+- **A captured `var` is one cell, shared — and the cell is what is carried, whatever the
+  declaration says.** Common lowering boxes a mutable local that a closure captures into a holder
+  and rewrites its reads and writes to go through it, so the closure and the frame that made it see
+  each other's writes rather than a copy. That holder is a one-field object here, traced when the
+  field holds a reference. The declaration is NOT what says so: a local declared `var n: Int` keeps
+  `Int` on its `Variable` node and on the lambda body's parameter, because `Int` is what the
+  programmer wrote, while what is stored and passed is the cell. The initializer settles the local
+  (a holder is created by `RefNew`) and the body settles the parameter (it reaches a holder through
+  `RefGet`/`RefSet` rather than using the value). Believing the declaration truncates a pointer into
+  a 32-bit slot — a miscompile with no symptom where it happens, which is why it took a program that
+  kept something alive across a collection and read it back to see it.
+  Tests: `tests/native_codegen_e2e.rs` (`a_lambda_captures_a_mutable_local_by_reference`);
+  `tests/native_gc_stress_e2e.rs` (`closures_and_their_captures_survive_collection`).
+
+- **Concurrency: there is none yet, and that is a tested claim rather than an omission.** The
+  runtime's whole kernel interface is `write`, `mmap`, `munmap` and `exit_group`; nothing creates
+  anything that runs concurrently, so the collector stops nothing. `@Volatile` therefore compiles as
+  an ordinary property — with one thread its meaning is exhausted, and there is no observer for it
+  to be wrong for — and a `suspend` function that never actually suspends is an ordinary function,
+  because `suspend` is a calling convention rather than concurrency. A function that DOES suspend is
+  declined: it needs a state machine to resume into, and compiling it into a straight call would run
+  a coroutine body to its first suspension and silently carry on.
+  Tests: `tests/native_concurrency_e2e.rs` — including one that reads the syscall header, so adding
+  `clone` fails there before the Kotlin/Native memory model this target committed to is implemented.
 
 - **A companion object is initialized when its class is first constructed.** That is the moment the
   JVM would have run the class's `<clinit>`, and what a `<clinit>` does for a class with a companion

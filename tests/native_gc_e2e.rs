@@ -156,6 +156,40 @@ const FAILURES: &[(i32, &str)] = &[
         23,
         "the live-object count disagreed with what the program holds",
     ),
+    (
+        24,
+        "a rooted reference array lost or damaged an element: an array's elements must be traced \
+          as precisely as a field is",
+    ),
+    (
+        25,
+        "an unrooted reference array's elements survived: an array holds its elements alive, and \
+          nothing else does",
+    ),
+    (
+        26,
+        "objects referenced only from a LongArray's elements survived: an array of the same \
+          element WIDTH must not be walked as pointers",
+    ),
+    (
+        27,
+        "a registered global root was freed or damaged: static slots are not discovered, they are \
+          registered",
+    ),
+    (
+        28,
+        "a reference into static storage did not survive a collection untouched: an address that \
+          belongs to no heap chunk must be ignored, not swept",
+    ),
+    (
+        29,
+        "an object reachable only through an array reachable only through a field was freed: \
+          tracing must follow arrays as it follows objects",
+    ),
+    (
+        30,
+        "a mixed live set did not come through repeated collections intact",
+    ),
 ];
 
 fn describe(code: i32) -> String {
@@ -424,6 +458,215 @@ __attribute__((noinline)) static void test_strings_survive_collections(void) {
     }
 }
 
+/* 11. An array of references is traced through its ELEMENTS, which the descriptor describes with a
+   stride and a flag rather than with a fixed offset table — an array's length is not known when its
+   type is written. A rooted array must keep every element alive and intact. */
+__attribute__((noinline)) static void test_a_reference_array_is_traced(void) {
+    KRef array = kt_array_new(&kt_type_array, 64);
+    for (kt_int i = 0; i < 64; i++) {
+        Node *node = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+        node->value = 1000 + i;
+        ((KRef *)((char *)array + kt_type_array.instance_size))[i] = (KRef)node;
+    }
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    for (kt_int i = 0; i < 64; i++) {
+        Node *node =
+            (Node *)((KRef *)((char *)array + kt_type_array.instance_size))[i];
+        if (node == NULL || node->value != 1000 + i) {
+            fail(24);
+        }
+    }
+}
+
+/* 12. The other half of the same property: the array is the ONLY thing holding those elements, so
+   when it goes they go. A tracer that marked every allocated object would pass test 11 and fail
+   this one. */
+__attribute__((noinline)) static void build_unrooted_array(void) {
+    KRef array = kt_array_new(&kt_type_array, 32);
+    for (kt_int i = 0; i < 32; i++) {
+        Node *node = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+        node->value = i;
+        ((KRef *)((char *)array + kt_type_array.instance_size))[i] = (KRef)node;
+    }
+}
+
+__attribute__((noinline)) static void test_an_unrooted_reference_array_is_reclaimed(void) {
+    kt_gc_collect();
+    size_t before = kt_gc_live_objects();
+    /* Built in a frame that has RETURNED: with conservative roots, a reference the current frame
+       ever held may still sit in a register or a stack slot the scanner reads, and "unreachable"
+       has to mean unreachable to the scanner too, not just to the program. */
+    build_unrooted_array();
+    clobber_stack();
+    kt_gc_collect();
+    if (kt_gc_live_objects() != before) {
+        fail(25);
+    }
+}
+
+/* 13. A `LongArray`'s elements are exactly as wide as a reference and may hold a pointer's BITS.
+   The descriptor says they are not references, and that has to be believed: the objects those bits
+   name are unreachable and must be reclaimed. This is the array form of test 6. */
+__attribute__((noinline)) static void fill_with_pointer_bits(KRef bits) {
+    for (kt_int i = 0; i < 16; i++) {
+        Node *node = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+        node->value = i;
+        ((kt_long *)((char *)bits + kt_type_long_array.instance_size))[i] = (kt_long)(uintptr_t)node;
+    }
+}
+
+__attribute__((noinline)) static void test_array_tracing_is_precise(void) {
+    kt_gc_collect();
+    size_t before = kt_gc_live_objects();
+    KRef bits = kt_array_new(&kt_type_long_array, 16);
+    fill_with_pointer_bits(bits);
+    clobber_stack();
+    kt_gc_collect();
+    /* The array itself is rooted here; the 16 nodes it names only in integer form must go. */
+    if (kt_gc_live_objects() != before + 1) {
+        fail(26);
+    }
+    for (kt_int i = 0; i < 16; i++) {
+        if (((kt_long *)((char *)bits + kt_type_long_array.instance_size))[i] == 0) {
+            fail(26);
+        }
+    }
+}
+
+/* 14. A global slot. A freestanding program cannot find its own data section, so a static slot that
+   may hold a reference is REGISTERED rather than discovered; this is what every top-level property
+   and every `object` singleton depends on. `holder` deliberately never appears on the stack after
+   registration: the root must be the registration, not a leftover copy. */
+static KRef global_slot;
+
+__attribute__((noinline)) static void fill_global_slot(void) {
+    Node *node = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+    node->value = 4242;
+    Node *tail = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+    tail->value = 2424;
+    node->next = tail;
+    global_slot = (KRef)node;
+}
+
+__attribute__((noinline)) static void test_a_global_root_keeps_its_object(void) {
+    kt_gc_add_global_root((void **)&global_slot);
+    fill_global_slot();
+    clobber_stack();
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    Node *node = (Node *)global_slot;
+    if (node == NULL || node->value != 4242 || node->next == NULL || node->next->value != 2424) {
+        fail(27);
+    }
+}
+
+/* 15. The box cache and every string literal live in STATIC storage, outside the heap. A collection
+   must leave them alone — and a heap object whose field points at one must survive tracing rather
+   than trip over an address that belongs to no chunk. */
+__attribute__((noinline)) static void test_static_references_survive_untouched(void) {
+    KRef cached = kt_box_int(7);
+    KRef again = kt_box_int(7);
+    if (cached != again) {
+        fail(28); /* the cache is what makes this a static-storage test at all */
+    }
+    Node *node = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+    node->next = (Node *)cached; /* a heap object pointing OUT of the heap */
+    node->value = 99;
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    if (node->value != 99 || (KRef)node->next != cached) {
+        fail(28);
+    }
+    if (kt_unbox_int(cached) != 7 || kt_box_int(7) != cached) {
+        fail(28);
+    }
+}
+
+/* 16. Depth: an object held only by an array held only by a field. Nothing here is on the stack but
+   the head, so every edge has to be followed — object to field, field to array, array to element. */
+__attribute__((noinline)) static void test_tracing_follows_arrays_inside_objects(void) {
+    Node *head = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+    head->value = 1;
+    {
+        KRef array = kt_array_new(&kt_type_array, 8);
+        for (kt_int i = 0; i < 8; i++) {
+            Node *leaf = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+            leaf->value = 500 + i;
+            ((KRef *)((char *)array + kt_type_array.instance_size))[i] = (KRef)leaf;
+        }
+        head->next = (Node *)array;
+    }
+    clobber_stack();
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    KRef array = (KRef)head->next;
+    for (kt_int i = 0; i < 8; i++) {
+        Node *leaf = (Node *)((KRef *)((char *)array + kt_type_array.instance_size))[i];
+        if (leaf == NULL || leaf->value != 500 + i) {
+            fail(29);
+        }
+    }
+}
+
+/* 17. Everything at once, repeatedly: a live set of several object kinds and sizes — small, large,
+   arrays, strings, a global root — with garbage churned between collections. Each round verifies
+   every live value, so a collector that is right about one kind and wrong about another in
+   combination shows up here rather than in production. */
+static KRef stress_slot;
+
+__attribute__((noinline)) static void test_a_mixed_live_set_survives_many_collections(void) {
+    kt_gc_add_global_root((void **)&stress_slot);
+    KRef array = kt_array_new(&kt_type_array, 16);
+    Node *chain = NULL;
+    for (kt_int i = 0; i < 16; i++) {
+        Node *node = (Node *)kt_gc_allocate(&node_type, sizeof(Node));
+        node->value = 7000 + i;
+        node->next = chain;
+        chain = node;
+        ((KRef *)((char *)array + kt_type_array.instance_size))[i] = (KRef)node;
+    }
+    Big *big = (Big *)kt_gc_allocate(&big_type, sizeof(Big));
+    big->values[0] = 31337;
+    big->values[511] = 73313;
+    stress_slot = kt_string_utf8("mixed", 5);
+
+    for (kt_int round = 0; round < 12; round++) {
+        allocate_garbage(5000);
+        {
+            KRef scratch = kt_array_new(&kt_type_array, 64);
+            (void)scratch;
+        }
+        clobber_stack();
+        kt_gc_collect();
+
+        for (kt_int i = 0; i < 16; i++) {
+            Node *node = (Node *)((KRef *)((char *)array + kt_type_array.instance_size))[i];
+            if (node == NULL || node->value != 7000 + i) {
+                fail(30);
+            }
+        }
+        kt_int length = 0;
+        for (Node *node = chain; node != NULL; node = node->next) {
+            length++;
+        }
+        if (length != 16) {
+            fail(30);
+        }
+        if (big->values[0] != 31337 || big->values[511] != 73313) {
+            fail(30);
+        }
+        if (stress_slot == NULL) {
+            fail(30);
+        }
+    }
+    kt_println_any(stress_slot);
+}
+
 void kt_program_entry(void) {
     kt_long stack_anchor = 0;
     kt_runtime_init(&stack_anchor);
@@ -447,6 +690,20 @@ void kt_program_entry(void) {
     test_automatic_collection_bounds_the_heap();
     clobber_stack();
     test_strings_survive_collections();
+    clobber_stack();
+    test_a_reference_array_is_traced();
+    clobber_stack();
+    test_an_unrooted_reference_array_is_reclaimed();
+    clobber_stack();
+    test_array_tracing_is_precise();
+    clobber_stack();
+    test_a_global_root_keeps_its_object();
+    clobber_stack();
+    test_static_references_survive_untouched();
+    clobber_stack();
+    test_tracing_follows_arrays_inside_objects();
+    clobber_stack();
+    test_a_mixed_live_set_survives_many_collections();
     kt_exit(0);
 }
 "#;
@@ -485,7 +742,7 @@ fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
     let mut expected = (0..300)
         .map(|i| char::from(b'0' + (i % 10) as u8))
         .collect::<String>();
-    expected.push_str("\nliteral\nkotlin.Unit\nnull\n");
+    expected.push_str("\nliteral\nkotlin.Unit\nnull\nmixed\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         expected,

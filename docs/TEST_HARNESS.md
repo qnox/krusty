@@ -275,6 +275,27 @@ common lowering, and the list entry should say so and quote it; anything else is
 gets fixed, not listed. `KRUSTY_NATIVE_BOX_TRACE=<substring>` prints the case behind every decline
 whose reason contains that substring, which is how a line in the table becomes a file to read.
 
+### The collector, and what conformance cannot reach
+
+The box corpus tests language semantics; it does not keep anything alive across a collection, so it
+cannot see a collector bug at all. Two suites cover that instead, and they found a miscompile the
+corpus passed 7,352 cases with:
+
+* `tests/native_gc_e2e.rs` — the collector's invariants from C, against hand-written types, one
+  exit code per property: unrooted objects reclaimed, rooted ones intact, precise field and array
+  tracing (an object named only by a `Long`'s bits must go), cycles, interior pointers, registered
+  global roots, static-storage references, slot reuse, large objects, the automatic trigger, and a
+  mixed live set across repeated collections.
+* `tests/native_gc_stress_e2e.rs` — the same collector against types the GENERATOR emitted, driven
+  by Kotlin programs that allocate far past the threshold while holding a live set that is verified
+  afterwards: object graphs, replaced array entries, references held only in deep frames, closure
+  captures, every root mechanism at once, and interleaved allocation sizes. Every program is
+  deterministic; a collector bug shows up as damaged data or a wrong number, never as flakiness.
+
+`tests/native_concurrency_e2e.rs` pins the other half: there are no threads, what that makes
+meaningless (`@Volatile`, a non-suspending `suspend`) compiles, and what it makes impossible (a real
+suspension) is declined rather than quietly dropped.
+
 ## JVM-Running Tests
 
 Do not spawn `javac` or `java` per test unless the test is explicitly about the CLI/process boundary.

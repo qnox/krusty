@@ -1129,7 +1129,11 @@ before:**
    structural equality on references (171), `x!!` (33) and function values — lambdas, invocation
    and captured-variable holders, 310 between them — have landed, each leaving the decline table
    entirely: **778 pass**, more than double where the lane started, with 0 unexpected failures
-   throughout. Value classes were tried and put back: common IR carries one as an ordinary class,
+   throughout. The collector's own suites — invariants from C, stress through the generator — are
+   what caught the one real miscompile of the session: a `var` a closure captures is replaced by a
+   holder, and the generator believed the `Int` the declaration still said, truncating a pointer
+   into a 32-bit slot. The corpus passed 7,352 cases with that bug, because no case keeps something
+   alive across a collection and reads it back. Value classes were tried and put back: common IR carries one as an ordinary class,
    which compiles and then answers `IC(1) == IC(1)` with identity — 27 wrong answers the lane
    caught at once. They stay declined until the generator realizes the equality, hashing and
    rendering Kotlin gives them. Realizing them exposed three native defects the gate

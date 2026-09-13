@@ -266,7 +266,7 @@ impl<'a> FileLowering<'a> {
             }
             params.push(any());
         }
-        params.extend_from_slice(&function.params);
+        params.extend(functions::carried_parameters(self.ir, function));
         self.signature_of(&params, function.ret)
     }
 
@@ -392,7 +392,7 @@ impl<'a> FileLowering<'a> {
         if let Some(owner) = function.dispatch_receiver {
             slots.push(Ty::Obj(owner, &[]));
         }
-        slots.extend_from_slice(&function.params);
+        slots.extend(functions::carried_parameters(self.ir, function));
         let name = function.name.clone();
         let ret = function.ret;
         self.emit_function(
@@ -602,6 +602,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Variable {
                 index, ty, init, ..
             } => {
+                // A `var` a closure captures is replaced by a HOLDER: the slot holds the cell, not
+                // the value the source declared, and the declaration still says `Int` because that
+                // is what the programmer wrote. The initializer is what says which — and believing
+                // the declaration instead truncates a pointer into a 32-bit slot, which is a
+                // miscompile with no symptom at the point it happens.
+                let ty = match init.map(|init| self.file.ir.expr(init)) {
+                    Some(IrExpr::RefNew { .. }) => any(),
+                    _ => ty,
+                };
                 if carrier(ty) == Carrier::Void {
                     if let Some(init) = init {
                         self.expression(init)?;
@@ -1554,7 +1563,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if dispatch_receiver.is_some() {
                     return Err("a local call with a receiver".to_string());
                 }
-                let params = self.file.ir.functions[*function as usize].params.clone();
+                let params = functions::carried_parameters(
+                    self.file.ir,
+                    &self.file.ir.functions[*function as usize],
+                );
                 let arguments = self.arguments(args, &params)?;
                 if self.terminated {
                     return Ok(None);

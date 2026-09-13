@@ -745,7 +745,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 function.name
             ));
         };
-        let params = function.params.clone();
+        let params = super::functions::carried_parameters(self.file.ir, function);
         let ret = function.ret;
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
@@ -1029,7 +1029,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(id) = self.file.functions[fid as usize] else {
             return Err(format!("a `super` call to the abstract method `{name}`"));
         };
-        let params = function.params.clone();
+        let params = super::functions::carried_parameters(ir, function);
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };

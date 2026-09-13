@@ -40,6 +40,51 @@ pub(super) struct LambdaItems {
     singleton: Option<DataId>,
 }
 
+/// The types a function's parameters are CARRIED as, which are not always the types it declares.
+///
+/// A `var` that a closure captures is replaced by a holder, and what is passed to the lambda's body
+/// is that cell — but the parameter still says `Int`, because `Int` is what the programmer wrote.
+/// The BODY is what settles it: it reaches a holder through [`IrExpr::RefGet`]/[`IrExpr::RefSet`]
+/// rather than using the value directly. Believing the declaration instead truncates a pointer into
+/// a 32-bit parameter, which is a miscompile with no symptom where it happens — the collector's
+/// stress tests are what caught it, because the damage only became visible once something was kept
+/// alive across a collection and read back.
+pub(super) fn carried_parameters(ir: &IrFile, function: &crate::ir::IrFunction) -> Vec<Ty> {
+    let Some(body) = function.body else {
+        return function.params.clone();
+    };
+    // `this` occupies slot 0 when there is one, so a parameter's slot is offset by it.
+    let first = usize::from(function.dispatch_receiver.is_some());
+    let mut holders = vec![false; function.params.len() + first];
+    let mut pending = vec![body];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let IrExpr::RefGet { holder, .. } | IrExpr::RefSet { holder, .. } = ir.expr(id) {
+            if let IrExpr::GetValue(slot) = ir.expr(*holder) {
+                if let Some(flag) = holders.get_mut(*slot as usize) {
+                    *flag = true;
+                }
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, id, &mut |child| pending.push(child));
+    }
+    function
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, declared)| {
+            if holders[index + first] {
+                any()
+            } else {
+                *declared
+            }
+        })
+        .collect()
+}
+
 /// Lay out values after the object header, each aligned to its own size — the same rule the class
 /// model applies to fields, for the same reason: the collector is told where the references are
 /// and must be told the truth.
@@ -89,7 +134,8 @@ impl<'a> FileLowering<'a> {
                     captures.len()
                 ));
             }
-            let capture_types: Vec<Ty> = body.params[..captures.len()].to_vec();
+            let capture_types: Vec<Ty> =
+                carried_parameters(self.ir, body)[..captures.len()].to_vec();
             let (capture_offsets, instance_size, references) = layout(&capture_types);
 
             let base = format!("kt_fn_{index}");
@@ -155,7 +201,7 @@ impl<'a> FileLowering<'a> {
         arity: usize,
     ) -> Result<(), Unsupported> {
         let body = &self.ir.functions[impl_fn as usize];
-        let parameters = body.params.clone();
+        let parameters = carried_parameters(self.ir, body);
         let ret = body.ret;
         let target = self.functions[impl_fn as usize]
             .ok_or_else(|| "a lambda whose body has no code".to_string())?;
@@ -254,7 +300,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             items.instance_size,
             items.capture_offsets.clone(),
         );
-        let parameters = self.file.ir.functions[impl_fn as usize].params.clone();
+        let parameters =
+            carried_parameters(self.file.ir, &self.file.ir.functions[impl_fn as usize]);
 
         // Captures first, then the allocation: a capture that allocates must not leave a
         // half-built object for a collection to find.
