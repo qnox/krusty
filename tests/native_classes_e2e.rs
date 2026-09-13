@@ -350,3 +350,117 @@ fn a_user_to_string_is_reached_through_println_templates_and_explicit_calls() {
          default equality is identity"
     );
 }
+
+#[test]
+fn initialization_runs_the_superclass_first_then_fields_then_init_blocks() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // Kotlin's order: the superclass constructor (with its argument evaluated from the derived
+    // parameter), then the derived class's property initializers and `init` blocks in source
+    // order. Each step prints, so a reordering shows up in the output.
+    assert_eq!(
+        run("fun tag(s: String): String { println(s); return s }\n\
+             open class Base(val a: Int) { init { println(\"base $a\") } }\n\
+             class Derived(val n: Int) : Base(n + 1) {\n\
+             \x20   val label: String = tag(\"field\")\n\
+             \x20   init { println(\"derived $label $n $a\") }\n\
+             \x20   var count: Int = n * 2\n\
+             \x20   init { println(\"count $count\") }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val d = Derived(1)\n\
+             \x20   println(d.a + d.n + d.count)\n\
+             }\n"),
+        "base 2\nfield\nderived field 1 2\ncount 2\n5\n"
+    );
+}
+
+#[test]
+fn properties_with_custom_accessors_run_their_bodies() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // `area` has no storage at all — a read is a call. `t` has storage and both accessors written
+    // in source; the read and the write must go through them, and `field` inside them must be the
+    // backing field, not a recursive accessor call.
+    assert_eq!(
+        run("class R(val w: Int, val h: Int) {\n\
+             \x20   val area: Int get() = w * h\n\
+             \x20   var t: Int = 0\n\
+             \x20       get() = field + 1\n\
+             \x20       set(v) { field = v * 2 }\n\
+             \x20   var plain: Int = 7\n\
+             }\n\
+             fun main() {\n\
+             \x20   val r = R(2, 3)\n\
+             \x20   println(r.area)\n\
+             \x20   r.t = 5\n\
+             \x20   println(r.t)\n\
+             \x20   r.plain = r.plain + 1\n\
+             \x20   println(r.plain)\n\
+             }\n"),
+        "6\n11\n8\n"
+    );
+}
+
+#[test]
+fn an_open_property_read_through_the_base_type_reaches_the_override() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // `v` is overridden with a second backing field, `w` with a second getter body, and `m` is a
+    // `var` whose override adds its own setter. Through an `A`-typed value each must reach `B`'s.
+    assert_eq!(
+        run("open class A {\n\
+             \x20   open val v: Int = 1\n\
+             \x20   open val w: Int get() = 10\n\
+             \x20   open var m: Int = 100\n\
+             \x20   fun sum(): Int = v + w + m\n\
+             }\n\
+             class B : A() {\n\
+             \x20   override val v: Int = 2\n\
+             \x20   override val w: Int get() = 20\n\
+             \x20   override var m: Int = 200\n\
+             \x20       set(value) { field = value + 1 }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val x: A = B()\n\
+             \x20   println(x.v)\n\
+             \x20   println(x.w)\n\
+             \x20   x.m = 300\n\
+             \x20   println(x.m)\n\
+             \x20   println(x.sum())\n\
+             \x20   val a = A()\n\
+             \x20   println(a.sum())\n\
+             }\n"),
+        "2\n20\n301\n323\n111\n"
+    );
+}
+
+#[test]
+fn a_generic_class_erases_its_parameter_to_a_reference() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // `T` is carried as a reference, exactly as on the JVM: `Box(1)` boxes the `Int` on the way
+    // into the field and the read unboxes it back; `Box("s")` stores the string as is.
+    assert_eq!(
+        run("class Box<T>(val value: T) {\n\
+             \x20   fun get(): T = value\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(Box(1).value)\n\
+             \x20   println(Box(\"s\").value)\n\
+             \x20   val b = Box(41)\n\
+             \x20   println(b.get() + 1)\n\
+             \x20   val nested = Box(Box(\"inner\"))\n\
+             \x20   println(nested.value.value)\n\
+             }\n"),
+        "1\ns\n42\ninner\n"
+    );
+}

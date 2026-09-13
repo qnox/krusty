@@ -337,7 +337,7 @@ impl<'a> Emitter<'a> {
             let signature = self.signature(index, function)?;
             self.out.push_str(&format!("{signature} {{\n"));
             self.result = c_kind(function.ret);
-            self.statement(body, 1)?;
+            self.block_body(body, 1)?;
             self.out.push_str("}\n\n");
         }
 
@@ -677,7 +677,7 @@ impl<'a> Emitter<'a> {
         }
         if let Some(body) = declaration.init_body {
             self.result = CKind::Void;
-            self.statement(body, 1)?;
+            self.block_body(body, 1)?;
         }
         self.out.push_str("}\n\n");
         Ok(())
@@ -800,7 +800,9 @@ impl<'a> Emitter<'a> {
 
     // ---- statements --------------------------------------------------------------------------
 
-    fn statement(&mut self, id: u32, depth: usize) -> Result<(), Unsupported> {
+    /// The statements of a block, flat in the enclosing C scope: for a function body, a loop body
+    /// or a `when` arm, where the C construct already opens the scope.
+    fn block_body(&mut self, id: u32, depth: usize) -> Result<(), Unsupported> {
         match self.ir.expr(id).clone() {
             IrExpr::Block { stmts, value } => {
                 for statement in stmts {
@@ -809,6 +811,21 @@ impl<'a> Emitter<'a> {
                 if let Some(value) = value {
                     self.statement(value, depth)?;
                 }
+                Ok(())
+            }
+            _ => self.statement(id, depth),
+        }
+    }
+
+    fn statement(&mut self, id: u32, depth: usize) -> Result<(), Unsupported> {
+        match self.ir.expr(id).clone() {
+            // A nested block is a scope of its own: the IR numbers a block's locals independently
+            // of its siblings (two `init { }` blocks both declare a `v2`), which C accepts only
+            // inside braces.
+            IrExpr::Block { .. } => {
+                self.line(depth, "{");
+                self.block_body(id, depth + 1)?;
+                self.line(depth, "}");
             }
             IrExpr::Return(value) => {
                 let rendered = match value {
@@ -888,7 +905,7 @@ impl<'a> Emitter<'a> {
                         }
                         None => self.line(depth, "else {"),
                     }
-                    self.statement(body, depth + 1)?;
+                    self.block_body(body, depth + 1)?;
                     self.line(depth, "}");
                     first = false;
                 }
@@ -952,12 +969,12 @@ impl<'a> Emitter<'a> {
         // The body is emitted into a buffer first so the `goto` targets can be omitted unless the
         // body actually jumped to them; an emitted-but-unused C label is dead text in the output.
         let saved = std::mem::take(&mut self.out);
-        self.statement(body, depth + 1)?;
+        self.block_body(body, depth + 1)?;
         let rendered_body = std::mem::replace(&mut self.out, saved);
         let rendered_update = match update {
             Some(update) => {
                 let saved = std::mem::take(&mut self.out);
-                self.statement(update, depth + 1)?;
+                self.block_body(update, depth + 1)?;
                 Some(std::mem::replace(&mut self.out, saved))
             }
             None => None,
