@@ -40,6 +40,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             .chain(&sc_source_tys)
             .copied()
             .collect::<Vec<_>>();
+        let method_parameters = if env.java_parameters {
+            crate::jvm::method_parameters::secondary_constructor(c, sc, &sc_param_tys)
+        } else {
+            Vec::new()
+        };
         // Reserve this constructor's header — its declared annotations included — before its body
         // interns anything, matching the order kotlinc's writer produces.
         cw.reserve_method_pool_with_annotations(
@@ -48,7 +53,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             None,
             &[],
             &sc.annotations,
-            &[],
+            &method_parameters,
         );
         let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
         let mut sctor = CodeBuilder::new(1 + sc_words);
@@ -262,6 +267,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         }) | if sc.synthetic { 0x1000 } else { 0 };
         let sc_desc = method_descriptor(&sc_param_tys, Ty::Unit);
         cw.add_method(sc_access, "<init>", &sc_desc, &sctor);
+        cw.set_method_parameters("<init>", &sc_desc, &method_parameters);
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
         if !sc.annotations.is_empty() {

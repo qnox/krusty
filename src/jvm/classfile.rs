@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod control_flow;
+mod method_parameters;
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -2322,98 +2323,6 @@ impl ClassWriter {
             // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the
             // return, whichever order the two setters ran in — kotlinc writes the user's first.
             m.invisible_anns.splice(0..0, invis);
-        }
-    }
-
-    /// Attach the USER annotations written on a previously-added method's parameters (matched by
-    /// name+descriptor), split by retention into `RuntimeVisibleParameterAnnotations` (RUNTIME — the
-    /// Kotlin default) and `RuntimeInvisibleParameterAnnotations` (BINARY). `params` is per parameter in
-    /// order; a shorter list leaves the trailing parameters unannotated.
-    ///
-    /// Independent of [`ClassWriter::set_method_nullability`]: the synthesized `@NotNull`/`@Nullable`
-    /// parameter annotations live in their own list, and `finish` concatenates the two with the user
-    /// annotations first. No-op if the method isn't found.
-    ///
-    /// Both attributes span the method's PHYSICAL arity, taken from `desc` — `params` describes only the
-    /// SOURCE parameters, and a lowering can append more (a `suspend fun`'s CPS `Continuation`). kotlinc
-    /// writes `num_parameters` over the whole descriptor and leaves the synthesized tail empty; a short
-    /// count would describe a different parameter list.
-    pub fn set_method_param_annotations(
-        &mut self,
-        name: &str,
-        desc: &str,
-        params: &[crate::ir::DeclarationAnnotations],
-    ) {
-        if params
-            .iter()
-            .all(crate::ir::DeclarationAnnotations::is_empty)
-        {
-            return;
-        }
-        let arity = descriptor_param_count(desc).max(params.len());
-        // Resolve WITHOUT interning first, like `set_method_nullability`: describing a method that was
-        // never emitted must not leave orphan name/descriptor entries in the pool.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
-            return;
-        }
-        // Retention decides which attribute carries each annotation; the split itself is shared with
-        // every other declaration site so a new retention kind cannot diverge here.
-        let per_param: Vec<(
-            Vec<crate::ir::AppliedAnnotation>,
-            Vec<crate::ir::AppliedAnnotation>,
-        )> = (0..arity)
-            .map(|i| match params.get(i) {
-                Some(annotations) => split_declaration_annotations(annotations),
-                None => (Vec::new(), Vec::new()),
-            })
-            .collect();
-        // kotlinc writes the whole `RuntimeVisibleParameterAnnotations` attribute before the invisible
-        // one, and encoding interns as it goes — so EVERY parameter's visible annotations are encoded
-        // before any invisible one, not parameter by parameter.
-        let mut visible: Vec<Vec<Vec<u8>>> = Vec::with_capacity(arity);
-        for (vis, _) in &per_param {
-            visible.push(vis.iter().map(|a| self.encode_annotation(a)).collect());
-        }
-        let mut invisible: Vec<Vec<Vec<u8>>> = Vec::with_capacity(arity);
-        for (_, invis) in &per_param {
-            invisible.push(invis.iter().map(|a| self.encode_annotation(a)).collect());
-        }
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            if visible.iter().any(|p| !p.is_empty()) {
-                m.visible_param_anns = visible;
-            }
-            if invisible.iter().any(|p| !p.is_empty()) {
-                m.user_invisible_param_anns = invisible;
-            }
-        }
-    }
-
-    /// Attach a `MethodParameters` attribute to a previously-added method (matched by name+descriptor).
-    /// `params` is one `(name, access_flags)` per parameter of the method's PHYSICAL descriptor, in
-    /// order — the caller supplies the synthesized tail (`$completion`) and the mandated/synthetic
-    /// flags kotlinc sets on a generated parameter. No-op if the method isn't found, or `params` is
-    /// empty (kotlinc writes no attribute for a parameterless method).
-    pub fn set_method_parameters(&mut self, name: &str, desc: &str, params: &[(String, u16)]) {
-        if params.is_empty() {
-            return;
-        }
-        // Resolve WITHOUT interning first: describing a method that was never emitted must not leave
-        // orphan name/descriptor entries in the pool.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
-            return;
-        }
-        let entries: Vec<(u16, u16)> = params
-            .iter()
-            .map(|(parameter, flags)| (self.cp.utf8(parameter), *flags))
-            .collect();
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            m.method_parameters = entries;
         }
     }
 

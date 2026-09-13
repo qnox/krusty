@@ -758,6 +758,14 @@ mod tests {
     }
 
     #[test]
+    fn java_parameters_is_an_active_backend_option() {
+        let options = parse_args(&["-java-parameters", "f.kt"]);
+        assert!(options.java_parameters);
+        assert!(options.ignored.is_empty(), "{:?}", options.ignored);
+        assert_eq!(options.sources, vec!["f.kt".to_string()]);
+    }
+
+    #[test]
     fn jdk_home_and_no_jdk_flags() {
         let o = parse_args(&["-jdk-home", "/opt/jdk", "f.kt"]);
         assert_eq!(o.jdk_home, Some(PathBuf::from("/opt/jdk")));
