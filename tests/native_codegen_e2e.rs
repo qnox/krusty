@@ -1360,3 +1360,34 @@ fn an_extension_property_is_read_and_written_through_its_accessors() {
         "40\n21\n99\n198\n"
     );
 }
+
+#[test]
+fn a_data_class_gets_kotlins_equality_hashing_and_rendering() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A data class is only a data class if its synthesized members answer what Kotlin says. The
+    // checked lowering writes those members; what the generator supplies is the per-field hash and
+    // comparison they are written in terms of, and each is Kotlin's own answer rather than the
+    // machine's: a `Long` folds its halves so the high word survives the truncation to `Int`, a
+    // `Boolean` is 1231 or 1237, and a `String` field compares by content. A floating-point field
+    // is declined for now — the `toString` synthesized beside `equals` would have to render it.
+    assert_eq!(
+        run("data class Point(val x: Int, val y: Int)\n\
+             data class Tagged(val name: String, val big: Long, val flag: Boolean)\n\
+             fun main() {\n\
+             \x20   println(Point(1, 2) == Point(1, 2))\n\
+             \x20   println(Point(1, 2) == Point(1, 3))\n\
+             \x20   println(Point(1, 2).hashCode() == Point(1, 2).hashCode())\n\
+             \x20   println(Point(1, 2).hashCode() == Point(2, 1).hashCode())\n\
+             \x20   println(Point(1, 2).toString())\n\
+             \x20   val (a, b) = Point(3, 4)\n\
+             \x20   println(a + b)\n\
+             \x20   println(Tagged(\"a\" + \"b\", 1L shl 40, true) == Tagged(\"ab\", 1L shl 40, true))\n\
+             \x20   println(Tagged(\"ab\", 1L, true) == Tagged(\"ab\", 2L, true))\n\
+             \x20   println(Tagged(\"ab\", 1L, true).hashCode() == Tagged(\"ab\", 1L, true).hashCode())\n\
+             }\n"),
+        "true\nfalse\ntrue\nfalse\nPoint(x=1, y=2)\n7\ntrue\nfalse\ntrue\n"
+    );
+}

@@ -1174,6 +1174,15 @@ before:**
    is a call to the accessor the checked lowering already built, in the parameter order that
    lowering recorded. A member extension property still declines — it can be overridden, so it
    wants its receiver's vtable slot rather than a direct call.
+   Data classes took the lane to **1082 pass**, and they were another decline worth checking before
+   building: their `equals`, `hashCode`, `toString` and `componentN` are already synthesized by
+   common lowering, so all the generator owed them was the per-field hash and comparison those
+   members are written in terms of. The corpus then caught what the synthesis itself had wrong — a
+   data class with a NULLABLE array field rendered the array by identity, because `is_array` is
+   false for `Array<Int>?` — and krusty's JVM backend printed the identical wrong answer, which is
+   what says the defect is common lowering's. Fixing it there exposed a second one underneath, in
+   the JVM realization: `java.util.Arrays.toString` has no `Integer[]` overload, so a reference
+   array has to name the `Object[]` one. Both are fixed, and both lanes now pass the case.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

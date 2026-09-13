@@ -203,8 +203,6 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
         })
     {
         "an interface supertype"
-    } else if class.is_data {
-        "a data class"
     } else if class.is_inner_class || class.constructor_prefix_count > 0 {
         "an inner class"
     } else if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
@@ -1078,9 +1076,8 @@ mod tests {
     fn out_of_scope_classes_are_declined_by_name() {
         let mut ir = IrFile::default();
         let id = class(&mut ir, "D", "kotlin/Any", 0);
-        ir.classes[id as usize].is_data = true;
-        assert!(build(&ir).expect_err("declined").contains("a data class"));
-        ir.classes[id as usize].is_data = false;
+        // A `data class` is deliberately absent from this list: its synthesized members are
+        // ordinary functions in common IR, so it lowers like the class it is.
         ir.classes[id as usize].is_interface = true;
         assert!(build(&ir).expect_err("declined").contains("an interface"));
         ir.classes[id as usize].is_interface = false;

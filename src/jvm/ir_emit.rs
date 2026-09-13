@@ -16753,7 +16753,17 @@ impl<'a> Emitter<'a> {
                     }
                     crate::ir::IrIntrinsic::DataClassArrayToString { ty } => {
                         self.emit_value(args[0], code);
-                        let descriptor = format!("({})Ljava/lang/String;", type_descriptor(*ty));
+                        // `java.util.Arrays.toString` is overloaded per PRIMITIVE array plus one
+                        // `Object[]`; there is no `Integer[]` overload, so a reference array — of
+                        // any element type, nullable or not — takes the `Object[]` one. Naming the
+                        // field's own erasure instead is a methodref to a method that does not
+                        // exist, which the class loads with and then fails on at the call.
+                        let parameter = if ty.non_null().is_reference_array() {
+                            "[Ljava/lang/Object;".to_string()
+                        } else {
+                            type_descriptor(ty.non_null())
+                        };
+                        let descriptor = format!("({parameter})Ljava/lang/String;");
                         let method = self
                             .cw
                             .methodref("java/util/Arrays", "toString", &descriptor);

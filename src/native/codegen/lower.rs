@@ -1793,8 +1793,111 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.runtime_call("kt_to_string", &[any()], ret, &[value])
             }
+            IrIntrinsic::DataClassFieldHash { ty } => {
+                let [value] = args else {
+                    return Err("a malformed data-class field hash".to_string());
+                };
+                self.field_hash(*value, ty)
+            }
+            IrIntrinsic::DataClassFieldEquals { ty } => {
+                let [left, right] = args else {
+                    return Err("a malformed data-class field comparison".to_string());
+                };
+                self.field_equals(*left, *right, ty)
+            }
             other => Err(format!("the `{other:?}` intrinsic")),
         }
+    }
+
+    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`.
+    ///
+    /// Kotlin's answer for each primitive is fixed, and these are those answers rather than
+    /// anything this generator is free to choose: a program can print a hash, and two programs
+    /// that agree on everything else must agree on it. `Boolean` is 1231 or 1237 — arbitrary, and
+    /// arbitrary in the same way everywhere. `Long` folds its halves together so the high word is
+    /// not lost in the truncation to `Int`, and `Double` does the same to its bits. A `Float` is
+    /// its bits. The smaller integers are themselves, widened.
+    fn field_hash(&mut self, value: u32, ty: Ty) -> Result<Option<Value>, Unsupported> {
+        if carrier(ty) == Carrier::Ref {
+            // Including a nullable primitive, which is a box and hashes through its own type.
+            let value = self.reference(value)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            return self.runtime_call("kt_hash_code", &[any()], Ty::Int, &[value]);
+        }
+        let Some(operand) = self.coerce(value, ty)? else {
+            return Err("a `Unit` data-class field".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let hash = match ty.non_null() {
+            Ty::Boolean => {
+                let yes = self.builder.ins().iconst(types::I32, 1231);
+                let no = self.builder.ins().iconst(types::I32, 1237);
+                let zero = self.builder.ins().iconst(types::I8, 0);
+                let set = self.builder.ins().icmp(IntCC::NotEqual, operand, zero);
+                self.builder.ins().select(set, yes, no)
+            }
+            Ty::Byte | Ty::Short => self.builder.ins().sextend(types::I32, operand),
+            Ty::Char => self.builder.ins().uextend(types::I32, operand),
+            Ty::Int => operand,
+            Ty::Long => self.fold_to_int(operand),
+            // A floating-point field hashes by its BITS, with `Float` giving them directly and
+            // `Double` folding them as `Long` does. Not emitted yet, and deliberately: a data
+            // class holding one cannot compile at all today, because the `toString` synthesized
+            // beside this `hashCode` has to render the value and the runtime cannot. Writing the
+            // hash before the rendering would mean shipping a line no test can reach.
+            Ty::Float | Ty::Double => {
+                return Err("a data-class field holding a floating-point value".to_string())
+            }
+            other => return Err(format!("a data-class field of type `{other:?}`")),
+        };
+        Ok(Some(hash))
+    }
+
+    /// `(value xor (value ushr 32)).toInt()` — how Kotlin folds 64 bits into a hash.
+    fn fold_to_int(&mut self, value: Value) -> Value {
+        let shift = self.builder.ins().iconst(types::I64, 32);
+        let high = self.builder.ins().ushr(value, shift);
+        let folded = self.builder.ins().bxor(value, high);
+        self.builder.ins().ireduce(types::I32, folded)
+    }
+
+    /// Whether two data-class fields are equal, which is `equals`, not `==` on the machine.
+    ///
+    /// A reference field is the runtime's null-safe `equals`, which is Kotlin's. A floating-point
+    /// field would compare by its BITS — so that `NaN` equals `NaN` and `0.0` does not equal
+    /// `-0.0`, the opposite of what the comparison instruction answers — and is declined for the
+    /// same reason the hash above is: the `toString` synthesized beside this `equals` cannot
+    /// render the value, so no data class holding one compiles today.
+    fn field_equals(
+        &mut self,
+        left: u32,
+        right: u32,
+        ty: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        if !ty.is_nullable() && matches!(ty.non_null(), Ty::Float | Ty::Double) {
+            return Err("a data-class field holding a floating-point value".to_string());
+        }
+        if carrier(ty) != Carrier::Ref {
+            let left = self.coerce(left, ty)?;
+            let right = self.coerce(right, ty)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            let (Some(left), Some(right)) = (left, right) else {
+                return Err("a `Unit` data-class field".to_string());
+            };
+            return Ok(Some(self.builder.ins().icmp(IntCC::Equal, left, right)));
+        }
+        let left = self.reference(left)?;
+        let right = self.reference(right)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])
     }
 
     /// Arguments coerced to the parameter carriers they are passed as.

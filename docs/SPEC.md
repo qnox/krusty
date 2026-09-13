@@ -4335,6 +4335,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/fir_lower/sink.rs`, `src/native/codegen/lower.rs`,
   `tests/native_codegen_e2e.rs::a_tailrec_the_checked_lowering_leaves_recursive_is_declined`).
 
+- **A data class's members are Kotlin's, down to the per-field hash.** `equals`, `hashCode`,
+  `toString` and `componentN` are synthesized by common lowering; what a backend supplies is the
+  per-field hash and comparison they are written in terms of, and each has one right answer a
+  program can print: `Boolean` hashes to 1231 or 1237, `Long` to `(v xor (v ushr 32)).toInt()`,
+  the narrower integers to themselves widened, and a reference through its own `hashCode`. A field
+  comparison is `equals`, not the machine's `==`. A field holding a floating-point value is
+  declined natively for now, because the `toString` synthesized beside it would have to render one
+  (`src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::a_data_class_gets_kotlins_equality_hashing_and_rendering`).
+
+- **A data class renders an ARRAY field by content, nullable or not.** `A(x=[0, 1], y=null)`. The
+  checked lowering has to see through the `?` when it decides a field is an array — `is_array` is
+  false for `Array<Int>?` — and the JVM realization has to name `java.util.Arrays.toString(Object[])`
+  for a reference array, since no `Integer[]` overload exists to name. Both were wrong, and the two
+  wrongs were invisible together: the nullable field never reached the call that would have failed
+  (`src/fir_lower/data_classes.rs`, `src/jvm/ir_emit.rs`,
+  `tests/dataclass_hash_and_sam_e2e.rs::data_class_array_fields_render_their_contents`).
+
 - **An extension property is its accessors.** `val Cell.doubled get() = value * 2` has no backing
   field — there is no object of its own to keep one in — so every read and write is a call to the
   accessor, with the receiver passed as an argument. The parameter order is Kotlin's declaration
