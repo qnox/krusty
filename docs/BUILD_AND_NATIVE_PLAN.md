@@ -559,8 +559,9 @@ What this does NOT do, in order of how much it matters:
 * **Classes, properties, and almost all of the stdlib.** Each one makes the backend decline, by
   name, with a diagnostic. The runtime implements `kotlin.io`'s console functions, `String.plus`
   and `toString`.
-* **Memory management.** The runtime never frees. Choosing a strategy is a real design decision and
-  a placeholder would prejudge it badly.
+* **Classes on the heap.** The runtime now has an object model, an allocator and a collector (see
+  *Decided: krusty owns its runtime* below), but the emitter does not yet put a Kotlin class onto
+  them; `class` still declines.
 * **klib ingestion (phase 7).** Symbols still come from the Kotlin/JVM stdlib jar, since that is the
   only provider krusty has. Only *signatures* come from there — no JVM reaches the output — but two
   seams exist because of it and both disappear with phase 7: a top-level function arrives owned by a
@@ -781,6 +782,19 @@ The cost of step 2 is real but it is not the multi-year item: the multi-year ite
 collector, and what makes it multi-year is the compiler-side stack-map, safepoint and barrier work,
 not the collector's own lines. Deferring precision defers that, without deferring ownership.
 
+**Landed:** the first three items of step 2 exist. `src/native/runtime.rs` emits the object model —
+every heap object starts with a `KType` descriptor naming its reference fields, and the built-in
+values (boxes, `Unit`, `String` and the byte array that holds a string's text) sit on it — and
+`src/native/gc.rs` emits `krusty_gc.c`: a size-class allocator and a stop-the-world mark-sweep
+collector with conservative roots and precise heap tracing, triggered by allocation volume, with
+large objects unmapped when they die. `tests/native_gc_e2e.rs` drives it from C and pins each
+property (garbage reclaimed, reachable objects intact, cycles collected, interior pointers rooted,
+a pointer hidden in a `Long` field NOT rooted, freed slots reused); the runtime's syscall shim and
+page mapping moved into a shared `krusty_sys.h`. What is NOT there: strings still render through
+the runtime rather than being a Kotlin class; the emitter still declines `class`, so nothing but
+the runtime's own values reaches the heap yet; there is one thread and no synchronization; and
+root-finding stays conservative until step 3.
+
 What this concedes, honestly: no macOS or Windows targets while the runtime is freestanding-Linux
 (a stable syscall ABI is what makes sysroot-free cross-compilation work), no moving or generational
 collection until step 3, and strings, collections and exceptions written by hand. Those are the
@@ -929,9 +943,9 @@ and the first half is the larger one. Three honest tiers:
 * **Go-class** — sub-millisecond pauses, hybrid write barriers, escape analysis feeding stack
   allocation. ~100k lines and a team indefinitely. Go's collector has been rewritten more than once.
 
-For calibration at the other end: the C runtime this repository currently ships is **617 lines** and
-has no collector, no threads and no exceptions. The distance from there to the first tier is the
-quantity in question.
+For calibration at the other end: when this estimate was written the C runtime this repository
+shipped was **617 lines** and had no collector, no threads and no exceptions. The distance from
+there to the first tier is the quantity in question.
 
 **Can we take Go's runtime sources and build our own library from them?** Legally yes — Go is
 BSD-3-Clause, so vendoring or deriving is permitted with attribution. Technically it is not a

@@ -5383,6 +5383,43 @@ and behavior is checked by RUNNING the emitted program.
   partial emission would produce a program that links and misbehaves.
   Tests: `tests/native_hello_world_e2e.rs` (`an_unsupported_construct_is_declined_with_a_diagnostic`).
 
+- **Every heap object begins with its type, and memory is reclaimed by a mark-sweep collector whose
+  roots are conservative and whose heap tracing is precise.** A `KType` descriptor names the byte
+  offset of every reference-typed field, and the collector follows exactly those; a `Long` field
+  holding a pointer's bits does not keep anything alive. Roots — the stack and the callee-saved
+  registers — are the one place scanned conservatively, because emitting C leaves frame layout to
+  the C compiler and so no stack maps exist: any stack word that points into an allocated object
+  (interior pointers included) roots it. Global slots are roots only when registered
+  (`kt_gc_add_global_root`); static storage is never scanned and never treated as an object.
+  Collection is triggered by allocation volume since the last collection (never by heap size, which
+  would double the heap each cycle for a program with a small live set) and can be forced with
+  `kt_gc_collect()`.
+  Tests: `tests/native_gc_e2e.rs` (`the_collector_reclaims_garbage_and_keeps_what_is_reachable`,
+  whose C program pins precise heap tracing by an object referenced only from a `kt_long` field
+  being reclaimed, and interior-pointer rooting, cycle reclamation, slot reuse, large-object
+  unmapping and the automatic trigger);
+  `tests/native_hello_world_e2e.rs` (`a_program_that_allocates_heavily_runs_in_bounded_memory`).
+
+- **The collector never moves an object.** A conservative root cannot be updated — the word that
+  looks like a pointer may be an integer — so nothing that a root might refer to may change
+  address. That forecloses compaction and a copying nursery until krusty owns its code generator and
+  can emit stack maps (`docs/BUILD_AND_NATIVE_PLAN.md`, *Decided: krusty owns its runtime*, step 3).
+  The heap is shaped accordingly: size-segregated chunks, a freed slot reused in place, a large
+  object in a mapping of its own that is returned to the kernel when it dies.
+  Tests: `tests/native_gc_e2e.rs` (rooted objects are read back at the same address with the same
+  contents after a collection; a second batch the size of a freed first batch maps nothing new).
+
+- **A `String`'s text is a heap object of its own — a byte array with no reference fields — and the
+  string's type lists the field holding it as a reference.** The text therefore lives exactly as
+  long as some string uses it, and two strings may share one array. A literal is different: its
+  bytes stay in static storage and the string's array field is `NULL`, so the collector has nothing
+  to trace and nothing to free. Rendering a number or a `Char` allocates a byte array the same way;
+  the runtime keeps that array in a local across any further allocation, which is what makes it a
+  root.
+  Tests: `tests/native_gc_e2e.rs` (a string built across repeated collections prints intact, and a
+  literal and `Unit` pass through a collection untouched);
+  `tests/native_hello_world_e2e.rs` (`a_program_that_allocates_heavily_runs_in_bounded_memory`).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
