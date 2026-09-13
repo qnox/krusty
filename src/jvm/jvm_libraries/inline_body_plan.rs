@@ -46,6 +46,51 @@ fn physical_descriptor(member: &LibraryMember) -> String {
     crate::jvm::names::method_descriptor(&member.physical_params, member.physical_ret)
 }
 
+fn loaded_reference_local(instruction: &Insn) -> Option<u16> {
+    let Insn::Plain { op, operands } = instruction else {
+        return None;
+    };
+    match *op {
+        0x2a..=0x2d => Some(u16::from(*op - 0x2a)),
+        0x19 => operands.first().copied().map(u16::from),
+        0xc4 if operands.first() == Some(&0x19) => operands
+            .get(1)
+            .zip(operands.get(2))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low)),
+        _ => None,
+    }
+}
+
+fn loaded_int_local(instruction: &Insn) -> Option<u16> {
+    let Insn::Plain { op, operands } = instruction else {
+        return None;
+    };
+    match *op {
+        0x1a..=0x1d => Some(u16::from(*op - 0x1a)),
+        0x15 => operands.first().copied().map(u16::from),
+        0xc4 if operands.first() == Some(&0x15) => operands
+            .get(1)
+            .zip(operands.get(2))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low)),
+        _ => None,
+    }
+}
+
+fn stored_reference_local(instruction: &Insn) -> Option<u16> {
+    let Insn::Plain { op, operands } = instruction else {
+        return None;
+    };
+    match *op {
+        0x4b..=0x4e => Some(u16::from(*op - 0x4b)),
+        0x3a => operands.first().copied().map(u16::from),
+        0xc4 if operands.first() == Some(&0x3a) => operands
+            .get(1)
+            .zip(operands.get(2))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low)),
+        _ => None,
+    }
+}
+
 fn invocation_operands(
     instructions: &[Insn],
     source_cp: &[C],
@@ -68,7 +113,7 @@ fn invocation_operands(
     let mut operands = Vec::with_capacity(operand_count);
     while operands.len() < operand_count {
         cursor = cursor.checked_sub(1)?;
-        if let Some(local) = inline::loaded_local(&instructions[cursor]) {
+        if let Some(local) = loaded_reference_local(&instructions[cursor]) {
             operands.push(local);
             continue;
         }
@@ -106,10 +151,77 @@ fn exact_call_partition(call_indices: &[usize], lambda: usize) -> bool {
         && call_indices[2] > lambda
 }
 
+fn exact_parameter_roles(
+    lambda_parameter: usize,
+    semantic_parameters: usize,
+    physical_parameters: usize,
+    parameter_slots: usize,
+    state_parameters: usize,
+) -> bool {
+    state_parameters.checked_add(1).is_some_and(|lambda_role| {
+        lambda_parameter == lambda_role
+            && lambda_role.checked_add(1).is_some_and(|role_count| {
+                semantic_parameters == role_count
+                    && physical_parameters == role_count
+                    && parameter_slots == role_count
+            })
+    })
+}
+
+fn exact_null_default_prefix(instructions: &[Insn], mask_slot: u16, parameter_slot: u16) -> bool {
+    let [mask, one, and, branch, null, store, ..] = instructions else {
+        return false;
+    };
+    loaded_int_local(mask) == Some(mask_slot)
+        && matches!(one, Insn::Plain { op: 0x04, operands } if operands.is_empty())
+        && matches!(and, Insn::Plain { op: 0x7e, operands } if operands.is_empty())
+        && matches!(
+            branch,
+            Insn::Branch {
+                op: 0x99,
+                target: inline::BranchTarget::Internal(6),
+            }
+        )
+        && matches!(null, Insn::Plain { op: 0x01, operands } if operands.is_empty())
+        && stored_reference_local(store) == Some(parameter_slot)
+}
+
 fn is_structural_marker(target: MethodTarget<'_>) -> bool {
     target.0 == "kotlin/jvm/internal/InlineMarker"
         && target.2 == "(I)V"
         && matches!(target.1, "mark" | "finallyStart" | "finallyEnd")
+}
+
+fn exact_parameter_null_check(instructions: &[Insn], source_cp: &[C], parameter_slot: u16) -> bool {
+    let [load, Insn::Plain {
+        op: 0x12 | 0x13, ..
+    }, invoke] = instructions
+    else {
+        return false;
+    };
+    loaded_reference_local(load) == Some(parameter_slot)
+        && inline::invoked_method(invoke, source_cp).is_some_and(|(owner, name, descriptor, _)| {
+            owner == "kotlin/jvm/internal/Intrinsics"
+                && name == "checkNotNullParameter"
+                && descriptor == "(Ljava/lang/Object;Ljava/lang/String;)V"
+        })
+}
+
+fn exact_lambda_return_parameter(
+    instructions: &[Insn],
+    parameter_at: &impl Fn(u16) -> Option<usize>,
+) -> Option<Option<usize>> {
+    match instructions {
+        [Insn::Plain { op: 0xb0, .. }] => Some(None),
+        [Insn::Plain { op: 0x57, .. }, load, Insn::Plain { op: 0xb0, .. }] => {
+            Some(Some(parameter_at(loaded_reference_local(load)?)?))
+        }
+        _ => None,
+    }
+}
+
+fn handler_free_lambda_body(handlers: &[ExcEntry]) -> bool {
+    handlers.is_empty()
 }
 
 fn instruction_index(offsets: &[usize], byte_offset: u16) -> Option<usize> {
@@ -140,16 +252,102 @@ fn enter_result_starts_body(instructions: &[Insn], source_cp: &[C]) -> bool {
     })
 }
 
+fn exact_inline_local_prefix(instructions: &[Insn], scratch_slot: u16) -> bool {
+    let [Insn::Plain { op: 0x03, .. }, store] = instructions else {
+        return false;
+    };
+    inline::stored_local(store) == Some(scratch_slot)
+}
+
+fn exact_loaded_operands(instructions: &[Insn], operands: &[u16]) -> bool {
+    instructions.len() == operands.len()
+        && instructions
+            .iter()
+            .zip(operands.iter().rev())
+            .all(|(instruction, operand)| loaded_reference_local(instruction) == Some(*operand))
+}
+
+fn exact_enter_operands(instructions: &[Insn], source_cp: &[C], operands: &[u16]) -> bool {
+    let Some(loads) = instructions.get(..operands.len()) else {
+        return false;
+    };
+    exact_loaded_operands(loads, operands)
+        && instructions
+            .get(operands.len()..)
+            .is_some_and(|marker| is_inline_marker_pair(marker, source_cp, "mark"))
+}
+
+fn exact_control_flow(instructions: &[Insn], normal_branch: usize, normal_return: usize) -> bool {
+    normal_return < instructions.len()
+        && matches!(
+        instructions.get(normal_branch),
+        Some(
+            Insn::Branch {
+                op: 0xa7,
+                target: inline::BranchTarget::Internal(target),
+            } | Insn::BranchW {
+                op: 0xc8,
+                target: inline::BranchTarget::Internal(target),
+            }
+        ) if *target == normal_return
+        )
+        && instructions
+            .iter()
+            .enumerate()
+            .all(|(index, instruction)| match instruction {
+                Insn::Branch {
+                    op: 0xa7,
+                    target: inline::BranchTarget::Internal(target),
+                }
+                | Insn::BranchW {
+                    op: 0xc8,
+                    target: inline::BranchTarget::Internal(target),
+                } => index == normal_branch && *target == normal_return,
+                Insn::Branch { .. }
+                | Insn::BranchW { .. }
+                | Insn::TableSwitch { .. }
+                | Insn::LookupSwitch { .. } => false,
+                Insn::Plain { .. } => true,
+            })
+}
+
+fn has_only_template_effects(instructions: &[Insn]) -> bool {
+    instructions.iter().all(|instruction| match instruction {
+        Insn::Plain { op, .. } => !matches!(
+            *op,
+            0x4f..=0x56 // array stores
+                | 0x84 // iinc
+                | 0xb2..=0xb5 // field reads/writes
+                | 0xba // invokedynamic
+                | 0xbb | 0xbc | 0xbd // allocation
+                | 0xc2 | 0xc3 // monitor enter/exit
+                | 0xc5 // multidimensional allocation
+        ),
+        Insn::Branch { .. } | Insn::BranchW { .. } => true,
+        Insn::TableSwitch { .. } | Insn::LookupSwitch { .. } => false,
+    })
+}
+
+fn cleanup_boundaries_are_immediate(
+    invoke: usize,
+    normal_cleanup_start: usize,
+    handler: usize,
+    exceptional_cleanup_start: usize,
+) -> bool {
+    invoke.checked_add(2) == Some(normal_cleanup_start)
+        && handler.checked_add(1) == Some(exceptional_cleanup_start)
+}
+
 fn normal_result_return(
     instructions: &[Insn],
     source_cp: &[C],
     invoke: usize,
     normal_cleanup: usize,
     handler: usize,
-) -> Option<usize> {
+) -> Option<(usize, usize)> {
     let result_slot = instructions
         .get(invoke + 1)
-        .and_then(inline::stored_local)?;
+        .and_then(stored_reference_local)?;
     let branch = instructions
         .get(normal_cleanup + 1..handler)
         .into_iter()
@@ -172,16 +370,13 @@ fn normal_result_return(
         source_cp,
         "finallyEnd",
     ) && branch + 1 == handler
-        && instructions.get(target).and_then(inline::loaded_local) == Some(result_slot)
+        && instructions.get(target).and_then(loaded_reference_local) == Some(result_slot)
         && matches!(
             instructions.get(target + 1),
-            Some(Insn::Plain {
-                op: 0xac..=0xb0,
-                ..
-            })
+            Some(Insn::Plain { op: 0xb0, .. })
         )
         && target + 2 == instructions.len())
-    .then_some(target)
+    .then_some((branch, target))
 }
 
 fn exceptional_cleanup_rethrows(
@@ -191,7 +386,7 @@ fn exceptional_cleanup_rethrows(
     repeated_cleanup: usize,
     normal_return: usize,
 ) -> bool {
-    let Some(exception_slot) = instructions.get(handler).and_then(inline::stored_local) else {
+    let Some(exception_slot) = instructions.get(handler).and_then(stored_reference_local) else {
         return false;
     };
     let load = instructions
@@ -200,7 +395,7 @@ fn exceptional_cleanup_rethrows(
         .flatten()
         .enumerate()
         .find_map(|(offset, instruction)| {
-            (inline::loaded_local(instruction) == Some(exception_slot))
+            (loaded_reference_local(instruction) == Some(exception_slot))
                 .then_some(repeated_cleanup + 1 + offset)
         })
         .filter(|load| {
@@ -235,6 +430,8 @@ struct FinallyContract<'a> {
     exceptional_cleanup_starts_finally: bool,
     normal_result_flows_to_return: bool,
     exceptional_cleanup_rethrows: bool,
+    exact_parameter_roles: bool,
+    exact_instruction_template: bool,
 }
 
 /// Accept only the complete `enter; try { lambda } finally { cleanup }` bytecode contract. Merely
@@ -263,6 +460,8 @@ fn valid_finally_contract(contract: FinallyContract<'_>) -> bool {
         && contract.exceptional_cleanup_starts_finally
         && contract.normal_result_flows_to_return
         && contract.exceptional_cleanup_rethrows
+        && contract.exact_parameter_roles
+        && contract.exact_instruction_template
 }
 
 impl JvmLibraries {
@@ -274,16 +473,22 @@ impl JvmLibraries {
         // Every candidate overload the provider builds computes a plan, so the decode below is
         // memoized per declaration. The key carries every physical input read by the decoder.
         let parameter_slots = callable_parameter_slots(&callable.physical_params);
-        let default_descriptor = callable
-            .default_realization
-            .as_deref()
-            .map(|realization| realization.descriptor.as_str());
+        let default_target = callable.default_realization.as_deref().map(|realization| {
+            (
+                realization.declaration_owner,
+                realization.name.as_str(),
+                realization.descriptor.as_str(),
+            )
+        });
         if let Some(plan) = self.cp.cached_inline_plan(
             callable.owner,
             &callable.name,
             &body_descriptor,
             &parameter_slots,
-            default_descriptor,
+            callable.context_count,
+            callable.source_receiver,
+            &callable.params,
+            default_target,
         ) {
             return plan.map(|boxed| *boxed);
         }
@@ -302,7 +507,10 @@ impl JvmLibraries {
                 &callable.name,
                 &body_descriptor,
                 &parameter_slots,
-                default_descriptor,
+                callable.context_count,
+                callable.source_receiver,
+                &callable.params,
+                default_target,
                 plan.clone().map(Box::new),
             );
         }
@@ -347,6 +555,46 @@ impl JvmLibraries {
         let (&lambda_slot, invoke_argument_slots) = invoke_loads.split_last()?;
         let lambda_parameter = parameter_at(lambda_slot)?;
 
+        let first_invoke_operand = invoke.checked_sub(invoke_loads.len())?;
+        let exact_operands = instructions
+            .get(first_invoke_operand..*invoke)
+            .is_some_and(|loads| {
+                loads
+                    .iter()
+                    .zip(invoke_loads.iter().rev())
+                    .all(|(load, slot)| loaded_reference_local(load) == Some(*slot))
+            });
+        let exact_prelude = instructions
+            .get(..first_invoke_operand)
+            .is_some_and(|prelude| {
+                prelude.is_empty()
+                    || exact_parameter_null_check(prelude, &body.source_cp, lambda_slot)
+            });
+        let return_parameter = instructions
+            .get(invoke + 1..)
+            .and_then(|suffix| exact_lambda_return_parameter(suffix, &parameter_at));
+        let semantic_lambda_matches = matches!(
+            callable.params.get(lambda_parameter).copied(),
+            Some(Ty::Fun(lambda)) if lambda.params.len() == invoke_argument_slots.len()
+        );
+        if exact_operands
+            && exact_prelude
+            && semantic_lambda_matches
+            && handler_free_lambda_body(&body.handlers)
+        {
+            if let Some(return_parameter) = return_parameter {
+                return Some(InlineBodyPlan::InvokeLambda {
+                    lambda_parameter,
+                    argument_parameters: invoke_argument_slots
+                        .iter()
+                        .rev()
+                        .map(|slot| parameter_at(*slot))
+                        .collect::<Option<Vec<_>>>()?,
+                    return_parameter,
+                });
+            }
+        }
+
         let calls = instructions
             .iter()
             .enumerate()
@@ -355,22 +603,6 @@ impl JvmLibraries {
                 (index != *invoke && !is_structural_marker(target)).then_some((index, target))
             })
             .collect::<Vec<_>>();
-        if calls.is_empty() {
-            return Some(InlineBodyPlan::InvokeLambda {
-                lambda_parameter,
-                argument_parameters: invoke_argument_slots
-                    .iter()
-                    .rev()
-                    .map(|slot| parameter_at(*slot))
-                    .collect::<Option<Vec<_>>>()?,
-                return_parameter: instructions
-                    .iter()
-                    .rev()
-                    .nth(1)
-                    .and_then(inline::loaded_local)
-                    .and_then(parameter_at),
-            });
-        }
         let call_indices = calls.iter().map(|(index, _)| *index).collect::<Vec<_>>();
         if !exact_call_partition(&call_indices, *invoke) {
             return None;
@@ -400,6 +632,18 @@ impl JvmLibraries {
             || enter_member.params != cleanup_member.params
             || enter_member.params.len() > 1
         {
+            return None;
+        }
+        let exact_roles = callable.context_count == 0
+            && callable.source_receiver.is_some()
+            && exact_parameter_roles(
+                lambda_parameter,
+                callable.params.len(),
+                callable.physical_params.len(),
+                parameter_slots.len(),
+                enter_member.params.len(),
+            );
+        if !exact_roles {
             return None;
         }
         let Ty::Fun(lambda) = callable.params.get(lambda_parameter).copied()? else {
@@ -440,7 +684,7 @@ impl JvmLibraries {
         }
         expected_enter.push(receiver_slot);
         expected_cleanup.push(receiver_slot);
-        let (enter_operands, _) = invocation_operands(
+        let (enter_operands, enter_first_producer) = invocation_operands(
             &instructions,
             &body.source_cp,
             enter_target.0,
@@ -485,7 +729,7 @@ impl JvmLibraries {
                 "finallyStart",
             ),
             normal_result_flows_to_return: normal_return.is_some(),
-            exceptional_cleanup_rethrows: normal_return.is_some_and(|normal_return| {
+            exceptional_cleanup_rethrows: normal_return.is_some_and(|(_, normal_return)| {
                 exceptional_cleanup_rethrows(
                     &instructions,
                     &body.source_cp,
@@ -494,6 +738,42 @@ impl JvmLibraries {
                     normal_return,
                 )
             }),
+            exact_parameter_roles: exact_roles,
+            exact_instruction_template: normal_return.is_some_and(
+                |(normal_branch, normal_return)| {
+                    let Some(scratch_slot) = continuation_slot.checked_add(1) else {
+                        return false;
+                    };
+                    let (
+                        Some(prefix),
+                        Some(enter_producers),
+                        Some(normal_cleanup_producers),
+                        Some(repeated_cleanup_producers),
+                    ) = (
+                        instructions.get(..enter_first_producer),
+                        instructions.get(enter_first_producer..enter_target.0),
+                        instructions.get(normal_cleanup_first_producer..cleanup.0),
+                        instructions.get(repeated_cleanup_first_producer..repeated.0),
+                    )
+                    else {
+                        return false;
+                    };
+                    cleanup_boundaries_are_immediate(
+                        *invoke,
+                        normal_cleanup_start,
+                        handler,
+                        exceptional_cleanup_start,
+                    ) && exact_inline_local_prefix(prefix, scratch_slot)
+                        && exact_enter_operands(enter_producers, &body.source_cp, &enter_operands)
+                        && exact_loaded_operands(normal_cleanup_producers, &normal_cleanup_operands)
+                        && exact_loaded_operands(
+                            repeated_cleanup_producers,
+                            &repeated_cleanup_operands,
+                        )
+                        && exact_control_flow(&instructions, normal_branch, normal_return)
+                        && has_only_template_effects(&instructions)
+                },
+            ),
         }) {
             return None;
         }
@@ -551,8 +831,8 @@ impl JvmLibraries {
         Some(member)
     }
 
-    /// Whether the `$default` bridge stores `null` into `parameter`'s slot. `None` means the bridge
-    /// body could not be read and must not be cached as a stable negative.
+    /// Whether the `$default` bridge's exact leading mask branch assigns `null` to `parameter`.
+    /// `None` means the bridge body could not be read and must not be cached as a stable negative.
     fn inline_default_is_null(
         &self,
         callable: &LibraryCallable,
@@ -562,6 +842,9 @@ impl JvmLibraries {
         let Some(realization) = callable.default_realization.as_deref() else {
             return Some(false);
         };
+        if realization.mask_count != 1 {
+            return Some(false);
+        }
         let owner = realization.declaration_owner.render();
         let body = self
             .cp
@@ -572,16 +855,43 @@ impl JvmLibraries {
         let Some(slot) = parameter_slots.get(parameter).copied() else {
             return Some(false);
         };
-        Some(instructions.windows(2).any(|window| {
-            matches!(window[0], Insn::Plain { op: 0x01, .. })
-                && inline::stored_local(&window[1]) == Some(slot)
-        }))
+        let Some(mask_slot) = slot_after_parameters(&realization.real_params)
+            .and_then(|slot| slot.checked_add(u16::from(realization.suspend)))
+        else {
+            return Some(false);
+        };
+        Some(exact_null_default_prefix(&instructions, mask_slot, slot))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain(op: u8) -> Insn {
+        Insn::Plain {
+            op,
+            operands: Vec::new(),
+        }
+    }
+
+    fn valid_null_default_prefix() -> Vec<Insn> {
+        vec![
+            Insn::Plain {
+                op: 0x15,
+                operands: vec![4],
+            },
+            plain(0x04),
+            plain(0x7e),
+            Insn::Branch {
+                op: 0x99,
+                target: inline::BranchTarget::Internal(6),
+            },
+            plain(0x01),
+            plain(0x4c),
+            plain(0x00),
+        ]
+    }
 
     fn valid_handlers() -> [ExcEntry; 2] {
         [
@@ -618,13 +928,119 @@ mod tests {
             exceptional_cleanup_starts_finally: true,
             normal_result_flows_to_return: true,
             exceptional_cleanup_rethrows: true,
+            exact_parameter_roles: true,
+            exact_instruction_template: true,
         }));
+    }
+
+    #[test]
+    fn exact_masked_null_default_prefix_is_accepted() {
+        assert!(exact_null_default_prefix(
+            &valid_null_default_prefix(),
+            4,
+            1,
+        ));
+    }
+
+    #[test]
+    fn invoke_lambda_plan_rejects_an_exception_table() {
+        assert!(handler_free_lambda_body(&[]));
+        assert!(!handler_free_lambda_body(&valid_handlers()));
+    }
+
+    #[test]
+    fn conditional_or_effectful_null_default_is_rejected() {
+        let mut conditional = valid_null_default_prefix();
+        conditional[3] = Insn::Branch {
+            op: 0x99,
+            target: inline::BranchTarget::Internal(7),
+        };
+        conditional.insert(4, plain(0x00));
+        assert!(!exact_null_default_prefix(&conditional, 4, 1));
+
+        let mut effectful = valid_null_default_prefix();
+        effectful.insert(0, plain(0xb8));
+        assert!(!exact_null_default_prefix(&effectful, 4, 1));
     }
 
     #[test]
     fn extra_non_marker_call_before_lambda_is_rejected() {
         assert!(exact_call_partition(&[10, 30, 40], 20));
         assert!(!exact_call_partition(&[5, 10, 30, 40], 20));
+    }
+
+    #[test]
+    fn extra_physical_parameter_role_is_rejected() {
+        assert!(exact_parameter_roles(2, 3, 3, 3, 1));
+        assert!(!exact_parameter_roles(2, 3, 4, 4, 1));
+        assert!(!exact_parameter_roles(3, 4, 4, 4, 1));
+    }
+
+    #[test]
+    fn extra_branch_or_switch_is_rejected() {
+        let normal = Insn::Branch {
+            op: 0xa7,
+            target: inline::BranchTarget::Internal(3),
+        };
+        assert!(exact_control_flow(
+            &[
+                Insn::Plain {
+                    op: 0x00,
+                    operands: Vec::new(),
+                },
+                Insn::Plain {
+                    op: 0x00,
+                    operands: Vec::new(),
+                },
+                normal.clone(),
+                Insn::Plain {
+                    op: 0x00,
+                    operands: Vec::new(),
+                },
+            ],
+            2,
+            3,
+        ));
+        assert!(!exact_control_flow(
+            &[
+                normal.clone(),
+                Insn::Branch {
+                    op: 0x99,
+                    target: inline::BranchTarget::Internal(0),
+                },
+            ],
+            0,
+            3,
+        ));
+        assert!(!exact_control_flow(
+            &[
+                normal,
+                Insn::TableSwitch {
+                    default: 0,
+                    low: 0,
+                    targets: Vec::new(),
+                },
+            ],
+            0,
+            3,
+        ));
+    }
+
+    #[test]
+    fn instructions_between_result_or_exception_store_and_finally_are_rejected() {
+        assert!(cleanup_boundaries_are_immediate(10, 12, 20, 21));
+        assert!(!cleanup_boundaries_are_immediate(10, 13, 20, 21));
+        assert!(!cleanup_boundaries_are_immediate(10, 12, 20, 22));
+    }
+
+    #[test]
+    fn field_monitor_and_mutation_effects_are_rejected() {
+        for op in [0x4f, 0x84, 0xb2, 0xb5, 0xba, 0xbb, 0xc2, 0xc3] {
+            assert!(!has_only_template_effects(&[Insn::Plain {
+                op,
+                operands: Vec::new(),
+            }]));
+        }
     }
 
     #[test]
@@ -692,6 +1108,8 @@ mod tests {
             exceptional_cleanup_starts_finally: true,
             normal_result_flows_to_return: true,
             exceptional_cleanup_rethrows: true,
+            exact_parameter_roles: true,
+            exact_instruction_template: true,
         }));
     }
 
@@ -715,6 +1133,8 @@ mod tests {
             exceptional_cleanup_starts_finally: true,
             normal_result_flows_to_return: true,
             exceptional_cleanup_rethrows: true,
+            exact_parameter_roles: true,
+            exact_instruction_template: true,
         }));
     }
 
@@ -736,6 +1156,8 @@ mod tests {
             exceptional_cleanup_starts_finally: true,
             normal_result_flows_to_return: true,
             exceptional_cleanup_rethrows: true,
+            exact_parameter_roles: true,
+            exact_instruction_template: true,
         }));
     }
 
@@ -757,6 +1179,8 @@ mod tests {
             exceptional_cleanup_starts_finally: true,
             normal_result_flows_to_return: false,
             exceptional_cleanup_rethrows: true,
+            exact_parameter_roles: true,
+            exact_instruction_template: true,
         }));
     }
 
@@ -778,6 +1202,8 @@ mod tests {
             exceptional_cleanup_starts_finally: true,
             normal_result_flows_to_return: true,
             exceptional_cleanup_rethrows: false,
+            exact_parameter_roles: true,
+            exact_instruction_template: true,
         }));
     }
 }
