@@ -1279,6 +1279,7 @@ mod suspend_collection_hof_e2e;
 mod suspend_collection_hof_suspend_lambda_e2e;
 #[path = "suspend_continuation_owner_e2e.rs"]
 mod suspend_continuation_owner_e2e;
+
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;
 #[path = "suspend_debug_metadata_e2e.rs"]
@@ -1311,6 +1312,8 @@ mod suspend_member_after_call_e2e;
 mod suspend_normalization_e2e;
 #[path = "suspend_operator_convention_cross_file_e2e.rs"]
 mod suspend_operator_convention_cross_file_e2e;
+#[path = "suspend_prologue_cast_e2e.rs"]
+mod suspend_prologue_cast_e2e;
 #[path = "suspend_receiver_lambda_e2e.rs"]
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]

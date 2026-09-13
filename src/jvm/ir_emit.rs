@@ -22,6 +22,7 @@ use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod enum_metadata;
+mod field_write;
 mod member_schedule;
 mod operand_stack;
 mod secondary_constructor;
@@ -14402,62 +14403,7 @@ impl<'a> Emitter<'a> {
                 class,
                 index,
                 value,
-            } => {
-                if self.diverges(receiver) {
-                    self.emit_value(receiver, code);
-                    return;
-                }
-                let c = &self.ir.classes[class as usize];
-                let name = instance_field_jvm_name(self.ir, c, &c.fields[index as usize]);
-                let fty = c.fields[index as usize].ty.clone();
-                let jt = jvm_declared_ty(&fty);
-                let owner = c.fq_name();
-                if static_storage(self.ir, c) {
-                    // A static-storage object field: no instance operand (evaluate the receiver only
-                    // for its effects), and a branchy value runs on an already-clean stack.
-                    if !matches!(self.ir.expr(receiver), crate::ir::IrExpr::GetValue(_)) {
-                        self.emit_value(receiver, code);
-                        code.pop();
-                    }
-                    self.emit_value(value, code);
-                    if self.diverges(value) {
-                        return;
-                    }
-                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
-                    code.putstatic(fref, slot_words(jt) as i32);
-                } else {
-                    if self.diverges(value) {
-                        // Kotlin still evaluates the receiver before the RHS. A branchy divergent
-                        // RHS must start from a clean operand stack, so preserve an effectful
-                        // receiver through a temporary before emitting the non-returning value.
-                        if self.records_frame(value) {
-                            let temps = self.spill_to_temps(&[receiver], code);
-                            self.emit_value(value, code);
-                            self.slots.remove(&temps[0].2);
-                        } else {
-                            self.emit_value(receiver, code);
-                            self.emit_value(value, code);
-                        }
-                        return;
-                    }
-                    // A branchy value emits a merge frame; with the receiver already on the stack the
-                    // verifier sees a non-empty baseline it can't reconcile (krusty's frames carry no stack
-                    // prefix). Spill the value to a temp first — its branches then run on a clean stack —
-                    // then load the receiver and the temp. (Plain values keep the direct receiver,value order.)
-                    if self.records_frame(value) {
-                        let temps = self.spill_to_temps(&[value], code);
-                        self.emit_value(receiver, code);
-                        let (slot, t, key) = temps[0];
-                        load(t, slot, code);
-                        self.slots.remove(&key);
-                    } else {
-                        self.emit_value(receiver, code);
-                        self.emit_value(value, code);
-                    }
-                    let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
-                    code.putfield(fref, slot_words(jt) as i32);
-                }
-            }
+            } => self.emit_set_field(receiver, class, index, value, code),
             IrExpr::SetStatic { index, value } => {
                 let s = &self.ir.statics[index as usize];
                 let jt = jvm_declared_ty(&s.ty);

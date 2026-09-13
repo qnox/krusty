@@ -1787,3 +1787,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   is **byte-identical to kotlinc** — the first class from the corpus's largest difference family to
   match exactly.
   `tests/suspend_debug_metadata_e2e.rs::a_suspending_loops_continuation_is_byte_identical`.
+- **The get-or-create prologue casts the completion once (fix).** Every suspend function opens with
+  `$completion instanceof Cont && (label & MIN_VALUE) != 0` ⇒ reuse the continuation. kotlinc casts the
+  completion ONCE into a local and loads that local at each later read; krusty re-cast at every use,
+  so the prologue carried three extra `aload; checkcast` pairs — in every suspend function in a
+  program.
+  The binding lives INSIDE the `instanceof` branch: casting an unrelated completion would throw.
+  The label's field read-modify-write now uses `dup`, not a second receiver load. Still open: kotlinc
+  assigns the reusable continuation after the method's source locals, while krusty's control-flow
+  emitter allocates the branch-local binding at the next free slot. Fixing that requires a physical
+  local-lifetime model; aliasing two IR lifetimes to one slot produces invalid StackMap frames.
+  `tests/suspend_prologue_cast_e2e.rs::the_get_or_create_prologue_casts_the_completion_once`.
