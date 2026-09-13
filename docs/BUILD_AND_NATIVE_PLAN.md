@@ -551,7 +551,7 @@ builds to an executable that runs with `JAVA_HOME` and `PATH` emptied, and so do
 deserves a decision rather than a default, and printing `Hello, world!` through either candidate
 would have made that decision by accident. Emitting C decides nothing: the same lowering feeds a
 real backend when the choice is made, and in the meantime `cc` is already present wherever this
-compiler builds. The emitted program links against the generated `krusty_rt.c` and the C library —
+compiler builds. The emitted program links against the generated `krusty_rt.c` and `krusty_gc.c` and nothing else — no C library —
 a native binary, produced without committing the project to anything.
 
 What this does NOT do, in order of how much it matters:
