@@ -536,6 +536,8 @@ mod expected_return_invariant_binding_e2e;
 mod expected_type_propagation_e2e;
 #[path = "explicit_backing_field_e2e.rs"]
 mod explicit_backing_field_e2e;
+#[path = "explicit_import_shadows_same_package_e2e.rs"]
+mod explicit_import_shadows_same_package_e2e;
 #[path = "expr_completeness_e2e.rs"]
 mod expr_completeness_e2e;
 #[path = "expression_compound_assignment_e2e.rs"]

@@ -63041,6 +63041,16 @@ impl<'a> Checker<'a> {
             .then_some(internal)
     }
 
+    /// The classifier an explicit (non-star) import binds this spelling to.
+    ///
+    /// Kotlin's classifier tower ranks explicit imports ABOVE the current package, which in turn
+    /// outranks star imports. `import_levels` already encodes package-vs-star, but the explicit
+    /// map is separate, so this rung has to be asked before the same-package one.
+    fn explicit_import_classifier_name(&self, name: &str) -> Option<TypeName> {
+        let path = self.imports.get(name)?;
+        classifier_path(path, &self.fed_source(), None).ok()
+    }
+
     /// Select the classifier root from the scope tower, then commit every remaining segment through
     /// the shared qualifier loop. There is no import/module/classpath retry after this returns.
     fn select_classifier_binding(
@@ -63081,7 +63091,13 @@ impl<'a> Checker<'a> {
                     );
                 }
                 InheritedNestedClassifier::NotFound => {
-                    if let Some(classifier) = self.same_package_classifier_name(root_name) {
+                    if let Some(classifier) = self.explicit_import_classifier_name(root_name) {
+                        // An explicit import outranks the current package (it is a HIGHER rung of
+                        // the same tower `import_levels` models, whose level 0 IS this package).
+                        // A sibling file declaring the same simple name therefore does not capture
+                        // a spelling this file imported by name.
+                        ResolvedQualifier::Classifier(classifier)
+                    } else if let Some(classifier) = self.same_package_classifier_name(root_name) {
                         ResolvedQualifier::Classifier(classifier)
                     } else if let Some(classifier) =
                         self.scoped_source_alias_classifier(scope, root_name)
