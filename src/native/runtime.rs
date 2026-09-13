@@ -184,17 +184,34 @@ typedef bool     kt_boolean;
    traceable: it names the byte offset of every reference-typed field, so the collector follows
    exactly those and nothing else. A field holding an integer that happens to look like an address
    is never mistaken for a reference. */
+/* A method implementation as stored in a vtable. Every slot is a function pointer of some exact
+   signature; a call site casts to the signature it knows. A function-pointer-to-function-pointer
+   cast is defined C, where a cast through `void *` is not. */
+typedef void (*kt_fn)(void);
+
 typedef struct KType {
     const char *name;                  /* qualified Kotlin name, for toString */
     uint32_t name_length;
     uint32_t instance_size;            /* bytes including the header; the fixed part, for arrays */
     uint32_t reference_count;          /* how many reference-typed fields */
     const uint32_t *reference_offsets; /* byte offset of each reference field */
+    /* The superclass, or NULL for kotlin.Any only. `is` walks this chain. */
+    const struct KType *super;
+    /* Virtual dispatch: a class's table is its superclass's table with overridden slots replaced
+       and newly declared methods appended, so a slot number assigned at the declaring class is
+       valid for every subclass. The first three slots are kotlin.Any's (see KT_SLOT_*). */
+    const kt_fn *vtable;
+    uint32_t vtable_length;
 } KType;
 
 typedef struct KObjectHeader {
     const KType *type;
 } KObjectHeader;
+
+/* kotlin.Any's three members, in the order every vtable begins with. */
+#define KT_SLOT_EQUALS 0u    /* kt_boolean (*)(KRef self, KRef other) */
+#define KT_SLOT_HASH_CODE 1u /* kt_int (*)(KRef self) */
+#define KT_SLOT_TO_STRING 2u /* KRef (*)(KRef self) — a kotlin.String */
 
 /* ---- memory ---------------------------------------------------------------------------------- */
 
@@ -225,6 +242,52 @@ size_t kt_gc_live_bytes(void);
 /* Every Kotlin reference is one of these. `NULL` is Kotlin's `null`. */
 typedef struct KObject KObject;
 typedef KObject *KRef;
+
+/* ---- classes ----------------------------------------------------------------------------------- */
+
+/* The root of every class, defined by the runtime. Its vtable holds the defaults: `equals` is
+   reference identity, `hashCode` derives from the object's address (valid because the collector
+   never moves an object), `toString` is `<qualified name>@<hex hashCode>`. */
+extern const KType kt_type_any;
+
+/* The runtime's built-in value types, so emitted code can test `is String` and `as Int?`. */
+extern const KType kt_type_string;
+extern const KType kt_type_byte;
+extern const KType kt_type_short;
+extern const KType kt_type_int;
+extern const KType kt_type_long;
+extern const KType kt_type_char;
+extern const KType kt_type_boolean;
+extern const KType kt_type_unit;
+
+/* Defaults, callable directly for `super.toString()` and friends. */
+kt_boolean kt_any_equals(KRef self, KRef other);
+kt_int kt_any_hash_code(KRef self);
+KRef kt_any_to_string(KRef self);
+
+/* `a.equals(b)` and `a.hashCode()` through the receiver's vtable; null-safe in Kotlin's sense
+   (`null` equals only `null`, and hashes to 0). */
+kt_boolean kt_equals(KRef a, KRef b);
+kt_int kt_hash_code(KRef value);
+
+/* The vtable entry for an abstract method: never reached in a type-correct program, but a loud
+   failure rather than a jump through NULL. */
+void kt_abstract_method_called(void);
+/* A member access on `null`: the placeholder for NullPointerException. */
+void kt_null_receiver(void);
+
+static inline const KType *kt_type_of(KRef object) {
+    return ((const KObjectHeader *)object)->type;
+}
+
+/* The implementation of `slot` for `receiver`'s dynamic type. The call site casts the result to
+   the slot's signature and passes `receiver` as the first argument. */
+static inline kt_fn kt_dispatch(KRef receiver, uint32_t slot) {
+    if (receiver == NULL) {
+        kt_null_receiver();
+    }
+    return kt_type_of(receiver)->vtable[slot];
+}
 
 /* Construct a `String` over a UTF-8 literal. The bytes are borrowed, not copied: emitted code only
    ever passes string literals with static storage duration, and the string records that it owns
@@ -346,8 +409,24 @@ void *memset(void *destination, int value, size_t length) {
 
 /* ---- object model -------------------------------------------------------------------------- */
 
+static kt_boolean kt_builtin_equals(KRef self, KRef other);
+static kt_int kt_builtin_hash_code(KRef self);
+
+/* Every built-in value type shares one vtable: value equality, Kotlin's hash for that value, and
+   the runtime's own rendering as toString. */
+static const kt_fn kt_builtin_vtable[] = {(kt_fn)kt_builtin_equals, (kt_fn)kt_builtin_hash_code,
+                                          (kt_fn)kt_to_string};
+
+static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                      (kt_fn)kt_any_to_string};
+
+/* kotlin.Any itself is never instantiated; the descriptor exists as the root of every `super`
+   chain and the owner of the three default slots. */
+const KType kt_type_any = {"kotlin.Any", 10, sizeof(KObjectHeader), 0, NULL, NULL, kt_any_vtable, 3};
+
 #define KT_TYPE(identifier, kotlin_name, size, count, offsets)                                     \
-    static const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, size, count, offsets};
+    const KType identifier = {kotlin_name,   sizeof(kotlin_name) - 1, size, count, offsets, \
+                              &kt_type_any, kt_builtin_vtable,      3};
 
 /* Raw bytes: the storage behind a string's text and behind rendered numbers. It holds no
    references, so the collector never looks inside it. The bytes follow the header directly. */
@@ -455,33 +534,7 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
     return 3;
 }
 
-/* An instance of an emitted class: `<qualified name>@<hex>`, Kotlin's default shape. The hex part
-   derives from the address, which is stable for the object's whole life because the collector
-   never moves an object; a class's own `toString` has nowhere to hang yet, so this is every class's
-   rendering until dispatch exists. */
-static const char *kt_render_object(KRef value, kt_int *byte_length, KRef *storage) {
-    const KType *type = value->header.type;
-    uintptr_t address = (uintptr_t)value;
-    uint32_t hash = (uint32_t)((address >> 4) ^ (address >> 36));
-    char digits[8];
-    kt_int digit_count = 0;
-    do {
-        uint32_t nibble = hash & 0xFu;
-        digits[digit_count++] = (char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));
-        hash >>= 4;
-    } while (hash != 0);
-    kt_int length = (kt_int)type->name_length + 1 + digit_count;
-    KByteArray *buffer = kt_bytes_new(length);
-    char *out = kt_bytes_of(buffer);
-    memcpy(out, type->name, type->name_length);
-    out[type->name_length] = '@';
-    for (kt_int i = 0; i < digit_count; i++) {
-        out[type->name_length + 1 + i] = digits[digit_count - 1 - i];
-    }
-    *byte_length = length;
-    *storage = (KRef)buffer;
-    return out;
-}
+static KRef kt_object_to_string(KRef value);
 
 /* Render any value as bytes. `*storage` receives the heap object that owns the bytes (NULL when
    they are in static storage); a caller that allocates before it has finished with the bytes
@@ -526,7 +579,17 @@ static const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
     } else if (type == &kt_type_long) {
         number = value->as.long_value;
     } else {
-        return kt_render_object(value, byte_length, storage);
+        /* A class instance: its own toString, through the vtable, so `println(obj)` and `"$obj"`
+           reach a user override. The result is a string; its text is what gets rendered, and the
+           text's storage is what the caller must keep alive. */
+        KRef text = kt_object_to_string(value);
+        if (text == NULL || text->header.type != &kt_type_string) {
+            *byte_length = 4;
+            return "null";
+        }
+        *storage = text->as.string.storage;
+        *byte_length = text->as.string.byte_length;
+        return text->as.string.bytes;
     }
     KByteArray *buffer = kt_bytes_new(24);
     *byte_length = kt_render_long(number, kt_bytes_of(buffer));
@@ -537,6 +600,9 @@ static const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
 KRef kt_to_string(KRef value) {
     if (value != NULL && value->header.type == &kt_type_string) {
         return value;
+    }
+    if (value != NULL && value->header.type->super != NULL && value->header.type->vtable != kt_builtin_vtable) {
+        return kt_object_to_string(value);
     }
     kt_int length = 0;
     KRef storage = NULL;
@@ -601,6 +667,180 @@ KRef kt_unit(void) {
     static KObject unit = {{&kt_type_unit}, {{NULL, NULL, 0}}};
     return &unit;
 }
+
+/* ---- classes ------------------------------------------------------------------------------- */
+
+kt_boolean kt_any_equals(KRef self, KRef other) { return self == other; }
+
+/* Derived from the address. The collector never moves an object (conservative roots forbid it;
+   see krusty_gc.c), so an object's address is stable for its whole life and is a legitimate
+   identity hash. The shifts fold the aligned low bits and the high bits into the 32 that count. */
+kt_int kt_any_hash_code(KRef self) {
+    uintptr_t address = (uintptr_t)self;
+    return (kt_int)(uint32_t)((address >> 4) ^ (address >> 36));
+}
+
+/* `<qualified name>@<hex hashCode>`, Kotlin's default shape. */
+KRef kt_any_to_string(KRef self) {
+    const KType *type = self->header.type;
+    uint32_t hash = (uint32_t)kt_hash_code(self);
+    char digits[8];
+    kt_int digit_count = 0;
+    do {
+        uint32_t nibble = hash & 0xFu;
+        digits[digit_count++] = (char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));
+        hash >>= 4;
+    } while (hash != 0);
+    kt_int length = (kt_int)type->name_length + 1 + digit_count;
+    KByteArray *buffer = kt_bytes_new(length);
+    char *out = kt_bytes_of(buffer);
+    memcpy(out, type->name, type->name_length);
+    out[type->name_length] = '@';
+    for (kt_int i = 0; i < digit_count; i++) {
+        out[type->name_length + 1 + i] = digits[digit_count - 1 - i];
+    }
+    return kt_string_of((KRef)buffer, out, length);
+}
+
+static KRef kt_object_to_string(KRef value) {
+    const KType *type = value->header.type;
+    /* A type with no vtable (a hand-written test type) still renders as kotlin.Any would. */
+    if (type->vtable == NULL || type->vtable_length <= KT_SLOT_TO_STRING) {
+        return kt_any_to_string(value);
+    }
+    return ((KRef(*)(KRef))type->vtable[KT_SLOT_TO_STRING])(value);
+}
+
+kt_boolean kt_equals(KRef a, KRef b) {
+    if (a == NULL) {
+        return b == NULL;
+    }
+    const KType *type = a->header.type;
+    if (type->vtable == NULL) {
+        return a == b;
+    }
+    return ((kt_boolean(*)(KRef, KRef))type->vtable[KT_SLOT_EQUALS])(a, b);
+}
+
+kt_int kt_hash_code(KRef value) {
+    if (value == NULL) {
+        return 0;
+    }
+    const KType *type = value->header.type;
+    if (type->vtable == NULL) {
+        return kt_any_hash_code(value);
+    }
+    return ((kt_int(*)(KRef))type->vtable[KT_SLOT_HASH_CODE])(value);
+}
+
+/* Built-in values compare by value, as Kotlin's `==` on boxed values does: two `Int?` holding 3
+   are equal, and two strings with the same text are equal. */
+static kt_boolean kt_builtin_equals(KRef self, KRef other) {
+    if (self == other) {
+        return true;
+    }
+    if (other == NULL || self->header.type != other->header.type) {
+        return false;
+    }
+    const KType *type = self->header.type;
+    if (type == &kt_type_string) {
+        if (self->as.string.byte_length != other->as.string.byte_length) {
+            return false;
+        }
+        for (kt_int i = 0; i < self->as.string.byte_length; i++) {
+            if (self->as.string.bytes[i] != other->as.string.bytes[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (type == &kt_type_boolean) {
+        return self->as.boolean_value == other->as.boolean_value;
+    }
+    if (type == &kt_type_char) {
+        return self->as.char_value == other->as.char_value;
+    }
+    if (type == &kt_type_byte) {
+        return self->as.byte_value == other->as.byte_value;
+    }
+    if (type == &kt_type_short) {
+        return self->as.short_value == other->as.short_value;
+    }
+    if (type == &kt_type_int) {
+        return self->as.int_value == other->as.int_value;
+    }
+    if (type == &kt_type_long) {
+        return self->as.long_value == other->as.long_value;
+    }
+    /* kotlin.Unit: one instance, already handled by identity above. */
+    return false;
+}
+
+/* Kotlin's `hashCode` for the built-in values. A string hashes over its UTF-16 code units, as
+   Kotlin specifies, which the UTF-8 text is decoded into on the way. */
+static kt_int kt_builtin_hash_code(KRef self) {
+    const KType *type = self->header.type;
+    if (type == &kt_type_string) {
+        uint32_t hash = 0;
+        const unsigned char *bytes = (const unsigned char *)self->as.string.bytes;
+        kt_int length = self->as.string.byte_length;
+        kt_int at = 0;
+        while (at < length) {
+            uint32_t lead = bytes[at];
+            uint32_t code_point;
+            kt_int width;
+            if (lead < 0x80) {
+                code_point = lead;
+                width = 1;
+            } else if (lead < 0xE0) {
+                code_point = lead & 0x1F;
+                width = 2;
+            } else if (lead < 0xF0) {
+                code_point = lead & 0x0F;
+                width = 3;
+            } else {
+                code_point = lead & 0x07;
+                width = 4;
+            }
+            for (kt_int i = 1; i < width && at + i < length; i++) {
+                code_point = (code_point << 6) | (bytes[at + i] & 0x3Fu);
+            }
+            at += width;
+            if (code_point >= 0x10000) {
+                uint32_t offset = code_point - 0x10000;
+                hash = 31u * hash + (0xD800u + (offset >> 10));
+                hash = 31u * hash + (0xDC00u + (offset & 0x3FFu));
+            } else {
+                hash = 31u * hash + code_point;
+            }
+        }
+        return (kt_int)hash;
+    }
+    if (type == &kt_type_boolean) {
+        return self->as.boolean_value ? 1231 : 1237;
+    }
+    if (type == &kt_type_char) {
+        return (kt_int)self->as.char_value;
+    }
+    if (type == &kt_type_byte) {
+        return (kt_int)self->as.byte_value;
+    }
+    if (type == &kt_type_short) {
+        return (kt_int)self->as.short_value;
+    }
+    if (type == &kt_type_int) {
+        return self->as.int_value;
+    }
+    if (type == &kt_type_long) {
+        uint64_t bits = (uint64_t)self->as.long_value;
+        return (kt_int)(uint32_t)(bits ^ (bits >> 32));
+    }
+    return kt_any_hash_code(self);
+}
+
+void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n"); }
+
+void kt_null_receiver(void) { KT_FAIL("krusty: member access on a null receiver\n"); }
 
 /* ---- arithmetic ---------------------------------------------------------------------------- */
 

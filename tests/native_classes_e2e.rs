@@ -131,3 +131,95 @@ fn a_class_with_a_field_and_a_method_constructs_calls_and_prints() {
         "expected Kotlin's `Name@hash` default, got {rendered:?}"
     );
 }
+
+#[test]
+fn a_call_through_a_base_typed_value_reaches_the_override() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // The vtable proof: the static type says `A`, the object is a `B`, and the call must land in
+    // `B.name`. A direct call by static type would compile, link, run and print `A`.
+    assert_eq!(
+        run("open class A { open fun name(): String = \"A\" }\n\
+             class B : A() { override fun name(): String = \"B\" }\n\
+             fun main() {\n\
+             \x20   val x: A = B()\n\
+             \x20   val y: A = A()\n\
+             \x20   println(x.name())\n\
+             \x20   println(y.name())\n\
+             }\n"),
+        "B\nA\n"
+    );
+}
+
+#[test]
+fn a_super_call_runs_the_base_implementation_then_the_override() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // `super.name()` is a non-virtual call to `A`'s own body; the override then adds to it. A
+    // `super` call that dispatched would recurse forever.
+    assert_eq!(
+        run("open class A { open fun name(): String = \"A\" }\n\
+             class B : A() { override fun name(): String = super.name() + \"B\" }\n\
+             fun main() { println(B().name()) }\n"),
+        "AB\n"
+    );
+}
+
+#[test]
+fn an_abstract_method_dispatches_to_each_implementation() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // The abstract class's own concrete method (`describe`) calls the abstract `area` on `this`,
+    // so the dispatch has to happen from inside the base class's code as well as from `main`.
+    assert_eq!(
+        run("abstract class Shape(val name: String) {\n\
+             \x20   abstract fun area(): Int\n\
+             \x20   fun describe(): String = \"$name:${area()}\"\n\
+             }\n\
+             class Square(val side: Int) : Shape(\"square\") {\n\
+             \x20   override fun area(): Int = side * side\n\
+             }\n\
+             class Rect(val w: Int, val h: Int) : Shape(\"rect\") {\n\
+             \x20   override fun area(): Int = w * h\n\
+             }\n\
+             fun main() {\n\
+             \x20   val shapes = Square(3)\n\
+             \x20   val other: Shape = Rect(2, 5)\n\
+             \x20   println(shapes.describe())\n\
+             \x20   println(other.describe())\n\
+             \x20   println(other.area() + shapes.area())\n\
+             }\n"),
+        "square:9\nrect:10\n19\n"
+    );
+}
+
+#[test]
+fn a_three_level_hierarchy_inherits_fields_and_overrides_at_each_level() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // Fields declared at three levels are read through the most derived object, and each level's
+    // override — or inherited implementation — is the one that runs through the root type.
+    assert_eq!(
+        run(
+            "open class A(val a: Int) { open fun f(): Int = a\n open fun g(): Int = 1 }\n\
+             open class B(a: Int, val b: Int) : A(a) { override fun f(): Int = a + b }\n\
+             class C(val c: Int) : B(10, 20) { override fun g(): Int = c + f() }\n\
+             fun main() {\n\
+             \x20   val root: A = C(5)\n\
+             \x20   println(root.f())\n\
+             \x20   println(root.g())\n\
+             \x20   val mid: B = B(1, 2)\n\
+             \x20   println(mid.f() + mid.g())\n\
+             }\n"
+        ),
+        "30\n35\n4\n"
+    );
+}

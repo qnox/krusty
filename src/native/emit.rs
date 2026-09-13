@@ -11,23 +11,24 @@
 //! afford a best effort because `kotlinc` decides what is correct; nothing decides that here yet,
 //! so a wrong emission would be indistinguishable from a right one until someone ran it.
 //!
-//! **Classes.** A class becomes a C struct whose first member is the object header, laid out by
-//! [`super::classes`]; construction allocates through the collector and runs an emitted
-//! constructor function; an instance method is a C function taking the receiver first and is
-//! called directly. Inheritance is declined until there is a vtable to dispatch through. What the
-//! IR presents for a property access is not quite what its declarations suggest, and the emitter
-//! follows the IR: the access arrives as a *checked* operation naming a `PropertyId`
-//! (`IrExpr::Checked`), resolved here to the declaring class's accessor or backing field.
+//! **Classes.** A class becomes a C struct whose first member is the object header, laid out and
+//! given a vtable by [`super::classes`]; construction allocates through the collector and runs an
+//! emitted constructor function; an instance method is a C function taking the receiver first;
+//! a call on an instance loads the implementation from the receiver's type descriptor
+//! (`kt_dispatch`). What the IR presents for these is not quite what its declarations suggest, and
+//! the emitter follows the IR: a property access arrives as a *checked* operation naming a
+//! `PropertyId` (`IrExpr::Checked`), and an override of `kotlin.Any`'s members is not recorded in
+//! `function_overrides`, so those three are matched by name and signature.
 //!
 //! One GNU C extension is used: the statement expression `({ …; value; })`, which is how a Kotlin
-//! block with a value renders in expression position, and how a freshly allocated object is held
-//! across its constructor call. gcc and clang both support it; a portable
+//! block with a value renders in expression position, and how a receiver is evaluated exactly once
+//! before it is used both to find and to call a method. gcc and clang both support it; a portable
 //! spelling would mean hoisting temporaries through a lowering pass, which is real work that
 //! belongs with the rest of the native lowering rather than in the first emitter.
 
 use std::collections::{HashMap, HashSet};
 
-use super::classes::{c_kind, CKind, ClassModel};
+use super::classes::{c_kind, CKind, ClassModel, Slot, SlotKey};
 use crate::ir::{Callee, ClassId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::classpath::Classpath;
 use crate::types::{Ty, TypeName};
@@ -147,9 +148,10 @@ pub(super) struct Symbols {
 }
 
 /// The names a class's base reserves. Kept in one place so the reservation and the uses agree.
-fn class_symbol_family(base: &str) -> [String; 3] {
+fn class_symbol_family(base: &str) -> [String; 4] {
     [
         format!("kt_type_{base}"),
+        format!("kt_vtable_{base}"),
         format!("kt_refs_{base}"),
         format!("kt_{base}__init"),
     ]
@@ -230,8 +232,10 @@ pub(super) struct Emitter<'a> {
     /// Loops enclosing the statement being emitted, innermost last.
     loops: Vec<LoopFrame>,
     label_count: u32,
-    /// Temporaries introduced for values evaluated once and used twice.
+    /// Temporaries introduced for receivers evaluated once and used twice.
     temp_count: u32,
+    /// Synthesized field accessors the vtables reference, emitted once each.
+    synthesized: Vec<Slot>,
     out: String,
 }
 
@@ -250,6 +254,7 @@ impl<'a> Emitter<'a> {
             loops: Vec::new(),
             label_count: 0,
             temp_count: 0,
+            synthesized: Vec::new(),
             out: String::new(),
         }
     }
@@ -276,6 +281,9 @@ impl<'a> Emitter<'a> {
 
         // Forward declarations next, so order of definition never decides what resolves.
         for (index, function) in self.ir.functions.iter().enumerate() {
+            if function.dispatch_receiver.is_some() && function.body.is_none() {
+                continue;
+            }
             self.out
                 .push_str(&format!("{};\n", self.signature(index, function)?));
         }
@@ -286,16 +294,29 @@ impl<'a> Emitter<'a> {
         }
         self.out.push('\n');
 
+        // Descriptors and vtables reference the functions declared above, and a descriptor names
+        // its superclass's, so they go out superclass-first; synthesized accessors are discovered
+        // while writing the vtables and defined right after.
+        for &class in &self.model().order.clone() {
+            self.class_descriptor(class)?;
+        }
+        let synthesized = std::mem::take(&mut self.synthesized);
+        for accessor in &synthesized {
+            self.synthesized_accessor(accessor);
+        }
+
         for class in 0..self.ir.classes.len() {
-            let class = class as ClassId;
-            self.class_descriptor(class);
-            self.constructor(class)?;
+            self.constructor(class as ClassId)?;
         }
 
         let mut entry = None;
         for index in 0..self.ir.functions.len() {
             let function = &self.ir.functions[index];
             let Some(body) = function.body else {
+                if function.dispatch_receiver.is_some() {
+                    // Abstract: its vtable entry is the runtime's loud failure.
+                    continue;
+                }
                 return Err(format!("a body-less function `{}`", function.name));
             };
             if function.name == "main" && function.params.is_empty() && function.is_static {
@@ -404,6 +425,18 @@ impl<'a> Emitter<'a> {
         format!("{}_f{index}", self.symbols.classes[class as usize])
     }
 
+    fn accessor_symbol(&self, slot: &Slot) -> String {
+        match slot {
+            Slot::FieldGetter { class, field } => {
+                format!("kt_{}__get_f{field}", self.symbols.classes[*class as usize])
+            }
+            Slot::FieldSetter { class, field } => {
+                format!("kt_{}__set_f{field}", self.symbols.classes[*class as usize])
+            }
+            _ => unreachable!("only field accessors are synthesized"),
+        }
+    }
+
     /// The superclass chain of `class`, root first, ending with `class` itself.
     fn chain(&self, class: ClassId) -> Vec<ClassId> {
         let mut chain = vec![class];
@@ -454,9 +487,8 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    /// The reference-offset table and the `KType` of one class: what the collector reads to trace
-    /// an instance precisely, and what the default rendering reads to name it.
-    fn class_descriptor(&mut self, class: ClassId) {
+    /// The reference-offset table, the vtable and the `KType` of one class.
+    fn class_descriptor(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let layout = self.model().layout(class).clone();
         let base = self.symbols.classes[class as usize].clone();
         let references = if layout.reference_offsets.is_empty() {
@@ -473,14 +505,83 @@ impl<'a> Emitter<'a> {
             ));
             format!("kt_refs_{base}")
         };
-        let kotlin_name = self.kotlin_name(class);
+
+        let mut entries = Vec::with_capacity(layout.vtable.len());
+        for slot in &layout.vtable {
+            let symbol = match slot {
+                Slot::Runtime(symbol) => (*symbol).to_string(),
+                Slot::Function(fid) => self.symbols.functions[*fid as usize].clone(),
+                Slot::Abstract => "kt_abstract_method_called".to_string(),
+                Slot::FieldGetter { .. } | Slot::FieldSetter { .. } => {
+                    if !self.synthesized.contains(slot) {
+                        self.synthesized.push(slot.clone());
+                    }
+                    self.accessor_symbol(slot)
+                }
+            };
+            entries.push(format!("(kt_fn){symbol}"));
+        }
+        // Synthesized accessors are defined after the descriptors; declare them here.
+        for slot in self.synthesized.clone() {
+            let symbol = self.accessor_symbol(&slot);
+            let (Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field }) = slot
+            else {
+                continue;
+            };
+            let kind = self.model().layout(class).fields[field as usize].kind;
+            let declaration = if matches!(slot, Slot::FieldGetter { .. }) {
+                format!("static {} {symbol}(KRef v0);\n", kind.spelling())
+            } else {
+                format!("static void {symbol}(KRef v0, {} v1);\n", kind.spelling())
+            };
+            if !self.out.contains(&declaration) {
+                self.out.push_str(&declaration);
+            }
+        }
         self.out.push_str(&format!(
-            "static const KType kt_type_{base} = {{{}, {}, {}, {}, {references}}};\n\n",
+            "static const kt_fn kt_vtable_{base}[] = {{{}}};\n",
+            entries.join(", ")
+        ));
+
+        let kotlin_name = self.kotlin_name(class);
+        let parent = match layout.superclass {
+            Some(parent) => self.type_symbol(parent),
+            None => "kt_type_any".to_string(),
+        };
+        self.out.push_str(&format!(
+            "static const KType kt_type_{base} = {{{}, {}, {}, {}, {references}, &{parent}, \
+             kt_vtable_{base}, {}}};\n\n",
             c_literal_of(&kotlin_name),
             kotlin_name.len(),
             layout.instance_size,
-            layout.reference_offsets.len()
+            layout.reference_offsets.len(),
+            layout.vtable.len()
         ));
+        Ok(())
+    }
+
+    fn synthesized_accessor(&mut self, slot: &Slot) {
+        let symbol = self.accessor_symbol(slot);
+        let (Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field }) = slot else {
+            return;
+        };
+        let kind = self.model().layout(*class).fields[*field as usize].kind;
+        let access = format!(
+            "(({} *)v0)->{}",
+            self.struct_name(*class),
+            self.member(*class, *field)
+        );
+        if matches!(slot, Slot::FieldGetter { .. }) {
+            self.out.push_str(&format!(
+                "static {} {symbol}(KRef v0) {{\n    return {access};\n}}\n\n",
+                kind.spelling()
+            ));
+        } else {
+            self.out.push_str(&format!(
+                "static void {symbol}(KRef v0, {} v1) {{\n    {access} = v1;\n}}\n\n",
+                kind.spelling()
+            ));
+        }
     }
 
     fn constructor_signature(&self, class: ClassId) -> String {
@@ -665,7 +766,13 @@ impl<'a> Emitter<'a> {
     fn callee_result(&self, callee: &Callee) -> Option<Ty> {
         Some(match callee {
             Callee::Local(function) => self.ir.functions[*function as usize].ret,
-            Callee::External { ret, .. } | Callee::Intrinsic { ret, .. } => *ret,
+            Callee::External { ret, .. }
+            | Callee::Intrinsic { ret, .. }
+            | Callee::Super { ret, .. } => *ret,
+            Callee::Special { source, .. } => {
+                let fid = self.ir.checked_callable_functions.get(source.as_ref()?)?;
+                self.ir.functions[*fid as usize].ret
+            }
             _ => return None,
         })
     }
@@ -1139,7 +1246,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// The coercions the frontend inserts, and casts between carriers. A check against a class
-    /// (`is`, `as?`) needs the runtime to know the class hierarchy, which it does not yet.
+    /// (`is`, `as?`) needs the runtime to walk the class hierarchy, which comes next.
     fn type_operation(
         &mut self,
         op: IrTypeOp,
@@ -1175,6 +1282,32 @@ impl<'a> Emitter<'a> {
             "(({} *)({object}))->{}",
             self.struct_name(class),
             self.member(class, index)
+        ))
+    }
+
+    /// A call through the receiver's vtable: the receiver is evaluated once into a temporary,
+    /// which both selects the implementation and is passed as its first argument.
+    fn dispatch(
+        &mut self,
+        receiver: u32,
+        slot: u32,
+        ret: CKind,
+        parameters: &[Ty],
+        arguments: &[u32],
+    ) -> Result<String, Unsupported> {
+        let object = self.reference(receiver)?;
+        let temp = self.temp();
+        let mut rendered = vec![temp.clone()];
+        let mut signature = vec!["KRef".to_string()];
+        for (&argument, &ty) in arguments.iter().zip(parameters) {
+            rendered.push(self.coerce(argument, ty)?);
+            signature.push(c_kind(ty).spelling().to_string());
+        }
+        Ok(format!(
+            "({{ KRef {temp} = {object}; (({} (*)({}))kt_dispatch({temp}, {slot}))({}); }})",
+            ret.spelling(),
+            signature.join(", "),
+            rendered.join(", ")
         ))
     }
 
@@ -1224,8 +1357,6 @@ impl<'a> Emitter<'a> {
         ))
     }
 
-    /// A call of an instance method. Direct: with inheritance declined, the method named is the
-    /// method that runs.
     fn method_call(
         &mut self,
         class: ClassId,
@@ -1246,13 +1377,16 @@ impl<'a> Emitter<'a> {
         if function.dispatch_receiver.is_none() {
             return Err(format!("a class-static call (`{}`)", function.name));
         }
+        let key = super::classes::function_key(self.ir, class, fid);
+        let Some(slot) = self.model().slot(class, &key) else {
+            return Err(format!(
+                "a method with no dispatch slot (`{}`)",
+                function.name
+            ));
+        };
         let parameters = function.params.clone();
-        let symbol = self.symbols.functions[fid as usize].clone();
-        let mut rendered = vec![self.reference(receiver)?];
-        for (&argument, ty) in arguments.iter().zip(parameters) {
-            rendered.push(self.coerce(argument, ty)?);
-        }
-        Ok(format!("{symbol}({})", rendered.join(", ")))
+        let ret = c_kind(function.ret);
+        self.dispatch(receiver, slot, ret, &parameters, &arguments)
     }
 
     /// The property a checked operation names, as (class, property index).
@@ -1294,6 +1428,11 @@ impl<'a> Emitter<'a> {
                 property.name
             ));
         }
+        let key = SlotKey::Getter(class, property.name.clone());
+        if let Some(slot) = self.model().slot(class, &key) {
+            let ret = c_kind(property.ty);
+            return self.dispatch(receiver, slot, ret, &[], &[]);
+        }
         if let Some(getter) = property.getter {
             let object = self.reference(receiver)?;
             return Ok(format!(
@@ -1321,6 +1460,10 @@ impl<'a> Emitter<'a> {
         let Some(receiver) = receiver else {
             return Err(format!("a receiver-less write of `{}`", property.name));
         };
+        let key = SlotKey::Setter(class, property.name.clone());
+        if let Some(slot) = self.model().slot(class, &key) {
+            return self.dispatch(receiver, slot, CKind::Void, &[property.ty], &[value]);
+        }
         if let Some(setter) = property.setter {
             let object = self.reference(receiver)?;
             let value = self.coerce(value, property.ty)?;
@@ -1353,6 +1496,29 @@ impl<'a> Emitter<'a> {
         match callee {
             Callee::Intrinsic { operation, .. } => {
                 self.intrinsic(operation, dispatch_receiver, args)
+            }
+            Callee::Super {
+                owner,
+                name,
+                source,
+                params,
+                ..
+            } => {
+                let Some(receiver) = receiver else {
+                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                };
+                self.direct_call(*owner, name, *source, Some(params), receiver, args)
+            }
+            Callee::Special {
+                owner,
+                name,
+                source,
+                ..
+            } => {
+                let Some(receiver) = receiver else {
+                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                };
+                self.direct_call(*owner, name, *source, None, receiver, args)
             }
             _ if dispatch_receiver.is_some() && !matches!(callee, Callee::External { .. }) => {
                 Err(format!("a {} call with a receiver", callee_kind(callee)))
@@ -1395,6 +1561,60 @@ impl<'a> Emitter<'a> {
             }
             other => Err(format!("a {} call", callee_kind(other))),
         }
+    }
+
+    /// A non-virtual call to the named class's own implementation: `super.f()`.
+    fn direct_call(
+        &mut self,
+        owner: TypeName,
+        name: &str,
+        source: Option<crate::fir::CallableId>,
+        params: Option<&[Ty]>,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<String, Unsupported> {
+        if owner.matches("kotlin/Any") {
+            let symbol = match (name, args.len()) {
+                ("toString", 0) => "kt_any_to_string",
+                ("hashCode", 0) => "kt_any_hash_code",
+                ("equals", 1) => "kt_any_equals",
+                _ => return Err(format!("a `super` call to `Any.{name}`")),
+            };
+            let mut rendered = vec![self.reference(receiver)?];
+            for argument in args {
+                rendered.push(self.reference(*argument)?);
+            }
+            return Ok(format!("{symbol}({})", rendered.join(", ")));
+        }
+        let class = self.class_of(owner, "a `super` call to a method of")?;
+        let fid = source
+            .and_then(|callable| self.ir.checked_callable_functions.get(&callable).copied())
+            .or_else(|| {
+                self.ir.classes[class as usize]
+                    .methods
+                    .iter()
+                    .copied()
+                    .find(|&fid| {
+                        let function = &self.ir.functions[fid as usize];
+                        function.name == name
+                            && params.is_none_or(|params| function.params == params)
+                    })
+            })
+            .ok_or_else(|| format!("a `super` call to an unknown method (`{name}`)"))?;
+        let function = &self.ir.functions[fid as usize];
+        if function.body.is_none() {
+            return Err(format!("a `super` call to the abstract method `{name}`"));
+        }
+        let parameters = function.params.clone();
+        let mut rendered = vec![self.reference(receiver)?];
+        for (&argument, ty) in args.iter().zip(parameters) {
+            rendered.push(self.coerce(argument, ty)?);
+        }
+        Ok(format!(
+            "{}({})",
+            self.symbols.functions[fid as usize],
+            rendered.join(", ")
+        ))
     }
 
     /// Realize a compiler-supplied operation the frontend selected in place of a call.
