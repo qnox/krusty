@@ -5320,6 +5320,17 @@ and behavior is checked by RUNNING the emitted program.
   would render it: `println(1.0)` is declined at compile time with a diagnostic instead. Arithmetic
   and `compareTo` on floating-point values are unaffected.
 
+- **Concurrency follows Kotlin/Native's memory model, not the JVM's.** The native target is a
+  Kotlin Multiplatform target with no Java interop, so its contract is Kotlin/Native's: `@Volatile`
+  (`kotlin.concurrent.Volatile`) makes backing-field reads and writes atomic and writes visible to
+  other threads — and *only* backing-field operations, so a property whose accessor touches the
+  field more than once is not atomic as a whole — and `kotlin.concurrent.atomics` supplies
+  compare-and-swap. Two JVM rules are deliberately NOT reproduced because Kotlin/Native does not
+  have them: `synchronized` does not exist on this target, and there is no `final`-field freeze, so
+  no release fence is emitted at constructor exit. Requiring the JVM memory model would be a
+  stronger guarantee than Kotlin/Native offers, so code correct under Kotlin/Native stays correct
+  here. Nothing concurrent is implemented yet; this records the target the implementation aims at.
+
 - **The native runtime is freestanding — it uses no C library.** This is what makes
   cross-compilation work: `clang` compiles for every architecture and `ld.lld` links all of them,
   but a libc call would demand a target sysroot (headers plus a target C library) for each one,

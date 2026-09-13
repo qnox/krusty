@@ -619,6 +619,10 @@ What it does not solve, and what a prototype has to answer before this becomes t
   time, where Kotlin folds it to `-2147483648`; folded constants must be emitted so they do not
   trip this.
 * **Generics.** Go's have no variance and no reification.
+
+A gap listed here earlier — that Go's memory model has no final-field freeze — no longer applies:
+the native target follows Kotlin/Native's memory model, which has no such rule to reproduce. See
+*Decided: Kotlin/Native's memory model, not the JVM's* below.
 * **A second full compiler in the pipeline**, and Go frames in every stack trace.
 
 The emitter is a printer over checked common IR, and the lowering, tests and target model are
@@ -672,22 +676,43 @@ scaffold with an expiry date rather than a target to grow features on. Go's coll
 concurrent because the Go compiler emits the stack maps; SubstrateVM's is precise too, at 39 seconds
 a build.
 
-#### The JVM memory model is emittable, but only explicitly
+#### Decided: Kotlin/Native's memory model, not the JVM's
 
-Worth stating plainly: Kotlin/Native does **not** reproduce the JVM memory model, so requiring it is
-a stronger goal than Kotlin/Native itself holds. It is a defensible one here, because krusty's
-entire correctness story is agreeing with kotlinc. What it costs on each path:
+The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows
+from the framing this whole track sits under — a Kotlin Multiplatform native target, with no Java
+interop — and it is not a compromise: requiring the JVM memory model would be a *stronger* guarantee
+than Kotlin/Native itself offers, so code that is correct on Kotlin/Native would remain correct
+here.
 
-| | `@Volatile` | final-field freeze (safe publication) | `synchronized` |
-|---|---|---|---|
-| C | `<stdatomic.h>` seq-cst — compiler-provided, works freestanding | emitted release fence at constructor exit | emitted monitor |
-| Go | `sync/atomic` seq-cst | no equivalent; emitted fence at constructor exit | `sync.Mutex` |
-| native-image | exact, free | exact, free | exact, free |
+What Kotlin/Native actually specifies, and therefore what has to be emitted:
 
-Neither C nor Go gives it for free, and neither makes it impossible. The emitter knows which fields
-are `@Volatile` — it is a declaration fact, already in the IR — so the work is emitting an atomic
-access instead of a plain one, not inferring anything. Go's gap is the final-field rule specifically:
-its memory model has no freeze, so publication of an immutable object needs a fence krusty emits.
+* **`@Volatile` (`kotlin.concurrent.Volatile`)** — reads and writes of the backing field are atomic
+  and writes are visible to other threads. Note the exact scope: only *backing-field* operations
+  are atomic, so a property whose accessor touches the field several times is not atomic as a whole.
+  The emitter has volatility as a declaration fact already, so this is emitting an atomic access
+  instead of a plain one, not inferring anything.
+* **`kotlin.concurrent.atomics`** (`AtomicInt`, `AtomicLong`, `AtomicReference`) — compare-and-swap
+  and atomic update, mapped to the host's atomics.
+* **No `synchronized`.** It is a JVM-only construct; it does not exist on Kotlin/Native, so there is
+  no monitor to implement.
+* **No final-field freeze.** The JVM's `final`-field safe-publication rule is not part of
+  Kotlin/Native's contract, so there is no release fence to emit at constructor exit.
+
+Those last two are the whole of what this decision removes, and they were the expensive half. It
+also removes the one item Go could not supply: Go's memory model has no final-field freeze, which
+was listed above as its specific gap — under Kotlin/Native's contract there is nothing there to
+reproduce.
+
+**The collector lands in the same place.** Kotlin/Native's GC is a *concurrent mark-and-sweep,
+non-generational* collector (with a parallel-mark/concurrent-sweep fallback). Go's is a concurrent
+mark-and-sweep, non-generational collector. Emitting Go would not approximate Kotlin/Native's
+runtime here — it lands on the same collector design, for free. Kotlin's own documentation describes
+its native memory manager as "similar to the JVM, Go, and other mainstream technologies", naming Go
+directly.
+
+Emitting C still cannot reach it, for the structural reason above: no stack maps, so conservative
+scanning is the ceiling. With the memory model settled this way, the collector is the binding
+constraint on the C path and nothing else is close.
 
 ---
 
