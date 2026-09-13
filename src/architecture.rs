@@ -358,6 +358,13 @@ mod tests {
             "src/native/codegen/lower/objects.rs",
             &["fir", "ir", "types"],
         );
+        // `names` is Kotlin's own accessor-naming rule, which common lowering already applied when
+        // it named a source-written accessor; reading it from the same place is what keeps the two
+        // from drifting.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower/statics.rs",
+            &["fir", "names", "types"],
+        );
     }
 
     #[test]

@@ -9,3 +9,4 @@ diagnostics/functions/tailRecursion/infixRecursiveCall.kt	common lowering turns 
 diagnostics/functions/tailRecursion/recursiveInnerFunction.kt	common lowering does not loop-transform a local `tailrec` function; it recurses a million deep
 diagnostics/functions/tailRecursion/thisReferences.kt	common lowering does not loop-transform a member `tailrec` function; it recurses a million deep
 diagnostics/functions/tailRecursion/unitBlocks.kt	common lowering loops only `return f(...)` tail calls; a Unit-typed tail call without `return` stays a call and recurses a million deep
+intrinsics/prefixIncDec.kt	`++prop` on a property with custom accessors reads it once where kotlinc reads it twice, so the accessor side effect is counted 2 instead of 3 — krusty's JVM backend prints the identical "fail in prefix increment: 2 != 3", so this is common lowering's, not the generator's

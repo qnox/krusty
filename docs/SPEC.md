@@ -5500,6 +5500,22 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_classes_e2e.rs` (`is_and_safe_casts_follow_the_superclass_chain`,
   `a_failed_cast_fails_loudly_naming_both_types`).
 
+- **A top-level property is a global slot, initialized before the entry function, and rooted in the
+  collector if it holds a reference.** The JVM realizes a top-level property as a private static
+  field plus a `getX`/`setX` pair (and an `access$get<X>$p` bridge when a sibling class reads a
+  private one) because of JVM visibility rules; none of that applies natively, so a read is a load
+  from the slot and a write is a store. An accessor is called only where the SOURCE wrote one
+  (`val doubled get() = …`), which is exactly when common lowering emits an accessor function —
+  the property's `field` reads inside it lower to the slot as any other read does. Initializers run
+  in declaration order at process start, which is where the JVM would have run the facade's
+  `<clinit>`: a program touches the facade by calling its entry point. A reference-typed slot is
+  registered with `kt_gc_add_global_root` BEFORE the first initializer runs, because a later
+  initializer may allocate and the collection that follows must already trace the earlier slots.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`top_level_properties_initialize_before_main_and_hold_their_values`,
+  `a_top_level_property_is_a_collector_root`,
+  `a_top_level_property_with_custom_accessors_runs_their_bodies`).
+
 - **An `object` declaration is one lazily constructed instance in a static slot registered as a
   collector root.** Static storage is never scanned, so the emitted getter registers the slot with
   `kt_gc_add_global_root` before it allocates and assigns the slot before running the constructor;

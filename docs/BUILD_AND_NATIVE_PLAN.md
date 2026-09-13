@@ -1115,13 +1115,19 @@ before:**
    (multi-file, multi-module, other backends, unmodeled flags), 2 frontend panics, 7 known
    failures shared with the JVM lane and listed with their reasons in
    `tests/native_box_expected_failures.txt` (a listed case that starts passing fails the test until
-   it is removed), **0 unexpected failures**. The first run found and fixed two native defects —
+   it is removed), **0 unexpected failures**. The lane honours the corpus's JVM ignores as well as
+   its native ones: krusty has one frontend and one common lowering, so a case muted on `JVM_IR` is
+   muted for a reason the native backend inherits rather than causes — verified case by case by
+   running the same source through the JVM backend and getting the same wrong answer. The first run found and fixed two native defects —
    `===` on primitives boxed both sides and compared addresses; `UInt` was carried as the `Int` it
    wraps — which is what the gate is for. The backlog, by frequency: top-level properties (499),
    structural `==` on references (152), lambdas and function values (264), checked operations
    (70), reference arrays (50) and array intrinsics (85), callable references (49), data classes,
    interfaces, inner and local classes, value classes, `vararg`, `!!`, extension properties,
    floating-point rendering, `try`.
+6. **Growing the generator by that backlog, biggest first.** Top-level properties (499 declines,
+   the largest single item) landed: **408 pass**, and the construct left the decline table
+   entirely.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

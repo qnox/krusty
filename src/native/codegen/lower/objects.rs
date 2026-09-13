@@ -53,7 +53,7 @@ fn any_member(symbol: &str) -> Option<(Vec<Ty>, Ty)> {
 
 /// Flags for a load or store through a reference the program already holds: aligned by
 /// construction, and non-trapping because null receivers are checked before any access.
-fn trusted() -> MemFlagsData {
+pub(super) fn trusted() -> MemFlagsData {
     MemFlagsData::trusted()
 }
 
@@ -78,7 +78,7 @@ impl<'a> FileLowering<'a> {
     }
 
     /// A descriptor the runtime defines, declared as an import on first use.
-    fn import_data(&mut self, symbol: &str) -> Result<DataId, Unsupported> {
+    pub(super) fn import_data(&mut self, symbol: &str) -> Result<DataId, Unsupported> {
         if let Some(id) = self.data_imports.get(symbol) {
             return Ok(*id);
         }
@@ -112,13 +112,17 @@ impl<'a> FileLowering<'a> {
         self.import_data(symbol).map(Some)
     }
 
-    fn declare_local_data(&mut self, name: &str, writable: bool) -> Result<DataId, Unsupported> {
+    pub(super) fn declare_local_data(
+        &mut self,
+        name: &str,
+        writable: bool,
+    ) -> Result<DataId, Unsupported> {
         self.module
             .declare_data(name, Linkage::Local, writable, false)
             .map_err(|error| format!("declaring `{name}` ({error})"))
     }
 
-    fn declare_local_function(
+    pub(super) fn declare_local_function(
         &mut self,
         name: &str,
         params: &[Ty],
@@ -487,7 +491,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The address of a data item.
-    fn data_address(&mut self, data: DataId) -> Value {
+    pub(super) fn data_address(&mut self, data: DataId) -> Value {
         let global = self
             .file
             .module
@@ -704,7 +708,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Err("a property with no checked declaration".to_string());
         };
         let Some(class) = property.class else {
-            return Err(format!("a top-level property (`{}`)", property.name));
+            // A top-level property: not a class member at all, so it has no (class, index).
+            return Err(TOP_LEVEL.to_string());
         };
         let index = self.file.ir.classes[class as usize]
             .properties
@@ -975,6 +980,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 }
+
+/// Marks a checked property that turned out to be top-level, so the caller routes it to
+/// `super::statics` instead of looking for a class member. Never reaches a diagnostic.
+pub(super) const TOP_LEVEL: &str = "\u{0}top-level";
 
 /// A type's spelling for a diagnostic: the class name when it has one, else the debug form.
 fn type_name_of(ty: Ty) -> String {

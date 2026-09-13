@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod objects;
+mod statics;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -142,9 +143,6 @@ pub fn lower_file(
     stem: &str,
     entry: Entry,
 ) -> Result<Lowered, Unsupported> {
-    if !ir.statics.is_empty() {
-        return Err("a top-level property".to_string());
-    }
     let class_model = model::build(ir)?;
 
     let isa = isa_for(target)?;
@@ -168,10 +166,13 @@ pub fn lower_file(
         strings: HashMap::new(),
         classes: Vec::new(),
         accessors: HashMap::new(),
+        statics: Vec::new(),
     };
     lowering.declare_functions()?;
     lowering.declare_classes()?;
+    lowering.declare_statics()?;
     lowering.define_classes()?;
+    let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
@@ -184,7 +185,7 @@ pub fn lower_file(
                 Entry::Box => function.name == "box" && carrier(function.ret) == Carrier::Ref,
             };
         if is_entry {
-            lowering.define_program_entry(index)?;
+            lowering.define_program_entry(index, statics_init)?;
             defines_entry = true;
         }
     }
@@ -219,6 +220,8 @@ struct FileLowering<'a> {
     classes: Vec<objects::ClassItems>,
     /// Synthesized field accessors the vtables reference, by slot.
     accessors: HashMap<Slot, FuncId>,
+    /// The global slot of each top-level property, parallel to `ir.statics`.
+    statics: Vec<DataId>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -402,7 +405,11 @@ impl<'a> FileLowering<'a> {
     /// collector, runs the entry function — printing its result when it has one, which is how a
     /// `box()` case reports its verdict — and exits through the kernel; it never returns to
     /// `_start`.
-    fn define_program_entry(&mut self, main_index: usize) -> Result<(), Unsupported> {
+    fn define_program_entry(
+        &mut self,
+        main_index: usize,
+        statics_init: Option<FuncId>,
+    ) -> Result<(), Unsupported> {
         let void = Signature::new(CallConv::SystemV);
         let entry_id = self
             .module
@@ -437,6 +444,12 @@ impl<'a> FileLowering<'a> {
             let bottom = builder.ins().stack_addr(types::I64, slot, 0);
             let init_ref = self.module.declare_func_in_func(init, builder.func);
             builder.ins().call(init_ref, &[bottom]);
+            // Top-level properties are initialized before the entry function runs, which is when
+            // the JVM would have touched the facade and run its `<clinit>`.
+            if let Some(statics_init) = statics_init {
+                let statics_ref = self.module.declare_func_in_func(statics_init, builder.func);
+                builder.ins().call(statics_ref, &[]);
+            }
             let main_ref = self.module.declare_func_in_func(main, builder.func);
             let call = builder.ins().call(main_ref, &[]);
             if let Some(println) = println {
@@ -633,6 +646,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
                 value,
             } => self.field_write(receiver, class, index, value)?,
+            IrExpr::SetStatic { index, value } => self.static_write(index, value)?,
             IrExpr::Checked(IrCheckedOperation::PropertyWrite {
                 target,
                 dispatch_receiver,
@@ -644,8 +658,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
                     return Err("an extension or context property".to_string());
                 }
-                let (class, index) = self.checked_property(&target)?;
-                self.property_write(class, index, dispatch_receiver, value)?;
+                match self.checked_property(&target) {
+                    Ok((class, index)) => {
+                        self.property_write(class, index, dispatch_receiver, value)?
+                    }
+                    Err(reason) if reason == objects::TOP_LEVEL => {
+                        let name = self.checked_property_name(&target)?;
+                        self.top_level_write(&name, value)?;
+                    }
+                    Err(reason) => return Err(reason),
+                }
             }
             _ => {
                 self.expression(id)?;
@@ -883,6 +905,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
             } => self.field_read(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
+            IrExpr::GetStatic(index) => self.static_read(index),
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -893,8 +916,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
                     return Err("an extension or context property".to_string());
                 }
-                let (class, index) = self.checked_property(&target)?;
-                self.property_read(class, index, dispatch_receiver)
+                match self.checked_property(&target) {
+                    Ok((class, index)) => self.property_read(class, index, dispatch_receiver),
+                    Err(reason) if reason == objects::TOP_LEVEL => {
+                        let name = self.checked_property_name(&target)?;
+                        self.top_level_read(&name)
+                    }
+                    Err(reason) => Err(reason),
+                }
             }
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
@@ -903,6 +932,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             | IrExpr::Break { .. }
             | IrExpr::Continue { .. }
             | IrExpr::SetField { .. }
+            | IrExpr::SetStatic { .. }
             | IrExpr::Checked(IrCheckedOperation::PropertyWrite { .. }) => {
                 self.statement(id)?;
                 Ok(None)
@@ -1023,6 +1053,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::GetField { class, index, .. } => {
                 self.file.ir.classes[*class as usize].fields[*index as usize].ty
             }
+            IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
                 self.file.ir.checked_properties.get(target)?.ty
             }

@@ -625,3 +625,86 @@ fn unsigned_integers_are_declined_rather_than_carried_as_signed() {
         "expected the backend to decline, got {diagnostics:?}"
     );
 }
+
+#[test]
+fn top_level_properties_initialize_before_main_and_hold_their_values() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Initializers run in declaration order, before the entry function — where the JVM would have
+    // run the facade's `<clinit>`. `tag` prints as each one is evaluated, so a reordering shows up
+    // in the output, and `derived` reads `base`, which only works if `base` was assigned first.
+    assert_eq!(
+        run("fun tag(s: String, n: Int): Int { println(s); return n }\n\
+             val base: Int = tag(\"base\", 4)\n\
+             val derived: Int = base * 10\n\
+             var counter: Int = 0\n\
+             val name: String = \"kotlin\"\n\
+             fun bump(): Int { counter = counter + 1; return counter }\n\
+             fun main() {\n\
+             \x20   println(base)\n\
+             \x20   println(derived)\n\
+             \x20   println(name)\n\
+             \x20   println(bump())\n\
+             \x20   println(bump())\n\
+             \x20   counter = 40\n\
+             \x20   println(bump())\n\
+             }\n"),
+        "base\n4\n40\nkotlin\n1\n2\n41\n"
+    );
+}
+
+#[test]
+fn a_top_level_property_is_a_collector_root() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `kept` holds a HEAP string (built by a template, so it is not a literal in static storage)
+    // and nothing else references it: only the registered global root keeps it alive. The loop
+    // then allocates far past the collection threshold, so the string survives many collections
+    // with its slot as its sole root. Without `kt_gc_add_global_root` this printed reused bytes.
+    assert_eq!(
+        run("val kept: String = \"kept-${1 + 1}\"\n\
+             var last: String = \"\"\n\
+             fun main() {\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 100000) {\n\
+             \x20       last = \"garbage-$i\"\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             \x20   println(kept)\n\
+             \x20   println(last)\n\
+             }\n"),
+        "kept-2\ngarbage-99999\n"
+    );
+}
+
+#[test]
+fn a_top_level_property_with_custom_accessors_runs_their_bodies() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `doubled` has no storage at all — a read is a call. `guarded` has storage and both accessors
+    // written in source; `field` inside them is the backing slot, not a recursive accessor call.
+    assert_eq!(
+        run("var backing: Int = 3\n\
+             val doubled: Int get() = backing * 2\n\
+             var guarded: Int = 1\n\
+             \x20   get() = field + 100\n\
+             \x20   set(v) { field = if (v < 0) 0 else v }\n\
+             fun main() {\n\
+             \x20   println(doubled)\n\
+             \x20   backing = 5\n\
+             \x20   println(doubled)\n\
+             \x20   println(guarded)\n\
+             \x20   guarded = -7\n\
+             \x20   println(guarded)\n\
+             \x20   guarded = 7\n\
+             \x20   println(guarded)\n\
+             }\n"),
+        "6\n10\n101\n100\n107\n"
+    );
+}
