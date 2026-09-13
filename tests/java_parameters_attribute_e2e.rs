@@ -70,9 +70,15 @@ fn kotlinc_classes(source_name: &str, source: &str) -> Option<std::path::PathBuf
 
 const SOURCE: &str = "package demo\n\
     data class Acc(val redirectTo: String, val count: Int)\n\
-    class Svc(private val dep: String) {\n\
+    class Leaf {\n\
+    \x20 suspend fun pull(id: String): String = id\n\
+    }\n\
+    class Svc(private val dep: String, private val leaf: Leaf) {\n\
     \x20 fun plain(one: String, two: Int): String = one + two\n\
-    \x20 suspend fun waits(one: String): String = one + dep\n\
+    \x20 suspend fun waits(one: String): String {\n\
+    \x20\x20 val first = leaf.pull(one)\n\
+    \x20\x20 return first + dep\n\
+    \x20 }\n\
     }\n\
     fun topLevel(a: String, b: Int): String = a + b\n";
 

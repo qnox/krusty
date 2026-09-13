@@ -7079,6 +7079,22 @@ fn emit_class(
                 ("$result".to_string(), "Ljava/lang/Object;".to_string(), 1),
             ],
         );
+        // A continuation's two methods are compiler-manufactured, but kotlinc still names their
+        // parameters under `-java-parameters` — and names them PLAIN: the captured outer instance is
+        // `this$0` with no `mandated` flag, unlike an inner class's own constructor parameter.
+        if env.java_parameters {
+            let mut ctor_parameters = Vec::with_capacity(2);
+            if has_this0 {
+                ctor_parameters.push(("this$0".to_string(), 0));
+            }
+            ctor_parameters.push(("$completion".to_string(), 0));
+            cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
+            cw.set_method_parameters(
+                "invokeSuspend",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[("$result".to_string(), 0)],
+            );
+        }
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
