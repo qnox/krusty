@@ -11,10 +11,10 @@
 //! * **klib ingestion** (phase 7). Symbols still come from the Kotlin/JVM stdlib jar, because that
 //!   is the only provider krusty has. Only *signatures* come from there; the emitted program links
 //!   against `krusty_rt.c` and nothing else.
-//! * **Interfaces and objects.** Classes with fields, methods, properties, single inheritance,
-//!   virtual dispatch and `is`/`as` live on the heap (`classes.rs` lays them out and builds their
-//!   vtables, `emit.rs` constructs them and dispatches through `kotlin.Any`-rooted type
-//!   descriptors); interface dispatch and `object` declarations decline.
+//! * **Interfaces.** Classes with fields, methods, properties, single inheritance, virtual
+//!   dispatch, `is`/`as` and `object` declarations live on the heap (`classes.rs` lays them out
+//!   and builds their vtables, `emit.rs` constructs them and dispatches through
+//!   `kotlin.Any`-rooted type descriptors); interface dispatch declines.
 //! * **Most of the stdlib, and data classes, enums, lambdas.** Every one of them makes the backend
 //!   decline with a diagnostic naming the construct, rather than emit something unverified.
 

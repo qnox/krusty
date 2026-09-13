@@ -464,3 +464,88 @@ fn a_generic_class_erases_its_parameter_to_a_reference() {
         "1\ns\n42\ninner\n"
     );
 }
+
+#[test]
+fn an_object_declaration_is_one_instance_rooted_across_collections() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // Part one: one instance, mutated through its methods and properties. Part two is the
+    // collector proof, and it is arranged so that NOTHING but the registered global root keeps
+    // the singleton alive: `setup` creates it and stores a HEAP string in its field (a template,
+    // not a literal — a literal lives in static storage and would survive anything), then
+    // `setup`'s frame is gone and `deep` overwrites the stack region it used, then `churn`
+    // allocates far past the collection threshold. `main` itself never holds the singleton until
+    // it reads it back at the end. Without `kt_gc_add_global_root` in the emitted getter this
+    // printed a reused slot's bytes; with it, the string is intact.
+    assert_eq!(
+        run("object Counter {\n\
+             \x20   var n: Int = 0\n\
+             \x20   var last: String? = null\n\
+             \x20   val label: String = \"counter\"\n\
+             \x20   fun bump() { n = n + 1 }\n\
+             \x20   fun describe(): String = \"$label=$n\"\n\
+             }\n\
+             fun setup() {\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 1000) { Counter.bump(); i = i + 1 }\n\
+             \x20   println(Counter.describe())\n\
+             \x20   Counter.last = \"kept-${Counter.n}\"\n\
+             }\n\
+             fun deep(depth: Int): Int = if (depth == 0) 0 else deep(depth - 1) + 1\n\
+             fun churn(): String {\n\
+             \x20   var j = 0\n\
+             \x20   var garbage = \"\"\n\
+             \x20   while (j < 100000) { garbage = \"garbage-$j-$j\"; j = j + 1 }\n\
+             \x20   return garbage\n\
+             }\n\
+             fun main() {\n\
+             \x20   setup()\n\
+             \x20   println(deep(500))\n\
+             \x20   println(churn())\n\
+             \x20   println(Counter.last)\n\
+             \x20   println(Counter.n)\n\
+             \x20   println(Counter === Counter)\n\
+             }\n"),
+        "counter=1000\n500\ngarbage-99999-99999\nkept-1000\n1000\ntrue\n"
+    );
+}
+
+#[test]
+fn a_linked_chain_built_under_collection_pressure_is_traced_through_emitted_layouts() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // Every iteration allocates a node AND a heap string that is garbage by the next iteration,
+    // so the collector runs many times while the chain is being built. Only the head is rooted
+    // (a local in `main`); every other node is reachable solely through `next`, which the emitted
+    // `reference_offsets` must list at the right offset. A wrong offset frees nodes or follows an
+    // `Int` as a pointer, and the walk afterwards would not sum to exactly this.
+    assert_eq!(
+        run("class Node(val value: Int, val next: Node?)\n\
+             fun main() {\n\
+             \x20   var head: Node? = null\n\
+             \x20   var i = 0\n\
+             \x20   var scratch = \"\"\n\
+             \x20   while (i < 40000) {\n\
+             \x20       head = Node(i, head)\n\
+             \x20       scratch = \"garbage-$i-${i * 3}-${i + 7}\"\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             \x20   var sum = 0\n\
+             \x20   var count = 0\n\
+             \x20   var n = head\n\
+             \x20   while (n != null) {\n\
+             \x20       sum = sum + n.value\n\
+             \x20       count = count + 1\n\
+             \x20       n = n.next\n\
+             \x20   }\n\
+             \x20   println(count)\n\
+             \x20   println(sum)\n\
+             \x20   println(scratch)\n\
+             }\n"),
+        "40000\n799980000\ngarbage-39999-119997-40006\n"
+    );
+}

@@ -227,8 +227,6 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
         || class.ctor_args.iter().any(|argument| argument.has_default)
     {
         "a constructor default argument"
-    } else if class.is_object {
-        "an object declaration"
     } else if class.is_value {
         "a value class"
     } else if class.is_annotation || class.annotation_impl_of.is_some() {

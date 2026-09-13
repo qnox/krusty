@@ -148,12 +148,14 @@ pub(super) struct Symbols {
 }
 
 /// The names a class's base reserves. Kept in one place so the reservation and the uses agree.
-fn class_symbol_family(base: &str) -> [String; 4] {
+fn class_symbol_family(base: &str) -> [String; 6] {
     [
         format!("kt_type_{base}"),
         format!("kt_vtable_{base}"),
         format!("kt_refs_{base}"),
         format!("kt_{base}__init"),
+        format!("kt_singleton_{base}"),
+        format!("kt_singleton_{base}_get"),
     ]
 }
 
@@ -291,6 +293,12 @@ impl<'a> Emitter<'a> {
             let class = class as ClassId;
             self.out
                 .push_str(&format!("{};\n", self.constructor_signature(class)));
+            if self.ir.classes[class as usize].is_object {
+                self.out.push_str(&format!(
+                    "static KRef {}(void);\n",
+                    self.singleton_getter(class)
+                ));
+            }
         }
         self.out.push('\n');
 
@@ -306,7 +314,11 @@ impl<'a> Emitter<'a> {
         }
 
         for class in 0..self.ir.classes.len() {
-            self.constructor(class as ClassId)?;
+            let class = class as ClassId;
+            if self.ir.classes[class as usize].is_object {
+                self.singleton(class);
+            }
+            self.constructor(class)?;
         }
 
         let mut entry = None;
@@ -417,6 +429,10 @@ impl<'a> Emitter<'a> {
 
     fn constructor_symbol(&self, class: ClassId) -> String {
         format!("kt_{}__init", self.symbols.classes[class as usize])
+    }
+
+    fn singleton_getter(&self, class: ClassId) -> String {
+        format!("kt_singleton_{}_get", self.symbols.classes[class as usize])
     }
 
     /// The struct member holding field `index` of `class` — named by the DECLARING class, so a
@@ -683,6 +699,28 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    /// An `object` declaration: one lazily constructed instance in a static slot that is a
+    /// registered collector root, so whatever the singleton references stays alive through every
+    /// collection. The slot is assigned before the constructor runs, so the root exists before
+    /// anything the constructor allocates.
+    fn singleton(&mut self, class: ClassId) {
+        let base = self.symbols.classes[class as usize].clone();
+        self.out.push_str(&format!(
+            "static KRef kt_singleton_{base};\n\
+             static KRef kt_singleton_{base}_get(void) {{\n\
+             \x20   if (kt_singleton_{base} == NULL) {{\n\
+             \x20       kt_gc_add_global_root((void **)&kt_singleton_{base});\n\
+             \x20       kt_singleton_{base} = (KRef)kt_gc_allocate(&{}, sizeof({}));\n\
+             \x20       {}(kt_singleton_{base});\n\
+             \x20   }}\n\
+             \x20   return kt_singleton_{base};\n\
+             }}\n\n",
+            self.type_symbol(class),
+            self.struct_name(class),
+            self.constructor_symbol(class)
+        ));
+    }
+
     /// The in-file class a name denotes, or the decline for one declared elsewhere.
     fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
         self.ir.class_id_by_name(internal).ok_or_else(|| {
@@ -768,7 +806,10 @@ impl<'a> Emitter<'a> {
             },
             IrExpr::When { branches } => self.ty_of(branches.first()?.1)?,
             IrExpr::Call { callee, .. } => self.callee_result(callee)?,
-            IrExpr::New { internal, .. } => Ty::Obj(*internal, &[]),
+            IrExpr::New { internal, .. }
+            | IrExpr::SingletonValue {
+                classifier: internal,
+            } => Ty::Obj(*internal, &[]),
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.ir.classes[*class as usize].methods[*index as usize];
                 self.ir.functions[fid as usize].ret
@@ -1101,6 +1142,16 @@ impl<'a> Emitter<'a> {
                 receiver,
                 args,
             } => self.method_call(class, index, receiver, &args),
+            IrExpr::SingletonValue { classifier } => {
+                let class = self.class_of(classifier, "the object")?;
+                if !self.ir.classes[class as usize].is_object {
+                    return Err(format!(
+                        "a singleton value of `{}`, which is not an object declaration",
+                        classifier.render()
+                    ));
+                }
+                Ok(format!("{}()", self.singleton_getter(class)))
+            }
             IrExpr::GetField {
                 receiver,
                 class,
