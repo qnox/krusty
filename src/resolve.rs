@@ -33208,36 +33208,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// A fixed outer expectation is a representable upper bound for a conditional when both
-    /// value-producing branches satisfy it. This matters when their exact Kotlin common type is an
-    /// intersection that [`Ty`] deliberately does not synthesize (for example numeric classifiers
-    /// share `Number`, `Comparable`, and platform interfaces): an enclosing `Number` parameter is
-    /// still a sound contextual result instead of widening the expression to `Any`.
-    fn join_conditional(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expected: Option<Ty>,
-        left: Ty,
-        right: Ty,
-        span: Span,
-    ) -> Ty {
-        let semantic_join = self.semantic_common_supertype(left, right);
-        if left != Ty::Nothing && right != Ty::Nothing {
-            if let Some(expected) = Self::usable_conditional_expected(scope, expected) {
-                if semantic_join.is_some_and(|joined| self.receiver_is_assignable(joined, expected))
-                {
-                    return semantic_join.expect("checked semantic join");
-                }
-                if self.receiver_is_assignable(left, expected)
-                    && self.receiver_is_assignable(right, expected)
-                {
-                    return expected;
-                }
-            }
-        }
-        semantic_join.unwrap_or_else(|| self.join(left, right, span))
-    }
-
     fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
         let suppression_depth = self.active_statement_suppressions.len();
         if let Some(suppressions) = self.file.statement_suppressions.get(&s) {
@@ -78177,7 +78147,11 @@ impl<'a> Checker<'a> {
                 let reference_like =
                     |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
                 result = if wanted.value_required && reference_like(result) && reference_like(ht) {
-                    self.join(result, ht, self.span(e))
+                    // Join against the EXPECTATION, exactly as `if`/`when` do: a `try` in value
+                    // position is a conditional expression like any other. A blind join of two
+                    // generic branches invents an out-projection (`R<out Any>`) that no INVARIANT
+                    // declared type can take, rejecting source kotlinc accepts.
+                    conditional_branch::join_types(self, scope, wanted.expected, result, ht, e)
                 } else if result == ht {
                     result
                 } else if result == Ty::Nothing {
@@ -78861,7 +78835,7 @@ impl<'a> Checker<'a> {
         rhs: ExprId,
     ) -> Ty {
         let t = {
-            let conditional_expected = Self::usable_conditional_expected(scope, expected);
+            let conditional_expected = conditional_branch::usable_expected(scope, expected);
             let lt0 = match conditional_expected {
                 // The left branch is observed only after an implicit null test. Its NON-null value
                 // must fit the enclosing expectation, but the expression itself may return null;
@@ -78918,7 +78892,7 @@ impl<'a> Checker<'a> {
             {
                 rt
             } else {
-                self.join_conditional(scope, conditional_expected, lt, rt, self.span(e))
+                conditional_branch::join_types(self, scope, conditional_expected, lt, rt, e)
             }
         };
         self.set(e, t)
@@ -80907,14 +80881,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// An outer call's pending type variable cannot constrain a conditional branch. A lexical type
-    /// parameter remains a usable expectation.
-    fn usable_conditional_expected(scope: &CheckerScope<'_>, expected: Option<Ty>) -> Option<Ty> {
-        expected
-            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
-            .filter(|ty| Self::type_is_lexically_fixed(scope, *ty))
-    }
-
     /// Recheck a branch whose selected generic call has an unbound result formal, using a sibling's
     /// result as its expectation.
     fn rebind_conditional_branch(
@@ -81039,7 +81005,7 @@ impl<'a> Checker<'a> {
                     });
                     self.report_unbound_conditional_branch(scope, then_branch);
                     self.report_unbound_conditional_branch(scope, eb);
-                    self.join_conditional(scope, wanted.expected, tt, et, self.span(e))
+                    conditional_branch::join_types(self, scope, wanted.expected, tt, et, e)
                 }
                 None => {
                     self.report_unbound_conditional_branch(scope, then_branch);
