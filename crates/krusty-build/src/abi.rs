@@ -35,7 +35,7 @@
 //! Until those land, a fingerprint from this module is sound for avoidance only on code with no
 //! `inline` functions and no contracts. [`AbiClass::from_class_file`] cannot detect that for you.
 
-use crate::fnv1a;
+use crate::digest::{Digest, Hasher};
 
 /// Whether an [`AbiMember`] came from a field or a method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,7 +45,7 @@ pub enum MemberKind {
 }
 
 impl MemberKind {
-    fn tag(self) -> &'static str {
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             Self::Field => "field",
             Self::Method => "method",
@@ -95,24 +95,24 @@ pub struct AbiClass {
 
 /// A module's ABI condensed to one value. Folded into every dependent's cache key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AbiFingerprint(u64);
+pub struct AbiFingerprint(Digest);
 
 impl AbiFingerprint {
-    pub fn value(self) -> u64 {
+    pub fn digest(self) -> Digest {
         self.0
     }
 
     /// Rebuild a fingerprint from a previously stored value — used when a cache hit supplies a
     /// module's ABI without recomputing it. Not for minting fingerprints: those come from
     /// [`fingerprint`].
-    pub fn from_raw(value: u64) -> Self {
+    pub fn from_digest(value: Digest) -> Self {
         Self(value)
     }
 }
 
 impl std::fmt::Display for AbiFingerprint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:016x}", self.0)
+        self.0.fmt(f)
     }
 }
 
@@ -196,11 +196,36 @@ impl AbiClass {
 pub fn fingerprint(classes: &[AbiClass]) -> AbiFingerprint {
     let mut ordered: Vec<&AbiClass> = classes.iter().collect();
     ordered.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut rendered = String::new();
+
+    // Length-delimited rather than hashing `render()`: a class name or descriptor containing a
+    // newline must not be able to impersonate a second member. See `crate::digest`.
+    let mut hasher = Hasher::new();
+    hasher.count("classes", ordered.len());
     for class in ordered {
-        rendered.push_str(&class.render());
+        hasher.text("class", &class.name);
+        hasher.field("access", &class.access.to_le_bytes());
+        hasher.text("super", class.super_name.as_deref().unwrap_or(""));
+        hasher.count("interfaces", class.interfaces.len());
+        for interface in &class.interfaces {
+            hasher.text("interface", interface);
+        }
+        hasher.text("signature", class.signature.as_deref().unwrap_or(""));
+        hasher.text("retention", class.retention.as_deref().unwrap_or(""));
+        hasher.text("meta", &class.metadata);
+        hasher.count("members", class.members.len());
+        for member in &class.members {
+            hasher.text("kind", member.kind.tag());
+            hasher.text("name", &member.name);
+            hasher.text("descriptor", &member.descriptor);
+            hasher.field("member-access", &member.access.to_le_bytes());
+            hasher.text(
+                "member-signature",
+                member.signature.as_deref().unwrap_or(""),
+            );
+            hasher.text("constant", member.constant.as_deref().unwrap_or(""));
+        }
     }
-    AbiFingerprint(fnv1a(rendered.as_bytes()))
+    AbiFingerprint(hasher.finish())
 }
 
 #[cfg(test)]
@@ -338,7 +363,7 @@ mod tests {
     #[test]
     fn fingerprint_displays_as_fixed_width_hex() {
         let rendered = fingerprint(&[class("lib/Api", vec![])]).to_string();
-        assert_eq!(rendered.len(), 16);
+        assert_eq!(rendered.len(), 64, "SHA-256 renders as 64 hex characters");
         assert!(rendered.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

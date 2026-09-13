@@ -25,15 +25,43 @@ use std::path::{Path, PathBuf};
 
 use crate::abi::{fingerprint, AbiClass, AbiFingerprint};
 use crate::cache::{CacheKey, CacheKeyInputs};
+use crate::digest::{digest_bytes, Hasher};
 use crate::graph::{GraphError, ModuleGraph};
 use crate::model::{Module, ModuleId, ModuleOutput};
 use crate::store::{ArtifactStore, CachedModule, MissReason};
+
+/// Whether [`crate::abi`]'s model captures everything a dependent can observe about this module.
+///
+/// The model deliberately carries no method bodies, which is what makes avoidance possible — but
+/// two Kotlin constructs put body content into the ABI anyway:
+///
+/// * **`inline` functions.** On this target an inline body is bytecode spliced into the CALL SITE
+///   (`src/jvm/inline.rs`), so editing one changes what every dependent compiles to while changing
+///   no signature.
+/// * **`contract { … }` blocks.** They live syntactically inside a body but drive callers'
+///   smart-cast analysis (`src/contracts.rs`).
+///
+/// A module containing either must not have its dependents keyed on the signature fingerprint: the
+/// fingerprint would not move, and the dependent would take a stale cache hit with wrong compiled
+/// behavior. [`Driver`] therefore publishes a whole-output digest for such modules, so any change
+/// to them invalidates their dependents. That is krusty's behavior today — no avoidance — but it is
+/// SOUND, and it is confined to the modules that actually need it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbiCompleteness {
+    /// Every observable is in the ABI model; dependents may key on the signature fingerprint.
+    Complete,
+    /// Something a dependent observes is not modelled. The reason is carried so a build report can
+    /// explain why a rebuild cascaded.
+    Incomplete { reason: String },
+}
 
 /// What a compiler hands back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompiledModule {
     /// Emitted artifacts as `(target-relative path, bytes)`, in emission order.
     pub artifacts: Vec<(String, Vec<u8>)>,
+    /// Whether dependents may rely on the signature fingerprint for avoidance.
+    pub abi_completeness: AbiCompleteness,
 }
 
 /// Everything the driver needs from the outside world, behind one trait so the build logic can be
@@ -43,6 +71,16 @@ pub trait BuildEnvironment {
     /// it depends on build order. Splitting it here keeps the "every input is in the key" rule in
     /// one place ([`CacheKeyInputs`]) rather than spread across implementations.
     fn base_inputs(&self, module: &Module) -> Result<CacheKeyInputs, String>;
+
+    /// Why this environment cannot faithfully build `module`, if it cannot.
+    ///
+    /// The model can express more than any given environment implements. Silently ignoring a field
+    /// it promises — a per-module JDK, resources, annotation processors, a jar output — produces a
+    /// module that is quietly wrong and then caches it under a key that looks valid. Refusing is
+    /// the same contract as a module with Java sources: loud, and never a short artifact.
+    fn unsupported(&self, _module: &Module) -> Option<String> {
+        None
+    }
 
     /// Compile one module. Called only on a cache miss.
     ///
@@ -206,6 +244,11 @@ impl<E: BuildEnvironment> Driver<E> {
                 ),
             };
         }
+        // Anything the environment cannot honor faithfully is refused BEFORE a key is computed, so
+        // an unfaithful build can never be cached.
+        if let Some(reason) = self.environment.unsupported(module) {
+            return Outcome::Refused { reason };
+        }
 
         // Every dependency must have produced an ABI, or this module's key would be computed from
         // incomplete inputs — a key that could collide with a later, correct build.
@@ -267,7 +310,7 @@ impl<E: BuildEnvironment> Driver<E> {
             Err(message) => return Outcome::Failed { message },
         };
 
-        let abi = match abi_of(&compiled.artifacts) {
+        let abi = match published_abi(&compiled.artifacts, &compiled.abi_completeness) {
             Ok(abi) => abi,
             Err(message) => return Outcome::Failed { message },
         };
@@ -288,12 +331,35 @@ impl<E: BuildEnvironment> Driver<E> {
     }
 }
 
-/// Fingerprint a module's ABI from its emitted class files.
+/// The ABI value a module publishes to its dependents.
 ///
-/// Non-`.class` artifacts (`META-INF/*.kotlin_module`) are excluded: they are module-level metadata
-/// rather than per-class ABI, and `.kotlin_module` tracks source ORDER, so folding it in would make
-/// a pure source reordering invalidate every dependent for no semantic reason.
-fn abi_of(artifacts: &[(String, Vec<u8>)]) -> Result<AbiFingerprint, String> {
+/// For a [`AbiCompleteness::Complete`] module this is the signature fingerprint over its emitted
+/// class files — what makes a body-only edit invisible downstream. Non-`.class` artifacts
+/// (`META-INF/*.kotlin_module`) are excluded: they are module-level metadata rather than per-class
+/// ABI, and `.kotlin_module` tracks source ORDER, so folding it in would make a pure source
+/// reordering invalidate every dependent for no semantic reason.
+///
+/// For an [`AbiCompleteness::Incomplete`] module it is instead a digest of the WHOLE output, so any
+/// change at all propagates to dependents. The two forms are domain-separated, so a complete and an
+/// incomplete module can never publish the same value by accident.
+fn published_abi(
+    artifacts: &[(String, Vec<u8>)],
+    completeness: &AbiCompleteness,
+) -> Result<AbiFingerprint, String> {
+    if let AbiCompleteness::Incomplete { reason } = completeness {
+        let mut hasher = Hasher::new();
+        hasher.text("abi-kind", "whole-output");
+        hasher.text("reason", reason);
+        let mut ordered: Vec<&(String, Vec<u8>)> = artifacts.iter().collect();
+        ordered.sort_by(|a, b| a.0.cmp(&b.0));
+        hasher.count("artifacts", ordered.len());
+        for (path, bytes) in ordered {
+            hasher.text("path", path);
+            hasher.nested("content", digest_bytes(bytes));
+        }
+        return Ok(AbiFingerprint::from_digest(hasher.finish()));
+    }
+
     let mut classes = Vec::new();
     for (path, bytes) in artifacts {
         if !path.ends_with(".class") {
@@ -301,28 +367,103 @@ fn abi_of(artifacts: &[(String, Vec<u8>)]) -> Result<AbiFingerprint, String> {
         }
         classes.push(AbiClass::from_class_file(bytes).map_err(|error| format!("{path}: {error}"))?);
     }
-    Ok(fingerprint(&classes))
+    let mut hasher = Hasher::new();
+    hasher.text("abi-kind", "signatures");
+    hasher.nested("signatures", fingerprint(&classes).digest());
+    Ok(AbiFingerprint::from_digest(hasher.finish()))
 }
 
-/// Write artifacts into the module's output directory, so a dependent can compile against them.
+/// Replace each output directory's contents with `artifacts`.
 ///
 /// Runs on a cache hit as well as a compile: reuse means "the same files are on disk", not "the
 /// compiler did not run".
+///
+/// This REPLACES rather than overlays. Writing the current artifacts over whatever was there before
+/// leaves files behind that the module no longer produces — delete or rename a class and its stale
+/// `.class` stays on disk, visible to every dependent, on both the rebuild and the cache-hit path.
+/// A build whose output depends on what happened to be there before is not reproducible.
+///
+/// The swap goes through a staging directory so the window in which the output is incomplete is a
+/// rename rather than the whole write. EVERY declared output is written, not just the first.
 fn materialize(artifacts: &[(String, Vec<u8>)], module: &Module) -> Result<(), String> {
-    let Some(directory) = output_directory(module) else {
-        return Ok(()); // Nothing declared an output; nothing to place.
-    };
-    write_tree(&directory, artifacts)
+    for output in &module.outputs {
+        let ModuleOutput::ClassDirectory(directory) = output else {
+            // A jar output is refused up front (see `BuildEnvironment::unsupported`); reaching here
+            // would mean a module was admitted that cannot be materialized.
+            return Err(format!(
+                "cannot materialize into {}: only a class directory is supported",
+                output.path().display()
+            ));
+        };
+        replace_tree(directory, artifacts)?;
+    }
+    Ok(())
+}
+
+/// Build the tree beside the target, then swap it in and drop the old one.
+fn replace_tree(directory: &Path, artifacts: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let parent = directory.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+
+    let suffix = format!("{}-{}", std::process::id(), staging_counter());
+    let staging = parent.join(format!(
+        ".{}.staging-{suffix}",
+        directory
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("out")
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)
+        .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
+    write_tree(&staging, artifacts)?;
+
+    let retired = parent.join(format!(
+        ".{}.replaced-{suffix}",
+        directory
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("out")
+    ));
+    let had_previous = directory.exists();
+    if had_previous {
+        std::fs::rename(directory, &retired)
+            .map_err(|error| format!("cannot set aside {}: {error}", directory.display()))?;
+    }
+    match std::fs::rename(&staging, directory) {
+        Ok(()) => {
+            if had_previous {
+                let _ = std::fs::remove_dir_all(&retired);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            // Put the previous output back rather than leaving nothing in place.
+            if had_previous {
+                let _ = std::fs::rename(&retired, directory);
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(format!("cannot publish {}: {error}", directory.display()))
+        }
+    }
+}
+
+fn staging_counter() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Where a module's classes land, and therefore what a dependent puts on its classpath.
 ///
-/// Jar packaging is a separate step: the driver places loose classes and a later phase can zip
-/// them. Writing a jar here would duplicate what `krusty -d foo.jar` already does, badly.
+/// `None` for a jar output rather than a silently invented sibling directory: jar packaging is not
+/// implemented, and quietly writing `foo.classes/` when the model asked for `foo.jar` gives a
+/// dependent a classpath entry nobody declared. Such a module is refused up front instead.
 pub fn output_directory(module: &Module) -> Option<PathBuf> {
-    module.outputs.first().map(|output| match output {
-        ModuleOutput::ClassDirectory(path) => path.clone(),
-        ModuleOutput::Jar(path) => path.with_extension("classes"),
+    module.outputs.first().and_then(|output| match output {
+        ModuleOutput::ClassDirectory(path) => Some(path.clone()),
+        ModuleOutput::Jar(_) => None,
     })
 }
 
@@ -378,6 +519,12 @@ mod tests {
         /// module id -> (body marker, signature marker)
         sources: BTreeMap<String, (String, String)>,
         compiles: BTreeMap<String, usize>,
+        /// What `compile` reports about ABI completeness.
+        completeness: AbiCompleteness,
+        /// module id -> reason this environment cannot honor it.
+        refuse: BTreeMap<String, String>,
+        /// Artifact names to emit, so a test can drop one and check stale output is removed.
+        artifact_names: Option<Vec<String>>,
     }
 
     impl FakeEnvironment {
@@ -385,6 +532,9 @@ mod tests {
             Self {
                 sources: BTreeMap::new(),
                 compiles: BTreeMap::new(),
+                completeness: AbiCompleteness::Complete,
+                refuse: BTreeMap::new(),
+                artifact_names: None,
             }
         }
 
@@ -399,15 +549,20 @@ mod tests {
     }
 
     impl BuildEnvironment for FakeEnvironment {
+        fn unsupported(&self, module: &Module) -> Option<String> {
+            let id = module.id.as_ref()?.as_str();
+            self.refuse.get(id).cloned()
+        }
+
         fn base_inputs(&self, module: &Module) -> Result<CacheKeyInputs, String> {
             let id = module.id.as_ref().expect("id").as_str().to_string();
             let (body, signature) = self.sources.get(&id).cloned().unwrap_or_default();
             // The source digest covers BOTH: any edit changes this module's own key.
             Ok(CacheKeyInputs {
                 compiler: "fake-compiler-1".into(),
-                sources: vec![FileDigest::new(
+                sources: vec![FileDigest::of_bytes(
                     format!("/src/{id}.kt"),
-                    crate::fnv1a(format!("{body}|{signature}").as_bytes()),
+                    format!("{body}|{signature}").as_bytes(),
                 )],
                 target: "jvm-17".into(),
                 ..CacheKeyInputs::default()
@@ -423,11 +578,16 @@ mod tests {
             *self.compiles.entry(id.clone()).or_insert(0) += 1;
             let (body, signature) = self.sources.get(&id).cloned().unwrap_or_default();
             // Body affects emitted bytes; only `signature` will reach the ABI (see `abi_of_fake`).
+            let names = self
+                .artifact_names
+                .clone()
+                .unwrap_or_else(|| vec![format!("{id}/Main.marker")]);
             Ok(CompiledModule {
-                artifacts: vec![(
-                    format!("{id}/Main.marker"),
-                    format!("SIG:{signature}\nBODY:{body}\n").into_bytes(),
-                )],
+                artifacts: names
+                    .into_iter()
+                    .map(|name| (name, format!("SIG:{signature}\nBODY:{body}\n").into_bytes()))
+                    .collect(),
+                abi_completeness: self.completeness.clone(),
             })
         }
     }
@@ -446,7 +606,7 @@ mod tests {
                 rendered.push('\n');
             }
         }
-        AbiFingerprint::from_raw(crate::fnv1a(rendered.as_bytes()))
+        AbiFingerprint::from_digest(crate::digest::digest_bytes(rendered.as_bytes()))
     }
 
     /// A driver wired to the fake ABI rule above.
@@ -822,6 +982,122 @@ mod tests {
             second.render()
         );
         assert_eq!(d.environment.compile_count("core"), 2);
+    }
+
+    /// Finding: the ABI model carries no inline bodies or contracts, so a module containing either
+    /// must NOT let its dependents key on the signature fingerprint. Here the environment reports
+    /// the dependency incomplete, and a body-only edit must therefore reach the dependent — the
+    /// opposite of the avoidance case above, and the sound answer when the ABI cannot describe the
+    /// module.
+    #[test]
+    fn a_body_edit_in_an_abi_incomplete_module_still_rebuilds_dependents() {
+        let temp = TempDir::new("incomplete");
+        let out = temp.path().join("out");
+        let mut graph = ModuleGraph::new();
+        graph.insert(module("core", &[], &out)).expect("core");
+        graph.insert(module("app", &["core"], &out)).expect("app");
+
+        let mut environment = FakeEnvironment::new(&out);
+        environment.set("core", "body-v1", "sig-v1");
+        environment.set("app", "body-v1", "sig-v1");
+        environment.completeness = AbiCompleteness::Incomplete {
+            reason: "core.kt mentions `inline`".into(),
+        };
+        let store = ArtifactStore::open(temp.path().join("cache")).expect("store");
+        let mut driver = Driver::new(environment, store);
+
+        driver.build(&graph).expect("plannable");
+        driver.environment.set("core", "body-v2", "sig-v1"); // body only — signature untouched
+        let report = driver.build(&graph).expect("plannable");
+
+        assert_eq!(
+            report
+                .compiled()
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["core", "app"],
+            "an inline body edit is invisible to the signature fingerprint, so an incomplete \
+             module must publish a whole-output digest and rebuild its dependents\n{}",
+            report.render()
+        );
+    }
+
+    /// Finding: materialization overlaid rather than replaced, so a class that stopped being
+    /// produced stayed on disk and remained visible to dependents.
+    #[test]
+    fn materialize_removes_artifacts_that_are_no_longer_produced() {
+        let temp = TempDir::new("stale");
+        let out = temp.path().join("out");
+        let mut graph = ModuleGraph::new();
+        graph.insert(module("core", &[], &out)).expect("core");
+
+        let mut environment = FakeEnvironment::new(&out);
+        environment.set("core", "body-v1", "sig-v1");
+        environment.artifact_names =
+            Some(vec!["pkg/Kept.marker".into(), "pkg/Removed.marker".into()]);
+        let store = ArtifactStore::open(temp.path().join("cache")).expect("store");
+        let mut driver = Driver::new(environment, store);
+        driver.build(&graph).expect("plannable");
+
+        let kept = out.join("core").join("pkg").join("Kept.marker");
+        let removed = out.join("core").join("pkg").join("Removed.marker");
+        assert!(
+            kept.is_file() && removed.is_file(),
+            "first build writes both"
+        );
+
+        // The module stops producing one class, as if its source were deleted.
+        driver.environment.artifact_names = Some(vec!["pkg/Kept.marker".into()]);
+        driver.environment.set("core", "body-v2", "sig-v1");
+        driver.build(&graph).expect("plannable");
+
+        assert!(kept.is_file(), "the surviving class is still there");
+        assert!(
+            !removed.exists(),
+            "a class the module no longer produces must not be left on disk for dependents to \
+             compile against"
+        );
+    }
+
+    /// Finding: the model can express more than an environment implements; ignoring a field it
+    /// promises yields a quietly wrong module cached under a valid-looking key.
+    #[test]
+    fn a_module_the_environment_cannot_honor_is_refused_and_blocks_dependents() {
+        let temp = TempDir::new("unsupported");
+        let out = temp.path().join("out");
+        let mut graph = ModuleGraph::new();
+        graph.insert(module("core", &[], &out)).expect("core");
+        graph.insert(module("app", &["core"], &out)).expect("app");
+
+        let mut environment = FakeEnvironment::new(&out);
+        environment.set("core", "b", "s");
+        environment.set("app", "b", "s");
+        environment.refuse.insert(
+            "core".into(),
+            "declares resources this environment does not copy".into(),
+        );
+        let store = ArtifactStore::open(temp.path().join("cache")).expect("store");
+        let mut driver = Driver::new(environment, store);
+
+        let report = driver.build(&graph).expect("plannable");
+        assert!(matches!(
+            report.get(&ModuleId::new("core")),
+            Some(Outcome::Refused { .. })
+        ));
+        assert!(matches!(
+            report.get(&ModuleId::new("app")),
+            Some(Outcome::Blocked { .. })
+        ));
+        assert_eq!(
+            driver.environment.compile_count("core"),
+            0,
+            "a refused module must never reach the compiler, and never be cached"
+        );
+        assert!(
+            driver.store.is_empty().expect("store readable"),
+            "nothing may be cached for a refused build"
+        );
     }
 
     #[test]

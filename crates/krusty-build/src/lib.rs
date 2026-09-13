@@ -42,6 +42,7 @@
 pub mod abi;
 pub mod cache;
 pub mod compiler;
+pub mod digest;
 pub mod driver;
 pub mod graph;
 pub mod model;
@@ -50,39 +51,8 @@ pub mod store;
 pub use abi::{AbiClass, AbiFingerprint, AbiMember, MemberKind};
 pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
 pub use compiler::KrustyCli;
+pub use digest::{digest_bytes, Digest, Hasher};
 pub use driver::{BuildEnvironment, BuildReport, CompiledModule, Driver, Outcome};
 pub use graph::{GraphError, ModuleGraph};
 pub use model::{Module, ModuleId, ModuleOutput, SourceRoot, SourceRootKind};
 pub use store::{ArtifactStore, CachedModule, MissReason};
-
-/// FNV-1a over `bytes`.
-///
-/// Matches `crates/krusty-lsp/src/project/fingerprint.rs`, and is hand-rolled because the project
-/// is deliberately dependency-lean.
-///
-/// A real content-addressed cache wants a cryptographic hash instead: a cache key becomes
-/// attacker-reachable the moment the cache is shared between machines, and FNV is trivially
-/// collidable on purpose. That is a deliberate deferral, not an oversight — remote caching, cache
-/// poisoning and trust are called out as unaddressed in the proposal, and swapping the hash is a
-/// one-function change behind this name.
-pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    hash
-}
-
-#[cfg(test)]
-mod tests {
-    use super::fnv1a;
-
-    #[test]
-    fn fnv1a_is_stable_and_distinguishes_inputs() {
-        assert_eq!(fnv1a(b"abc"), fnv1a(b"abc"));
-        assert_ne!(fnv1a(b"abc"), fnv1a(b"abd"));
-        assert_ne!(fnv1a(b"ab"), fnv1a(b"ba"), "order must matter");
-        assert_ne!(fnv1a(b""), fnv1a(b"\0"));
-    }
-}

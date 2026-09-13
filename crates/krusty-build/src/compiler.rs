@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cache::{CacheKeyInputs, FileDigest};
-use crate::driver::{BuildEnvironment, CompiledModule};
+use crate::driver::{AbiCompleteness, BuildEnvironment, CompiledModule};
 use crate::model::Module;
 
 /// Drives `krusty` as a subprocess.
@@ -64,13 +64,17 @@ impl KrustyCli {
     }
 
     /// A module's Kotlin sources, sorted by path — the canonical compile order. See module docs.
-    pub fn sources_of(module: &Module) -> Vec<PathBuf> {
+    ///
+    /// An unreadable root or entry is an ERROR, never a shorter list. A partial source set would
+    /// compile to a partial module and then be cached under a key that looks perfectly valid, which
+    /// is the same silent-wrongness the total-output contract exists to prevent.
+    pub fn sources_of(module: &Module) -> Result<Vec<PathBuf>, String> {
         let mut sources = Vec::new();
         for root in &module.source_roots {
-            collect_kotlin(&root.path, &mut sources);
+            collect_kotlin(&root.path, &mut sources)?;
         }
         sources.sort();
-        sources
+        Ok(sources)
     }
 
     /// Entries that enter the CACHE KEY: the module's own classpath plus its friend paths. These
@@ -95,11 +99,12 @@ impl KrustyCli {
     fn module_args(
         &self,
         module: &Module,
+        sources: &[PathBuf],
         output: &Path,
         dependency_outputs: &[PathBuf],
     ) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
-        for source in Self::sources_of(module) {
+        for source in sources {
             args.push(source.display().to_string());
         }
         let classpath = self.compile_classpath(module, dependency_outputs);
@@ -124,9 +129,50 @@ impl KrustyCli {
 }
 
 impl BuildEnvironment for KrustyCli {
+    /// Fields the model can express that this environment does not implement.
+    ///
+    /// Each is refused rather than ignored. Ignoring them produces output that is wrong in a way
+    /// nothing downstream can detect: a module built against the wrong JDK, a jar missing its
+    /// resources, or a module whose generated sources were never generated — and then that output
+    /// is cached under a key that looks entirely valid.
+    fn unsupported(&self, module: &Module) -> Option<String> {
+        if module.jdk_home.is_some() {
+            return Some(
+                "module declares its own jdk_home; this environment compiles against the ambient \
+                 JAVA_HOME only, and the bootclasspath decides what `java.*` resolves to"
+                    .into(),
+            );
+        }
+        if !module.resources.is_empty() {
+            return Some(format!(
+                "module declares {} resource director(ies); resources are not copied into the \
+                 output, so the module would be short",
+                module.resources.len()
+            ));
+        }
+        if !module.processor_path.is_empty() {
+            return Some(format!(
+                "module declares {} annotation/symbol processor(s); they are not run, so their \
+                 generated sources would be missing from the output",
+                module.processor_path.len()
+            ));
+        }
+        if let Some(jar) = module
+            .outputs
+            .iter()
+            .find(|output| matches!(output, crate::model::ModuleOutput::Jar(_)))
+        {
+            return Some(format!(
+                "module requests a jar output ({}); jar packaging is not implemented",
+                jar.path().display()
+            ));
+        }
+        None
+    }
+
     fn base_inputs(&self, module: &Module) -> Result<CacheKeyInputs, String> {
         let mut sources = Vec::new();
-        for path in Self::sources_of(module) {
+        for path in Self::sources_of(module)? {
             sources.push(
                 FileDigest::of_file(&path)
                     .map_err(|error| format!("cannot read source {}: {error}", path.display()))?,
@@ -194,7 +240,9 @@ impl BuildEnvironment for KrustyCli {
         std::fs::create_dir_all(&output)
             .map_err(|error| format!("cannot create {}: {error}", output.display()))?;
 
-        let args = self.module_args(module, &output, dependency_outputs);
+        let sources = Self::sources_of(module)?;
+        let completeness = abi_completeness_of(&sources)?;
+        let args = self.module_args(module, &sources, &output, dependency_outputs);
         let result = Command::new(&self.binary)
             .args(&args)
             .output()
@@ -218,7 +266,10 @@ impl BuildEnvironment for KrustyCli {
         if artifacts.is_empty() {
             return Err("krusty exited successfully but emitted no artifacts".into());
         }
-        Ok(CompiledModule { artifacts })
+        Ok(CompiledModule {
+            artifacts,
+            abi_completeness: completeness,
+        })
     }
 }
 
@@ -231,35 +282,99 @@ fn digest_path(path: &Path) -> Result<FileDigest, String> {
         collect_artifacts(path, path, &mut entries)
             .map_err(|error| format!("cannot digest directory {}: {error}", path.display()))?;
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut rendered = String::new();
+        // Length-delimited, like every other identity in this crate: a file NAME containing a
+        // newline must not be able to impersonate a second entry.
+        let mut hasher = crate::digest::Hasher::new();
+        hasher.count("entries", entries.len());
         for (name, bytes) in &entries {
-            rendered.push_str(&format!("{name}:{:016x}\n", crate::fnv1a(bytes)));
+            hasher.text("name", name);
+            hasher.nested("content", crate::digest::digest_bytes(bytes));
         }
-        return Ok(FileDigest::new(path, crate::fnv1a(rendered.as_bytes())));
+        return Ok(FileDigest::new(path, hasher.finish()));
     }
     match FileDigest::of_file(path) {
         Ok(digest) => Ok(digest),
         // A classpath entry that does not exist yet is still part of the key: its absence is an
         // input, and it must not silently hash the same as a present one.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(FileDigest::new(path, crate::fnv1a(b"<absent>")))
+            Ok(FileDigest::of_bytes(path, ABSENT_ENTRY_MARKER))
         }
         Err(error) => Err(format!("cannot digest {}: {error}", path.display())),
     }
 }
 
-fn collect_kotlin(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// Distinguishes "this classpath entry does not exist" from any real file content.
+const ABSENT_ENTRY_MARKER: &[u8] = b"krusty-build:absent-classpath-entry";
+
+fn collect_kotlin(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(root)
+        .map_err(|error| format!("cannot read source root {}: {error}", root.display()))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("cannot read an entry under {}: {error}", root.display()))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_kotlin(&path, out);
+            collect_kotlin(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "kt") {
             out.push(path);
         }
     }
+    Ok(())
+}
+
+/// Decide whether the ABI model can describe this module, by looking for the two constructs that
+/// put body content into the ABI: `inline` functions and `contract { … }` blocks.
+///
+/// Deliberately a lexical over-approximation. The word `inline` inside a comment or string marks
+/// the module incomplete even though nothing is actually inlined, which costs dependents a rebuild
+/// they did not need. That direction is safe; the other direction ships a stale binary. A precise
+/// answer needs the frontend's declaration model, and belongs with the ABI artifact work that would
+/// carry inline bodies properly.
+fn abi_completeness_of(sources: &[PathBuf]) -> Result<AbiCompleteness, String> {
+    for path in sources {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read source {}: {error}", path.display()))?;
+        if contains_word(&text, "inline") {
+            return Ok(AbiCompleteness::Incomplete {
+                reason: format!(
+                    "{} mentions `inline`; an inline body is spliced into call sites and is not in \
+                     the ABI model",
+                    path.display()
+                ),
+            });
+        }
+        if contains_word(&text, "contract") {
+            return Ok(AbiCompleteness::Incomplete {
+                reason: format!(
+                    "{} mentions `contract`; a contract drives callers' smart-casts and is not in \
+                     the ABI model",
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(AbiCompleteness::Complete)
+}
+
+/// Whole-word match, so `inlined` or `myContract` do not trip the detector.
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(word) {
+        let start = from + found;
+        let end = start + word.len();
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[end..].chars().next();
+        if boundary(before) && boundary(after) {
+            return true;
+        }
+        from = start + 1;
+        if from >= bytes.len() {
+            break;
+        }
+    }
+    false
 }
 
 /// Read every file under `directory` as `(path relative to `base`, bytes)`.
@@ -317,9 +432,9 @@ fn identify_compiler(binary: &Path) -> String {
         })
         .unwrap_or_default();
     let content = std::fs::read(binary)
-        .map(|bytes| crate::fnv1a(&bytes))
-        .unwrap_or(0);
-    format!("{version} [{content:016x}]")
+        .map(|bytes| crate::digest::digest_bytes(&bytes).to_string())
+        .unwrap_or_else(|_| "unreadable".to_string());
+    format!("{version} [{content}]")
 }
 
 /// Identify the JDK by `JAVA_HOME`'s `release` file when present, falling back to the path.
@@ -329,7 +444,7 @@ fn identify_jdk() -> String {
     };
     let release = Path::new(&home).join("release");
     match std::fs::read(&release) {
-        Ok(bytes) => format!("jdk:{:016x}", crate::fnv1a(&bytes)),
+        Ok(bytes) => format!("jdk:{}", crate::digest::digest_bytes(&bytes)),
         Err(_) => format!("jdk-path:{home}"),
     }
 }
@@ -359,7 +474,7 @@ mod tests {
         std::fs::write(root.join("nested/Beta.kt"), "fun b() {}").expect("write");
         std::fs::write(root.join("notes.txt"), "ignored").expect("write");
 
-        let sources = KrustyCli::sources_of(&module_with_sources(&root));
+        let sources = KrustyCli::sources_of(&module_with_sources(&root)).expect("readable roots");
         let names: Vec<String> = sources
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -379,7 +494,7 @@ mod tests {
         assert_eq!(digest.path, missing);
         assert_eq!(
             digest.content,
-            crate::fnv1a(b"<absent>"),
+            crate::digest::digest_bytes(ABSENT_ENTRY_MARKER),
             "an absent entry is an input, not a hole in the key"
         );
     }
@@ -399,6 +514,63 @@ mod tests {
             "a dependency output directory must have content identity, not just a path"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Finding: a `read_dir` failure silently produced a shorter source list, which compiled to a
+    /// partial module and cached it under a key that looked valid.
+    #[test]
+    fn an_unreadable_source_root_is_an_error_not_a_short_source_list() {
+        let mut module = Module::new(ModuleId::new("demo"), "/nonexistent");
+        module.source_roots = vec![SourceRoot {
+            path: PathBuf::from("/nonexistent/krusty-build/source-root"),
+            kind: SourceRootKind::Main,
+            generated: false,
+        }];
+        let error = KrustyCli::sources_of(&module).expect_err("must not silently return empty");
+        assert!(
+            error.contains("cannot read source root"),
+            "the error must name the root: {error}"
+        );
+    }
+
+    #[test]
+    fn inline_and_contract_mark_a_module_abi_incomplete() {
+        let root = std::env::temp_dir().join(format!("krusty-build-abi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+
+        let plain = root.join("Plain.kt");
+        std::fs::write(&plain, "fun f(): Int = 1\n").expect("write");
+        assert_eq!(
+            abi_completeness_of(std::slice::from_ref(&plain)).expect("readable"),
+            AbiCompleteness::Complete
+        );
+
+        let inlined = root.join("Inlined.kt");
+        std::fs::write(&inlined, "inline fun f(g: () -> Int): Int = g()\n").expect("write");
+        assert!(matches!(
+            abi_completeness_of(&[inlined]).expect("readable"),
+            AbiCompleteness::Incomplete { .. }
+        ));
+
+        let contracted = root.join("Contracted.kt");
+        std::fs::write(&contracted, "fun f() { contract { } }\n").expect("write");
+        assert!(matches!(
+            abi_completeness_of(&[contracted]).expect("readable"),
+            AbiCompleteness::Incomplete { .. }
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The detector is a lexical over-approximation, but it must not fire on unrelated identifiers:
+    /// over-refusing everything would silently disable avoidance for the whole build.
+    #[test]
+    fn the_keyword_detector_matches_whole_words_only() {
+        assert!(contains_word("inline fun f()", "inline"));
+        assert!(!contains_word("val inlined = 1", "inline"));
+        assert!(!contains_word("fun myContract()", "contract"));
+        assert!(contains_word("  contract  {", "contract"));
     }
 
     #[test]

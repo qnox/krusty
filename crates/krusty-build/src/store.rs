@@ -23,8 +23,8 @@
 //! `crates/krusty-lsp/src/deps_cache.rs` uses:
 //!
 //! ```text
-//! <root>/v1/<key>/MANIFEST
-//! <root>/v1/<key>/files/<artifact path>
+//! <root>/v2/<key>/MANIFEST
+//! <root>/v2/<key>/files/<artifact path>
 //! ```
 
 use std::io;
@@ -32,11 +32,11 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::abi::AbiFingerprint;
 use crate::cache::CacheKey;
-use crate::fnv1a;
+use crate::digest::{digest_bytes, Digest};
 
 /// Bumped whenever the on-disk shape or the manifest grammar changes. Entries under an older
 /// version directory are simply never consulted.
-pub const STORE_FORMAT_VERSION: u32 = 1;
+pub const STORE_FORMAT_VERSION: u32 = 2;
 
 /// One module's cached output.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +124,7 @@ impl ArtifactStore {
                 }
                 Err(error) => return Err(error),
             };
-            if bytes.len() != record.length || fnv1a(&bytes) != record.content {
+            if bytes.len() != record.length || digest_bytes(&bytes) != record.content {
                 return Ok(Err(MissReason::CorruptEntry));
             }
             artifacts.push((record.path.clone(), bytes));
@@ -143,7 +143,28 @@ impl ArtifactStore {
     pub fn put(&self, key: CacheKey, entry: &CachedModule) -> io::Result<()> {
         let final_dir = self.entry_dir(key);
         if final_dir.is_dir() {
-            return Ok(());
+            // A HEALTHY entry under this key is authoritative: two builds that agree on the key
+            // agree on the bytes, so there is nothing to choose between them.
+            //
+            // A DAMAGED one is different, and returning early on it was a trap: the read path
+            // reports a miss, the driver recompiles, and then this early return refused to publish
+            // the replacement — so the same corrupt entry caused a miss forever and the module was
+            // recompiled on every single build. Quarantine it instead, then fall through and
+            // publish. Quarantining rather than deleting keeps the evidence for diagnosis and
+            // avoids racing a concurrent reader mid-read.
+            match self.get(key) {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(_damaged)) => {
+                    let quarantine = self
+                        .versioned_root
+                        .join(format!(".damaged-{key}-{}", unique_suffix()));
+                    // If the rename loses a race, someone else already dealt with it.
+                    if std::fs::rename(&final_dir, &quarantine).is_err() && final_dir.is_dir() {
+                        return Ok(());
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         let staging = self.versioned_root.join(format!(
@@ -176,7 +197,7 @@ impl ArtifactStore {
             manifest.files.push(FileRecord {
                 path: path.clone(),
                 length: bytes.len(),
-                content: fnv1a(bytes),
+                content: digest_bytes(bytes),
             });
         }
 
@@ -215,7 +236,7 @@ impl ArtifactStore {
     }
 
     /// Remove entries whose manifest has not been modified within `max_age`, plus any leftover
-    /// staging directories. Returns the number of entries removed.
+    /// staging and quarantined-damaged directories. Returns the number of entries removed.
     ///
     /// Deliberately simple: eviction policy is a real design question (size caps, LRU, shared
     /// caches) and belongs with the remote-caching work, which the proposal leaves open.
@@ -227,7 +248,7 @@ impl ArtifactStore {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(".staging-") {
+            if name.starts_with(".staging-") || name.starts_with(".damaged-") {
                 let _ = std::fs::remove_dir_all(&path);
                 continue;
             }
@@ -286,7 +307,7 @@ fn unique_suffix() -> u64 {
 struct FileRecord {
     path: String,
     length: usize,
-    content: u64,
+    content: Digest,
 }
 
 #[derive(Debug)]
@@ -302,7 +323,7 @@ impl Manifest {
         let mut out = format!("version {STORE_FORMAT_VERSION}\nabi {}\n", self.abi);
         for record in &self.files {
             out.push_str(&format!(
-                "file {} {:016x} {}\n",
+                "file {} {} {}\n",
                 record.length, record.content, record.path
             ));
         }
@@ -315,7 +336,7 @@ impl Manifest {
         if version.trim() != STORE_FORMAT_VERSION.to_string() {
             return None;
         }
-        let abi = u64::from_str_radix(lines.next()?.strip_prefix("abi ")?.trim(), 16).ok()?;
+        let abi = Digest::parse_hex(lines.next()?.strip_prefix("abi ")?.trim())?;
         let mut files = Vec::new();
         for line in lines {
             if line.trim().is_empty() {
@@ -328,11 +349,11 @@ impl Manifest {
             files.push(FileRecord {
                 path: path.to_string(),
                 length: length.parse().ok()?,
-                content: u64::from_str_radix(content, 16).ok()?,
+                content: Digest::parse_hex(content)?,
             });
         }
         Some(Self {
-            abi: AbiFingerprint::from_raw(abi),
+            abi: AbiFingerprint::from_digest(abi),
             files,
         })
     }
@@ -375,12 +396,12 @@ mod tests {
                 ),
                 ("META-INF/m.kotlin_module".into(), b"module bytes".to_vec()),
             ],
-            abi: AbiFingerprint::from_raw(0xdead_beef_0000_0001),
+            abi: AbiFingerprint::from_digest(digest_bytes(b"abi-one")),
         }
     }
 
     fn key(value: u64) -> CacheKey {
-        CacheKey::from_raw(value)
+        CacheKey::from_digest(digest_bytes(&value.to_le_bytes()))
     }
 
     #[test]
@@ -539,7 +560,7 @@ mod tests {
         let store = ArtifactStore::open(temp.path()).expect("open");
         let malicious = CachedModule {
             artifacts: vec![("../../escaped.class".into(), b"nope".to_vec())],
-            abi: AbiFingerprint::from_raw(1),
+            abi: AbiFingerprint::from_digest(digest_bytes(b"abi-malicious")),
         };
         assert!(
             store.put(key(10), &malicious).is_err(),
@@ -583,6 +604,68 @@ mod tests {
             store.get(key(12)).expect("get").is_ok(),
             "a fresh, complete entry survives"
         );
+    }
+
+    /// Finding: `put` returned early whenever the entry directory existed, so a DAMAGED entry was
+    /// never replaced — the read path reported a miss forever and the module recompiled on every
+    /// build. The damaged entry must be quarantined and the replacement published.
+    #[test]
+    fn a_damaged_entry_is_replaced_rather_than_missing_forever() {
+        let temp = TempDir::new("repair");
+        let store = ArtifactStore::open(temp.path()).expect("open");
+        store.put(key(20), &entry()).expect("put");
+
+        // Corrupt it exactly as an interrupted write would.
+        std::fs::remove_file(store.root().join(key(20).to_string()).join("MANIFEST"))
+            .expect("damage");
+        assert_eq!(
+            store.get(key(20)).expect("get"),
+            Err(MissReason::NoManifest)
+        );
+
+        // A rebuild republishes the same key.
+        store.put(key(20), &entry()).expect("republish");
+        assert_eq!(
+            store.get(key(20)).expect("get").expect("must now be a hit"),
+            entry(),
+            "the replacement must be readable; otherwise this key misses forever"
+        );
+    }
+
+    #[test]
+    fn a_healthy_entry_is_not_disturbed_by_republishing() {
+        let temp = TempDir::new("republish-healthy");
+        let store = ArtifactStore::open(temp.path()).expect("open");
+        store.put(key(21), &entry()).expect("put");
+        let before =
+            std::fs::read_to_string(store.root().join(key(21).to_string()).join("MANIFEST"))
+                .expect("read manifest");
+
+        store.put(key(21), &entry()).expect("republish");
+        let after =
+            std::fs::read_to_string(store.root().join(key(21).to_string()).join("MANIFEST"))
+                .expect("read manifest");
+        assert_eq!(
+            before, after,
+            "a healthy entry is authoritative and untouched"
+        );
+        assert_eq!(
+            store.len().expect("len"),
+            1,
+            "no quarantine directory was made"
+        );
+    }
+
+    #[test]
+    fn gc_reclaims_quarantined_damaged_entries() {
+        let temp = TempDir::new("gc-damaged");
+        let store = ArtifactStore::open(temp.path()).expect("open");
+        let quarantined = store.root().join(".damaged-deadbeef-1");
+        std::fs::create_dir_all(quarantined.join("files")).expect("mkdir");
+        store
+            .gc_older_than(std::time::Duration::from_secs(3600))
+            .expect("gc");
+        assert!(!quarantined.exists(), "quarantined entries are swept by gc");
     }
 
     #[test]
