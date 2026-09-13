@@ -78177,7 +78177,11 @@ impl<'a> Checker<'a> {
                 let reference_like =
                     |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
                 result = if wanted.value_required && reference_like(result) && reference_like(ht) {
-                    self.join(result, ht, self.span(e))
+                    // Join against the EXPECTATION, exactly as `if`/`when` do: a `try` in value
+                    // position is a conditional expression like any other. A blind join of two
+                    // generic branches invents an out-projection (`R<out Any>`) that no INVARIANT
+                    // declared type can take, rejecting source kotlinc accepts.
+                    self.join_conditional(scope, wanted.expected, result, ht, self.span(e))
                 } else if result == ht {
                     result
                 } else if result == Ty::Nothing {

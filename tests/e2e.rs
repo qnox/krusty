@@ -1406,6 +1406,8 @@ mod try_catch_e2e;
 mod try_catch_expr_generic_merge_e2e;
 #[path = "try_catch_expr_nullable_merge_e2e.rs"]
 mod try_catch_expr_nullable_merge_e2e;
+#[path = "try_expected_type_join_e2e.rs"]
+mod try_expected_type_join_e2e;
 #[path = "type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
