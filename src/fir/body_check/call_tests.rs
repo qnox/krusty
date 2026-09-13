@@ -3854,16 +3854,18 @@ fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
     });
     let Some(FirInlineBodyPlan::SuspendBeforeLambdaFinally {
         lambda_parameter,
-        state_parameter,
-        state_default,
+        state,
         enter,
         cleanup,
     }) = plan
     else {
         panic!("withLock must publish its selected structural plan in checked FIR")
     };
-    assert_eq!((*lambda_parameter, *state_parameter), (1, 0));
-    assert_eq!(*state_default, FirInlineDefaultValue::Null);
+    let state = state
+        .as_ref()
+        .expect("withLock threads its `owner` through lock/unlock");
+    assert_eq!((*lambda_parameter, state.parameter), (1, 0));
+    assert_eq!(state.default, FirInlineDefaultValue::Null);
     assert_eq!(enter.parameters.len(), 1);
     assert_eq!(cleanup.parameters.len(), 1);
     assert!(enter.suspend);

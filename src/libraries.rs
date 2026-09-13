@@ -4,7 +4,7 @@ mod array_factories;
 mod inline_body;
 
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use inline_body::{InlineBodyPlan, InlineCollectionLocalNames};
+pub use inline_body::{InlineBodyPlan, InlineBodyState, InlineCollectionLocalNames};
 
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};

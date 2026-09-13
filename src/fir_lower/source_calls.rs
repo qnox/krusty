@@ -518,15 +518,13 @@ impl BodyLowering<'_> {
             }
             crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
                 lambda_parameter,
-                state_parameter,
-                state_default,
+                state,
                 enter,
                 cleanup,
             } => {
                 return self.external_suspend_finally_inline_call(
                     *lambda_parameter,
-                    *state_parameter,
-                    *state_default,
+                    state.as_ref(),
                     enter,
                     cleanup,
                     receiver_ty,
@@ -603,8 +601,7 @@ impl BodyLowering<'_> {
     fn external_suspend_finally_inline_call(
         &mut self,
         lambda_parameter: u32,
-        state_parameter: u32,
-        state_default: crate::fir::FirInlineDefaultValue,
+        state: Option<&crate::fir::FirInlineBodyState>,
         enter: &crate::fir::FirInlineMemberCall,
         cleanup: &crate::fir::FirInlineMemberCall,
         receiver_ty: Option<ResolvedTy>,
@@ -628,33 +625,39 @@ impl BodyLowering<'_> {
                 mode: SelectedOperandMode::Materialized,
             })?;
         let receiver = receiver?;
-        let state_parameter = state_parameter as usize;
+        // The state argument is optional: `withLock` threads its `owner` into `lock`/`unlock`,
+        // `withPermit` threads nothing into `acquire`/`release`. Only that one parameter may be
+        // omitted at the call site — any other default means this is not the recognized shape.
+        let state_parameter = state.map(|state| state.parameter as usize);
         if defaults
             .iter()
-            .any(|default| *default as usize != state_parameter)
+            .any(|default| Some(*default as usize) != state_parameter)
         {
             return None;
         }
-        let state_ty = *parameter_types.get(state_parameter)?;
-        let state_value = if defaults
-            .iter()
-            .any(|default| *default as usize == state_parameter)
-        {
-            match state_default {
-                crate::fir::FirInlineDefaultValue::Null => {
-                    self.ir.add_expr(IrExpr::Const(IrConst::Null))
-                }
+        let state_slot = match (state, state_parameter) {
+            (Some(state), Some(parameter)) => {
+                let state_ty = *parameter_types.get(parameter)?;
+                let state_value = if defaults.iter().any(|default| *default as usize == parameter) {
+                    match state.default {
+                        crate::fir::FirInlineDefaultValue::Null => {
+                            self.ir.add_expr(IrExpr::Const(IrConst::Null))
+                        }
+                    }
+                } else {
+                    *args.get(parameter)?
+                };
+                let slot = self.allocate_temporary();
+                statements.push(self.ir.add_expr(IrExpr::Variable {
+                    index: slot,
+                    ty: state_ty,
+                    init: Some(state_value),
+                    named: false,
+                }));
+                Some(slot)
             }
-        } else {
-            *args.get(state_parameter)?
+            _ => None,
         };
-        let state_slot = self.allocate_temporary();
-        statements.push(self.ir.add_expr(IrExpr::Variable {
-            index: state_slot,
-            ty: state_ty,
-            init: Some(state_value),
-            named: false,
-        }));
         let inline_body = self.materialize_external_inline_lambda(
             &mut statements,
             &args,
@@ -662,9 +665,13 @@ impl BodyLowering<'_> {
             &[],
         )?;
 
-        let enter_state = self.ir.add_expr(IrExpr::GetValue(state_slot));
-        let enter_call =
-            self.external_inline_member_call(enter, receiver, receiver_ty, vec![enter_state])?;
+        let enter_state = state_slot.map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)));
+        let enter_call = self.external_inline_member_call(
+            enter,
+            receiver,
+            receiver_ty,
+            enter_state.into_iter().collect(),
+        )?;
         statements.push(enter_call);
 
         let result_ty = result.get();
@@ -686,9 +693,13 @@ impl BodyLowering<'_> {
             stmts: vec![store_result],
             value: None,
         });
-        let cleanup_state = self.ir.add_expr(IrExpr::GetValue(state_slot));
-        let cleanup_call =
-            self.external_inline_member_call(cleanup, receiver, receiver_ty, vec![cleanup_state])?;
+        let cleanup_state = state_slot.map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)));
+        let cleanup_call = self.external_inline_member_call(
+            cleanup,
+            receiver,
+            receiver_ty,
+            cleanup_state.into_iter().collect(),
+        )?;
         let finally = self.ir.add_expr(IrExpr::Block {
             stmts: vec![cleanup_call],
             value: None,
