@@ -1075,7 +1075,15 @@ before:**
    segments, applies the five x86-64 relocation kinds and writes a static `ET_EXEC` ELF by hand;
    `build.rs` compiles the runtime once per target with clang and `src/native/prebuilt.rs` carries
    the objects inside the compiler. The executable runs with an empty environment. No C is emitted.
-2. The same on linux-aarch64 and linux-riscv64 from the same host, with the ELF machine asserted.
+2. **Landed.** The same hello world links for linux-aarch64 and linux-riscv64 from the same host
+   (`one_host_links_a_static_executable_for_every_supported_architecture`): Cranelift's AArch64 and
+   RISC-V backends are compiled in, and the linker applies the nine AArch64 and eleven RISC-V
+   relocation kinds their objects and the prebuilt runtime use — RISC-V's `PCREL_LO12` paired with
+   its `HI20` in a second pass, `RELAX` ignored because this linker does not relax. Verification is
+   honest about its limit: the host binary is run; the cross-built ones cannot be executed here
+   (no emulator), so every call and literal-pool relocation in their program text was decoded from
+   the linked image and compared against symbol addresses computed independently from the input
+   objects' own tables — all match. Running them is one `qemu-user-static` install away on CI.
 3. Re-run the landed class tests against the new generator, slice by slice, until they all pass.
 4. Per-module objects and ABI-hash caching — the incremental half.
 5. The `codegen/box` corpus through the native pipeline as the conformance gate: skipping permitted,

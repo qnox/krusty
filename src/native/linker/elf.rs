@@ -195,7 +195,10 @@ pub(super) fn link_static(
     }
 
     // ---- apply relocations -------------------------------------------------------------------
+    // Gathered first, then applied per architecture: RISC-V's `PCREL_LO12` needs the result of the
+    // `PCREL_HI20` it is paired with, which may sit anywhere in the same object.
     for (file_index, file) in files.iter().enumerate() {
+        let mut relocations = Vec::new();
         for section in file.sections() {
             let Some(place) = placed.get(&(file_index, section.index())).copied() else {
                 continue;
@@ -235,20 +238,16 @@ pub(super) fn link_static(
                 let RelocationFlags::Elf { r_type } = relocation.flags() else {
                     return Err(ProgramLinkError::Unsupported("non-ELF relocation".into()));
                 };
-                let addend = relocation.addend();
-                let site_vaddr = place.vaddr + offset;
-                let site_file = (place.file_offset + offset) as usize;
-                apply(
-                    target.arch,
-                    r_type.0,
-                    &mut image,
-                    site_file,
-                    site_vaddr,
-                    symbol_value,
-                    addend,
-                )?;
+                relocations.push(Reloc {
+                    r_type: r_type.0,
+                    site_file: (place.file_offset + offset) as usize,
+                    p: place.vaddr + offset,
+                    s: symbol_value,
+                    a: relocation.addend(),
+                });
             }
         }
+        relocate(target.arch, &mut image, &relocations)?;
     }
 
     // ---- headers -----------------------------------------------------------------------------
@@ -265,54 +264,346 @@ pub(super) fn link_static(
     Ok(image)
 }
 
-/// Apply one relocation. `S` is the symbol value, `A` the addend, `P` the site's address.
-fn apply(
-    arch: Arch,
+/// One relocation, resolved: where it is, what it points at.
+struct Reloc {
     r_type: u32,
-    image: &mut [u8],
-    site: usize,
+    /// Offset of the site in the output file.
+    site_file: usize,
+    /// Address of the site: `P` in the ABI documents.
     p: u64,
+    /// Value of the symbol: `S`.
     s: u64,
+    /// Addend: `A`.
     a: i64,
-) -> Result<(), ProgramLinkError> {
-    let s_plus_a = (s as i64).wrapping_add(a);
-    let pc_relative = s_plus_a.wrapping_sub(p as i64);
-    let write32 = |image: &mut [u8], value: i64, signed: bool, what: &str| {
-        let fits = if signed {
-            i32::try_from(value).is_ok()
-        } else {
-            u32::try_from(value).is_ok()
-        };
-        if !fits {
-            return Err(ProgramLinkError::RelocationOutOfRange(format!(
-                "{what}: value {value:#x} at {p:#x}"
-            )));
-        }
-        image[site..site + 4].copy_from_slice(&(value as u32).to_le_bytes());
-        Ok(())
-    };
+}
+
+fn out_of_range(what: &str, value: i64, p: u64) -> ProgramLinkError {
+    ProgramLinkError::RelocationOutOfRange(format!("{what}: value {value:#x} at {p:#x}"))
+}
+
+fn read32(image: &[u8], site: usize) -> u32 {
+    u32::from_le_bytes(image[site..site + 4].try_into().expect("4 bytes"))
+}
+
+fn write32(image: &mut [u8], site: usize, value: u32) {
+    image[site..site + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn read16(image: &[u8], site: usize) -> u16 {
+    u16::from_le_bytes(image[site..site + 2].try_into().expect("2 bytes"))
+}
+
+fn write16(image: &mut [u8], site: usize, value: u16) {
+    image[site..site + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Does `value` fit in a signed field of `bits` bits?
+fn fits_signed(value: i64, bits: u32) -> bool {
+    let min = -(1i64 << (bits - 1));
+    let max = (1i64 << (bits - 1)) - 1;
+    (min..=max).contains(&value)
+}
+
+/// Apply every relocation of one object for `arch`.
+fn relocate(arch: Arch, image: &mut [u8], relocations: &[Reloc]) -> Result<(), ProgramLinkError> {
     match arch {
-        Arch::X86_64 => match r_type {
-            // R_X86_64_64
-            1 => {
-                image[site..site + 8].copy_from_slice(&(s_plus_a as u64).to_le_bytes());
-                Ok(())
-            }
-            // R_X86_64_PC32, R_X86_64_PLT32: a static link has no PLT, so both are PC-relative to S.
-            2 | 4 => write32(image, pc_relative, true, "PC32"),
-            // R_X86_64_32 (zero-extended) and R_X86_64_32S (sign-extended) absolute.
-            10 => write32(image, s_plus_a, false, "32"),
-            11 => write32(image, s_plus_a, true, "32S"),
-            other => Err(ProgramLinkError::UnsupportedRelocation {
-                arch,
-                r_type: other,
-            }),
-        },
-        other => Err(ProgramLinkError::UnsupportedRelocation {
-            arch: other,
-            r_type,
-        }),
+        Arch::X86_64 => relocations
+            .iter()
+            .try_for_each(|r| relocate_x86_64(image, r)),
+        Arch::Aarch64 => relocations
+            .iter()
+            .try_for_each(|r| relocate_aarch64(image, r)),
+        Arch::Riscv64 => relocate_riscv64(image, relocations),
     }
+}
+
+fn relocate_x86_64(image: &mut [u8], r: &Reloc) -> Result<(), ProgramLinkError> {
+    let s_plus_a = (r.s as i64).wrapping_add(r.a);
+    let pc_relative = s_plus_a.wrapping_sub(r.p as i64);
+    match r.r_type {
+        // R_X86_64_64
+        1 => image[r.site_file..r.site_file + 8].copy_from_slice(&(s_plus_a as u64).to_le_bytes()),
+        // R_X86_64_PC32, R_X86_64_PLT32: a static link has no PLT, so both are PC-relative to S.
+        2 | 4 => {
+            if !fits_signed(pc_relative, 32) {
+                return Err(out_of_range("PC32", pc_relative, r.p));
+            }
+            write32(image, r.site_file, pc_relative as u32);
+        }
+        // R_X86_64_32 (zero-extended) and R_X86_64_32S (sign-extended) absolute.
+        10 => {
+            if u32::try_from(s_plus_a).is_err() {
+                return Err(out_of_range("32", s_plus_a, r.p));
+            }
+            write32(image, r.site_file, s_plus_a as u32);
+        }
+        11 => {
+            if !fits_signed(s_plus_a, 32) {
+                return Err(out_of_range("32S", s_plus_a, r.p));
+            }
+            write32(image, r.site_file, s_plus_a as u32);
+        }
+        other => {
+            return Err(ProgramLinkError::UnsupportedRelocation {
+                arch: Arch::X86_64,
+                r_type: other,
+            })
+        }
+    }
+    Ok(())
+}
+
+/// AArch64: every kind clang's freestanding objects and Cranelift's non-PIC output use. Fields are
+/// patched into fixed 32-bit instructions per the ELF-for-AArch64 supplement.
+fn relocate_aarch64(image: &mut [u8], r: &Reloc) -> Result<(), ProgramLinkError> {
+    let x = (r.s as i64).wrapping_add(r.a);
+    let rel = x.wrapping_sub(r.p as i64);
+    let site = r.site_file;
+    // Insert the low 12 bits of `x`, scaled by `shift`, into an LDST/ADD imm12 (bits 21:10).
+    let imm12 = |image: &mut [u8], shift: u32| {
+        let field = ((x as u64 & 0xfff) >> shift) as u32;
+        let instruction = (read32(image, site) & !(0xfff << 10)) | (field << 10);
+        write32(image, site, instruction);
+    };
+    match r.r_type {
+        // R_AARCH64_ABS64
+        257 => image[site..site + 8].copy_from_slice(&(x as u64).to_le_bytes()),
+        // R_AARCH64_PREL32 (`.eh_frame` and friends)
+        261 => {
+            if !fits_signed(rel, 32) {
+                return Err(out_of_range("PREL32", rel, r.p));
+            }
+            write32(image, site, rel as u32);
+        }
+        // R_AARCH64_ADR_PREL_PG_HI21: page delta into ADRP's immhi:immlo.
+        275 => {
+            let page_delta = ((x as u64 & !0xfff) as i64).wrapping_sub((r.p & !0xfff) as i64);
+            if !fits_signed(page_delta, 33) {
+                return Err(out_of_range("ADR_PREL_PG_HI21", page_delta, r.p));
+            }
+            let pages = (page_delta >> 12) as u64;
+            let immlo = ((pages & 0x3) as u32) << 29;
+            let immhi = (((pages >> 2) & 0x7ffff) as u32) << 5;
+            let instruction =
+                (read32(image, site) & !((0x3 << 29) | (0x7ffff << 5))) | immlo | immhi;
+            write32(image, site, instruction);
+        }
+        // R_AARCH64_ADD_ABS_LO12_NC and the LDST*_ABS_LO12_NC family: low 12 bits, scaled by access size.
+        277 | 278 => imm12(image, 0),
+        284 => imm12(image, 1),
+        285 => imm12(image, 2),
+        286 => imm12(image, 3),
+        299 => imm12(image, 4),
+        // R_AARCH64_JUMP26 / R_AARCH64_CALL26: imm26 = (S+A-P) >> 2.
+        282 | 283 => {
+            if rel & 3 != 0 || !fits_signed(rel, 28) {
+                return Err(out_of_range("CALL26", rel, r.p));
+            }
+            let imm26 = ((rel >> 2) as u32) & 0x03ff_ffff;
+            let instruction = (read32(image, site) & !0x03ff_ffff) | imm26;
+            write32(image, site, instruction);
+        }
+        other => {
+            return Err(ProgramLinkError::UnsupportedRelocation {
+                arch: Arch::Aarch64,
+                r_type: other,
+            })
+        }
+    }
+    Ok(())
+}
+
+/// RISC-V: two passes, because a `PCREL_LO12_*` relocation names the `auipc` it pairs with rather
+/// than the final symbol, and takes the low half of THAT relocation's value. `RELAX` is ignored:
+/// this linker performs no relaxation, so every instruction stays where the assembler put it.
+fn relocate_riscv64(image: &mut [u8], relocations: &[Reloc]) -> Result<(), ProgramLinkError> {
+    // Value `X = S + A - P` of every PCREL_HI20, keyed by the address of its `auipc`.
+    let mut hi20_at: HashMap<u64, i64> = HashMap::new();
+    let mut deferred = Vec::new();
+    for r in relocations {
+        let x = (r.s as i64).wrapping_add(r.a);
+        let rel = x.wrapping_sub(r.p as i64);
+        let site = r.site_file;
+        match r.r_type {
+            // R_RISCV_64 / R_RISCV_32
+            2 => image[site..site + 8].copy_from_slice(&(x as u64).to_le_bytes()),
+            1 => {
+                if u32::try_from(x).is_err() && !fits_signed(x, 32) {
+                    return Err(out_of_range("32", x, r.p));
+                }
+                write32(image, site, x as u32);
+            }
+            // R_RISCV_BRANCH: B-type immediate.
+            16 => {
+                if rel & 1 != 0 || !fits_signed(rel, 13) {
+                    return Err(out_of_range("BRANCH", rel, r.p));
+                }
+                write32(
+                    image,
+                    site,
+                    (read32(image, site) & 0x01ff_f07f) | b_type(rel as u32),
+                );
+            }
+            // R_RISCV_JAL: J-type immediate.
+            17 => {
+                if rel & 1 != 0 || !fits_signed(rel, 21) {
+                    return Err(out_of_range("JAL", rel, r.p));
+                }
+                write32(
+                    image,
+                    site,
+                    (read32(image, site) & 0x0000_0fff) | j_type(rel as u32),
+                );
+            }
+            // R_RISCV_CALL / R_RISCV_CALL_PLT: `auipc` at P, `jalr` at P+4; no PLT in a static link.
+            18 | 19 => {
+                if !fits_signed(rel, 32) {
+                    return Err(out_of_range("CALL", rel, r.p));
+                }
+                let (hi, lo) = split_hi_lo(rel);
+                write32(image, site, (read32(image, site) & 0xfff) | (hi << 12));
+                write32(
+                    image,
+                    site + 4,
+                    (read32(image, site + 4) & 0x000f_ffff) | (lo << 20),
+                );
+            }
+            // R_RISCV_PCREL_HI20: remember X for the paired LO12.
+            23 => {
+                if !fits_signed(rel, 32) {
+                    return Err(out_of_range("PCREL_HI20", rel, r.p));
+                }
+                let (hi, _) = split_hi_lo(rel);
+                write32(image, site, (read32(image, site) & 0xfff) | (hi << 12));
+                hi20_at.insert(r.p, rel);
+            }
+            // R_RISCV_PCREL_LO12_I / _S: resolved after every HI20 is known.
+            24 | 25 => deferred.push(r),
+            // R_RISCV_HI20 / LO12_I / LO12_S: absolute, split the same way.
+            26 => {
+                if !fits_signed(x, 32) {
+                    return Err(out_of_range("HI20", x, r.p));
+                }
+                let (hi, _) = split_hi_lo(x);
+                write32(image, site, (read32(image, site) & 0xfff) | (hi << 12));
+            }
+            27 => {
+                let (_, lo) = split_hi_lo(x);
+                write32(
+                    image,
+                    site,
+                    (read32(image, site) & 0x000f_ffff) | (lo << 20),
+                );
+            }
+            28 => {
+                let (_, lo) = split_hi_lo(x);
+                write32(
+                    image,
+                    site,
+                    (read32(image, site) & 0x01ff_f07f) | s_type(lo),
+                );
+            }
+            // R_RISCV_RVC_BRANCH / R_RISCV_RVC_JUMP: 16-bit compressed forms.
+            44 => {
+                if rel & 1 != 0 || !fits_signed(rel, 9) {
+                    return Err(out_of_range("RVC_BRANCH", rel, r.p));
+                }
+                write16(
+                    image,
+                    site,
+                    (read16(image, site) & 0xe383) | cb_type(rel as u32),
+                );
+            }
+            45 => {
+                if rel & 1 != 0 || !fits_signed(rel, 12) {
+                    return Err(out_of_range("RVC_JUMP", rel, r.p));
+                }
+                write16(
+                    image,
+                    site,
+                    (read16(image, site) & 0xe003) | cj_type(rel as u32),
+                );
+            }
+            // R_RISCV_RELAX, R_RISCV_ALIGN: hints for a relaxing linker; this one does not relax.
+            43 | 51 => {}
+            other => {
+                return Err(ProgramLinkError::UnsupportedRelocation {
+                    arch: Arch::Riscv64,
+                    r_type: other,
+                })
+            }
+        }
+    }
+    for r in deferred {
+        // The symbol names the `auipc`; its recorded value is what we take the low half of.
+        let Some(&x) = hi20_at.get(&r.s) else {
+            return Err(ProgramLinkError::Unsupported(format!(
+                "PCREL_LO12 at {:#x} has no PCREL_HI20 at {:#x}",
+                r.p, r.s
+            )));
+        };
+        let (_, lo) = split_hi_lo(x);
+        let site = r.site_file;
+        match r.r_type {
+            24 => write32(
+                image,
+                site,
+                (read32(image, site) & 0x000f_ffff) | (lo << 20),
+            ),
+            25 => write32(
+                image,
+                site,
+                (read32(image, site) & 0x01ff_f07f) | s_type(lo),
+            ),
+            _ => unreachable!("only LO12 relocations are deferred"),
+        }
+    }
+    Ok(())
+}
+
+/// Split a 32-bit value into RISC-V's `hi20`/`lo12` pair, where `lo12` is sign-extended and `hi20`
+/// is adjusted so that `(hi20 << 12) + sext(lo12) == value`.
+fn split_hi_lo(value: i64) -> (u32, u32) {
+    let hi = ((value + 0x800) >> 12) as u32 & 0xf_ffff;
+    let lo = (value as u32).wrapping_sub(hi << 12) & 0xfff;
+    (hi, lo)
+}
+
+fn b_type(imm: u32) -> u32 {
+    ((imm >> 12) & 1) << 31
+        | ((imm >> 5) & 0x3f) << 25
+        | ((imm >> 1) & 0xf) << 8
+        | ((imm >> 11) & 1) << 7
+}
+
+fn j_type(imm: u32) -> u32 {
+    ((imm >> 20) & 1) << 31
+        | ((imm >> 1) & 0x3ff) << 21
+        | ((imm >> 11) & 1) << 20
+        | ((imm >> 12) & 0xff) << 12
+}
+
+fn s_type(imm: u32) -> u32 {
+    ((imm >> 5) & 0x7f) << 25 | (imm & 0x1f) << 7
+}
+
+fn cb_type(imm: u32) -> u16 {
+    (((imm >> 8) & 1) << 12
+        | ((imm >> 3) & 3) << 10
+        | ((imm >> 6) & 3) << 5
+        | ((imm >> 1) & 3) << 3
+        | ((imm >> 5) & 1) << 2) as u16
+}
+
+fn cj_type(imm: u32) -> u16 {
+    (((imm >> 11) & 1) << 12
+        | ((imm >> 4) & 1) << 11
+        | ((imm >> 8) & 3) << 9
+        | ((imm >> 10) & 1) << 8
+        | ((imm >> 6) & 1) << 7
+        | ((imm >> 7) & 1) << 6
+        | ((imm >> 1) & 7) << 3
+        | ((imm >> 5) & 1) << 2) as u16
 }
 
 #[allow(clippy::too_many_arguments)]

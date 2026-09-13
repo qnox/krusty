@@ -171,3 +171,75 @@ fn the_executable_is_a_static_elf_with_no_interpreter() {
         );
     }
 }
+
+/// The ELF header's `e_machine`: what architecture a binary is for.
+fn elf_machine(image: &[u8]) -> u16 {
+    u16::from_le_bytes([image[18], image[19]])
+}
+
+#[test]
+fn one_host_links_a_static_executable_for_every_supported_architecture() {
+    if krusty::toolchain::stdlib_jar().is_none() {
+        eprintln!("skipping: needs the Kotlin stdlib");
+        return;
+    }
+    // The Go property, now with nothing but krusty in the loop: the code generator emits each
+    // architecture's object and krusty's linker joins it with that architecture's prebuilt
+    // runtime. Every produced binary is asserted to be for the architecture asked for; the host's
+    // is also RUN. The others cannot be executed here (no emulator), so for them the assertion is
+    // that the link resolved every symbol and every relocation — a wrong relocation kind or an
+    // out-of-range field fails the link, not the run.
+    let mut linked = Vec::new();
+    for &target in NativeTarget::ALL {
+        if !krusty::native::can_link(target) {
+            eprintln!("skipping {target}: no prebuilt runtime in this build");
+            continue;
+        }
+        let (artifacts, diagnostics) = compile(
+            &[(
+                "Main",
+                "fun shout(): String = \"Hello, world!\"\nfun main() { println(shout()) }\n",
+            )],
+            target,
+        );
+        assert!(diagnostics.is_empty(), "{target}: {diagnostics:?}");
+        let objects = artifacts
+            .iter()
+            .map(|(_, b)| b.as_slice())
+            .collect::<Vec<_>>();
+        let image = krusty::native::link_program(&objects, target)
+            .unwrap_or_else(|error| panic!("linking for {target} must succeed: {error}"));
+        assert_eq!(&image[..4], b"\x7fELF", "{target}");
+        assert_eq!(image[16], 2, "{target}: ET_EXEC");
+        assert_eq!(
+            elf_machine(&image),
+            target.arch.elf_machine(),
+            "{target}: wrong machine"
+        );
+        if Some(target) == NativeTarget::host() {
+            let scratch = Scratch::new(&format!("cross-{target}"));
+            let executable = scratch.path().join("program");
+            std::fs::write(&executable, &image).expect("write");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            let output = std::process::Command::new(&executable)
+                .env_clear()
+                .output()
+                .expect("run");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "Hello, world!\n",
+                "{target}"
+            );
+        }
+        linked.push(target);
+    }
+    assert!(
+        linked.len() > 1,
+        "cross-compilation is a requirement, not a bonus: only {linked:?} could be linked"
+    );
+}
