@@ -2355,46 +2355,6 @@ impl IrStatic {
     }
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct FnParamInfo {
-    pub names: Vec<String>,
-    pub defaults: Option<Vec<Option<ExprId>>>,
-    /// The registered `defaults` serve only the `$default` STUB (which re-emits them inside the
-    /// stub's own frame) — a CALL SITE must not reuse them to fill an omitted argument. Set for an
-    /// EXTENSION whose defaults are not all constant: kotlinc still emits `name$default` for it (the
-    /// cross-module ABI), while krusty's same-module omitted-arg lowering — which inlines only
-    /// checker-recorded constant defaults — keeps bailing exactly as before the defaults were
-    /// registered (skip, never miscompile).
-    pub stub_only: bool,
-}
-
-impl FnParamInfo {
-    pub fn names(names: Vec<String>) -> Self {
-        Self {
-            names,
-            defaults: None,
-            stub_only: false,
-        }
-    }
-
-    pub fn defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
-        Self {
-            names,
-            defaults: Some(defaults),
-            stub_only: false,
-        }
-    }
-
-    /// [`Self::defaults`] with the stub-only marker set — see [`Self::stub_only`].
-    pub fn stub_only_defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
-        Self {
-            names,
-            defaults: Some(defaults),
-            stub_only: true,
-        }
-    }
-}
-
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -3728,6 +3688,8 @@ impl IrFile {
 mod debug_locals;
 pub use debug_locals::IrLambdaOrigin;
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+mod function_parameters;
+pub use function_parameters::FnParamInfo;
 mod traversal;
 pub use traversal::*;
 mod clone;

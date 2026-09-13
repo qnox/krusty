@@ -196,6 +196,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(opts.jvm_target_major)
         .with_jvm_default(opts.jvm_default)
+        .with_java_parameters(opts.java_parameters)
         .with_lambda_modes(opts.lambda_modes)
         .with_param_assertions(!opts.no_param_assertions)
         .with_call_assertions(!opts.no_call_assertions);

@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod control_flow;
+mod method_parameters;
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -526,6 +527,10 @@ struct MethodInfo {
     user_invisible_param_anns: Vec<Vec<Vec<u8>>>,
     /// Analysis-only Java header stubs preserve whether an annotation element may be omitted.
     annotation_default: bool,
+    /// `MethodParameters` entries `(name_index, access_flags)`, one per parameter in descriptor order.
+    /// Empty ⇒ no attribute. kotlinc writes this only under `-java-parameters`, and only for methods
+    /// that HAVE a declaration: a `$default` bridge or a synthetic marker constructor gets none.
+    method_parameters: Vec<(u16, u16)>,
 }
 
 struct FieldInfo {
@@ -1002,6 +1007,7 @@ impl ClassWriter {
             visible_param_anns: Vec::new(),
             user_invisible_param_anns: Vec::new(),
             annotation_default: false,
+            method_parameters: Vec::new(),
         });
     }
 
@@ -2121,10 +2127,12 @@ impl ClassWriter {
             signature,
             ann_types,
             &crate::ir::DeclarationAnnotations::default(),
+            &[],
         );
     }
 
-    /// [`Self::reserve_method_pool`] plus the DECLARED annotations' constants. kotlinc interns a
+    /// [`Self::reserve_method_pool`] plus the DECLARED annotations' constants and the
+    /// `MethodParameters` names (empty when the method gets no such attribute). kotlinc interns a
     /// method's header — name, descriptor, `Signature`, its own annotations, then the compiler's
     /// `@NotNull`/`@Nullable` types — before visiting the body, so the payload of a user annotation
     /// must be reserved here rather than when the annotation is attached after code generation.
@@ -2137,11 +2145,18 @@ impl ClassWriter {
         signature: Option<&str>,
         ann_types: &[&str],
         annotations: &crate::ir::DeclarationAnnotations,
+        parameters: &[(String, u16)],
     ) {
         self.cp.utf8(name);
         self.cp.utf8(desc);
         if let Some(s) = signature {
             self.cp.utf8(s);
+        }
+        // `MethodParameters` names sit between the header and the annotation types: ASM visits
+        // `visitParameter` before `visitParameterAnnotation` and before the code, so a parameter name
+        // precedes both the `@NotNull`/`@Nullable` descriptors and every constant the body introduces.
+        for (parameter, _) in parameters {
+            self.cp.utf8(parameter);
         }
         let _ = self.encode_declaration_annotations(annotations);
         for a in ann_types {
@@ -2232,6 +2247,7 @@ impl ClassWriter {
             visible_param_anns: Vec::new(),
             user_invisible_param_anns: Vec::new(),
             annotation_default: false,
+            method_parameters: Vec::new(),
         });
     }
 
@@ -2307,72 +2323,6 @@ impl ClassWriter {
             // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the
             // return, whichever order the two setters ran in — kotlinc writes the user's first.
             m.invisible_anns.splice(0..0, invis);
-        }
-    }
-
-    /// Attach the USER annotations written on a previously-added method's parameters (matched by
-    /// name+descriptor), split by retention into `RuntimeVisibleParameterAnnotations` (RUNTIME — the
-    /// Kotlin default) and `RuntimeInvisibleParameterAnnotations` (BINARY). `params` is per parameter in
-    /// order; a shorter list leaves the trailing parameters unannotated.
-    ///
-    /// Independent of [`ClassWriter::set_method_nullability`]: the synthesized `@NotNull`/`@Nullable`
-    /// parameter annotations live in their own list, and `finish` concatenates the two with the user
-    /// annotations first. No-op if the method isn't found.
-    ///
-    /// Both attributes span the method's PHYSICAL arity, taken from `desc` — `params` describes only the
-    /// SOURCE parameters, and a lowering can append more (a `suspend fun`'s CPS `Continuation`). kotlinc
-    /// writes `num_parameters` over the whole descriptor and leaves the synthesized tail empty; a short
-    /// count would describe a different parameter list.
-    pub fn set_method_param_annotations(
-        &mut self,
-        name: &str,
-        desc: &str,
-        params: &[crate::ir::DeclarationAnnotations],
-    ) {
-        if params
-            .iter()
-            .all(crate::ir::DeclarationAnnotations::is_empty)
-        {
-            return;
-        }
-        let arity = descriptor_param_count(desc).max(params.len());
-        // Resolve WITHOUT interning first, like `set_method_nullability`: describing a method that was
-        // never emitted must not leave orphan name/descriptor entries in the pool.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
-            return;
-        }
-        // Retention decides which attribute carries each annotation; the split itself is shared with
-        // every other declaration site so a new retention kind cannot diverge here.
-        let per_param: Vec<(
-            Vec<crate::ir::AppliedAnnotation>,
-            Vec<crate::ir::AppliedAnnotation>,
-        )> = (0..arity)
-            .map(|i| match params.get(i) {
-                Some(annotations) => split_declaration_annotations(annotations),
-                None => (Vec::new(), Vec::new()),
-            })
-            .collect();
-        // kotlinc writes the whole `RuntimeVisibleParameterAnnotations` attribute before the invisible
-        // one, and encoding interns as it goes — so EVERY parameter's visible annotations are encoded
-        // before any invisible one, not parameter by parameter.
-        let mut visible: Vec<Vec<Vec<u8>>> = Vec::with_capacity(arity);
-        for (vis, _) in &per_param {
-            visible.push(vis.iter().map(|a| self.encode_annotation(a)).collect());
-        }
-        let mut invisible: Vec<Vec<Vec<u8>>> = Vec::with_capacity(arity);
-        for (_, invis) in &per_param {
-            invisible.push(invis.iter().map(|a| self.encode_annotation(a)).collect());
-        }
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            if visible.iter().any(|p| !p.is_empty()) {
-                m.visible_param_anns = visible;
-            }
-            if invisible.iter().any(|p| !p.is_empty()) {
-                m.user_invisible_param_anns = invisible;
-            }
         }
     }
 
@@ -2761,6 +2711,13 @@ impl ClassWriter {
             (class_has_sig || self.methods.iter().any(|m| m.signature.is_some()))
                 .then(|| self.cp.utf8("Signature"))
         });
+        // `MethodParameters` (written only under `-java-parameters`) interns once, when some method
+        // carries one.
+        let method_parameters_attr_name = self
+            .methods
+            .iter()
+            .any(|method| !method.method_parameters.is_empty())
+            .then(|| self.cp.utf8("MethodParameters"));
         // Intern `Deprecated` only if the class or a method carries it; a method's own use already
         // interned it in the per-method sequence above.
         let deprecated_attr_name = method_dep_name.or_else(|| {
@@ -2953,7 +2910,8 @@ impl ClassWriter {
             let invisible_params = invisible_param_anns(m);
             let rvpa_attr: u16 = u16::from(!m.visible_param_anns.is_empty());
             let ripa_attr: u16 = u16::from(!invisible_params.is_empty());
-            let ann_attr = mrva_attr + mria_attr + rvpa_attr + ripa_attr;
+            let mp_attr: u16 = u16::from(!m.method_parameters.is_empty());
+            let ann_attr = mrva_attr + mria_attr + rvpa_attr + ripa_attr + mp_attr;
             let default_attr = u16::from(m.annotation_default);
             match &m.code {
                 None => u2(&mut out, sig_attr + dep_attr + ann_attr + default_attr), // abstract: optional Signature [+ Deprecated] [+ anns/default]
@@ -3087,6 +3045,20 @@ impl ClassWriter {
             }
             if ripa_attr == 1 {
                 write_param_anns(&mut out, ripa_attr_name.unwrap(), &invisible_params);
+            }
+            // `MethodParameters` comes after every annotation attribute — kotlinc's order.
+            if mp_attr == 1 {
+                u2(
+                    &mut out,
+                    method_parameters_attr_name
+                        .expect("a method carrying parameters interns the attribute name"),
+                );
+                u4(&mut out, 1 + m.method_parameters.len() as u32 * 4);
+                out.push(m.method_parameters.len() as u8);
+                for (parameter, flags) in &m.method_parameters {
+                    u2(&mut out, *parameter);
+                    u2(&mut out, *flags);
+                }
             }
         }
         // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty

@@ -26,6 +26,7 @@ pub mod jvm_libraries;
 mod local_properties;
 mod mapped_builtin_declarations;
 pub mod metadata;
+mod method_parameters;
 mod module_calls;
 pub mod names;
 mod parameter_assertions;

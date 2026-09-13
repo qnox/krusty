@@ -88,6 +88,10 @@ review explanation tied to an active migration plan.
 - Common FIR/IR lowering records debug-local source identity, semantic role, and inline-frame
   provenance. It must not format JVM/kotlinc synthetic local spellings such as `$iv`, `_u24`, or a
   `$lambda$N` implementation name; the JVM debug-info boundary owns those conventions.
+- Common IR records parameter source identities and compiler-generated provenance. A backend may
+  format those identities for its ABI (`$completion`, capture prefixes, synthetic/mandated flags),
+  but must not reconstruct them from a descriptor, invent `pN` reflection names, or silently omit an
+  enabled parameter-metadata attribute when the recorded identity and physical arity disagree.
 - Kotlin metadata is authoritative for Kotlin declarations. Complete missing metadata decoding
   instead of adding stdlib/class-name/member-name exceptions. Java/classfile facts are used only for
   declarations that do not have Kotlin metadata.
