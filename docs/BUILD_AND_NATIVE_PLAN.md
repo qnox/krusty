@@ -185,9 +185,9 @@ test harnesses; there is no production JS driver.
 
 ## What does not exist
 
-### Emission is not deterministic — and this blocks everything
+### Emission determinism is unproven, not known-good
 
-Two independent measurements, in two documents:
+Two historical measurements record nondeterministic emission:
 
 - `docs/RESOLUTION_ENGINE_PLAN.md`: *"the BASE binary produces four distinct md5s for
   `unqualifiedSuperKt$box$1.class` across six runs of the same input. Emission order is keyed by hash
@@ -195,11 +195,27 @@ Two independent measurements, in two documents:
 - `docs/SPEC.md`: *"A 47th differs between any two runs of the SAME binary — a pre-existing
   non-deterministic emission, not a guard."*
 
-**A content-addressed cache over a nondeterministic producer inverts.** An unchanged module's ABI
-bytes change on rebuild, so its hash changes, so every dependent rebuilds. Worse, caching *hides* the
-defect: a nondeterminism bug that would surface as a byte diff instead surfaces as a cache hit. And
-Phase 4's natural oracle — output equivalence against a clean rebuild — is unwritable while a clean
-build does not equal a second clean build. Hence Phase 0.
+**Neither reproduces on `master` at 00dd62d.** Measured while writing this document: the exact class
+named in the first report (`unqualifiedSuperKt$box$1.class`, from an unqualified-super fixture with
+an object expression) is byte-identical across 12 runs, and a generated 113-class output — 40
+interfaces, 120 members, 30 object expressions — is byte-identical across 10 runs, whole-output
+digest included. Both reports predate the FIR streaming migration; the defect appears to have been
+fixed incidentally.
+
+So the property currently holds for the shapes tested and has never been **swept, gated, or
+protected**. That is the actual gap: a content-addressed cache over a nondeterministic producer
+*inverts* — an unchanged module's hash changes, so every dependent rebuilds — and caching then
+*hides* the defect, because a nondeterminism bug that would surface as a byte diff instead surfaces
+as a cache hit. Phase 4's oracle, output equivalence against a clean rebuild, is also unwritable
+without it. Phase 0 therefore establishes a gate rather than performing a fix.
+
+**Emitted output is source-order sensitive, and that is not a defect.** Also measured: compiling four
+same-package files in reverse order changes `.kotlin_module` bytes, because a package's facade-name
+list accumulates in file-streaming order (`JvmState::module_packages`). `DeltaKt EchoKt FoxtrotKt
+ZuluKt` becomes `ZuluKt FoxtrotKt EchoKt DeltaKt`. Class files themselves are unaffected. This is
+input-order sensitivity rather than nondeterminism, and it is why the cache key below hashes an
+**ordered** source list; a key over a sorted multiset would collide two builds with different
+`.kotlin_module` output.
 
 ### The compiler silently emits partial output
 
@@ -412,17 +428,19 @@ Cranelift.
 
 Each ends green with tests, per `CLAUDE.md`.
 
-### Phase 0 — Deterministic emission
+### Phase 0 — Gate emission determinism
 
-Nothing downstream is meaningful without it (see [What does not exist](#what-does-not-exist)).
-Replace every unordered collection on an emission-ordering path with an ordered container or an
-explicit sort at the boundary, and add an `src/architecture.rs`-style guard forbidding unordered
-iteration in `src/jvm/ir_emit.rs`, `src/jvm/classfile.rs`, `src/metadata/`, and
-`JvmBackend::finalize`.
+The property holds for the shapes measured (see
+[What does not exist](#what-does-not-exist)) but is unprotected, so the work is a gate, not a fix.
+Add an N-run byte-identity test, then widen it to a `codegen/box` corpus sweep using the harness from
+`docs/RESOLUTION_ENGINE_PLAN.md`. Pin the source-order sensitivity of `.kotlin_module` in the same
+test file, since the cache key depends on it. Should the sweep find surviving nondeterminism, the fix
+is an ordered container or an explicit sort at the boundary, plus an `src/architecture.rs`-style
+guard forbidding unordered iteration in `src/jvm/ir_emit.rs`, `src/jvm/classfile.rs`,
+`src/metadata/`, and `JvmBackend::finalize`.
 
-*Test:* N-run byte identity over the full `codegen/box` corpus, as a gate rather than a one-off
-measurement. The sweep harness from `docs/RESOLUTION_ENGINE_PLAN.md` already exists and already made
-this measurement. Zero classes may differ across runs.
+*Test:* zero classes differ across N in-process compilations of the same source; `.kotlin_module`
+facade order tracks source order. Both land as a regression gate.
 
 ### Phase 1 — Total-output contract
 
