@@ -26,6 +26,7 @@
 //! a conditional sub-expression like elvis/`&&`, an extension suspend fn, or a member suspend fn with its
 //! own parameters — its continuation would also have to capture them) skip the file.
 
+mod get_or_create;
 mod statement_normalization;
 
 use crate::ir::{
@@ -35,6 +36,7 @@ use crate::ir::{
 use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
+use get_or_create::build_get_or_create;
 use statement_normalization::{
     demote_block_value_to_statement, normalize_block_inits, normalize_statement_try_results,
     split_unit_conditional_returns,
@@ -6767,156 +6769,6 @@ fn local_storage_ty(ir: &IrFile, semantic: Ty, init: Option<ExprId>) -> Ty {
         _ => None,
     })
     .unwrap_or(semantic)
-}
-
-/// Build the get-or-create prologue: `$completion instanceof Cont && (label & MIN_VALUE) != 0` ⇒ reuse
-/// the continuation (clearing the resume bit), else `new Cont($completion)`. Nested `when`s avoid
-/// relying on `&&` short-circuit (the cast/getfield must not run when `$completion` isn't our type).
-fn build_get_or_create(
-    ir: &mut IrFile,
-    completion_idx: u32,
-    cont_ty: &Ty,
-    cont_id: ClassId,
-    receiver_this: Option<u32>,
-    param_caps: &[(u32, u32)],
-) -> ExprId {
-    let k = |ir: &mut IrFile, e: IrExpr| ir.add_expr(e);
-    let cast = |ir: &mut IrFile| {
-        let c = ir.add_expr(IrExpr::GetValue(completion_idx));
-        ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: c,
-            type_operand: cont_ty.clone(),
-        })
-    };
-    let label_of = |ir: &mut IrFile, recv: ExprId| {
-        ir.add_expr(IrExpr::GetField {
-            receiver: recv,
-            class: cont_id,
-            index: 1,
-        })
-    };
-    // `new Cont([this,] $completion)` — kotlinc's continuation ctor takes only the receiver + the
-    // completion. Each live value parameter is stored into its `L$N` field RIGHT AFTER construction (a
-    // fresh continuation only — a resumed one keeps its saved fields), so the loop-top restore reads
-    // correct values on the first iteration: `{ val t = new Cont(recv?, completion); t.L$i = p; …; t }`.
-    let new_cont = |ir: &mut IrFile| {
-        let mut args = Vec::new();
-        if let Some(this_idx) = receiver_this {
-            args.push(ir.add_expr(IrExpr::GetValue(this_idx)));
-        }
-        args.push(ir.add_expr(IrExpr::GetValue(completion_idx)));
-        let cont_internal = ir.classes[cont_id as usize].fq_name_id();
-        let new = ir.add_expr(IrExpr::New {
-            internal: cont_internal,
-            args,
-            ctor_params: None,
-            ctor_desc: None,
-            external_target: None,
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        });
-        if param_caps.is_empty() {
-            return new;
-        }
-        let tmp = max_value_index(ir) + 1;
-        let mut stmts = vec![ir.add_expr(IrExpr::Variable {
-            index: tmp,
-            ty: *cont_ty,
-            init: Some(new),
-            named: false,
-        })];
-        for &(local, field) in param_caps {
-            let recv = ir.add_expr(IrExpr::GetValue(tmp));
-            let val = ir.add_expr(IrExpr::GetValue(local));
-            stmts.push(ir.add_expr(IrExpr::SetField {
-                receiver: recv,
-                class: cont_id,
-                index: field,
-                value: val,
-            }));
-        }
-        let out = ir.add_expr(IrExpr::GetValue(tmp));
-        ir.add_expr(IrExpr::Block {
-            stmts,
-            value: Some(out),
-        })
-    };
-
-    let comp = k(ir, IrExpr::GetValue(completion_idx));
-    let is_inst = k(
-        ir,
-        IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: comp,
-            type_operand: cont_ty.clone(),
-        },
-    );
-    // (label & MIN_VALUE) != 0
-    let c1 = cast(ir);
-    let lbl1 = label_of(ir, c1);
-    let min1 = k(ir, IrExpr::Const(IrConst::Int(I32_MIN)));
-    let masked = k(
-        ir,
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::BitAnd,
-            lhs: lbl1,
-            rhs: min1,
-        },
-    );
-    let zero = k(ir, IrExpr::Const(IrConst::Int(0)));
-    let bit_set = k(
-        ir,
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Ne,
-            lhs: masked,
-            rhs: zero,
-        },
-    );
-    // reuse: cont.label -= MIN_VALUE; yield cont
-    let c_recv = cast(ir);
-    let c_read = cast(ir);
-    let old = label_of(ir, c_read);
-    let min2 = k(ir, IrExpr::Const(IrConst::Int(I32_MIN)));
-    let newl = k(
-        ir,
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Sub,
-            lhs: old,
-            rhs: min2,
-        },
-    );
-    let set = k(
-        ir,
-        IrExpr::SetField {
-            receiver: c_recv,
-            class: cont_id,
-            index: 1,
-            value: newl,
-        },
-    );
-    let cval = cast(ir);
-    let reuse = k(
-        ir,
-        IrExpr::Block {
-            stmts: vec![set],
-            value: Some(cval),
-        },
-    );
-    let new1 = new_cont(ir);
-    let inner = k(
-        ir,
-        IrExpr::When {
-            branches: vec![(Some(bit_set), reuse), (None, new1)],
-        },
-    );
-    let new2 = new_cont(ir);
-    k(
-        ir,
-        IrExpr::When {
-            branches: vec![(Some(is_inst), inner), (None, new2)],
-        },
-    )
 }
 
 /// Synthesize the `Facade$fn$1 extends ContinuationImpl` continuation class: `result`/`label` fields, a
