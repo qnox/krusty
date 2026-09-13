@@ -48,6 +48,12 @@ typedef struct KType {
     /* Whether an array's elements are references the collector must trace. Separate from
        `element_size` because a `LongArray`'s elements are the same width and must NOT be traced. */
     uint32_t element_references;
+    /* Every interface this type implements, TRANSITIVELY — an interface's own bases included, and
+       those of every superclass. `is` checks this list at each step of the super chain, which is
+       why the list is flattened: an interface is not on the single-inheritance chain, so there is
+       no second chain to walk. An interface's own descriptor carries its bases here too. */
+    const struct KType *const *interfaces;
+    uint32_t interface_count;
 } KType;
 
 

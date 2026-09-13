@@ -25,7 +25,9 @@ mod ktype {
     pub const SUPER: u32 = 32;
     pub const VTABLE: u32 = 40;
     pub const VTABLE_LENGTH: u32 = 48;
-    pub const SIZE: usize = 56;
+    pub const INTERFACES: u32 = 56;
+    pub const INTERFACE_COUNT: u32 = 64;
+    pub const SIZE: usize = 72;
 }
 
 /// Where an object keeps its type: the header is one pointer.
@@ -237,6 +239,7 @@ impl<'a> FileLowering<'a> {
     /// the struct. Every emitted type goes through here — a class, a lambda, a captured-variable
     /// holder — so the descriptor the collector reads and the layout the code uses are written by
     /// one piece of code.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn define_type_descriptor(
         &mut self,
         descriptor: DataId,
@@ -246,6 +249,7 @@ impl<'a> FileLowering<'a> {
         reference_offsets: &[u32],
         vtable: &[FuncId],
         superclass: DataId,
+        interfaces: &[DataId],
     ) -> Result<(), Unsupported> {
         let references = if reference_offsets.is_empty() {
             None
@@ -278,6 +282,27 @@ impl<'a> FileLowering<'a> {
             .define_data(table, &description)
             .map_err(|error| format!("defining `kt_vtable_{base}` ({error})"))?;
 
+        // The interfaces this type implements, transitively. An interface is not on the super
+        // chain — that chain is single inheritance — so `is` finds it here instead.
+        let implemented = if interfaces.is_empty() {
+            None
+        } else {
+            let id = self.declare_local_data(&format!("kt_ifaces_{base}"), false)?;
+            let mut description = DataDescription::new();
+            description.define(vec![0; interfaces.len() * 8].into_boxed_slice());
+            description.set_align(8);
+            for (index, interface) in interfaces.iter().enumerate() {
+                let global = self
+                    .module
+                    .declare_data_in_data(*interface, &mut description);
+                description.write_data_addr(index as u32 * 8, global, 0);
+            }
+            self.module
+                .define_data(id, &description)
+                .map_err(|error| format!("defining `kt_ifaces_{base}` ({error})"))?;
+            Some(id)
+        };
+
         let name_data = self.string_data(kotlin_name.as_bytes())?;
         let mut bytes = vec![0u8; ktype::SIZE];
         write_u32(&mut bytes, ktype::NAME_LENGTH, kotlin_name.len() as u32);
@@ -288,6 +313,7 @@ impl<'a> FileLowering<'a> {
             reference_offsets.len() as u32,
         );
         write_u32(&mut bytes, ktype::VTABLE_LENGTH, vtable.len() as u32);
+        write_u32(&mut bytes, ktype::INTERFACE_COUNT, interfaces.len() as u32);
         let mut description = DataDescription::new();
         description.define(bytes.into_boxed_slice());
         description.set_align(8);
@@ -296,6 +322,7 @@ impl<'a> FileLowering<'a> {
             (ktype::REFERENCE_OFFSETS, references),
             (ktype::SUPER, Some(superclass)),
             (ktype::VTABLE, Some(table)),
+            (ktype::INTERFACES, implemented),
         ] {
             let Some(data) = data else {
                 continue;
@@ -345,6 +372,11 @@ impl<'a> FileLowering<'a> {
             Some(parent) => self.classes[parent as usize].descriptor,
             None => self.import_data("kt_type_any")?,
         };
+        let interfaces: Vec<DataId> = self.model.interfaces[class as usize]
+            .clone()
+            .into_iter()
+            .map(|interface| self.classes[interface as usize].descriptor)
+            .collect();
         self.define_type_descriptor(
             descriptor,
             &base,
@@ -353,6 +385,7 @@ impl<'a> FileLowering<'a> {
             &layout.reference_offsets,
             &vtable,
             superclass,
+            &interfaces,
         )
     }
 

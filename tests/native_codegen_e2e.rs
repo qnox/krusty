@@ -459,14 +459,13 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // Interfaces are not implemented. The contract is that the backend SAYS so: emitting a partial
-    // object that links and misbehaves would be far worse than refusing.
+    // An `inner` class is not implemented. The contract is that the backend SAYS so: emitting a
+    // partial object that links and misbehaves would be far worse than refusing.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
-            "interface Greeter { fun greet(): String }\n\
-             class English : Greeter { override fun greet(): String = \"hi\" }\n\
-             fun main() { println(English().greet()) }\n",
+            "class Outer(val n: Int) { inner class Inner { fun value() = n + 1 } }\n\
+             fun main() { println(Outer(1).Inner().value()) }\n",
         )],
         target,
     );
@@ -1389,5 +1388,108 @@ fn a_data_class_gets_kotlins_equality_hashing_and_rendering() {
              \x20   println(Tagged(\"ab\", 1L, true).hashCode() == Tagged(\"ab\", 1L, true).hashCode())\n\
              }\n"),
         "true\nfalse\ntrue\nfalse\nPoint(x=1, y=2)\n7\ntrue\nfalse\ntrue\n"
+    );
+}
+
+#[test]
+fn an_interface_dispatches_through_a_program_wide_slot() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A call through an interface-typed value knows only the interface, so the slot number it uses
+    // has to mean the same member in every class implementing it — which is what the program-wide
+    // numbering above every class's own slots buys. The cases that have to work: a plain override,
+    // a default body the class does not override, an interface property, a second interface on the
+    // same class, an interface extending another, and a method the class INHERITS rather than
+    // declares (`Sub` satisfies `Named` with `Base`'s method, and `Base` knows nothing of `Named`).
+    assert_eq!(
+        run("interface Named {\n\
+             \x20   fun name(): String\n\
+             \x20   fun greet(): String = \"hi \" + name()\n\
+             \x20   val tag: String\n\
+             }\n\
+             interface Counted { fun count(): Int }\n\
+             interface Both : Named, Counted\n\
+             class One : Named {\n\
+             \x20   override fun name() = \"one\"\n\
+             \x20   override val tag = \"t1\"\n\
+             }\n\
+             class Two : Both {\n\
+             \x20   override fun name() = \"two\"\n\
+             \x20   override fun greet() = \"hey \" + name()\n\
+             \x20   override fun count() = 2\n\
+             \x20   override val tag = \"t2\"\n\
+             }\n\
+             open class Base { open fun name() = \"base\" }\n\
+             class Sub : Base(), Named { override val tag = \"t3\" }\n\
+             fun describe(named: Named): String = named.greet() + \"/\" + named.tag\n\
+             fun main() {\n\
+             \x20   println(describe(One()))\n\
+             \x20   println(describe(Two()))\n\
+             \x20   println(describe(Sub()))\n\
+             \x20   val both: Both = Two()\n\
+             \x20   println(both.count())\n\
+             \x20   val counted: Counted = Two()\n\
+             \x20   println(counted.count())\n\
+             }\n"),
+        "hi one/t1\nhey two/t2\nhi base/t3\n2\n2\n"
+    );
+}
+
+#[test]
+fn an_interface_answers_is_and_as() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An interface is not on the single-inheritance chain `is` walks, so each type carries the
+    // interfaces it implements — transitively, which is what makes the base of an interface, and
+    // an interface of a superclass, answer as well as the one the class names itself.
+    assert_eq!(
+        run("interface Base\n\
+             interface Derived : Base\n\
+             open class Holder : Derived\n\
+             class Sub : Holder()\n\
+             class Other\n\
+             fun main() {\n\
+             \x20   val sub: Any = Sub()\n\
+             \x20   println(sub is Derived)\n\
+             \x20   println(sub is Base)\n\
+             \x20   println(sub is Holder)\n\
+             \x20   val other: Any = Other()\n\
+             \x20   println(other is Base)\n\
+             \x20   println((sub as Base) === sub)\n\
+             \x20   println((other as? Base) == null)\n\
+             }\n"),
+        "true\ntrue\ntrue\nfalse\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn an_override_that_needs_a_bridge_is_declined() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // `D4.foo(): Int` is what `D1.foo(): Any` gets here, and the two disagree about the machine:
+    // one returns an unboxed integer, the other a reference. Pointing the interface's slot at the
+    // inherited method would have a caller read an integer as a pointer. The JVM emits a bridge
+    // for exactly this; until one is emitted here the file is declined rather than miscompiled.
+    let (_, diagnostics) = compile(
+        &[(
+            "Main",
+            "interface Boxed { fun foo(): Any }\n\
+             open class Raw { fun foo(): Int = 42 }\n\
+             class Both : Raw(), Boxed\n\
+             fun main() { val b: Boxed = Both(); println(b.foo()) }\n",
+        )],
+        target,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("a bridge method is needed")),
+        "expected the backend to decline, got {diagnostics:?}"
     );
 }

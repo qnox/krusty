@@ -1183,6 +1183,21 @@ before:**
    what says the defect is common lowering's. Fixing it there exposed a second one underneath, in
    the JVM realization: `java.util.Arrays.toString` has no `Integer[]` overload, so a reference
    array has to name the `Object[]` one. Both are fixed, and both lanes now pass the case.
+   Interfaces were the largest remaining construct and took the lane to **1234 pass**. A call
+   through an interface-typed value knows only the interface, so the slot it dispatches on has to
+   mean the same member in every class implementing it: each class's table is its own slots, padded
+   to a common base, then one entry per interface member in the program. Dispatch stays a single
+   indexed load — the same instruction a class method's call site emits — at the cost of a vtable as
+   long as the program's interface surface. That is the right trade while a compilation unit is a
+   file; an itable search is what to revisit when it is not. `is` needed the other half: an
+   interface is not on the single-inheritance chain, so each descriptor carries the interfaces it
+   implements, flattened. The corpus's `bridges/` directory then did its job twice over — a fake
+   override, where a class satisfies an interface with a method it inherits from a superclass that
+   knows nothing of the interface, and the case where that inherited method returns an unboxed
+   `Int` for an interface promising `Any`, which needs a bridge and is declined rather than
+   miscompiled. An interface member a concrete class implements but this model cannot find is a
+   decline too, not an abstract trap: the implementation is in the source, so failing to find it is
+   this model's defect and belongs at compile time.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

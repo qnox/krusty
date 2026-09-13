@@ -4335,6 +4335,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/fir_lower/sink.rs`, `src/native/codegen/lower.rs`,
   `tests/native_codegen_e2e.rs::a_tailrec_the_checked_lowering_leaves_recursive_is_declined`).
 
+- **An interface member has one slot number, program-wide.** A call through an interface-typed
+  value knows the interface and not the class, so the number it dispatches on has to mean the same
+  member in every implementation. Each class's table is therefore its own slots, padded to a common
+  base, then one entry per interface member in the program; a class fills the entries of interfaces
+  it implements and the rest are the abstract trap, which nothing can name through a type it has.
+  A class satisfying an interface member with a method it INHERITS (a fake override) points the
+  interface's number at the inherited slot. Where the inherited method's representation differs
+  from the interface's — `Raw.foo(): Int` for `Boxed.foo(): Any` — a bridge is needed and the file
+  is declined instead (`src/native/classes.rs`,
+  `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
+  `::an_override_that_needs_a_bridge_is_declined`).
+
+- **`is` finds an interface in the type, not on the chain.** Single inheritance gives one superclass
+  chain, and an interface is not on it, so each type descriptor carries the interfaces it implements
+  — transitively, so an interface's own bases and a superclass's interfaces answer too
+  (`src/native/runtime/krusty_rt.c`, `src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::an_interface_answers_is_and_as`).
+
 - **A data class's members are Kotlin's, down to the per-field hash.** `equals`, `hashCode`,
   `toString` and `componentN` are synthesized by common lowering; what a backend supplies is the
   per-field hash and comparison they are written in terms of, and each has one right answer a

@@ -143,6 +143,9 @@ pub(super) struct ClassLayout {
 pub(super) struct ClassModel {
     pub layouts: Vec<ClassLayout>,
     pub order: Vec<ClassId>,
+    /// Every interface each class implements, transitively — what its descriptor carries so `is`
+    /// can answer for a type that is not on the single-inheritance chain. Indexed by `ClassId`.
+    pub interfaces: Vec<Vec<ClassId>>,
 }
 
 impl ClassModel {
@@ -155,6 +158,9 @@ impl ClassModel {
         self.layout(class).slots.get(key).copied()
     }
 }
+
+/// How many slots `kotlin.Any` occupies at the front of every vtable.
+const ANY_SLOTS: u32 = 3;
 
 /// `kotlin.Any`'s vtable, the prefix of every class's.
 fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
@@ -192,18 +198,7 @@ fn any_slot_signature(slot: u32) -> (&'static [CKind], CKind) {
 /// Reject, by name, a class this step does not lower.
 pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
-    let construct = if class.is_interface {
-        "an interface"
-    } else if !class.interfaces.is_empty()
-        || class.supertypes.iter().any(|supertype| {
-            supertype
-                .obj_internal()
-                .and_then(|internal| ir.class_id_by_name(internal))
-                .is_some_and(|id| ir.classes[id as usize].is_interface)
-        })
-    {
-        "an interface supertype"
-    } else if class.is_inner_class || class.constructor_prefix_count > 0 {
+    let construct = if class.is_inner_class || class.constructor_prefix_count > 0 {
         "an inner class"
     } else if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
         "an enum class"
@@ -261,21 +256,265 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
         };
         layouts[id as usize] = Some(layout);
     }
+    let mut layouts: Vec<ClassLayout> = layouts
+        .into_iter()
+        .map(|layout| layout.expect("every class was laid out"))
+        .collect();
+    let interfaces = interface_closure(ir);
+    place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
     Ok(ClassModel {
-        layouts: layouts
-            .into_iter()
-            .map(|layout| layout.expect("every class was laid out"))
-            .collect(),
+        layouts,
         order,
+        interfaces,
     })
 }
 
-/// Classes sorted so that a superclass precedes its subclasses. The order is read off
-/// `classifier_hierarchies` — the frontend's own record of each class's supertypes — and a
-/// superclass that is not in this file (other than `kotlin.Any`) is declined.
+/// Every interface each class implements, transitively: its own, its superclass's, and the bases
+/// of both. An interface's entry holds the interfaces it extends, not itself.
+fn interface_closure(ir: &IrFile) -> Vec<Vec<ClassId>> {
+    let direct = |id: ClassId| -> Vec<ClassId> {
+        let class = &ir.classes[id as usize];
+        class
+            .interfaces
+            .iter()
+            .chain(
+                class
+                    .supertypes
+                    .iter()
+                    .copied()
+                    .filter_map(Ty::obj_internal),
+            )
+            .filter_map(|name| ir.class_id_by_name(name))
+            .filter(|&candidate| ir.classes[candidate as usize].is_interface)
+            .collect()
+    };
+    let mut closures: Vec<Vec<ClassId>> = vec![Vec::new(); ir.classes.len()];
+    // A fixed point rather than an order-dependent single pass: a class may precede an interface
+    // it implements in IR order, and the closure is small enough that iterating to stability costs
+    // nothing.
+    loop {
+        let mut changed = false;
+        for id in 0..ir.classes.len() as ClassId {
+            let mut collected: Vec<ClassId> = closures[id as usize].clone();
+            let add = |collected: &mut Vec<ClassId>, candidate: ClassId| {
+                if !collected.contains(&candidate) {
+                    collected.push(candidate);
+                }
+            };
+            for candidate in direct(id) {
+                add(&mut collected, candidate);
+                for inherited in closures[candidate as usize].clone() {
+                    add(&mut collected, inherited);
+                }
+            }
+            if let Some(parent) = ir.class_id_by_name(ir.classes[id as usize].superclass) {
+                for inherited in closures[parent as usize].clone() {
+                    add(&mut collected, inherited);
+                }
+            }
+            if collected.len() != closures[id as usize].len() {
+                closures[id as usize] = collected;
+                changed = true;
+            }
+        }
+        if !changed {
+            return closures;
+        }
+    }
+}
+
+/// Give every interface member a slot number that is the same in EVERY class implementing it.
+///
+/// A class's own methods are numbered as they are declared, so two classes number their methods
+/// differently — which is fine for a call through a class-typed receiver, because the call site
+/// knows the class. A call through an INTERFACE-typed receiver does not: it knows only the
+/// interface, so the number it uses has to mean the same thing in every implementation. So the
+/// interface members share one numbering, placed above every class's own slots: each class's
+/// vtable is its own slots, padded to `interface_base`, then one entry per interface member in the
+/// program. A class fills only the entries of interfaces it implements; the rest are the abstract
+/// trap, which nothing can reach because nothing can name them through a type this class has.
+///
+/// The cost is a vtable as long as the program's interface surface rather than the class's own,
+/// and it is paid per class. That is the trade Kotlin's own targets make differently — the JVM has
+/// `invokeinterface` and an itable search — and it is the right one while a compilation unit is a
+/// file: dispatch stays a single indexed load, exactly like a class method's.
+fn place_interface_slots(
+    ir: &IrFile,
+    order: &[ClassId],
+    layouts: &mut [ClassLayout],
+    interfaces: &[Vec<ClassId>],
+) -> Result<(), Unsupported> {
+    let is_interface = |id: ClassId| ir.classes[id as usize].is_interface;
+    // Relative numbering, assigned interface by interface so an extending interface inherits the
+    // slots of the one it extends.
+    let mut members: Vec<InterfaceMember> = Vec::new();
+    let mut relative: Vec<HashMap<SlotKey, u32>> = vec![HashMap::new(); ir.classes.len()];
+    for &id in order.iter().filter(|&&id| is_interface(id)) {
+        let mut own: HashMap<SlotKey, u32> = HashMap::new();
+        for &base in &interfaces[id as usize] {
+            for (key, slot) in &relative[base as usize] {
+                own.insert(key.clone(), *slot);
+            }
+        }
+        let layout = &layouts[id as usize];
+        // The provisional layout numbered this interface's members as if they were a class's; the
+        // ORDER it used is the declaration order, which is all that is wanted here.
+        let mut provisional: Vec<(&SlotKey, &u32)> = layout.slots.iter().collect();
+        provisional.sort_by_key(|(_, slot)| **slot);
+        for (key, slot) in provisional {
+            if matches!(key, SlotKey::Any(_)) {
+                continue;
+            }
+            let inherited = interfaces[id as usize]
+                .iter()
+                .find_map(|&base| relative[base as usize].get(key).copied());
+            let entry = layout.vtable[*slot as usize].clone();
+            match inherited {
+                Some(slot) => {
+                    own.insert(key.clone(), slot);
+                    // A class implementing `Both : Named` registers what it overrides under the
+                    // key the override names, and that can be either interface's spelling of the
+                    // same member — a property's key carries its declaring class. So the member
+                    // records the extending interface's spelling too, and the class is looked up
+                    // by any of them.
+                    if let Some(alias) = alias_key(key, id) {
+                        let aliases = &mut members[slot as usize].aliases;
+                        if !aliases.contains(&alias) {
+                            aliases.push(alias);
+                        }
+                    }
+                    // An interface redeclaring an inherited member with a body replaces what the
+                    // base supplied, for classes that implement neither themselves.
+                    if !matches!(entry, Slot::Abstract) {
+                        members[slot as usize].default = entry;
+                    }
+                }
+                None => {
+                    let assigned = members.len() as u32;
+                    members.push(InterfaceMember {
+                        interface: id,
+                        key: key.clone(),
+                        aliases: Vec::new(),
+                        default: entry,
+                    });
+                    own.insert(key.clone(), assigned);
+                }
+            }
+        }
+        relative[id as usize] = own;
+    }
+
+    let base = layouts
+        .iter()
+        .enumerate()
+        .filter(|(id, _)| !is_interface(*id as ClassId))
+        .map(|(_, layout)| layout.vtable.len() as u32)
+        .max()
+        .unwrap_or(0)
+        .max(ANY_SLOTS);
+    for id in 0..layouts.len() as ClassId {
+        if is_interface(id) {
+            // An interface has no instances, so its table is never loaded; what its layout carries
+            // is the NUMBERING, which is what a call through it looks up.
+            let slots = relative[id as usize]
+                .iter()
+                .map(|(key, slot)| (key.clone(), base + slot))
+                .chain(
+                    layouts[id as usize]
+                        .slots
+                        .iter()
+                        .filter(|(key, _)| matches!(key, SlotKey::Any(_)))
+                        .map(|(key, slot)| (key.clone(), *slot)),
+                )
+                .collect();
+            layouts[id as usize].slots = slots;
+            layouts[id as usize].vtable = Vec::new();
+            continue;
+        }
+        let mut vtable = std::mem::take(&mut layouts[id as usize].vtable);
+        vtable.resize(base as usize, Slot::Abstract);
+        for member in &members {
+            let implemented = interfaces[id as usize].contains(&member.interface);
+            let entry = if !implemented {
+                Slot::Abstract
+            } else {
+                match std::iter::once(&member.key)
+                    .chain(&member.aliases)
+                    .find_map(|key| layouts[id as usize].slots.get(key))
+                {
+                    // The class (or an ancestor) implements the member: its own slot already holds
+                    // the most derived implementation, whatever further overrides did to it.
+                    Some(&slot) => vtable[slot as usize].clone(),
+                    None => member.default.clone(),
+                }
+            };
+            // A CONCRETE class reaching the abstract trap for an interface it DOES implement
+            // means the implementation exists in the source and this model failed to find it —
+            // Kotlin would not have compiled the class otherwise. Declining says so at compile
+            // time; emitting the trap would say it at run time, as a program that aborts where it
+            // should print an answer. A slot of an interface the class does not implement is
+            // padding, and unreachable: nothing can name it through a type this class has.
+            if implemented
+                && matches!(entry, Slot::Abstract)
+                && !ir.classes[id as usize].is_abstract
+                && !ir.classes[id as usize].is_interface
+            {
+                return Err(format!(
+                    "an interface member with no implementation found (`{}` in `{}`)",
+                    member_name(ir, member),
+                    ir.classes[id as usize].fq_name()
+                ));
+            }
+            vtable.push(entry);
+        }
+        layouts[id as usize].vtable = vtable;
+    }
+    Ok(())
+}
+
+/// How a diagnostic names an interface member.
+fn member_name(ir: &IrFile, member: &InterfaceMember) -> String {
+    let interface = ir.classes[member.interface as usize].fq_name();
+    let name = match &member.key {
+        SlotKey::Function(fid) => ir.functions[*fid as usize].name.clone(),
+        SlotKey::Getter(_, name) => format!("get {name}"),
+        SlotKey::Setter(_, name) => format!("set {name}"),
+        SlotKey::Any(slot) => format!("kotlin.Any slot {slot}"),
+    };
+    format!("{interface}.{name}")
+}
+
+/// The same member spelled as a member of `interface`, for a key that carries its declaring class.
+fn alias_key(key: &SlotKey, interface: ClassId) -> Option<SlotKey> {
+    match key {
+        SlotKey::Getter(_, name) => Some(SlotKey::Getter(interface, name.clone())),
+        SlotKey::Setter(_, name) => Some(SlotKey::Setter(interface, name.clone())),
+        SlotKey::Function(_) | SlotKey::Any(_) => None,
+    }
+}
+
+/// One member of one interface, in the program-wide numbering.
+struct InterfaceMember {
+    interface: ClassId,
+    key: SlotKey,
+    /// The same member as spelled through each interface that inherits it.
+    aliases: Vec<SlotKey>,
+    /// What a class that implements the interface without supplying this member gets: the
+    /// interface's own body where it has one, and otherwise the abstract trap.
+    default: Slot,
+}
+
+/// Classes sorted so that everything a class is laid out FROM precedes it: its superclass, whose
+/// fields and vtable it extends, and — for an interface — the interfaces it extends, whose member
+/// numbering it inherits. A superclass that is not in this file (other than `kotlin.Any`) is
+/// declined.
+///
+/// This is a topological sort rather than a sort by hierarchy depth. Depth is not a valid key
+/// here: two classes can sit at the same recorded depth with one extending the other, once
+/// interfaces contribute their own depths to the same number, and laying out a subclass before its
+/// superclass reads a layout that does not exist yet.
 fn hierarchy_order(ir: &IrFile) -> Result<Vec<ClassId>, Unsupported> {
-    let mut depths = Vec::with_capacity(ir.classes.len());
-    for (id, class) in ir.classes.iter().enumerate() {
+    for class in &ir.classes {
         if !class.superclass.matches("kotlin/Any")
             && ir.class_id_by_name(class.superclass).is_none()
         {
@@ -285,18 +524,48 @@ fn hierarchy_order(ir: &IrFile) -> Result<Vec<ClassId>, Unsupported> {
                 class.superclass.render()
             ));
         }
-        let depth = ir
-            .classifier_hierarchies
-            .get(&class.fq_name_id())
-            .map_or(0, |applied| {
-                applied.iter().map(|entry| entry.depth).max().unwrap_or(0)
-            });
-        depths.push((depth, id as ClassId));
     }
-    // A stable sort by depth: the IR order is kept within one level, so emission stays
-    // deterministic for a given source.
-    depths.sort_by_key(|(depth, _)| *depth);
-    Ok(depths.into_iter().map(|(_, id)| id).collect())
+    let requires = |id: ClassId| -> Vec<ClassId> {
+        let class = &ir.classes[id as usize];
+        let mut needed: Vec<ClassId> = ir.class_id_by_name(class.superclass).into_iter().collect();
+        if class.is_interface {
+            needed.extend(
+                class
+                    .interfaces
+                    .iter()
+                    .chain(
+                        class
+                            .supertypes
+                            .iter()
+                            .copied()
+                            .filter_map(Ty::obj_internal),
+                    )
+                    .filter_map(|name| ir.class_id_by_name(name)),
+            );
+        }
+        needed.retain(|&needed| needed != id);
+        needed
+    };
+    let mut placed = vec![false; ir.classes.len()];
+    let mut order = Vec::with_capacity(ir.classes.len());
+    // IR order within a level, so emission stays deterministic for a given source.
+    while order.len() < ir.classes.len() {
+        let mut progressed = false;
+        for id in 0..ir.classes.len() as ClassId {
+            if placed[id as usize] || !requires(id).iter().all(|&need| placed[need as usize]) {
+                continue;
+            }
+            placed[id as usize] = true;
+            order.push(id);
+            progressed = true;
+        }
+        if !progressed {
+            // A cycle among supertypes: not expressible in Kotlin, so this is a defect in the
+            // hierarchy the frontend handed over rather than something to lower.
+            return Err("a cycle among supertypes".to_string());
+        }
+    }
+    Ok(order)
 }
 
 fn round_up(value: u32, alignment: u32) -> u32 {
@@ -339,13 +608,29 @@ fn layout_class(
         (parent.vtable.clone(), parent.slots.clone())
     });
 
-    // Which methods are property accessors, so their slots are keyed by the property.
+    // Which methods are property accessors, so their slots are keyed by the property. A property
+    // whose accessor has no BODY — an abstract `val` in an interface — carries no accessor id, and
+    // its accessor reaches the method list as an ordinary method; matching the declared accessor
+    // name is what ties the two back together, so the interface and the class implementing it
+    // agree on one key for the member.
     let mut accessor_keys: HashMap<FunId, SlotKey> = HashMap::new();
     for property in &class.properties {
-        if let Some(getter) = property.getter {
+        let named = |accessor: &str, arity: usize| {
+            class.methods.iter().copied().find(|&fid| {
+                let function = &ir.functions[fid as usize];
+                function.name == accessor && function.params.len() == arity
+            })
+        };
+        let getter = property
+            .getter
+            .or_else(|| named(&crate::names::property_getter_name(&property.name), 0));
+        let setter = property
+            .setter
+            .or_else(|| named(&crate::names::property_setter_name(&property.name), 1));
+        if let Some(getter) = getter {
             accessor_keys.insert(getter, SlotKey::Getter(id, property.name.clone()));
         }
-        if let Some(setter) = property.setter {
+        if let Some(setter) = setter {
             accessor_keys.insert(setter, SlotKey::Setter(id, property.name.clone()));
         }
     }
@@ -380,29 +665,41 @@ fn layout_class(
             }
             None => None,
         };
+        // What this method overrides, split by what each target owns: a class base owns a slot in
+        // this vtable to replace, while an interface base owns a number in the program-wide
+        // interface region, which is pointed at this method's slot once that slot is known.
+        let mut interface_keys = Vec::new();
+        let mut class_replaces = None;
+        for &overridden in overridden_functions.get(&fid).into_iter().flatten() {
+            check_same_representation(ir, function, &ir.functions[overridden as usize])?;
+            let owner = ir.functions[overridden as usize]
+                .dispatch_receiver
+                .and_then(|owner| ir.class_id_by_name(owner))
+                .ok_or_else(|| {
+                    format!(
+                        "an override of a method declared outside this file (`{}`)",
+                        function.name
+                    )
+                })?;
+            let key = function_key(ir, owner, overridden);
+            if ir.classes[owner as usize].is_interface {
+                interface_keys.push(key);
+                continue;
+            }
+            let slot = slots.get(&key).copied().ok_or_else(|| {
+                format!("an override with no slot to replace (`{}`)", function.name)
+            })?;
+            class_replaces = Some(slot);
+        }
         let replaces = match replaces {
             Some(slot) => Some(slot),
-            None => match overridden_functions.get(&fid) {
-                Some(&overridden) => {
-                    check_same_representation(ir, function, &ir.functions[overridden as usize])?;
-                    let owner = ir.functions[overridden as usize]
-                        .dispatch_receiver
-                        .and_then(|owner| ir.class_id_by_name(owner))
-                        .ok_or_else(|| {
-                            format!(
-                                "an override of a method declared outside this file (`{}`)",
-                                function.name
-                            )
-                        })?;
-                    let key = function_key(ir, owner, overridden);
-                    Some(slots.get(&key).copied().ok_or_else(|| {
-                        format!("an override with no slot to replace (`{}`)", function.name)
-                    })?)
-                }
+            None => match class_replaces {
+                Some(slot) => Some(slot),
                 None => match &own_key {
                     SlotKey::Getter(_, name) | SlotKey::Setter(_, name) => {
                         let setter = matches!(own_key, SlotKey::Setter(..));
                         overridden_property_slot(
+                            ir,
                             &overridden_properties,
                             &slots,
                             name,
@@ -425,6 +722,9 @@ fn layout_class(
             }
         };
         slots.insert(own_key, slot);
+        for key in interface_keys {
+            slots.insert(key, slot);
+        }
     }
 
     // Open or overriding properties with no source accessor still dispatch: synthesize the
@@ -453,6 +753,7 @@ fn layout_class(
                 SlotKey::Getter(id, property.name.clone())
             };
             let replaces = overridden_property_slot(
+                ir,
                 &overridden_properties,
                 &slots,
                 &property.name,
@@ -470,8 +771,25 @@ fn layout_class(
                 }
             };
             slots.insert(key, slot);
+            for (owner, overridden_name) in overridden_properties
+                .get(&property.name)
+                .into_iter()
+                .flatten()
+            {
+                if !ir.classes[*owner as usize].is_interface {
+                    continue;
+                }
+                let key = if setter {
+                    SlotKey::Setter(*owner, overridden_name.clone())
+                } else {
+                    SlotKey::Getter(*owner, overridden_name.clone())
+                };
+                slots.insert(key, slot);
+            }
         }
     }
+
+    register_inherited_interface_members(ir, class, &mut slots)?;
 
     Ok(ClassLayout {
         superclass,
@@ -482,6 +800,105 @@ fn layout_class(
         vtable,
         slots,
     })
+}
+
+/// Point an interface's member numbers at implementations this class INHERITS rather than declares.
+///
+/// Kotlin calls this a fake override: `class B : A(), I` satisfies `I.foo` with `A.foo`, and `A`
+/// knows nothing about `I`. `A.foo` already occupies a slot in this class's table — inherited with
+/// the rest of `A`'s — so what is missing is only the interface's number pointing at that slot,
+/// which nothing in the loop over the class's OWN members could have added. The frontend records
+/// the edge on the class that brings the two together, which is this one.
+fn register_inherited_interface_members(
+    ir: &IrFile,
+    class: &IrClass,
+    slots: &mut HashMap<SlotKey, u32>,
+) -> Result<(), Unsupported> {
+    let module_function = |target: &ResolvedFunctionOverrideTarget| match target {
+        ResolvedFunctionOverrideTarget::Module(callable) => {
+            ir.checked_callable_functions.get(callable).copied()
+        }
+        ResolvedFunctionOverrideTarget::External(_) => None,
+    };
+    for edge in ir
+        .function_overrides
+        .get(&class.fq_name_id())
+        .into_iter()
+        .flatten()
+    {
+        if !edge.overridden_is_interface {
+            continue;
+        }
+        let implementation = edge
+            .implementation_function
+            .or_else(|| module_function(&edge.implementation));
+        let (Some(implementation), Some(overridden)) =
+            (implementation, module_function(&edge.overridden))
+        else {
+            continue;
+        };
+        let (Some(owner), Some(interface)) = (
+            ir.class_id_by_name(edge.implementation_owner),
+            ir.class_id_by_name(edge.overridden_owner),
+        ) else {
+            continue;
+        };
+        let Some(&slot) = slots.get(&function_key(ir, owner, implementation)) else {
+            continue;
+        };
+        // The inherited method has to be CALLABLE through the interface's signature. `class F5 :
+        // F3, D4()` where `D4.foo(): Int` is what `D1.foo(): Any` gets is the case that says why:
+        // one returns an unboxed machine integer, the other a reference, and pointing the
+        // interface's slot at it would have a caller read an integer as a pointer. The JVM emits a
+        // bridge for exactly this; until one is emitted here, the file is declined.
+        check_same_representation(
+            ir,
+            &ir.functions[implementation as usize],
+            &ir.functions[overridden as usize],
+        )?;
+        slots
+            .entry(function_key(ir, interface, overridden))
+            .or_insert(slot);
+    }
+    for edge in ir
+        .property_overrides
+        .get(&class.fq_name_id())
+        .into_iter()
+        .flatten()
+    {
+        if !edge.overridden_is_interface {
+            continue;
+        }
+        let property = |target: &ResolvedPropertyOverrideTarget| match target {
+            ResolvedPropertyOverrideTarget::Module(id) => ir.checked_properties.get(id),
+            ResolvedPropertyOverrideTarget::External(_) => None,
+        };
+        let (Some(implementation), Some(overridden)) =
+            (property(&edge.implementation), property(&edge.overridden))
+        else {
+            continue;
+        };
+        let (Some(owner), Some(interface)) = (implementation.class, overridden.class) else {
+            continue;
+        };
+        for setter in [false, true] {
+            let (from, to) = if setter {
+                (
+                    SlotKey::Setter(owner, implementation.name.clone()),
+                    SlotKey::Setter(interface, overridden.name.clone()),
+                )
+            } else {
+                (
+                    SlotKey::Getter(owner, implementation.name.clone()),
+                    SlotKey::Getter(interface, overridden.name.clone()),
+                )
+            };
+            if let Some(&slot) = slots.get(&from) {
+                slots.entry(to).or_insert(slot);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The slot key of a method of `owner`: a property accessor is keyed by its property.
@@ -501,13 +918,21 @@ pub(super) fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
 /// The slot an overriding property accessor replaces, found through the overridden property's
 /// declaring class.
 fn overridden_property_slot(
-    overridden: &HashMap<String, (ClassId, String)>,
+    ir: &IrFile,
+    overridden: &HashMap<String, Vec<(ClassId, String)>>,
     slots: &HashMap<SlotKey, u32>,
     name: &str,
     setter: bool,
     class_name: &str,
 ) -> Result<Option<u32>, Unsupported> {
-    let Some((owner, overridden_name)) = overridden.get(name) else {
+    // Only a CLASS base owns a slot to replace. An interface base owns a number in the program-wide
+    // interface region instead, and that is pointed at this property afterwards rather than
+    // replaced here.
+    let Some((owner, overridden_name)) = overridden.get(name).and_then(|targets| {
+        targets
+            .iter()
+            .find(|(owner, _)| !ir.classes[*owner as usize].is_interface)
+    }) else {
         return Ok(None);
     };
     let key = if setter {
@@ -529,8 +954,8 @@ fn overridden_property_slot(
 fn overridden_functions(
     ir: &IrFile,
     class: &IrClass,
-) -> Result<HashMap<FunId, FunId>, Unsupported> {
-    let mut map = HashMap::new();
+) -> Result<HashMap<FunId, Vec<FunId>>, Unsupported> {
+    let mut map: HashMap<FunId, Vec<FunId>> = HashMap::new();
     let Some(overrides) = ir.function_overrides.get(&class.fq_name_id()) else {
         return Ok(map);
     };
@@ -550,8 +975,13 @@ fn overridden_functions(
             ResolvedFunctionOverrideTarget::Module(callable) => {
                 match ir.checked_callable_functions.get(callable) {
                     Some(&overridden) => {
-                        // The nearest override wins when a chain records several edges.
-                        map.entry(implementation).or_insert(overridden);
+                        // EVERY target, not just the nearest: one method can override its
+                        // superclass's and an interface's at once, and the two want different
+                        // things — one slot replaced, one interface number pointed here.
+                        let targets = map.entry(implementation).or_default();
+                        if !targets.contains(&overridden) {
+                            targets.push(overridden);
+                        }
                     }
                     None => {
                         return Err(format!(
@@ -581,8 +1011,8 @@ fn overridden_properties(
     ir: &IrFile,
     id: ClassId,
     class: &IrClass,
-) -> Result<HashMap<String, (ClassId, String)>, Unsupported> {
-    let mut map = HashMap::new();
+) -> Result<HashMap<String, Vec<(ClassId, String)>>, Unsupported> {
+    let mut map: HashMap<String, Vec<(ClassId, String)>> = HashMap::new();
     let Some(overrides) = ir.property_overrides.get(&class.fq_name_id()) else {
         return Ok(map);
     };
@@ -610,9 +1040,15 @@ fn overridden_properties(
                 edge.name
             ));
         };
-        // Depth 1 is the direct base; deeper edges describe the same slot.
-        if edge.depth == 1 || !map.contains_key(&property.name) {
-            map.insert(property.name.clone(), overridden);
+        // Every target: a property can override a superclass's and an interface's at once, and
+        // the direct base's edge (depth 1) is the one whose slot is replaced, so it goes first.
+        let targets = map.entry(property.name.clone()).or_default();
+        if !targets.contains(&overridden) {
+            if edge.depth == 1 {
+                targets.insert(0, overridden);
+            } else {
+                targets.push(overridden);
+            }
         }
     }
     Ok(map)
@@ -1076,11 +1512,9 @@ mod tests {
     fn out_of_scope_classes_are_declined_by_name() {
         let mut ir = IrFile::default();
         let id = class(&mut ir, "D", "kotlin/Any", 0);
-        // A `data class` is deliberately absent from this list: its synthesized members are
-        // ordinary functions in common IR, so it lowers like the class it is.
-        ir.classes[id as usize].is_interface = true;
-        assert!(build(&ir).expect_err("declined").contains("an interface"));
-        ir.classes[id as usize].is_interface = false;
+        // A `data class` and an interface are deliberately absent from this list: a data class's
+        // synthesized members are ordinary functions in common IR, and an interface's members have
+        // slots of their own, so both lower like the classes they are.
         ir.classes[id as usize].is_inner_class = true;
         assert!(build(&ir).expect_err("declined").contains("an inner class"));
     }

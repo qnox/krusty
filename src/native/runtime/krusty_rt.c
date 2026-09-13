@@ -520,6 +520,13 @@ kt_boolean kt_is_instance(KRef object, const KType *type) {
         if (at == type) {
             return true;
         }
+        /* An interface is not on the super chain, so each type carries the ones it implements.
+           The list is already transitive, so this is a scan and not a second walk. */
+        for (uint32_t i = 0; i < at->interface_count; i++) {
+            if (at->interfaces[i] == type) {
+                return true;
+            }
+        }
     }
     return false;
 }

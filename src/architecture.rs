@@ -339,7 +339,11 @@ mod tests {
         // `fir` is on this list for the identities common IR carries by value: a checked property
         // operation names a `PropertyId`, and an override edge names the `CallableId` it resolved.
         // Both are part of the IR contract, not a way back into the frontend.
-        assert_allowed_crate_modules("src/native/classes.rs", &["fir", "ir", "types"]);
+        // `names` for the same reason `lower/statics.rs` has it: Kotlin's accessor-naming rule is
+        // what common lowering applied when it named an abstract property's accessor, and reading
+        // it from the same place is what lets the interface and its implementation agree on one
+        // key for the member.
+        assert_allowed_crate_modules("src/native/classes.rs", &["fir", "ir", "names", "types"]);
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
     }
 

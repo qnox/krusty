@@ -219,6 +219,7 @@ impl<'a> FileLowering<'a> {
                 &references,
                 &vtable,
                 any_type,
+                &[],
             )?;
             self.define_thunk(thunk, &base, impl_fn, &capture_offsets, arity)?;
             let singleton = if captures.is_empty() {
@@ -333,6 +334,7 @@ impl<'a> FileLowering<'a> {
             &references,
             &vtable,
             any_type,
+            &[],
         )?;
         self.holders.insert(key, descriptor);
         Ok(descriptor)
