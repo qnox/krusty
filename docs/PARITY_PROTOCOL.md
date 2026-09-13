@@ -1869,3 +1869,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
   parameter descriptors and every constant the body introduces.
   `tests/java_parameters_attribute_e2e.rs`.
+- **A receiver-function argument needs the source-aware unifier (fix).** A declared parameter and its
+  actual argument need not name the same classifier:
+  `operator fun <T> Collection<T>.plus(elements: Iterable<T>): List<T>` called on a `List` has to
+  project the argument to `Iterable` before `T` can read its element type. The receiver-function
+  selection path used the source-LESS unifier, which only matches equal owners, so the argument
+  contributed no constraint at all and `T` stayed pinned at the receiver's element type.
+  `servers + infra` over two branches of a sealed hierarchy then reported
+  `actual 'List<Infra>', but 'Iterable<Server>' was expected` — a type kotlinc never forms, since both
+  sides are lower bounds on `T` and the answer is their join. The named spelling `a.plus(b)` resolved
+  through the extension path and always worked, which is what isolated the operator path as the
+  culprit; declaration-site variance was already decoded correctly and was not the cause.
+  `tests/receiver_and_argument_join_e2e.rs::plus_joins_the_receiver_and_the_argument_without_an_expected_type`.

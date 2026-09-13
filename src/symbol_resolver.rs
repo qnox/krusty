@@ -2790,7 +2790,13 @@ impl<'a> SymbolResolver<'a> {
                 && !argument.is_expected_type_callable()
                 && !argument.is_omitted_default()
             {
-                unify_inferred_ty(
+                // Source-aware: the declared parameter and the actual argument need not name the
+                // same classifier. `Collection<T>.plus(elements: Iterable<T>)` called on a `List`
+                // has to project the argument to `Iterable` before `T` can read its element type,
+                // and the source-less unifier only matches equal owners — so the argument
+                // contributed NO constraint and `T` stayed pinned at the receiver's element type.
+                unify_inferred_ty_with_source(
+                    &self.src,
                     parameter,
                     argument.type_for(parameter),
                     &mut argument_bindings,

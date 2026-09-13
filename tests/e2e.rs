@@ -1127,6 +1127,8 @@ mod range_property_e2e;
 mod range_step_e2e;
 #[path = "raw_string_interpolation_e2e.rs"]
 mod raw_string_interpolation_e2e;
+#[path = "receiver_and_argument_join_e2e.rs"]
+mod receiver_and_argument_join_e2e;
 #[path = "receiver_fn_value_invoke_e2e.rs"]
 mod receiver_fn_value_invoke_e2e;
 #[path = "receiver_lambda_e2e.rs"]
