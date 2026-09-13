@@ -101,9 +101,21 @@ fn a_non_unit_generic_member_extension_lambda_still_needs_an_exhaustive_when() {
         )],
         &classpath,
     );
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must still require an exhaustive `when` in a value position"
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc names the rejected file");
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:5:12: error: return type mismatch: expected 'String', actual \
+                 'Unit'.\n  h.pick {{ when {{ flag -> \"a\" }} }}\n           ^^^^^^^^^^^^^^^^^^^^\n"
+            )
+            .as_str()
+        ),
     );
     let path = result
         .krusty_stderr

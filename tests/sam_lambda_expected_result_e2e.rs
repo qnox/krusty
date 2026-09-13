@@ -129,12 +129,37 @@ fn a_body_disagreeing_with_the_declared_result_is_still_rejected() {
         )],
         &classpath,
     );
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a body that is not the declared result"
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc names the rejected file");
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:3:55: error: return type mismatch: expected 'Mono<Auth!>!', \
+                 actual 'String'.\nfun use(m: Mono<Auth>): Mono<Auth> = m.onErrorExact {{ \"not a \
+                 Mono\" }}\n                                                      ^^^^^^^^^^^^\n"
+            )
+            .as_str()
+        ),
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty must reject a body that is not the declared result"
+    let path = result
+        .krusty_stderr
+        .split(':')
+        .next()
+        .expect("krusty names the rejected file");
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{path}:3:53: error: type mismatch: inferred type is String but Mono<Auth>! was \
+                 expected\nkrusty: 1 error(s)\n"
+            )
+            .as_str()
+        ),
     );
 }
