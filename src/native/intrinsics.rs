@@ -81,6 +81,35 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
     }
 }
 
+/// What a scope function's call yields once its block has run.
+///
+/// `apply`, `also`, `let` and `run` differ in exactly this and in nothing else: each evaluates the
+/// receiver once, hands it to the block, and then yields either the receiver it was called on or
+/// whatever the block returned. Kotlin's own signatures say which.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScopeResult {
+    /// `T.apply(block: T.() -> Unit): T` and `T.also(block: (T) -> Unit): T`.
+    Receiver,
+    /// `T.let(block: (T) -> R): R` and `T.run(block: T.() -> R): R`.
+    BlockResult,
+}
+
+/// Which scope function a selected dependency member is, or `None` for anything else.
+///
+/// A block written at the call site never arrives here: these are `inline`, and the checked
+/// lowering splices such a block into its caller. What arrives is the call whose block is an
+/// ordinary function VALUE, which has no body to splice.
+pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
+    if facade_package(kotlin_owner(owner))? != "kotlin" {
+        return None;
+    }
+    match name {
+        "apply" | "also" => Some(ScopeResult::Receiver),
+        "let" | "run" => Some(ScopeResult::BlockResult),
+        _ => None,
+    }
+}
+
 /// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
 /// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
 /// which is what `4.toString()` means anyway.

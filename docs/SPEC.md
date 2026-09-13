@@ -4335,6 +4335,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/fir_lower/sink.rs`, `src/native/codegen/lower.rs`,
   `tests/native_codegen_e2e.rs::a_tailrec_the_checked_lowering_leaves_recursive_is_declined`).
 
+- **An extension property is its accessors.** `val Cell.doubled get() = value * 2` has no backing
+  field — there is no object of its own to keep one in — so every read and write is a call to the
+  accessor, with the receiver passed as an argument. The parameter order is Kotlin's declaration
+  order: context parameters, then the extension receiver, then the value a setter takes, which is
+  what the checked lowering records in `IrFile::local_property_layouts` when it builds the
+  accessors (`src/native/codegen/lower/statics.rs`,
+  `tests/native_codegen_e2e.rs::an_extension_property_is_read_and_written_through_its_accessors`).
+
+- **A scope function whose block is a function value is still a scope function.** `apply`, `also`,
+  `let` and `run` are `inline`, so a block written at the call site is spliced and never reaches a
+  backend. A block that arrives as a function-typed parameter (`fun build(instructions: Box.() ->
+  Unit) = fresh().apply(instructions)`) has no body to splice, so the call survives and has to be
+  realized: invoke the block on the receiver, which is evaluated once, and yield the receiver for
+  `apply`/`also` or the block's result for `let`/`run`
+  (`src/native/codegen/lower/scope.rs`,
+  `tests/native_codegen_e2e.rs::a_scope_function_whose_block_is_a_function_value_runs`).
+
+- **An `inline` call's block is the call site's own code.** `x.apply { … }` and its siblings are
+  `inline`, and the checked lowering splices the block into the caller rather than making a
+  function value of it. What it leaves behind is a cleared standalone implementation and an
+  orphaned lambda node, both unreachable; a backend must emit neither. Emitting the node's thunk
+  fails at LINK time, not at compile time, because the thunk calls the implementation the splice
+  cleared (`src/native/codegen/lower.rs`, `src/native/codegen/lower/functions.rs`,
+  `tests/native_codegen_e2e.rs::the_stdlib_scope_functions_are_expanded_at_the_call_site`).
+
 - **Equality on a function value is declined natively.** Kotlin answers `::f == ::f` with `true`:
   a callable reference compares by the declaration it names and the receiver it binds, not by
   identity. A lambda's `equals`/`hashCode` ARE identity, which the native backend would answer

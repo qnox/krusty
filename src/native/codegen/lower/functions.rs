@@ -166,6 +166,13 @@ impl<'a> FileLowering<'a> {
                 .functions
                 .get(impl_fn as usize)
                 .ok_or_else(|| "a function value with no body function".to_string())?;
+            // A lambda the checked lowering spliced into an `inline` caller leaves its expression
+            // node behind in the arena, orphaned, with the implementation it named already
+            // cleared. Declaring a thunk for it would emit a call to a function nobody defines —
+            // the link fails, not the compile. Nothing reaches the node, so nothing needs it.
+            if body.body.is_none() && self.ir.inline_only_fns.contains(&impl_fn) {
+                continue;
+            }
             // What the body takes beyond the captures is what a caller supplies. A SUSPEND lambda's
             // body takes a continuation nobody here can pass, and that is what this catches.
             let Some(arity) = body.params.len().checked_sub(captures.len()) else {
@@ -405,6 +412,27 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             &vec![any(); arguments.len()],
             any(),
             &arguments,
+        )?;
+        match result {
+            Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),
+            _ => Ok(None),
+        }
+    }
+
+    /// Call a function value that is already a `Value`, with arguments that already are too:
+    /// `invoke_function`'s other half, for a caller holding values rather than expressions.
+    pub(super) fn invoke_value(
+        &mut self,
+        function: Value,
+        arguments: &[Value],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let result = self.dispatch(
+            function,
+            INVOKE_SLOT,
+            &vec![any(); arguments.len()],
+            any(),
+            arguments,
         )?;
         match result {
             Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),

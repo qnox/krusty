@@ -1273,3 +1273,90 @@ fn a_tailrec_the_checked_lowering_leaves_recursive_is_declined() {
         );
     }
 }
+
+#[test]
+fn the_stdlib_scope_functions_are_expanded_at_the_call_site() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `apply`/`also` yield the receiver, `let`/`run` yield the block's result, and all four hand
+    // the block the receiver — evaluated exactly once, which the counter pins: `next()` runs once
+    // per call however often the block mentions the value it returned.
+    assert_eq!(
+        run("class Box(var n: Int) {\n\
+             \x20   fun twice(): Int = n * 2\n\
+             }\n\
+             var calls = 0\n\
+             fun next(): Box { calls = calls + 1; return Box(3) }\n\
+             fun main() {\n\
+             \x20   val applied = next().apply { n = n + 1 }\n\
+             \x20   println(applied.n)\n\
+             \x20   val also = next().also { it.n = it.n + 10 }\n\
+             \x20   println(also.n)\n\
+             \x20   println(next().let { it.n + it.twice() })\n\
+             \x20   println(next().run { n + twice() })\n\
+             \x20   val captured = 100\n\
+             \x20   println(next().let { it.n + captured })\n\
+             \x20   println(calls)\n\
+             }\n"),
+        "4\n13\n9\n9\n103\n5\n"
+    );
+}
+
+#[test]
+fn a_scope_function_whose_block_is_a_function_value_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `apply { … }` written at the call site is spliced by the checked lowering and never reaches
+    // the generator. This is the other shape: the block arrives as a function-typed PARAMETER, so
+    // there is nothing to splice and the call has to be realized — invoke the block on the
+    // receiver, then yield what Kotlin's signature says. The counter pins the receiver being
+    // evaluated once.
+    assert_eq!(
+        run("class Box(var n: Int)\n\
+             var made = 0\n\
+             fun fresh(): Box { made = made + 1; return Box(2) }\n\
+             fun build(instructions: Box.() -> Unit): Box = fresh().apply(instructions)\n\
+             fun over(block: (Box) -> Unit): Box = fresh().also(block)\n\
+             fun read(block: (Box) -> Int): Int = fresh().let(block)\n\
+             fun on(block: Box.() -> Int): Int = fresh().run(block)\n\
+             fun main() {\n\
+             \x20   println(build { n = n + 5 }.n)\n\
+             \x20   println(over { it.n = it.n + 7 }.n)\n\
+             \x20   println(read { it.n + 30 })\n\
+             \x20   println(on { n + 40 })\n\
+             \x20   println(made)\n\
+             }\n"),
+        "7\n9\n32\n42\n4\n"
+    );
+}
+
+#[test]
+fn an_extension_property_is_read_and_written_through_its_accessors() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An extension property has no storage of its own — there is no object to keep a field in —
+    // so every access is a call to its accessor, with the receiver as an argument. A `var` one
+    // writes through its setter, and the receiver is what the setter changes.
+    assert_eq!(
+        run("class Cell(var value: Int)\n\
+             val Cell.doubled: Int get() = value * 2\n\
+             var Cell.raised: Int\n\
+             \x20   get() = value + 1\n\
+             \x20   set(next) { value = next - 1 }\n\
+             fun main() {\n\
+             \x20   val cell = Cell(20)\n\
+             \x20   println(cell.doubled)\n\
+             \x20   println(cell.raised)\n\
+             \x20   cell.raised = 100\n\
+             \x20   println(cell.value)\n\
+             \x20   println(cell.doubled)\n\
+             }\n"),
+        "40\n21\n99\n198\n"
+    );
+}

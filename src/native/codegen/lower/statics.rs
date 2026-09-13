@@ -234,3 +234,66 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(())
     }
 }
+
+impl BodyLowering<'_, '_, '_> {
+    /// Read or write a property that has a receiver its owner does not supply: an extension
+    /// property (`val Foo.bar get() = …`) or one with context parameters.
+    ///
+    /// There is no storage to reach — an extension property cannot have a backing field, because
+    /// there is no object of its own to keep one in — so every such access is a call to the
+    /// accessor the checked lowering already built. What that lowering also recorded is the
+    /// accessor's parameter ORDER, and it is the one Kotlin declares: the context parameters,
+    /// then the extension receiver, then (for a setter) the value. Reading the order back from
+    /// `IrFile::local_property_layouts` is the point of that table; deriving it from the
+    /// accessor's name or arity would be guessing at what is already written down.
+    pub(super) fn receiver_property(
+        &mut self,
+        target: &crate::fir::PropertyId,
+        extension_receiver: Option<u32>,
+        context_arguments: &[u32],
+        value: Option<u32>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(layout) = self.file.ir.local_property_layouts.get(target) else {
+            return Err("an extension or context property with no realization".to_string());
+        };
+        let IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } = layout else {
+            // A MEMBER extension property (`class C { val Foo.bar get() = … }`) is an instance
+            // method and can be overridden, so it wants the receiver's vtable slot rather than a
+            // direct call. That is the dispatch work this slice does not do.
+            return Err("a member extension or context property".to_string());
+        };
+        let function = match value {
+            None => *getter,
+            Some(_) => setter.ok_or_else(|| "a write to a read-only property".to_string())?,
+        };
+        let parameters = self.file.ir.functions[function as usize].params.clone();
+        let supplied = context_arguments
+            .iter()
+            .copied()
+            .chain(extension_receiver)
+            .chain(value)
+            .collect::<Vec<_>>();
+        if supplied.len() != parameters.len() {
+            return Err(format!(
+                "an accessor taking {} operands for {} parameters",
+                parameters.len(),
+                supplied.len()
+            ));
+        }
+        let mut arguments = Vec::with_capacity(supplied.len());
+        for (operand, ty) in supplied.iter().zip(&parameters) {
+            let Some(argument) = self.coerce(*operand, *ty)? else {
+                return Err("a `Unit` operand of a property accessor".to_string());
+            };
+            if self.terminated {
+                return Ok(None);
+            }
+            arguments.push(argument);
+        }
+        let id = self.file.functions[function as usize]
+            .ok_or_else(|| "a property accessor with no body".to_string())?;
+        let func_ref = self.func_ref(id);
+        let call = self.builder.ins().call(func_ref, &arguments);
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+}

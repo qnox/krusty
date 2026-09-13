@@ -1154,6 +1154,26 @@ before:**
    Kotlin, and the checked lowering now rewrites it, which makes `unitBlocks.kt` pass outright. The
    expected-failures list dropped from 14 entries to 8, and every one that remains is a wrong ANSWER
    krusty's JVM backend gives too, not a crash that depends on where it runs.
+   The next slice cost two lines and bought **937 pass**. `x.apply { … }`, `let`, `run` and `also`
+   were the largest single decline in the table, and the reason was not that the generator could not
+   compile them: the checked lowering had ALREADY spliced each one into its caller, exactly as
+   `inline` means, and then cleared the block's standalone implementation because nothing calls it.
+   The native backend was reading that cleared implementation as a function it could not compile,
+   and the orphaned lambda node left in the expression arena as a function value to build a thunk
+   for — a thunk calling a symbol nobody defines, which fails the LINK rather than the compile. Both
+   now skip what the splice made dead. The lesson generalizes past this slice: a decline is a claim
+   about what the generator cannot do, and it is worth checking that the claim is true before
+   building the feature it asks for.
+   What survived that check was the other half of the same entry, and it took the lane past a
+   thousand: **1002 pass**. A scope function whose block arrives as a function-typed PARAMETER has
+   no body to splice — `fun build(instructions: Buildee<T>.() -> Unit) = Buildee<T>().apply(
+   instructions)`, the shape every `inference/pcla` case is built on — so the call reaches the
+   generator and is realized as what it means: invoke the block on the receiver, yield the receiver
+   or the block's result as Kotlin's signature says.
+   Extension and context properties followed for **1031 pass**: one has no storage, so each access
+   is a call to the accessor the checked lowering already built, in the parameter order that
+   lowering recorded. A member extension property still declines — it can be overridden, so it
+   wants its receiver's vtable slot rather than a direct call.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

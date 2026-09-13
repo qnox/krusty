@@ -16,6 +16,7 @@ use std::rc::Rc;
 mod arrays;
 mod functions;
 mod objects;
+mod scope;
 mod statics;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -31,7 +32,8 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
-    Callee, ClassId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp,
+    Callee, ClassId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
+    IrLocalPropertyLayout, IrTypeOp,
 };
 use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
@@ -384,6 +386,13 @@ impl<'a> FileLowering<'a> {
             return Ok(());
         };
         let Some(body) = function.body else {
+            // A lambda passed to an `inline` declaration has already been spliced into its caller
+            // by the checked lowering, which then clears the standalone implementation it no
+            // longer needs. Nothing calls it, so there is nothing to emit — and declining the file
+            // over it would decline every `x.apply { … }` in the corpus.
+            if self.ir.inline_only_fns.contains(&(index as u32)) {
+                return Ok(());
+            }
             return Err(format!("a body-less function `{}`", function.name));
         };
         // A `tailrec` the checked lowering could not rewrite into a loop still recurses, and this
@@ -696,7 +705,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ..
             }) => {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
-                    return Err("an extension or context property".to_string());
+                    self.receiver_property(
+                        &target,
+                        extension_receiver,
+                        &context_arguments,
+                        Some(value),
+                    )?;
+                    return Ok(());
                 }
                 match self.checked_property(&target) {
                     Ok((class, index)) => {
@@ -994,7 +1009,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ..
             }) => {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
-                    return Err("an extension or context property".to_string());
+                    return self.receiver_property(
+                        &target,
+                        extension_receiver,
+                        &context_arguments,
+                        None,
+                    );
                 }
                 match self.checked_property(&target) {
                     Ok((class, index)) => self.property_read(class, index, dispatch_receiver),
@@ -1658,6 +1678,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             && self.is_function_expression(receiver)
                         {
                             return Err("equality on a function value".to_string());
+                        }
+                        // `x.apply(block)` where `block` is a function VALUE rather than a
+                        // lambda written here: nothing was spliced, so the call is realized as
+                        // what it means — invoke the block on the receiver.
+                        if let Some(realized) =
+                            self.scope_function(&owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
                         }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)
