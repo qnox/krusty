@@ -83,7 +83,11 @@ impl<'a> FileLowering<'a> {
                 .get(impl_fn as usize)
                 .ok_or_else(|| "a lambda with no body function".to_string())?;
             if body.params.len() != captures.len() + arity {
-                return Err("a lambda whose captures do not match its body".to_string());
+                return Err(format!(
+                    "a lambda whose body takes {} parameters for {} captures and arity {arity}",
+                    body.params.len(),
+                    captures.len()
+                ));
             }
             let capture_types: Vec<Ty> = body.params[..captures.len()].to_vec();
             let (capture_offsets, instance_size, references) = layout(&capture_types);

@@ -197,13 +197,14 @@ fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Ou
 
 /// Run the linked program with a deadline; its stdout, or what went wrong.
 fn run(executable: &Path) -> Result<String, String> {
-    let mut child = Command::new(executable)
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not start the program: {error}"))?;
+    let mut child = super::common::spawn_freshly_written(
+        Command::new(executable)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|error| format!("could not start the program: {error}"))?;
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -374,6 +375,7 @@ fn kotlin_codegen_box_native_conformance() {
     let mut frontend = 0usize;
     let mut declined: BTreeMap<String, usize> = BTreeMap::new();
     let mut not_applicable: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut traced: Vec<(PathBuf, String)> = Vec::new();
     let mut frontend_panics: Vec<(PathBuf, String)> = Vec::new();
     let mut known_failures: Vec<(PathBuf, String)> = Vec::new();
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
@@ -391,7 +393,10 @@ fn kotlin_codegen_box_native_conformance() {
             Outcome::Pass => passed += 1,
             Outcome::Frontend => frontend += 1,
             Outcome::FrontendPanic(reason) => frontend_panics.push((file.clone(), reason)),
-            Outcome::Declined(reason) => *declined.entry(reason).or_default() += 1,
+            Outcome::Declined(reason) => {
+                traced.push((file.clone(), reason.clone()));
+                *declined.entry(reason).or_default() += 1;
+            }
             Outcome::NotApplicable(reason) => *not_applicable.entry(reason).or_default() += 1,
             Outcome::Failed(reason) => match known.get(relative.as_str()) {
                 Some(why) => known_failures.push((file.clone(), format!("{reason} — {why}"))),
@@ -416,6 +421,16 @@ fn kotlin_codegen_box_native_conformance() {
         ("failed", failed.len()),
     ]);
     eprintln!("{report} ({:.1}s)", started.elapsed().as_secs_f64());
+
+    // Triage: name the cases behind one decline reason, so a line in the table below can be
+    // followed back to the source that produced it.
+    if let Ok(pattern) = std::env::var("KRUSTY_NATIVE_BOX_TRACE") {
+        for (file, reason) in &traced {
+            if reason.contains(&pattern) {
+                eprintln!("  traced {}: {reason}", file.display());
+            }
+        }
+    }
 
     // The backlog: what the generator declines, most frequent first.
     let mut reasons: Vec<(&String, &usize)> = declined.iter().collect();

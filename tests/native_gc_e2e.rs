@@ -19,6 +19,8 @@ use std::process::Command;
 
 use krusty::native::NativeTarget;
 
+use super::common;
+
 /// A scratch directory that cleans itself up.
 struct Scratch(PathBuf);
 
@@ -469,9 +471,7 @@ fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
             .expect("chmod");
     }
-    let output = Command::new(&executable)
-        .env_clear()
-        .output()
+    let output = common::run_freshly_written(Command::new(&executable).env_clear())
         .expect("run the built executable");
     let code = output.status.code().unwrap_or(-1);
     assert_eq!(

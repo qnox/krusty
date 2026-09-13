@@ -18,6 +18,8 @@ use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
+use super::common;
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -104,9 +106,8 @@ fn run(source: &str) -> String {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
             .expect("chmod");
     }
-    let output = std::process::Command::new(&executable)
-        .env_clear() // no PATH, no JAVA_HOME: nothing but the binary itself
-        .output()
+    // `env_clear`: no PATH, no JAVA_HOME — nothing but the binary itself.
+    let output = common::run_freshly_written(std::process::Command::new(&executable).env_clear())
         .expect("run the built executable");
     assert!(
         output.status.success(),
@@ -237,10 +238,9 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
                 std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
                     .unwrap();
             }
-            let output = std::process::Command::new(&executable)
-                .env_clear()
-                .output()
-                .expect("run");
+            let output =
+                common::run_freshly_written(std::process::Command::new(&executable).env_clear())
+                    .expect("run");
             assert_eq!(
                 String::from_utf8_lossy(&output.stdout),
                 "Hello, world! 55\n",
@@ -839,9 +839,7 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let output = std::process::Command::new(&executable)
-        .env_clear()
-        .output()
+    let output = common::run_freshly_written(std::process::Command::new(&executable).env_clear())
         .expect("run");
     assert!(!output.status.success(), "a `!!` on null must not continue");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
@@ -957,5 +955,25 @@ fn a_lambda_that_captures_nothing_is_one_object() {
              \x20   println(adder(1)(10))\n\
              }\n"),
         "true\ntrue\nfalse\n11\n"
+    );
+}
+
+#[test]
+fn the_unit_value_is_the_runtimes_own() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Unit` is one value for the whole program, so it is the runtime's rather than something each
+    // file declares — which is also why a file that merely mentions it needs nothing emitted.
+    assert_eq!(
+        run("fun nothing(): Unit = Unit\n\
+             fun main() {\n\
+             \x20   println(nothing())\n\
+             \x20   println(nothing() === Unit)\n\
+             \x20   val u: Any = Unit\n\
+             \x20   println(u == Unit)\n\
+             }\n"),
+        "kotlin.Unit\ntrue\ntrue\n"
     );
 }

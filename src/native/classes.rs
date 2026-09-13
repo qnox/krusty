@@ -209,6 +209,12 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
         "an inner class"
     } else if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
         "an enum class"
+    } else if class.is_value {
+        // A `value class` is not a one-field class: Kotlin gives it equality, hashing and rendering
+        // by its underlying value, and the JVM erases it to that value entirely. Common IR carries
+        // it as an ordinary class, and treating it as one compiles — and answers `IC(1) == IC(1)`
+        // with identity, which is false. Declined until the generator realizes those members.
+        "a value class"
     } else if !class.secondary_ctors.is_empty() {
         "a secondary constructor"
     } else if ir
@@ -217,8 +223,6 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
         || class.ctor_args.iter().any(|argument| argument.has_default)
     {
         "a constructor default argument"
-    } else if class.is_value {
-        "a value class"
     } else if class.is_annotation || class.annotation_impl_of.is_some() {
         "an annotation class"
     } else if class.is_anonymous_object

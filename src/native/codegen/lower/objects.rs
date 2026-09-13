@@ -965,6 +965,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// The instance of an `object` declaration.
     pub(super) fn singleton(&mut self, classifier: TypeName) -> Result<Option<Value>, Unsupported> {
+        // `Unit` is the runtime's, not the program's: every file that mentions it means the same
+        // one value, so there is nothing per-file to declare.
+        if classifier.matches("kotlin/Unit") {
+            return self.runtime_call("kt_unit", &[], any(), &[]);
+        }
         let class = self.file.class_of(classifier, "the object")?;
         let Some((_, getter)) = self.file.classes[class as usize].singleton else {
             return Err(format!(

@@ -14,6 +14,37 @@ use krusty::jvm::classpath::Classpath;
 /// Locate the batch CLI built from the separate `krusty-cli` workspace package.
 ///
 /// The canonical test runner builds it before starting the suite. A direct `cargo test -p krusty`
+/// Spawn a just-written executable, waiting out the window in which the kernel still sees an open
+/// write handle to it.
+///
+/// A test that writes a program and immediately runs it races every OTHER test in the binary: a
+/// `Command::spawn` on another thread forks, inheriting this file's still-open write descriptor,
+/// and the exec here fails with `ETXTBSY` until that child reaches its own exec and the
+/// close-on-exec flag takes effect. The window is microseconds and nothing about the compiler is
+/// being tested by it, so it is waited out rather than reported as a failure.
+#[allow(dead_code)]
+pub fn spawn_freshly_written(command: &mut Command) -> std::io::Result<Child> {
+    /// `ETXTBSY`. Spelled as its number because `ErrorKind::ExecutableFileBusy` is still unstable.
+    const TEXT_FILE_BUSY: i32 = 26;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(TEXT_FILE_BUSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Run a just-written executable to completion, with [`spawn_freshly_written`]'s retry.
+#[allow(dead_code)]
+pub fn run_freshly_written(command: &mut Command) -> std::io::Result<std::process::Output> {
+    spawn_freshly_written(command.stdout(Stdio::piped()).stderr(Stdio::piped()))?.wait_with_output()
+}
+
 /// may not, so build it once on demand in the test profile rather than coupling the compiler crate
 /// back to the executable package.
 #[allow(dead_code)]

@@ -1139,6 +1139,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// An expression coerced to the carrier of `target`.
     fn coerce(&mut self, arg: u32, target: Ty) -> Result<Option<Value>, Unsupported> {
         let Some(value) = self.expression(arg)? else {
+            // `Unit` is a value in Kotlin, and a position that wants a reference wants that value:
+            // `val u: Any = Unit`, an argument of type `Any?`, a `Unit`-returning lambda's result.
+            // The runtime owns the singleton, so there is one of it program-wide.
+            if !self.terminated && carrier(target) == Carrier::Ref {
+                return self.runtime_call("kt_unit", &[], any(), &[]);
+            }
             return Ok(None);
         };
         if self.terminated {
@@ -1150,13 +1156,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// An expression in a position that requires a reference, boxing a scalar if necessary.
     fn reference(&mut self, id: u32) -> Result<Value, Unsupported> {
-        match self.coerce(id, Ty::nullable(Ty::obj("kotlin/Any")))? {
+        match self.coerce(id, any())? {
             Some(value) => Ok(value),
-            None => {
-                // `Unit` as a value is the runtime's singleton.
-                let unit = self.runtime_call("kt_unit", &[], Ty::obj("kotlin/Unit"), &[])?;
-                Ok(unit.expect("`kt_unit` returns the singleton"))
-            }
+            // Only a lowering that already left has no value here; anything else, including
+            // `Unit`, `coerce` materialized.
+            None => Ok(self.builder.ins().iconst(types::I64, 0)),
         }
     }
 

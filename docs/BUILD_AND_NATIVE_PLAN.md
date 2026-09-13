@@ -1128,7 +1128,11 @@ before:**
 6. **Growing the generator by that backlog, biggest first.** Top-level properties (499 declines),
    structural equality on references (171), `x!!` (33) and function values — lambdas, invocation
    and captured-variable holders, 310 between them — have landed, each leaving the decline table
-   entirely: **717 pass**, double where the lane started, with 0 unexpected failures throughout. Realizing them exposed three native defects the gate
+   entirely: **731 pass**, more than double where the lane started, with 0 unexpected failures
+   throughout. Value classes were tried and put back: common IR carries one as an ordinary class,
+   which compiles and then answers `IC(1) == IC(1)` with identity — 27 wrong answers the lane
+   caught at once. They stay declined until the generator realizes the equality, hashing and
+   rendering Kotlin gives them. Realizing them exposed three native defects the gate
    caught and that are now fixed with tests — a `when` whose arms disagree on a carrier was typed
    from its first arm, boxed small values were not cached so `===` on them was false, and a
    companion object's initializers never ran; and a capture-free lambda was a fresh object per

@@ -17,6 +17,8 @@ use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
+use super::common;
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -99,9 +101,7 @@ fn execute(source: &str) -> std::process::Output {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
             .expect("chmod");
     }
-    std::process::Command::new(&executable)
-        .env_clear()
-        .output()
+    common::run_freshly_written(std::process::Command::new(&executable).env_clear())
         .expect("run the built executable")
 }
 

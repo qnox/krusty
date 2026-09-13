@@ -5403,6 +5403,11 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_codegen_e2e.rs`
   (`a_when_whose_arms_have_different_types_is_carried_as_a_reference`).
 
+- **`Unit` is a value, and it is the runtime's.** A position that wants a reference — `val u: Any =
+  Unit`, an `Any?` argument, a `Unit`-returning lambda's result — gets the runtime's singleton, so
+  there is one `Unit` program-wide and a file that merely mentions it emits nothing.
+  Tests: `tests/native_codegen_e2e.rs` (`the_unit_value_is_the_runtimes_own`).
+
 - **A function value is an object, and calling one is a vtable dispatch.** Common lowering has
   already made a lambda's body a top-level function whose LEADING parameters are the captured
   values, so what remains is an object holding those captures, with its body in the vtable slot

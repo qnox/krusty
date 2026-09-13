@@ -272,7 +272,8 @@ krusty carries no prebuilt runtime (no clang at build time).
 with krusty's JVM backend (`common::compile_in_process` + `common::run_box`, the two helpers the
 JVM lane uses) and compare. An identical wrong answer means the defect is in the shared frontend or
 common lowering, and the list entry should say so and quote it; anything else is the generator's and
-gets fixed, not listed.
+gets fixed, not listed. `KRUSTY_NATIVE_BOX_TRACE=<substring>` prints the case behind every decline
+whose reason contains that substring, which is how a line in the table becomes a file to read.
 
 ## JVM-Running Tests
 
