@@ -86183,6 +86183,10 @@ impl<'a> Checker<'a> {
                             let signature = candidate.generic_sig.as_ref()?;
                             Some(GenericMethod {
                                 method_tparams: signature.formals.clone(),
+                                // An UNBOUNDED type parameter's implicit bound is `Any?`, not
+                                // `Any`: `<R>` accepts a nullable binding, and a non-null default
+                                // makes inference narrow a nullable expected result to satisfy a
+                                // bound the declaration never wrote.
                                 method_tparam_bounds: signature
                                     .formal_bounds
                                     .iter()
@@ -86190,7 +86194,7 @@ impl<'a> Checker<'a> {
                                         bounds
                                             .first()
                                             .copied()
-                                            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
                                     })
                                     .collect(),
                                 param_shapes: signature.params.clone(),
@@ -86289,7 +86293,7 @@ impl<'a> Checker<'a> {
                                         .method_tparam_bounds
                                         .get(index)
                                         .copied()
-                                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))]
+                                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))]
                                 })
                                 .collect(),
                             receiver: None,

@@ -1412,6 +1412,8 @@ mod typealias_function_type_e2e;
 mod typealias_generic_target_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
+#[path = "unbounded_type_parameter_bound_e2e.rs"]
+mod unbounded_type_parameter_bound_e2e;
 #[path = "unimported_cross_package_type_e2e.rs"]
 mod unimported_cross_package_type_e2e;
 #[path = "unit_as_any_e2e.rs"]

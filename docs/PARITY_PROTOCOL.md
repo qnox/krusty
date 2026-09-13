@@ -1869,3 +1869,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
   parameter descriptors and every constant the body introduces.
   `tests/java_parameters_attribute_e2e.rs`.
+- **An unbounded method type parameter's implicit bound is `Any?` (fix).** The member lambda plan
+  defaulted a missing declared bound to NON-NULL `Any`, so binding a formal from a nullable expected
+  result failed that bound and inference narrowed it — `fun f(): Status? = wrap { source() }` shaped
+  the lambda's target as `() -> Status` and rejected a body legitimately returning `Status?`. The
+  class-parameter branch a few lines above already used `Any?`; the method branch (and the bound list
+  rebuilt from it) did not. EXPLICIT type arguments bypass the plan entirely, which is what pinned the
+  bound as the cause rather than the expected-result merge.
+  A DECLARED `R : Any` still rejects a nullable binding.
+  `tests/unbounded_type_parameter_bound_e2e.rs`.
