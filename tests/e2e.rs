@@ -1332,10 +1332,10 @@ mod suspend_unit_tail_conditional_e2e;
 mod suspend_value_class_mangle_e2e;
 #[path = "suspend_value_invoke_e2e.rs"]
 mod suspend_value_invoke_e2e;
-#[path = "suspend_when_branch_spill_e2e.rs"]
-mod suspend_when_branch_spill_e2e;
 #[path = "suspend_when_branch_resume_line_e2e.rs"]
 mod suspend_when_branch_resume_line_e2e;
+#[path = "suspend_when_branch_spill_e2e.rs"]
+mod suspend_when_branch_spill_e2e;
 #[path = "suspend_withlock_nonlocal_return_e2e.rs"]
 mod suspend_withlock_nonlocal_return_e2e;
 #[path = "synthetic_accessor_e2e.rs"]

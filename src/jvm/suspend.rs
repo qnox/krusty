@@ -26,8 +26,10 @@
 //! a conditional sub-expression like elvis/`&&`, an extension suspend fn, or a member suspend fn with its
 //! own parameters — its continuation would also have to capture them) skip the file.
 
+mod debug_metadata;
 mod get_or_create;
 mod statement_normalization;
+mod value_liveness;
 
 use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrFile,
@@ -36,12 +38,14 @@ use crate::ir::{
 use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
+use debug_metadata::capture_suspension_lines;
 use get_or_create::build_get_or_create;
 use statement_normalization::{
     demote_block_value_to_statement, normalize_block_inits, normalize_statement_try_results,
     split_unit_conditional_returns,
 };
 use std::collections::{HashMap, HashSet};
+use value_liveness::{kills_value, pending_reads_after};
 
 const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
@@ -6047,56 +6051,6 @@ fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
     });
 }
 
-/// Value-indices WRITTEN in `e` that are LIVE across a suspension — the writes NOT confined to a
-/// non-suspending (STRUCTURAL) loop. A write inside a structural loop is redone every iteration and read
-/// within the same iteration, so it never carries a value across the enclosing suspension; spilling such a
-/// local mis-frames the structural loop's back-edge. A write inside a SUSPENDING loop IS live (loop-carried
-/// across the inner suspension), so descend there.
-/// Whether the subtree under `e` writes local `idx` (declares it or `SetValue`s it).
-/// Whether EVERY path through `stmt` assigns `idx` before reading it AND no suspension runs after
-/// that assignment — i.e. `stmt` ends the lifetime of whatever `idx` held on entry without starting a
-/// crossing of its own. A `when` that binds its result temp in each branch is the shape that matters:
-/// the branch VALUES suspend, the stores follow the resumes, and no read can observe the old value.
-fn kills_value(ir: &IrFile, stmt: ExprId, idx: u32, suspend_set: &HashSet<u32>) -> bool {
-    match &ir.exprs[stmt as usize] {
-        IrExpr::Variable {
-            index,
-            init: Some(init),
-            ..
-        } if *index == idx => !expr_reads(ir, *init, idx),
-        IrExpr::SetValue { var, value } if *var == idx => !expr_reads(ir, *value, idx),
-        IrExpr::Block { stmts, value } => {
-            let mut killed = false;
-            for &s in stmts.iter().chain(value.iter()) {
-                if killed {
-                    // The value written above is live from here on: a later suspension carries it.
-                    if expr_calls_suspend(ir, s, suspend_set) {
-                        return false;
-                    }
-                    continue;
-                }
-                if kills_value(ir, s, idx, suspend_set) {
-                    killed = true;
-                    continue;
-                }
-                if expr_reads(ir, s, idx) || stmt_writes(ir, s, idx) {
-                    return false;
-                }
-            }
-            killed
-        }
-        // Exhaustive only — a `when` without an `else` leaves a path that writes nothing.
-        IrExpr::When { branches } => {
-            branches.iter().any(|(cond, _)| cond.is_none())
-                && branches.iter().all(|(cond, body)| {
-                    cond.is_none_or(|c| !expr_reads(ir, c, idx) && !stmt_writes(ir, c, idx))
-                        && kills_value(ir, *body, idx, suspend_set)
-                })
-        }
-        _ => false,
-    }
-}
-
 fn stmt_writes(ir: &IrFile, e: ExprId, idx: u32) -> bool {
     match ir.exprs[e as usize] {
         IrExpr::Variable { index, .. } if index == idx => return true,
@@ -6349,25 +6303,7 @@ impl ScopeWalk<'_> {
     /// liveness test for an unnamed temp (rest-of-list statements, plus whole enclosing loops, which
     /// re-run their subtrees on the back-edge).
     fn pending_reads(&self, slot: u32) -> bool {
-        // Levels run inside-out and each level's own entries in execution order, so walk the blocks
-        // back to front. The first entry that READS `slot` keeps it live; the first that OVERWRITES
-        // it on every path (a `when` binding its result temp in each branch) makes every later read
-        // see the new value, so nothing of the current one has to cross this suspension.
-        let mut end = self.pending.len();
-        for &start in self.levels.iter().rev() {
-            for &p in &self.pending[start..end] {
-                if expr_reads(self.ir, p, slot) {
-                    return true;
-                }
-                if kills_value(self.ir, p, slot, self.suspend_set) {
-                    return false;
-                }
-            }
-            end = start;
-        }
-        self.pending[..end]
-            .iter()
-            .any(|&p| expr_reads(self.ir, p, slot))
+        pending_reads_after(self.ir, &self.pending, &self.levels, slot, self.suspend_set)
     }
     fn walk_stmts(&mut self, stmts: &[ExprId]) {
         let base = self.scope.len();
@@ -6534,270 +6470,6 @@ fn collect_cond_susp_temp_bindings(
         }
         for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
     }
-}
-
-/// The line control reaches FIRST when a `when` arm runs: a block arm enters on its first
-/// statement's line, not on the brace that opens it.
-fn branch_entry_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
-    if let IrExpr::Block { stmts, value } = &ir.exprs[expr as usize] {
-        if let Some(&first) = stmts.first().or(value.as_ref()) {
-            return branch_entry_line(ir, first);
-        }
-    }
-    execution_start_line(ir, expr)
-}
-
-fn direct_expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
-    ir.expr_source_lines
-        .get(&expr)
-        .copied()
-        .or_else(|| ir.expr_lines.get(&expr).copied())
-}
-
-fn expression_source_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
-    direct_expression_source_line(ir, expr).or_else(|| nearest_expression_source_line(ir, expr))
-}
-
-fn execution_start_line(ir: &IrFile, expr: ExprId) -> Option<u32> {
-    if let IrExpr::Variable {
-        init: Some(init), ..
-    } = ir.exprs[expr as usize]
-    {
-        return expression_source_line(ir, init);
-    }
-    direct_expression_source_line(ir, expr)
-}
-
-fn nearest_expression_source_line(ir: &IrFile, root: ExprId) -> Option<u32> {
-    let mut stack = vec![root];
-    let mut seen = HashSet::new();
-    let mut best = None;
-    while let Some(expr) = stack.pop() {
-        if !seen.insert(expr) {
-            continue;
-        }
-        if let Some(&line) = ir
-            .expr_source_lines
-            .get(&expr)
-            .or_else(|| ir.expr_lines.get(&expr))
-        {
-            best = Some(best.map_or(line, |current: u32| current.min(line)));
-        }
-        for_each_child(&ir.exprs, expr, &mut |child| stack.push(child));
-    }
-    best
-}
-
-fn contains_lambda(ir: &IrFile, root: ExprId) -> bool {
-    if matches!(ir.exprs[root as usize], IrExpr::Lambda { .. }) {
-        return true;
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, root, &mut |child| {
-        found |= contains_lambda(ir, child);
-    });
-    found
-}
-
-fn is_inline_lambda_call(ir: &IrFile, expr: ExprId) -> bool {
-    let IrExpr::Call { callee, args, .. } = &ir.exprs[expr as usize] else {
-        return false;
-    };
-    let selected_inline = ir.inline_call_sites.contains(&expr)
-        || matches!(callee, Callee::Static { inline, .. } if *inline != InlineKind::None);
-    selected_inline && args.iter().any(|&arg| contains_lambda(ir, arg))
-}
-
-fn resumes_into_inline_call(ir: &IrFile, root: ExprId, suspension: ExprId) -> bool {
-    fn walk(ir: &IrFile, expr: ExprId, suspension: ExprId, inline_consumer: bool) -> Option<bool> {
-        if expr == suspension {
-            return Some(inline_consumer);
-        }
-        let inline_consumer =
-            inline_consumer || is_inline_lambda_call(ir, expr) || ir.inline_regions.contains(&expr);
-        let mut result = None;
-        for_each_child(&ir.exprs, expr, &mut |child| {
-            if result.is_none() {
-                result = walk(ir, child, suspension, inline_consumer);
-            }
-        });
-        result
-    }
-
-    walk(ir, root, suspension, false).unwrap_or(false)
-}
-
-fn collect_suspension_lines(
-    ir: &IrFile,
-    expr: ExprId,
-    suspend_set: &HashSet<u32>,
-    fall_through: Option<u32>,
-    out: &mut std::collections::HashMap<ExprId, (u32, u32)>,
-) {
-    if is_suspension_point(ir, expr, suspend_set) {
-        if let Some(line) = expression_source_line(ir, expr) {
-            let resume = fall_through.unwrap_or(line);
-            out.entry(expr).or_insert((line, resume));
-        }
-        return;
-    }
-
-    match &ir.exprs[expr as usize] {
-        IrExpr::Block { stmts, value } => {
-            let items: Vec<ExprId> = stmts.iter().copied().chain(value.iter().copied()).collect();
-            for (index, &item) in items.iter().enumerate() {
-                let next = items[index + 1..]
-                    .iter()
-                    .find_map(|&next| {
-                        execution_start_line(ir, next).or_else(|| {
-                            let current = expression_source_line(ir, item)?;
-                            nearest_expression_source_line(ir, next).filter(|&line| line > current)
-                        })
-                    })
-                    .or(fall_through);
-                collect_suspension_lines(ir, item, suspend_set, next, out);
-            }
-        }
-        IrExpr::When { branches } => {
-            for (index, (condition, body)) in branches.iter().enumerate() {
-                let next_condition = branches[index + 1..].iter().find_map(|(condition, _)| {
-                    condition.and_then(|c| expression_source_line(ir, c))
-                });
-                if let Some(condition) = condition {
-                    collect_suspension_lines(
-                        ir,
-                        *condition,
-                        suspend_set,
-                        expression_source_line(ir, *body)
-                            .or(next_condition)
-                            .or(fall_through),
-                        out,
-                    );
-                }
-                // A suspension in an ARM resumes on the line of whatever the arm falls into: the
-                // next branch (its condition, or the `else` arm's own body), and for the LAST arm
-                // the `when`'s own line — every arm converges on the `when`'s merge, which kotlinc
-                // attributes to the expression itself, not to the statement after it.
-                let next_branch = branches[index + 1..]
-                    .iter()
-                    .find_map(|(condition, body)| {
-                        condition
-                            .and_then(|c| expression_source_line(ir, c))
-                            .or_else(|| branch_entry_line(ir, *body))
-                    })
-                    .or_else(|| direct_expression_source_line(ir, expr));
-                collect_suspension_lines(ir, *body, suspend_set, next_branch.or(fall_through), out);
-            }
-        }
-        IrExpr::While {
-            cond, body, update, ..
-        } => {
-            let cond_line = expression_source_line(ir, *cond);
-            collect_suspension_lines(
-                ir,
-                *cond,
-                suspend_set,
-                expression_source_line(ir, *body).or(fall_through),
-                out,
-            );
-            collect_suspension_lines(
-                ir,
-                *body,
-                suspend_set,
-                update
-                    .and_then(|update| expression_source_line(ir, update))
-                    .or(cond_line)
-                    .or(fall_through),
-                out,
-            );
-            if let Some(update) = update {
-                collect_suspension_lines(ir, *update, suspend_set, cond_line.or(fall_through), out);
-            }
-        }
-        IrExpr::Try {
-            body,
-            catches,
-            finally,
-            ..
-        } => {
-            let region_fall_through = finally
-                .and_then(|finally| expression_source_line(ir, finally))
-                .or(fall_through);
-            let body_fall_through = ir.expr_end_lines.get(body).copied().or(region_fall_through);
-            collect_suspension_lines(ir, *body, suspend_set, body_fall_through, out);
-            for catch in catches {
-                collect_suspension_lines(ir, catch.body, suspend_set, region_fall_through, out);
-            }
-            if let Some(finally) = finally {
-                collect_suspension_lines(ir, *finally, suspend_set, fall_through, out);
-            }
-        }
-        IrExpr::Variable {
-            init: Some(init), ..
-        } if matches!(
-            ir.exprs[*init as usize],
-            IrExpr::Block { .. } | IrExpr::When { .. } | IrExpr::Try { .. }
-        ) =>
-        {
-            collect_suspension_lines(ir, *init, suspend_set, fall_through, out);
-        }
-        IrExpr::Return(Some(value)) if is_suspension_point(ir, *value, suspend_set) => {
-            collect_suspension_lines(ir, *value, suspend_set, Some(u32::MAX), out);
-        }
-        IrExpr::Return(Some(value)) => {
-            let mut calls = HashSet::new();
-            collect_suspension_points(ir, *value, suspend_set, &mut calls);
-            for call in calls {
-                if resumes_into_inline_call(ir, *value, call) {
-                    if let Some(line) = expression_source_line(ir, call) {
-                        out.entry(call)
-                            .or_insert((line, ir.source_line_count.saturating_add(1)));
-                    }
-                }
-            }
-            collect_suspension_lines(
-                ir,
-                *value,
-                suspend_set,
-                ir.expr_end_lines.get(value).copied().or(fall_through),
-                out,
-            );
-        }
-        _ => {
-            let mut children = Vec::new();
-            for_each_child(&ir.exprs, expr, &mut |child| children.push(child));
-            for (index, &child) in children.iter().enumerate() {
-                let next = children[index + 1..]
-                    .iter()
-                    .find_map(|&next| expression_source_line(ir, next))
-                    .or_else(|| {
-                        expression_source_line(ir, expr)
-                            .filter(|&line| Some(line) != expression_source_line(ir, child))
-                    })
-                    .or(fall_through);
-                collect_suspension_lines(ir, child, suspend_set, next, out);
-            }
-        }
-    }
-}
-
-fn capture_suspension_lines(
-    ir: &IrFile,
-    body: ExprId,
-    suspend_set: &HashSet<u32>,
-    final_resume_line: Option<u32>,
-) -> std::collections::HashMap<ExprId, (u32, u32)> {
-    let mut result = std::collections::HashMap::new();
-    collect_suspension_lines(ir, body, suspend_set, final_resume_line, &mut result);
-    // An expression-bodied suspension consumed immediately by an inline lambda call resumes in
-    // the inlined SMAP region rather than on the suspension's own source line. A concrete successor
-    // line (for example a selector on the next physical line) remains authoritative.
-    for (call, (line, resume)) in &mut result {
-        if *resume == *line && resumes_into_inline_call(ir, body, *call) {
-            *resume = ir.source_line_count.saturating_add(1);
-        }
-    }
-    result
 }
 
 fn collect_slot_names(ir: &IrFile, e: ExprId, out: &mut std::collections::HashMap<u32, String>) {
