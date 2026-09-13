@@ -629,6 +629,49 @@ The emitter is a printer over checked common IR, and the lowering, tests and tar
 target-agnostic, so a Go emitter is a sibling of the C one rather than a rewrite. That is the
 experiment to run, and this section stays open until it has been.
 
+#### The text round-trip tax, measured — and why it cannot be skipped
+
+Emitting a host language means printing text that the host compiler must then lex, parse and
+type-check back into an IR we already had. That is real duplicated work, and it was measured rather
+than estimated. Generated code in the shape an emitter produces — many small functions, explicit
+width-typed arithmetic, interface dispatch — compiled on this host:
+
+| generated size | Go: parse+typecheck share of compile | clang: frontend share of compile |
+|---|---|---|
+| ~6.5k lines | 24 % (0.37 s total) | ~12 % (0.39 s total) |
+| ~60k lines | **39 %** (2.60 s total) | **~46 %** (3.66 s total) |
+
+Two things follow. The tax is real and grows with generated size — roughly 40 % at 60k lines. And it
+is **not a Go tax**: clang's share is the same or worse, and its total is larger. The round-trip
+therefore does not discriminate between emitting Go and emitting C at all. What it discriminates
+between is *emitting a host language* and *emitting machine code ourselves*, which is the
+Cranelift-or-own-backend decision this document already defers.
+
+**Can the round-trip be skipped while keeping Go's runtime?** No, and the reason is structural
+rather than a matter of effort. Producing Go object files directly requires supplying, per function:
+machine code for the target; `FUNCDATA_ArgsPointerMaps` and `FUNCDATA_LocalsPointerMaps` — the
+precise GC stack maps — plus `PCDATA_StackMapIndex` saying which map is live at each PC; pcln
+tables; frame size, args and locals with the `morestack` prologue protocol; write barriers at every
+pointer store; the per-architecture `g` register convention; and type descriptors with GC bitmaps
+and itabs. Producing correct stack maps requires liveness analysis over a register-allocated
+function — which means **"skip Go's frontend" and "write the code generator" are the same project**.
+There is no intermediate position where Go's collector and scheduler are reused but Go's compiler is
+not. On top of that, `cmd/internal/obj`'s format is internal and unstable; it changed materially
+across several releases and carries no compatibility promise.
+
+Two cheaper levers exist and are worth taking whichever host language wins:
+
+* **Emit one Go package per Kotlin module, not one per program.** Go then compiles packages in
+  parallel and caches unchanged ones — and the ABI-based avoidance this document's phases 3–5 build
+  means an unchanged module is never re-emitted, so its parse cost is not paid at all. The tax
+  above is a *cold-build* number; incrementally it applies only to modules that actually changed.
+* **Emit compact text.** The cost is proportional to source size, so fewer temporaries and less
+  redundant spelling cut it directly.
+
+What remains unmeasured, and should be before this decides anything: the tax as a share of *total*
+build time, krusty's own frontend and lowering included. 2.6 s of Go compile matters if krusty took
+0.5 s to produce that module and does not if it took 10 s.
+
 #### Settled: GraalVM is the oracle, not the pipeline
 
 krusty already emits JVM bytecode byte-identical to kotlinc's, so `krusty → bytecode →
