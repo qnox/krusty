@@ -13,6 +13,16 @@
 
 use super::common;
 
+const SUSPENDING_WITH_PERMIT_SRC: &str = "import kotlinx.coroutines.sync.Semaphore\n\
+    import kotlinx.coroutines.sync.withPermit\n\
+    import kotlinx.coroutines.runBlocking\n\
+    suspend fun load(key: String): String = key.uppercase()\n\
+    fun box(): String = runBlocking {\n\
+    \x20   val gate = Semaphore(1)\n\
+    \x20   val r = gate.withPermit { load(\"ok\") }\n\
+    \x20   if (r == \"OK\") \"OK\" else \"F:$r\"\n\
+    }\n";
+
 fn run(src: &str) -> Option<String> {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
@@ -28,19 +38,46 @@ fn run(src: &str) -> Option<String> {
 /// The failing shape: a SUSPENDING call inside the `withPermit` lambda.
 #[test]
 fn with_permit_hosts_a_suspension_in_its_lambda() {
-    const SRC: &str = "import kotlinx.coroutines.sync.Semaphore\n\
-        import kotlinx.coroutines.sync.withPermit\n\
-        import kotlinx.coroutines.runBlocking\n\
-        suspend fun load(key: String): String = key.uppercase()\n\
-        fun box(): String = runBlocking {\n\
-        \x20   val gate = Semaphore(1)\n\
-        \x20   val r = gate.withPermit { load(\"ok\") }\n\
-        \x20   if (r == \"OK\") \"OK\" else \"F:$r\"\n\
-        }\n";
     assert_eq!(
-        run(SRC).expect("withPermit hosting a suspension compiles and runs"),
+        run(SUSPENDING_WITH_PERMIT_SRC).expect("withPermit hosting a suspension compiles and runs"),
         "OK"
     );
+}
+
+#[test]
+fn kotlinc_and_krusty_accept_the_suspend_inline_fixture() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let coroutines = common::coroutines_jar();
+    let reference = common::scratch_dir().expect("scratch directory");
+    let source = reference.join("SuspendInlineWithPermit.kt");
+    let output = reference.join("reference");
+    std::fs::write(&source, SUSPENDING_WITH_PERMIT_SRC).expect("write reference source");
+    std::fs::create_dir_all(&output).expect("create reference output directory");
+    let classpath = std::env::join_paths([stdlib.as_path(), coroutines.as_path()])
+        .expect("reference classpath")
+        .to_string_lossy()
+        .into_owned();
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        classpath,
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc available");
+    assert_eq!(code, 0, "kotlinc must accept the runtime fixture: {stderr}");
+    assert!(
+        common::compile_in_process(
+            SUSPENDING_WITH_PERMIT_SRC,
+            "SuspendInlineWithPermit",
+            &[stdlib, coroutines],
+            Some(jdk.as_path()),
+        )
+        .is_some(),
+        "krusty must accept the same runtime fixture as kotlinc",
+    );
+    let _ = std::fs::remove_dir_all(reference);
 }
 
 /// Both member calls in the structural plan return Kotlin `Unit`. Their physical suspend/JVM

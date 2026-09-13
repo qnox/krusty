@@ -29,6 +29,7 @@ mod destructure_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod inline_body_plan;
 #[cfg(test)]
 mod invoke_tests;
 mod invokes;
