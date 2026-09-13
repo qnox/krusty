@@ -2015,3 +2015,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   branch's type parameter FROM that expectation and accepts.
   One such file cost its whole module every class.
   `tests/try_expected_type_join_e2e.rs`.
+- **`T : R` is a lower bound on `R` (fix).** A formal declared as another formal's upper bound gets a
+  constraint from every binding that reaches it: `<R, T : R> Box<T>.orElse(fallback: () -> R): R`
+  binds `T` from the receiver, and that binding is a LOWER bound on `R`.
+  krusty propagated the edge only when `R` occurred in NO value parameter, on the theory that a
+  formal an argument can reach has its own evidence. That holds only when the argument actually
+  answers: `runCatching { xs.toSet() }.getOrElse { emptySet() }` with no expected type leaves `R` at
+  the symbolic `Set<T>` the empty-collection call produced, and the receiver's `Set<String>` was
+  never consulted — the call was reported inapplicable against a receiver erased to `Result<Any>`.
+  The edge now also applies when the argument-derived binding is absent, agrees, or still mentions a
+  type parameter; a real, disagreeing argument binding still wins.
+  `tests/tparam_bounded_by_tparam_e2e.rs::get_or_else_infers_from_the_receiver_without_an_expected_type`.

@@ -1390,6 +1390,8 @@ mod toplevel_property_inference_e2e;
 mod toplevel_property_ref_e2e;
 #[path = "tparam_bound_member_e2e.rs"]
 mod tparam_bound_member_e2e;
+#[path = "tparam_bounded_by_tparam_e2e.rs"]
+mod tparam_bounded_by_tparam_e2e;
 #[path = "trailing_lambda_default_e2e.rs"]
 mod trailing_lambda_default_e2e;
 #[path = "trailing_lambda_middle_default_e2e.rs"]
