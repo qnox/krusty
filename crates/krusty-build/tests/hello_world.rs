@@ -48,14 +48,23 @@ impl Drop for Workspace {
     }
 }
 
-/// Locate the compiler: an explicit override, else the usual profile output directories.
+/// Locate the compiler.
+///
+/// `KRUSTY_BIN` first, because both repo harnesses already export it — `run-tests.sh` points it at
+/// the `gate` build and `scripts/coverage.sh` at the instrumented `coverage` one. Honouring it is
+/// what lets this test actually RUN under the harness rather than silently skipping, which is the
+/// difference between a test and a decoration.
 fn krusty_binary() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("KRUSTY_BUILD_TEST_BINARY") {
-        let path = PathBuf::from(path);
-        return path.is_file().then_some(path);
+    for variable in ["KRUSTY_BUILD_TEST_BINARY", "KRUSTY_BIN"] {
+        if let Ok(path) = std::env::var(variable) {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
     }
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    ["gate", "debug", "release"]
+    ["gate", "debug", "release", "coverage"]
         .iter()
         .map(|profile| workspace_root.join("target").join(profile).join("krusty"))
         .find(|candidate| candidate.is_file())
