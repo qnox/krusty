@@ -352,6 +352,10 @@ fn a_library_module_emits_no_entry_point() {
     assert!(names.contains(&"Greeter.c"));
     assert!(names.contains(&krusty::native::RUNTIME_SOURCE));
     assert!(
+        names.contains(&krusty::native::GC_SOURCE),
+        "the collector is part of the runtime, not of a program: {names:?}"
+    );
+    assert!(
         !names.contains(&krusty::native::START_SOURCE),
         "a library has no process entry point: {names:?}"
     );
@@ -359,6 +363,34 @@ fn a_library_module_emits_no_entry_point() {
         !names.contains(&krusty::native::ENTRY_SOURCE),
         "a module with no `main` is a library; inventing an entry point for it would produce a \
          program that silently does nothing: {names:?}"
+    );
+}
+
+#[test]
+fn a_program_that_allocates_heavily_runs_in_bounded_memory() {
+    if !available() {
+        eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
+        return;
+    }
+    // Each iteration builds a fresh string through a template — several heap objects, all garbage
+    // by the next iteration except the one `last` holds. 200,000 iterations is tens of megabytes
+    // of allocation, far past the collector's threshold, so this runs through many automatic
+    // collections with `last` (and the literals) rooted on the stack the whole time. Before the
+    // runtime had a collector this program grew without bound; the check that it no longer does
+    // is `tests/native_gc_e2e.rs`, which reads the heap size from C. A bounded-memory assertion
+    // belongs here too once the runtime exposes heap statistics to Kotlin.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   var i = 0\n\
+             \x20   var last = \"\"\n\
+             \x20   while (i < 200000) {\n\
+             \x20       last = \"item-$i:${i * 2}\"\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             \x20   println(last)\n\
+             \x20   println(\"done after $i\")\n\
+             }\n"),
+        "item-199999:399998\ndone after 200000\n"
     );
 }
 

@@ -328,9 +328,10 @@ mod tests {
 
     #[test]
     fn the_native_runtime_and_linker_are_target_text_only() {
-        // `runtime.rs` is C source and `link.rs` drives a C compiler. Neither has any business
-        // knowing what a Kotlin type or a compiler IR is.
+        // `runtime.rs` and `gc.rs` are C source and `link.rs` drives a C compiler. None of them
+        // has any business knowing what a Kotlin type or a compiler IR is.
         assert_allowed_crate_modules("src/native/runtime.rs", &[]);
+        assert_allowed_crate_modules("src/native/gc.rs", &[]);
         assert_allowed_crate_modules("src/native/link.rs", &[]);
     }
 

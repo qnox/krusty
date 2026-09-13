@@ -11,17 +11,22 @@
 //! * **klib ingestion** (phase 7). Symbols still come from the Kotlin/JVM stdlib jar, because that
 //!   is the only provider krusty has. Only *signatures* come from there; the emitted program links
 //!   against `krusty_rt.c` and nothing else.
-//! * **A memory manager.** The runtime never frees.
+//! * **Classes on the heap.** The runtime has an object model, an allocator and a collector
+//!   (`runtime.rs`, `gc.rs`); the emitter does not yet put a Kotlin class onto them.
 //! * **Classes, properties, and most of the stdlib.** Every one of them makes the backend decline
 //!   with a diagnostic naming the construct, rather than emit something unverified.
 
 pub mod backend;
 mod emit;
+mod gc;
 mod intrinsics;
 mod link;
 mod runtime;
 mod target;
 
-pub use backend::{NativeBackend, ENTRY_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, START_SOURCE};
+pub use backend::{
+    NativeBackend, ENTRY_SOURCE, GC_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, START_SOURCE,
+    SYS_HEADER,
+};
 pub use link::{c_compiler, can_build, link_executable, LinkError};
 pub use target::{Arch, NativeTarget, Os};

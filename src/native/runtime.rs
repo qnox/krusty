@@ -12,11 +12,27 @@
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
 //!
-//! Three limits are deliberate and must not be mistaken for oversights:
+//! The runtime is three translation units, and the split is deliberate:
 //!
-//! * **Nothing is ever freed.** Allocation is a bump pointer over `mmap`ed chunks. A `main` that
-//!   prints and exits does not care, and choosing a memory-management strategy is a real design
-//!   decision (`docs/BUILD_AND_NATIVE_PLAN.md`, phase 8) that a placeholder would prejudge badly.
+//! * [`SYS_HEADER`] (`krusty_sys.h`) is the kernel interface — the syscall shim per architecture
+//!   and the page-mapping primitives over it. It is the whole of the target-specific surface, and
+//!   it is a header of `static inline` functions so that both C files below reach the kernel the
+//!   same way without either exporting the other's plumbing.
+//! * [`SOURCE`] (`krusty_rt.c`) is the *values*: the built-in types, boxing, strings, rendering and
+//!   `kotlin.io`. It allocates only through the collector.
+//! * `krusty_gc.c` (see [`super::gc`]) is the heap: allocator and collector. It knows nothing about
+//!   any particular type; every object tells it, through its [`KType`](self) descriptor, which of
+//!   its fields are references.
+//!
+//! **Every heap object starts with a type descriptor, and memory is reclaimed.** Allocation goes
+//! through `kt_gc_allocate`, and a mark-sweep collector with conservative roots and precise heap
+//! tracing frees what is unreachable (`src/native/gc.rs` states the properties and their cost).
+//! A `String`'s text is itself a heap object — a byte array — that the string's type lists as a
+//! reference, so the collector keeps text alive exactly as long as a string that uses it; a literal
+//! keeps pointing into static storage and owns no heap text at all.
+//!
+//! Two limits are deliberate and must not be mistaken for oversights:
+//!
 //! * **`String` is UTF-8 bytes.** Kotlin's `String.length` counts UTF-16 code units, which is not
 //!   the byte count for any non-ASCII text. The runtime therefore exposes no `length` at all rather
 //!   than exposing a wrong one.
@@ -26,6 +42,121 @@
 //!   consequently no `kt_box_double`, which means a `Double` cannot reach a reference position at
 //!   all: the backend declines `println(1.0)` at COMPILE time instead of printing something wrong.
 //!   Arithmetic and comparison on floating-point values are unaffected.
+
+/// The kernel interface, shared by the value runtime and the collector.
+///
+/// One syscall shim per supported architecture. Everything above it is portable C, which is why
+/// adding an architecture is a matter of adding a register convention and four numbers rather
+/// than porting a runtime.
+pub const SYS_HEADER: &str = r#"/* krusty native runtime — generated; do not edit. */
+#ifndef KRUSTY_SYS_H
+#define KRUSTY_SYS_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#if defined(__x86_64__)
+#define KT_SYS_WRITE 1
+#define KT_SYS_MMAP 9
+#define KT_SYS_MUNMAP 11
+#define KT_SYS_EXIT 231 /* exit_group */
+#elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
+#define KT_SYS_WRITE 64
+#define KT_SYS_MMAP 222
+#define KT_SYS_MUNMAP 215
+#define KT_SYS_EXIT 94 /* exit_group */
+#else
+#error "krusty native: unsupported architecture"
+#endif
+
+static inline long kt_syscall(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
+#if defined(__x86_64__)
+    /* The syscall ABI passes the fourth argument in r10, not rcx: `syscall` clobbers rcx. */
+    register long r10 __asm__("r10") = a3;
+    register long r8 __asm__("r8") = a4;
+    register long r9 __asm__("r9") = a5;
+    long result;
+    __asm__ volatile("syscall"
+                     : "=a"(result)
+                     : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    return result;
+#elif defined(__aarch64__)
+    register long x8 __asm__("x8") = number;
+    register long x0 __asm__("x0") = a0;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x4 __asm__("x4") = a4;
+    register long x5 __asm__("x5") = a5;
+    __asm__ volatile("svc #0"
+                     : "+r"(x0)
+                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+                     : "memory");
+    return x0;
+#else /* riscv64 */
+    register long a7r __asm__("a7") = number;
+    register long a0r __asm__("a0") = a0;
+    register long a1r __asm__("a1") = a1;
+    register long a2r __asm__("a2") = a2;
+    register long a3r __asm__("a3") = a3;
+    register long a4r __asm__("a4") = a4;
+    register long a5r __asm__("a5") = a5;
+    __asm__ volatile("ecall"
+                     : "+r"(a0r)
+                     : "r"(a7r), "r"(a1r), "r"(a2r), "r"(a3r), "r"(a4r), "r"(a5r)
+                     : "memory");
+    return a0r;
+#endif
+}
+
+static inline void kt_sys_exit(long status) {
+    kt_syscall(KT_SYS_EXIT, status, 0, 0, 0, 0, 0);
+    __builtin_unreachable();
+}
+
+static inline void kt_sys_write(long fd, const char *bytes, size_t length) {
+    size_t written = 0;
+    while (written < length) {
+        long step = kt_syscall(KT_SYS_WRITE, fd, (long)(bytes + written), (long)(length - written),
+                               0, 0, 0);
+        /* A short write is normal; anything negative is an error there is nothing useful to do
+           about while printing. */
+        if (step <= 0) {
+            return;
+        }
+        written += (size_t)step;
+    }
+}
+
+/* Print `message` on stderr and exit the way a SIGABRT looks to a shell. */
+static inline void kt_sys_fail(const char *message, size_t length) {
+    kt_sys_write(2, message, length);
+    kt_sys_exit(134);
+}
+
+#define KT_SYS_FAIL(literal) kt_sys_fail(literal, sizeof(literal) - 1)
+
+static inline void kt_fail_oom(void) { KT_SYS_FAIL("krusty: out of memory\n"); }
+
+/* Map `bytes` of fresh, zero-filled, readable and writable memory. Anonymous mappings are
+   zero-filled by the kernel; callers rely on that instead of clearing. Exits on failure: there is
+   no caller that could do anything else with a failed mapping. */
+static inline void *kt_map(size_t bytes) {
+    /* PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, no file. */
+    long mapped = kt_syscall(KT_SYS_MMAP, 0, (long)bytes, 3, 0x22, -1, 0);
+    if (mapped <= 0 && mapped >= -4095) {
+        kt_fail_oom();
+    }
+    return (void *)mapped;
+}
+
+static inline void kt_unmap(void *address, size_t bytes) {
+    kt_syscall(KT_SYS_MUNMAP, (long)address, (long)bytes, 0, 0, 0, 0);
+}
+
+#endif /* KRUSTY_SYS_H */
+"#;
 
 /// The header emitted code includes.
 pub const HEADER: &str = r#"/* krusty native runtime — generated; do not edit. */
@@ -47,12 +178,57 @@ typedef float    kt_float;
 typedef double   kt_double;
 typedef bool     kt_boolean;
 
+/* ---- object model ---------------------------------------------------------------------------- */
+
+/* Every heap object begins with a pointer to its type. The type is what makes the heap PRECISELY
+   traceable: it names the byte offset of every reference-typed field, so the collector follows
+   exactly those and nothing else. A field holding an integer that happens to look like an address
+   is never mistaken for a reference. */
+typedef struct KType {
+    const char *name;                  /* qualified Kotlin name, for toString */
+    uint32_t name_length;
+    uint32_t instance_size;            /* bytes including the header; the fixed part, for arrays */
+    uint32_t reference_count;          /* how many reference-typed fields */
+    const uint32_t *reference_offsets; /* byte offset of each reference field */
+} KType;
+
+typedef struct KObjectHeader {
+    const KType *type;
+} KObjectHeader;
+
+/* ---- memory ---------------------------------------------------------------------------------- */
+
+/* Record where the program's stack begins. Roots are found by scanning the stack from the
+   collector's own frame up to this address, so it must be called from the outermost frame BEFORE
+   anything allocates; the generated entry point does so with the address of a local. */
+void kt_runtime_init(void *stack_bottom);
+
+/* Allocate `size` zeroed bytes (at least the header) for an object of `type`, collecting first if
+   enough has been allocated since the last collection. Never returns NULL: exhaustion exits. */
+void *kt_gc_allocate(const KType *type, uint32_t size);
+
+/* Run a collection now. Automatic collections happen inside kt_gc_allocate. */
+void kt_gc_collect(void);
+
+/* Register a global slot that may hold a reference, so it is treated as a root. Static storage
+   is not scanned — a freestanding program has no portable way to find its own data section. */
+void kt_gc_add_global_root(void **slot);
+
+/* Introspection, for tests: allocated objects, bytes mapped for the heap, and bytes held by
+   allocated objects. */
+size_t kt_gc_live_objects(void);
+size_t kt_gc_heap_bytes(void);
+size_t kt_gc_live_bytes(void);
+
+/* ---- values ---------------------------------------------------------------------------------- */
+
 /* Every Kotlin reference is one of these. `NULL` is Kotlin's `null`. */
 typedef struct KObject KObject;
 typedef KObject *KRef;
 
 /* Construct a `String` over a UTF-8 literal. The bytes are borrowed, not copied: emitted code only
-   ever passes string literals with static storage duration. */
+   ever passes string literals with static storage duration, and the string records that it owns
+   no heap text. */
 KRef kt_string_utf8(const char *bytes, kt_int byte_length);
 
 /* `a + b` on strings, after both operands have been rendered. */
@@ -132,94 +308,20 @@ void kt_exit(kt_int status);
 #endif /* KRUSTY_RT_H */
 "#;
 
-/// The runtime implementation.
+/// The value runtime: built-in types, boxing, strings, rendering and `kotlin.io`.
 pub const SOURCE: &str = r#"/* krusty native runtime — generated; do not edit. */
 #include "krusty_rt.h"
+#include "krusty_sys.h"
 
 /* ---- kernel interface ---------------------------------------------------------------------- */
 
-/* One syscall shim per supported architecture. This is the whole of the target-specific surface:
-   everything above it is portable C, which is why adding an architecture is a matter of adding a
-   register convention and two numbers rather than porting a runtime. */
-
-#if defined(__x86_64__)
-#define KT_SYS_WRITE 1
-#define KT_SYS_MMAP 9
-#define KT_SYS_EXIT 231 /* exit_group */
-#elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
-#define KT_SYS_WRITE 64
-#define KT_SYS_MMAP 222
-#define KT_SYS_EXIT 94 /* exit_group */
-#else
-#error "krusty native: unsupported architecture"
-#endif
-
-static long kt_syscall(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
-#if defined(__x86_64__)
-    /* The syscall ABI passes the fourth argument in r10, not rcx: `syscall` clobbers rcx. */
-    register long r10 __asm__("r10") = a3;
-    register long r8 __asm__("r8") = a4;
-    register long r9 __asm__("r9") = a5;
-    long result;
-    __asm__ volatile("syscall"
-                     : "=a"(result)
-                     : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
-                     : "rcx", "r11", "memory");
-    return result;
-#elif defined(__aarch64__)
-    register long x8 __asm__("x8") = number;
-    register long x0 __asm__("x0") = a0;
-    register long x1 __asm__("x1") = a1;
-    register long x2 __asm__("x2") = a2;
-    register long x3 __asm__("x3") = a3;
-    register long x4 __asm__("x4") = a4;
-    register long x5 __asm__("x5") = a5;
-    __asm__ volatile("svc #0"
-                     : "+r"(x0)
-                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
-                     : "memory");
-    return x0;
-#else /* riscv64 */
-    register long a7r __asm__("a7") = number;
-    register long a0r __asm__("a0") = a0;
-    register long a1r __asm__("a1") = a1;
-    register long a2r __asm__("a2") = a2;
-    register long a3r __asm__("a3") = a3;
-    register long a4r __asm__("a4") = a4;
-    register long a5r __asm__("a5") = a5;
-    __asm__ volatile("ecall"
-                     : "+r"(a0r)
-                     : "r"(a7r), "r"(a1r), "r"(a2r), "r"(a3r), "r"(a4r), "r"(a5r)
-                     : "memory");
-    return a0r;
-#endif
-}
-
-void kt_exit(kt_int status) {
-    kt_syscall(KT_SYS_EXIT, status, 0, 0, 0, 0, 0);
-    __builtin_unreachable();
-}
+void kt_exit(kt_int status) { kt_sys_exit(status); }
 
 static void kt_write(kt_int fd, const char *bytes, size_t length) {
-    size_t written = 0;
-    while (written < length) {
-        long step = kt_syscall(KT_SYS_WRITE, fd, (long)(bytes + written), (long)(length - written),
-                               0, 0, 0);
-        /* A short write is normal; anything negative is an error there is nothing useful to do
-           about while printing. */
-        if (step <= 0) {
-            return;
-        }
-        written += (size_t)step;
-    }
+    kt_sys_write(fd, bytes, length);
 }
 
-static void kt_fail(const char *message, size_t length) {
-    kt_write(2, message, length);
-    kt_exit(134); /* what a SIGABRT exit looks like to a shell */
-}
-
-#define KT_FAIL(literal) kt_fail(literal, sizeof(literal) - 1)
+#define KT_FAIL(literal) KT_SYS_FAIL(literal)
 
 /* ---- freestanding C support --------------------------------------------------------------- */
 
@@ -242,50 +344,38 @@ void *memset(void *destination, int value, size_t length) {
     return destination;
 }
 
-/* ---- allocation ---------------------------------------------------------------------------- */
+/* ---- object model -------------------------------------------------------------------------- */
 
-/* A bump pointer over anonymous mappings. Nothing is freed; see the module comment. */
+#define KT_TYPE(identifier, kotlin_name, size, count, offsets)                                     \
+    static const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, size, count, offsets};
 
-#define KT_CHUNK (1u << 20)
+/* Raw bytes: the storage behind a string's text and behind rendered numbers. It holds no
+   references, so the collector never looks inside it. The bytes follow the header directly. */
+typedef struct KByteArray {
+    KObjectHeader header;
+    kt_int length;
+} KByteArray;
 
-static char *kt_bump = NULL;
-static size_t kt_remaining = 0;
+KT_TYPE(kt_type_byte_array, "kotlin.ByteArray", sizeof(KByteArray), 0, NULL)
 
-static void *kt_alloc(size_t size) {
-    size = (size + 15u) & ~(size_t)15u; /* keep every object suitably aligned */
-    if (size > kt_remaining) {
-        size_t request = size > KT_CHUNK ? size : KT_CHUNK;
-        /* PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, no file. */
-        long mapped = kt_syscall(KT_SYS_MMAP, 0, (long)request, 3, 0x22, -1, 0);
-        if (mapped <= 0 && mapped >= -4095) {
-            KT_FAIL("krusty: out of memory\n");
-        }
-        kt_bump = (char *)mapped;
-        kt_remaining = request;
-    }
-    void *memory = kt_bump;
-    kt_bump += size;
-    kt_remaining -= size;
-    return memory;
+static char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }
+
+static KByteArray *kt_bytes_new(kt_int length) {
+    KByteArray *array =
+        (KByteArray *)kt_gc_allocate(&kt_type_byte_array, (uint32_t)sizeof(KByteArray) + (uint32_t)length);
+    array->length = length;
+    return array;
 }
 
-/* ---- values -------------------------------------------------------------------------------- */
-
-typedef enum {
-    KT_STRING,
-    KT_BYTE,
-    KT_SHORT,
-    KT_INT,
-    KT_LONG,
-    KT_CHAR,
-    KT_BOOLEAN,
-    KT_UNIT
-} kt_tag;
-
+/* Every built-in value is one of these; the header's type says which. */
 struct KObject {
-    kt_tag tag;
+    KObjectHeader header;
     union {
         struct {
+            /* The heap byte array holding the text, or NULL when `bytes` points into static
+               storage (a literal). This is the string type's one reference field: it is what
+               keeps the text alive exactly as long as the string. */
+            KRef storage;
             const char *bytes;
             kt_int byte_length;
         } string;
@@ -298,21 +388,33 @@ struct KObject {
     } as;
 };
 
-static KRef kt_new(kt_tag tag) {
-    KRef object = (KRef)kt_alloc(sizeof(KObject));
-    object->tag = tag;
-    return object;
-}
+static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
-static KRef kt_string_of(const char *bytes, kt_int byte_length) {
-    KRef object = kt_new(KT_STRING);
+KT_TYPE(kt_type_string, "kotlin.String", sizeof(KObject), 1, kt_string_references)
+KT_TYPE(kt_type_byte, "kotlin.Byte", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_short, "kotlin.Short", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_int, "kotlin.Int", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_long, "kotlin.Long", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_char, "kotlin.Char", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_boolean, "kotlin.Boolean", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_unit, "kotlin.Unit", sizeof(KObject), 0, NULL)
+
+#undef KT_TYPE
+
+static KRef kt_new(const KType *type) { return (KRef)kt_gc_allocate(type, sizeof(KObject)); }
+
+/* ---- strings ------------------------------------------------------------------------------- */
+
+static KRef kt_string_of(KRef storage, const char *bytes, kt_int byte_length) {
+    KRef object = kt_new(&kt_type_string);
+    object->as.string.storage = storage;
     object->as.string.bytes = bytes;
     object->as.string.byte_length = byte_length;
     return object;
 }
 
 KRef kt_string_utf8(const char *bytes, kt_int byte_length) {
-    return kt_string_of(bytes, byte_length);
+    return kt_string_of(NULL, bytes, byte_length);
 }
 
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */
@@ -353,88 +455,94 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
     return 3;
 }
 
-/* Render any value as bytes the caller may read but must not free. */
-static const char *kt_render(KRef value, kt_int *byte_length) {
+/* Render any value as bytes. `*storage` receives the heap object that owns the bytes (NULL when
+   they are in static storage); a caller that allocates before it has finished with the bytes
+   must keep it in a local, so the collector sees a root. */
+static const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
+    *storage = NULL;
     if (value == NULL) {
         *byte_length = 4;
         return "null";
     }
-    switch (value->tag) {
-    case KT_STRING:
+    const KType *type = value->header.type;
+    if (type == &kt_type_string) {
+        *storage = value->as.string.storage;
         *byte_length = value->as.string.byte_length;
         return value->as.string.bytes;
-    case KT_BOOLEAN:
+    }
+    if (type == &kt_type_boolean) {
         if (value->as.boolean_value) {
             *byte_length = 4;
             return "true";
         }
         *byte_length = 5;
         return "false";
-    case KT_UNIT:
+    }
+    if (type == &kt_type_unit) {
         *byte_length = 11;
         return "kotlin.Unit";
-    case KT_CHAR: {
-        char *buffer = (char *)kt_alloc(4);
-        *byte_length = kt_render_char(value->as.char_value, buffer);
-        return buffer;
     }
-    default: {
-        kt_long number = 0;
-        switch (value->tag) {
-        case KT_BYTE:
-            number = value->as.byte_value;
-            break;
-        case KT_SHORT:
-            number = value->as.short_value;
-            break;
-        case KT_INT:
-            number = value->as.int_value;
-            break;
-        default:
-            number = value->as.long_value;
-            break;
-        }
-        char *buffer = (char *)kt_alloc(24);
-        *byte_length = kt_render_long(number, buffer);
-        return buffer;
+    if (type == &kt_type_char) {
+        KByteArray *buffer = kt_bytes_new(4);
+        *byte_length = kt_render_char(value->as.char_value, kt_bytes_of(buffer));
+        *storage = (KRef)buffer;
+        return kt_bytes_of(buffer);
     }
+    kt_long number;
+    if (type == &kt_type_byte) {
+        number = value->as.byte_value;
+    } else if (type == &kt_type_short) {
+        number = value->as.short_value;
+    } else if (type == &kt_type_int) {
+        number = value->as.int_value;
+    } else {
+        number = value->as.long_value;
     }
+    KByteArray *buffer = kt_bytes_new(24);
+    *byte_length = kt_render_long(number, kt_bytes_of(buffer));
+    *storage = (KRef)buffer;
+    return kt_bytes_of(buffer);
 }
 
 KRef kt_to_string(KRef value) {
-    if (value != NULL && value->tag == KT_STRING) {
+    if (value != NULL && value->header.type == &kt_type_string) {
         return value;
     }
     kt_int length = 0;
-    const char *bytes = kt_render(value, &length);
-    return kt_string_of(bytes, length);
+    KRef storage = NULL;
+    const char *bytes = kt_render(value, &length, &storage);
+    return kt_string_of(storage, bytes, length);
 }
 
 KRef kt_string_plus(KRef a, KRef b) {
     kt_int left_length = 0;
     kt_int right_length = 0;
-    const char *left = kt_render(a, &left_length);
-    const char *right = kt_render(b, &right_length);
-    char *joined = (char *)kt_alloc((size_t)left_length + (size_t)right_length + 1);
-    memcpy(joined, left, (size_t)left_length);
-    memcpy(joined + left_length, right, (size_t)right_length);
-    joined[left_length + right_length] = '\0';
-    return kt_string_of(joined, left_length + right_length);
+    /* Both storages stay in locals across the allocation below: they are its roots. */
+    KRef left_storage = NULL;
+    KRef right_storage = NULL;
+    const char *left = kt_render(a, &left_length, &left_storage);
+    const char *right = kt_render(b, &right_length, &right_storage);
+    KByteArray *joined = kt_bytes_new(left_length + right_length);
+    memcpy(kt_bytes_of(joined), left, (size_t)left_length);
+    memcpy(kt_bytes_of(joined) + left_length, right, (size_t)right_length);
+    return kt_string_of((KRef)joined, kt_bytes_of(joined), left_length + right_length);
 }
 
-#define KT_BOX(suffix, tag, field, type)                                                           \
+/* ---- boxing -------------------------------------------------------------------------------- */
+
+#define KT_BOX(suffix, type_descriptor, field, type)                                               \
     KRef kt_box_##suffix(type value) {                                                             \
-        KRef object = kt_new(tag);                                                                 \
+        KRef object = kt_new(&type_descriptor);                                                    \
         object->as.field = value;                                                                  \
         return object;                                                                             \
     }
 
-KT_BOX(byte, KT_BYTE, byte_value, kt_byte)
-KT_BOX(short, KT_SHORT, short_value, kt_short)
-KT_BOX(int, KT_INT, int_value, kt_int)
-KT_BOX(long, KT_LONG, long_value, kt_long)
-KT_BOX(char, KT_CHAR, char_value, kt_char)
-KT_BOX(boolean, KT_BOOLEAN, boolean_value, kt_boolean)
+KT_BOX(byte, kt_type_byte, byte_value, kt_byte)
+KT_BOX(short, kt_type_short, short_value, kt_short)
+KT_BOX(int, kt_type_int, int_value, kt_int)
+KT_BOX(long, kt_type_long, long_value, kt_long)
+KT_BOX(char, kt_type_char, char_value, kt_char)
+KT_BOX(boolean, kt_type_boolean, boolean_value, kt_boolean)
 
 #undef KT_BOX
 
@@ -457,8 +565,10 @@ KT_UNBOX(boolean, boolean_value, kt_boolean)
 
 #undef KT_UNBOX
 
+/* Static storage, not the heap: the collector never sees it as an object, and nothing needs it
+   to. */
 KRef kt_unit(void) {
-    static KObject unit = {KT_UNIT, {{NULL, 0}}};
+    static KObject unit = {{&kt_type_unit}, {{NULL, NULL, 0}}};
     return &unit;
 }
 
@@ -595,7 +705,8 @@ kt_int kt_compare_double(kt_double a, kt_double b) {
 
 static void kt_emit(KRef value, bool newline) {
     kt_int length = 0;
-    const char *bytes = kt_render(value, &length);
+    KRef storage = NULL;
+    const char *bytes = kt_render(value, &length, &storage);
     kt_write(1, bytes, (size_t)length);
     if (newline) {
         kt_write(1, "\n", 1);
