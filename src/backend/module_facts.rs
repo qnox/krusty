@@ -39,7 +39,7 @@ pub trait BackendClassifierSource {
 /// The exact classifier information representation backends may inspect after semantic checking.
 /// Resolver candidate maps, constructors, constants, source keys, inline plans, contracts, and
 /// parser-backed member identities cannot be represented here.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
     pub access: crate::libraries::ClassifierAccess,
     pub is_kotlin: bool,
@@ -51,6 +51,10 @@ pub struct BackendClassifierFact {
     pub supertypes: Box<[TypeName]>,
     /// Functions and property accessors in semantic declaration order.
     pub surface: Box<[BackendMemberFact]>,
+    /// Resolved declaration annotations. A backend reads these to answer questions a plugin cannot
+    /// answer for itself — whether ANOTHER file of this module carries an annotation whose generated
+    /// declarations this file's emission must name.
+    pub annotations: Box<[crate::types::ResolvedAnnotation]>,
     /// Number of leading semantic type parameters declared by this classifier itself. Remaining
     /// parameters are lexical captures used by common checking, not parameters of its backend
     /// declaration.
@@ -134,6 +138,7 @@ impl BackendClassifierFact {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             surface: surface.into_boxed_slice(),
+            annotations: shape.annotations.clone().into_boxed_slice(),
             own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
@@ -502,6 +507,16 @@ impl BackendModuleFacts {
                     .map(|(_, member)| member)
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
+                annotations: index
+                    .declaration_annotations(declaration)
+                    .iter()
+                    .copied()
+                    .map(|annotation| crate::types::ResolvedAnnotation {
+                        annotation,
+                        arguments: Vec::new(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
                 own_type_parameter_count,
                 type_param_variances,
                 value_underlying,
@@ -622,6 +637,15 @@ impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
     }
 }
 
+impl crate::types::ClassifierAnnotationSource for CheckedBackendClassifiers<'_> {
+    fn classifier_annotations(
+        &self,
+        classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
+    }
+}
+
 /// Checked adapter used by the legacy syntax-lowering path while it remains available to tests.
 pub struct SymbolSourceClassifiers<'a> {
     source: &'a dyn SymbolSource,
@@ -640,6 +664,15 @@ impl BackendClassifierSource for SymbolSourceClassifiers<'_> {
             panic!("classifier crossed the backend boundary with invalid types: {error:?}")
         });
         Some(Arc::new(BackendClassifierFact::from_library(&shape)))
+    }
+}
+
+impl crate::types::ClassifierAnnotationSource for SymbolSourceClassifiers<'_> {
+    fn classifier_annotations(
+        &self,
+        classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
     }
 }
 

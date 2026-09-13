@@ -160,6 +160,84 @@ fn compare_with_kotlinc_plugin(
     })
 }
 
+/// Multi-file form of [`compare_with_kotlinc_plugin`], used for module facts that cannot be tested
+/// by compiling declarations in one source unit.
+fn compare_files_with_kotlinc_plugin(
+    sources: &[(&str, &str)],
+    class: &str,
+    cp_jars: &[PathBuf],
+    kotlinc_extra: &[String],
+) -> Option<ReferenceComparison> {
+    let dir = common::scratch_dir()?;
+    let reference_dir = dir.join("ref");
+    let krusty_dir = dir.join("out");
+    std::fs::create_dir_all(&reference_dir).ok()?;
+    std::fs::create_dir_all(&krusty_dir).ok()?;
+    let mut source_paths = Vec::with_capacity(sources.len());
+    for (name, source) in sources {
+        let path = dir.join(name);
+        std::fs::write(&path, source).ok()?;
+        source_paths.push(path);
+    }
+
+    let mut arguments = vec![
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-classpath".to_string(),
+        cp_jars
+            .iter()
+            .map(|jar| jar.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":"),
+    ];
+    arguments.extend(kotlinc_extra.iter().cloned());
+    arguments.extend(
+        source_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    let (code, stderr) = common::kotlinc_compile(&arguments)?;
+    assert_eq!(code, 0, "kotlinc(source set) failed: {stderr}");
+
+    let classes =
+        common::compile_in_process_files(sources, cp_jars, Some(common::jdk_modules().as_path()))?;
+    for (internal, bytes) in &classes {
+        let path = krusty_dir.join(format!("{internal}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(path, bytes).ok()?;
+    }
+    let display_class = class.replace('/', ".");
+    let reference = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &reference_dir.to_string_lossy(),
+        &display_class,
+    ])?;
+    let krusty = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &krusty_dir.to_string_lossy(),
+        &display_class,
+    ])?;
+    let reference_bytes = std::fs::read(reference_dir.join(format!("{class}.class"))).ok()?;
+    let krusty_bytes = std::fs::read(krusty_dir.join(format!("{class}.class"))).ok()?;
+    std::fs::remove_dir_all(dir).ok()?;
+    Some(ReferenceComparison {
+        reference,
+        krusty,
+        reference_bytes,
+        krusty_bytes,
+    })
+}
+
 /// The serialization runtime the generated code links against, plus the plugin jar kotlinc needs in
 /// order to produce the reference at all. `None` when either is absent from the local caches.
 fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
@@ -1876,5 +1954,448 @@ fn a_serializable_class_emits_its_deserialization_constructor_last() {
         members(&built.krusty),
         members(&built.reference),
         "member order"
+    );
+}
+
+/// A `@Serializable` class whose ELEMENT type is a `@Serializable` class from the CLASSPATH — another
+/// module's jar, which is how every generated API client is shaped. kotlinc reads that dependency's
+/// generated serializer straight off the classpath (`getstatic dep/Inner$$serializer.INSTANCE`).
+///
+/// krusty derived an element serializer only from a `$serializer` declared in the SAME file, so the
+/// field had none: first it emitted a `null` child serializer (an NPE at decode), and once that was
+/// made explicit it declined the whole file — taking every other class in the module with it.
+#[test]
+fn an_element_typed_by_a_classpath_serializable_class_uses_its_serializer() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skipping: no scratch dir");
+        return;
+    };
+    // The dependency: built by the reference compiler running its own plugin, exactly as a real jar is.
+    let dependency_dir = dir.join("dep");
+    std::fs::create_dir_all(&dependency_dir).expect("dependency output directory");
+    let dependency_source = dir.join("Dep.kt");
+    std::fs::write(
+        &dependency_source,
+        "package dep\n\
+         import kotlinx.serialization.Serializable\n\
+         @Serializable\n\
+         data class Inner(val a: Int, val b: String)\n",
+    )
+    .expect("write dependency");
+    let Some((code, stderr)) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        dependency_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-classpath".to_string(),
+        cp.iter()
+            .map(|jar| jar.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":"),
+        format!("-Xplugin={}", plugin.display()),
+        dependency_source.to_string_lossy().into_owned(),
+    ]) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "kotlinc(dependency) failed: {stderr}");
+
+    let mut classpath = cp.clone();
+    classpath.push(dependency_dir.clone());
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               import dep.Inner\n\
+               @Serializable\n\
+               data class Outer(val inner: Inner)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ClasspathElementSerializer",
+        src,
+        "Outer$$serializer",
+        &classpath,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    let want = method_instructions(&built.reference, "childSerializers()");
+    assert_ne!(
+        want,
+        Vec::<String>::new(),
+        "kotlinc childSerializers contract"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "childSerializers()"),
+        want,
+        "classpath element serializer instructions"
+    );
+}
+
+/// The same shape ACROSS FILES of one module: `Outer` in one file, the `@Serializable` `Inner` it
+/// stores in another. krusty compiles a file at a time, so `Inner`'s `$serializer` is neither in this
+/// file's IR nor yet on the classpath — it is generated as that other file compiles. The element
+/// serializer is still `Inner$$serializer.INSTANCE`, and every generated API client is shaped this
+/// way: one declaration per file, each storing its siblings.
+#[test]
+fn an_element_declared_in_another_file_of_the_module_uses_its_serializer() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let sources = [
+        (
+            "Inner.kt",
+            "package model\n\
+             import kotlinx.serialization.Serializable\n\
+             @Serializable\n\
+             data class Inner(val a: Int, val b: String)\n",
+        ),
+        (
+            "Outer.kt",
+            "package model\n\
+             import kotlinx.serialization.Serializable\n\
+             @Serializable\n\
+             data class Outer(val inner: Inner)\n",
+        ),
+    ];
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) =
+        compare_files_with_kotlinc_plugin(&sources, "model/Outer$$serializer", &cp, &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "childSerializers()");
+    assert_ne!(
+        want,
+        Vec::<String>::new(),
+        "kotlinc childSerializers contract"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "childSerializers()"),
+        want,
+        "sibling element serializer instructions"
+    );
+}
+
+/// A `@Serializable` ENUM stored as an element. An enum has no `$serializer` class of its own — its
+/// accessor builds the serializer at run time — so the element reads it through the enum's own
+/// `serializer()`, which is what kotlinc caches in `$childSerializers`. krusty derived nothing for it
+/// and declined the file; generated API clients are full of enum-typed fields.
+#[test]
+fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.SerialName\n\
+               @Serializable\n\
+               data class Action(val type: Type, val note: String) {\n\
+               \x20   @Serializable\n\
+               \x20   enum class Type(val value: String) {\n\
+               \x20       @SerialName(\"attach\") ATTACH(\"attach\"),\n\
+               \x20       @SerialName(\"detach\") DETACH(\"detach\"),\n\
+               \x20   }\n\
+               }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializableEnumElement",
+        src,
+        "Action$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "childSerializers()");
+    assert_eq!(
+        want,
+        vec![
+            "0: invokestatic # // Method Action.access$get$childSerializers$cp:()[Lkotlin/Lazy;",
+            "3: astore_1",
+            "4: iconst_2",
+            "5: anewarray # // class kotlinx/serialization/KSerializer",
+            "8: astore_2",
+            "9: aload_2",
+            "10: iconst_0",
+            "11: aload_1",
+            "12: iconst_0",
+            "13: aaload",
+            "14: invokeinterface # 1 // InterfaceMethod kotlin/Lazy.getValue:()Ljava/lang/Object;",
+            "19: aastore",
+            "20: aload_2",
+            "21: iconst_1",
+            "22: getstatic # // Field kotlinx/serialization/internal/StringSerializer.INSTANCE:Lkotlinx/serialization/internal/StringSerializer;",
+            "25: aastore",
+            "26: aload_2",
+            "27: areturn",
+        ],
+        "kotlinc enum element serializer contract"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "childSerializers()"),
+        vec![
+            "0: iconst_2",
+            "1: anewarray # // class kotlinx/serialization/KSerializer",
+            "4: astore_1",
+            "5: aload_1",
+            "6: iconst_0",
+            "7: getstatic # // Field Action$Type.Companion:LAction$Type$Companion;",
+            "10: invokevirtual # // Method Action$Type$Companion.serializer:()Lkotlinx/serialization/KSerializer;",
+            "13: aastore",
+            "14: aload_1",
+            "15: iconst_1",
+            "16: getstatic # // Field kotlinx/serialization/internal/StringSerializer.INSTANCE:Lkotlinx/serialization/internal/StringSerializer;",
+            "19: aastore",
+            "20: aload_1",
+            "21: areturn",
+        ],
+        "krusty enum element serializer contract"
+    );
+}
+
+/// A contextual element INSIDE a collection. `@file:UseContextualSerialization(T::class)` makes every
+/// `T` in the file serialize through a `ContextualSerializer`, and krusty applied that rule to a
+/// PROPERTY of type `T` only — a `List<T>` names no such property, so its element serializer was
+/// underivable and the file was declined. Generated clients use exactly this to carry loosely-typed
+/// JSON maps.
+#[test]
+fn a_contextual_element_inside_a_collection_is_derivable() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "@file:UseContextualSerialization(Flexible.FlexibleMap::class)\n\
+               import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.UseContextualSerialization\n\
+               object Flexible {\n\
+               \x20   class FlexibleMap\n\
+               }\n\
+               @Serializable\n\
+               data class Options(val tiers: List<Flexible.FlexibleMap>? = null)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ContextualCollectionElement",
+        src,
+        "Options$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "childSerializers()");
+    assert_eq!(
+        want,
+        vec![
+            "0: invokestatic # // Method Options.access$get$childSerializers$cp:()[Lkotlin/Lazy;",
+            "3: astore_1",
+            "4: iconst_1",
+            "5: anewarray # // class kotlinx/serialization/KSerializer",
+            "8: astore_2",
+            "9: aload_2",
+            "10: iconst_0",
+            "11: aload_1",
+            "12: iconst_0",
+            "13: aaload",
+            "14: invokeinterface # 1 // InterfaceMethod kotlin/Lazy.getValue:()Ljava/lang/Object;",
+            "19: checkcast # // class kotlinx/serialization/KSerializer",
+            "22: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.getNullable:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;",
+            "25: aastore",
+            "26: aload_2",
+            "27: areturn",
+        ],
+        "kotlinc contextual collection element contract"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "childSerializers()"),
+        vec![
+            "0: iconst_1",
+            "1: anewarray # // class kotlinx/serialization/KSerializer",
+            "4: astore_1",
+            "5: aload_1",
+            "6: iconst_0",
+            "7: new # // class kotlinx/serialization/ContextualSerializer",
+            "10: dup",
+            "11: ldc # // class Flexible$FlexibleMap",
+            "13: invokestatic # // Method kotlin/jvm/internal/Reflection.getOrCreateKotlinClass:(Ljava/lang/Class;)Lkotlin/reflect/KClass;",
+            "16: invokespecial # // Method kotlinx/serialization/ContextualSerializer.\"<init>\":(Lkotlin/reflect/KClass;)V",
+            "19: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;",
+            "22: aastore",
+            "23: aload_1",
+            "24: areturn",
+        ],
+        "krusty contextual collection element contract"
+    );
+}
+
+/// A library type that NAMES its own serializer. `@Serializable(with = JsonObjectSerializer::class)`
+/// is how kotlinx's own types are serialized — there is no generated `$serializer` to find, and a
+/// consumer storing such a type reads the named class's singleton, which is what kotlinc emits
+/// (`getstatic kotlinx/serialization/json/JsonObjectSerializer.INSTANCE`).
+///
+/// krusty could not see the annotation's ARGUMENT: the classpath recorded annotation identities only,
+/// so the element was underivable and the file was declined.
+#[test]
+fn an_element_whose_class_names_its_own_serializer_reads_that_class() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let Some(json) = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-json-jvm")
+    else {
+        eprintln!("skipping: kotlinx-serialization-json jar not available locally");
+        return;
+    };
+    let mut classpath = cp.clone();
+    classpath.push(json);
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               import kotlinx.serialization.json.JsonObject\n\
+               @Serializable\n\
+               data class Holder(val one: JsonObject)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "NamedSerializerElement",
+        src,
+        "Holder",
+        &classpath,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "static {};");
+    assert_ne!(
+        want,
+        Vec::<String>::new(),
+        "kotlinc static initializer contract"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "static {};"),
+        want,
+        "named element serializer initialization"
+    );
+}
+
+/// A NULLABLE element whose type is a `@Serializable` class, an enum, or a collection. `deserialize`
+/// required a BUILTIN serializer for any nullable element, so one of these made the whole method
+/// undecodable — and krusty then emitted a stub that DEFAULT-CONSTRUCTS the class and ignores the
+/// input entirely. `serialize` and `childSerializers` derived the very same element fine.
+///
+/// kotlinc decodes every nullable element through `decodeNullableSerializableElement` with the same
+/// element serializer the other members use.
+#[test]
+fn a_nullable_serializable_element_is_actually_decoded() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Team(val name: String)\n\
+               @Serializable\n\
+               enum class Status { ACTIVE, IDLE }\n\
+               @Serializable\n\
+               data class Account(\n\
+               \x20   val team: Team? = null,\n\
+               \x20   val status: Status? = null,\n\
+               \x20   val tags: List<String>? = null,\n\
+               )\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "NullableSerializableElement",
+        src,
+        "Account$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The decoder calls `deserialize` makes: a class that decodes nothing calls none of them.
+    let decoder_calls = |text: &str| {
+        text.lines()
+            .skip_while(|line| !line.contains("Account deserialize("))
+            .take_while(|line| !line.contains("public java.lang.Object deserialize("))
+            .filter_map(|line| line.split("CompositeDecoder.").nth(1))
+            .filter_map(|call| call.split(':').next())
+            .map(str::to_string)
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        decoder_calls(&built.reference),
+        vec![
+            "decodeSequentially",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeElementIndex",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "endStructure",
+        ],
+        "reference decoder contract changed"
+    );
+    // krusty has no `decodeSequentially` fast path yet, so its call set is kotlinc's minus that one;
+    // what this test pins is that the nullable elements are decoded at all.
+    assert_eq!(
+        decoder_calls(&built.krusty),
+        vec![
+            "decodeElementIndex",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "decodeNullableSerializableElement",
+            "endStructure",
+        ],
+        "krusty must decode all three nullable elements in declaration order"
+    );
+}
+
+/// A file that only uses the serialization plugin still realizes the exact checked serializer
+/// accessor selected for a `@Serializable` class declared in a sibling file.
+#[test]
+fn a_sibling_files_generated_serializer_accessor_matches_kotlinc() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let row = "package demo\n\
+        import kotlinx.serialization.Serializable\n\
+        @Serializable\n\
+        data class Row(val id: String, val count: Int)\n";
+    let writer = "package demo\n\
+        import kotlinx.serialization.KSerializer\n\
+        import kotlinx.serialization.builtins.ListSerializer\n\
+        class Writer {\n\
+        \x20 fun rows(): KSerializer<List<Row>> = ListSerializer(Row.serializer())\n\
+        }\n";
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_files_with_kotlinc_plugin(
+        &[("Row.kt", row), ("Writer.kt", writer)],
+        "demo/Writer",
+        &cp,
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "rows()");
+    assert_eq!(want.len(), 4, "kotlinc rows instruction contract: {want:?}");
+    assert_eq!(
+        method_instructions(&built.krusty, "rows()"),
+        want,
+        "sibling serializer accessor instructions"
     );
 }

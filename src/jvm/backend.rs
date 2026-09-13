@@ -76,9 +76,18 @@ pub fn run_backend_passes(
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
 ) -> Result<(), SkipReason> {
     let mut discard = crate::jvm::suspend::ContinuationMetadataMap::default();
-    run_backend_passes_with_metadata(ir, facade, module_name, syms, classpath, &mut discard)
+    run_backend_passes_with_metadata(
+        ir,
+        facade,
+        module_name,
+        syms,
+        classpath,
+        classifiers,
+        &mut discard,
+    )
 }
 
 /// Run the JVM pass pipeline and retain continuation metadata for class emission.
@@ -88,9 +97,10 @@ pub fn run_backend_passes_with_metadata(
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
     let module_value_classes: std::collections::HashMap<_, _> = syms
         .classes
         .values()
@@ -124,7 +134,7 @@ pub fn run_backend_passes_with_checked_metadata(
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: &[String],
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
     run_backend_passes_after_plugins(
         ir,
         facade,
@@ -712,6 +722,7 @@ impl JvmBackend {
         mut ir: crate::ir::IrFile,
         checked: &CheckedFile<'_>,
         stem: &str,
+        classifiers: &dyn crate::types::ClassifierAnnotationSource,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -728,6 +739,7 @@ impl JvmBackend {
             module_name,
             syms,
             &self.cp,
+            classifiers,
             &mut continuation_metadata,
         ) {
             report_backend_pass_failure(reason, diags);
@@ -964,7 +976,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         };
-        self.emit_legacy_ir(ir, &checked, stem, state, diags)
+        self.emit_legacy_ir(ir, &checked, stem, &runtime, state, diags)
     }
 
     fn lower_ir_file(
