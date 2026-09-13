@@ -1798,3 +1798,24 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   emitter allocates the branch-local binding at the next free slot. Fixing that requires a physical
   local-lifetime model; aliasing two IR lifetimes to one slot produces invalid StackMap frames.
   `tests/suspend_prologue_cast_e2e.rs::the_get_or_create_prologue_casts_the_completion_once`.
+- **A `when` that rebinds its result temp kills the temp's earlier value (fix).** A compiler temp is
+  spilled only while LIVE across a suspension, and liveness was "some later expression reads it". A
+  `when` bound to a temp assigns that temp in EVERY branch, so every path to a read overwrites it
+  first: the declaration's value is dead, and the suspensions inside the branch VALUES all run before
+  their branch's store. krusty kept it live and gave it an `L$N`, one spill field more than kotlinc on
+  every continuation of that shape. Both liveness routes now stop at such a statement — the
+  statement-level crossing test restarts from it, and the temp walk's pending scan treats it as a
+  kill. The temp still gets its method-scope slot (the flattener binds it in one state and reads it in
+  another); only the FIELD goes.
+  `tests/suspend_when_branch_spill_e2e.rs::a_when_overwriting_its_result_temp_spills_no_field_for_it`.
+- **A suspension in a `when` arm resumes on the line the arm falls into (fix).** `@DebugMetadata`'s
+  `nl` gave every arm the enclosing statement's successor line. kotlinc uses what the arm actually
+  falls into: the NEXT branch — its condition, or, when the next branch is the `else`, that arm's first
+  executable line (a block arm enters on its first statement, not on the brace) — and for the LAST arm
+  the `when` expression's OWN line, since every arm converges on the `when`'s merge and kotlinc
+  attributes the merge to the expression rather than to the statement after it.
+  Measured on all four shapes against kotlinc 2.4.10.
+  `tests/suspend_when_branch_resume_line_e2e.rs`.
+  The `continuation_metadata_uses_returned_expression_end_line` fixture was an `if` whose arms are TAIL
+  suspend calls — kotlinc emits no continuation class for it at all, so its pinned `nl` had no ground
+  truth. The arms now feed a later expression, and the test compares `l`/`nl` against kotlinc's own.
