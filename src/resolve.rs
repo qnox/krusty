@@ -39,6 +39,7 @@ mod delegated_properties;
 mod dependency_platform;
 mod finalized_projection;
 mod interface_delegation;
+mod lambda_expectation;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
@@ -64,6 +65,7 @@ pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
+use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
@@ -2911,117 +2913,6 @@ fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
         CallArgKind::integer_literal(ty, value.value())
     } else {
         CallArgKind::Typed(ty)
-    }
-}
-
-/// The functional shape at one argument position of a selected provider candidate. Lambdas consume
-/// the split context/receiver/value inputs; callable references consume `callable_type`. Keeping one
-/// carrier prevents the two syntax forms from running separate candidate selection paths.
-#[derive(Clone, Debug)]
-struct FunctionalArgumentExpectation {
-    context_types: Vec<Ty>,
-    value_params: Vec<Ty>,
-    receiver: Option<Ty>,
-    callable_type: Option<Ty>,
-    sam_conversion: bool,
-}
-
-/// The expected shape of a lambda argument against the selected candidate's `param`: a Kotlin
-/// function-typed parameter contributes its input types — the receiver of an
-/// `@ExtensionFunctionType` parameter (`Recv.() -> R`, marked on the call sig's
-/// `lambda_receiver_params`) split from the leading position — and a Java SAM interface
-/// contributes its single method's parameter types. Any other parameter gives no expectation.
-fn functional_argument_expectation(
-    lib: &dyn crate::libraries::SemanticPlatform,
-    call_sig: &crate::libraries::CallSig,
-    index: usize,
-    param: Ty,
-) -> Option<FunctionalArgumentExpectation> {
-    let has_receiver = call_sig
-        .lambda_receiver_params
-        .get(index)
-        .copied()
-        .unwrap_or(false);
-    let metadata_receiver = call_sig.lambda_receivers.get(index).copied().flatten();
-    match param.non_null() {
-        Ty::Fun(sig) => {
-            let (receiver, skip) = if has_receiver {
-                // A receiver mark without a receiver parameter means the call sig and the
-                // decoded type disagree — decline rather than type the lambda against a
-                // truncated shape. Prefer the call-site-substituted function input because it
-                // retains declaration type arguments and nullability (`List<String>`, not raw
-                // `List`). The compact metadata receiver stores only a classifier, so it is a
-                // recovery source when the function shape has been erased, never a precision
-                // upgrade. A generic `T.() -> R` also necessarily resolves through this
-                // substituted input because metadata has no receiver classifier for `T`.
-                let receiver = sig
-                    .params
-                    .get(sig.context_count)
-                    .copied()
-                    .or(metadata_receiver)?;
-                (Some(receiver), sig.context_count + 1)
-            } else {
-                (None, sig.context_count)
-            };
-            Some(FunctionalArgumentExpectation {
-                context_types: sig.params[..sig.context_count.min(sig.params.len())].to_vec(),
-                value_params: sig.params.get(skip..).unwrap_or_default().to_vec(),
-                receiver,
-                callable_type: Some(Ty::Fun(sig)),
-                sam_conversion: false,
-            })
-        }
-        param if has_receiver => {
-            // A metadata-primary receiver mark can outlive an absent JVM `Signature` (including a
-            // krusty-emitted provider). Preserve that semantic fact instead of dropping back to a
-            // standalone lambda. If CallSig carries decoded input types, split them exactly; else
-            // retain the erased FunctionN arity with `Error` placeholders so explicit lambda
-            // parameters still get the right count without inventing concrete types.
-            let receiver = metadata_receiver?;
-            let context_count = call_sig
-                .lambda_context_counts
-                .get(index)
-                .copied()
-                .unwrap_or_default();
-            let decoded = call_sig.lambda_param_types.get(index);
-            let value_params = decoded
-                .filter(|params| !params.is_empty())
-                .map(|params| params.get(context_count + 1..).unwrap_or_default().to_vec())
-                .unwrap_or_else(|| {
-                    let arity = lib.function_like_arity(param).unwrap_or(1);
-                    vec![Ty::Error; arity.saturating_sub(context_count + 1)]
-                });
-            Some(FunctionalArgumentExpectation {
-                context_types: decoded
-                    .map(|params| {
-                        params
-                            .get(..context_count.min(params.len()))
-                            .unwrap_or_default()
-                            .to_vec()
-                    })
-                    .unwrap_or_default(),
-                value_params,
-                receiver: Some(receiver),
-                callable_type: None,
-                sam_conversion: false,
-            })
-        }
-        param => crate::symbol_resolver::semantic_sam_signature(lib, param).map(|sam| {
-            let callable_type = Ty::fun_with_shape(
-                sam.params.clone(),
-                sam.ret,
-                sam.context_count,
-                sam.has_receiver,
-                sam.suspend,
-            );
-            FunctionalArgumentExpectation {
-                context_types: Vec::new(),
-                value_params: sam.params,
-                receiver: None,
-                callable_type: Some(callable_type),
-                sam_conversion: true,
-            }
-        }),
     }
 }
 
@@ -22591,6 +22482,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let mut lambda_params = vec![Vec::new(); args.len()];
+            let mut lambda_expected = vec![None; args.len()];
             let mut lambda_receivers = vec![None; args.len()];
             let mut lambda_context_counts = vec![0; args.len()];
             for &(parameter_index, source_index) in &instantiated.argument_parameters {
@@ -22599,6 +22491,7 @@ impl<'a> Checker<'a> {
                 };
                 if let Ty::Fun(signature) = parameter {
                     lambda_params[source_index] = signature.params.clone();
+                    lambda_expected[source_index] = Some(*parameter);
                     lambda_context_counts[source_index] = signature.context_count;
                     if instantiated
                         .call_sig
@@ -22620,6 +22513,7 @@ impl<'a> Checker<'a> {
                     priority: shape.priority,
                     score: instantiated.score,
                     param_types: lambda_params,
+                    expected_types: lambda_expected,
                     receivers: lambda_receivers,
                     context_counts: lambda_context_counts,
                 });
@@ -29256,6 +29150,21 @@ impl<'a> Checker<'a> {
                                             call_fn_name.as_deref(),
                                         );
                                     }
+                                    // The decomposed inputs below cannot answer the body's
+                                    // POSITION. Only the declared result says whether the last
+                                    // expression is a statement, which is what makes a trailing
+                                    // `when` with no `else` legal in a `T.() -> Unit` builder block.
+                                    let coerce_return_to_unit = ext_callable_types
+                                        .as_ref()
+                                        .and_then(|types| types.get(i))
+                                        .copied()
+                                        .flatten()
+                                        .is_some_and(|expected| {
+                                            matches!(
+                                                expected.non_null(),
+                                                Ty::Fun(signature) if signature.ret == Ty::Unit
+                                            )
+                                        });
                                     let receiver = ext_lambda_recvs
                                         .as_ref()
                                         .and_then(|recvs| recvs.get(i))
@@ -29272,23 +29181,29 @@ impl<'a> Checker<'a> {
                                         context_count + usize::from(receiver.is_some());
                                     let values = pts[i].get(value_start..).unwrap_or_default();
                                     if !contexts.is_empty() || receiver.is_some() {
-                                        return c.check_lambda_with_implicit_receivers_labeled(
-                                            scope,
-                                            a,
-                                            LambdaShape {
-                                                context_types: contexts,
-                                                extension_receiver: receiver,
-                                                value_types: values,
-                                            },
-                                            false,
-                                            call_fn_name.as_deref(),
-                                        );
+                                        return c
+                                            .check_lambda_with_implicit_receivers_and_return_labeled(
+                                                scope,
+                                                a,
+                                                LambdaShape {
+                                                    context_types: contexts,
+                                                    extension_receiver: receiver,
+                                                    value_types: values,
+                                                },
+                                                call_fn_name.as_deref(),
+                                                LambdaCheckMode {
+                                                    suspend: false,
+                                                    coerce_return_to_unit,
+                                                    expected_return: None,
+                                                },
+                                            );
                                     }
                                     let pt = pts[i].clone();
-                                    return c.check_lambda_with_types_labeled(
+                                    return c.check_lambda_with_types_and_return(
                                         scope,
                                         a,
                                         &pt,
+                                        coerce_return_to_unit,
                                         call_fn_name.as_deref(),
                                     );
                                 }
@@ -31319,6 +31234,16 @@ impl<'a> Checker<'a> {
                                     )
                                 });
                             }
+                            // Past the function-type branch the shape is decomposed, and decomposed
+                            // inputs cannot answer the body's POSITION: only the declared result
+                            // says whether the last expression is a statement, which is what makes a
+                            // trailing `when` with no `else` legal in a `T.() -> Unit` builder
+                            // block. The provider expectation is the carrier that still has it.
+                            let coerce_return_to_unit = implicit_provider_member_lambda_pts
+                                .as_ref()
+                                .and_then(|slots| slots.get(i))
+                                .and_then(|slot| slot.as_ref())
+                                .is_some_and(|expectation| expectation.result == Some(Ty::Unit));
                             // Contexts sit ahead of the receiver, which sits ahead of what the
                             // author wrote; reading past one entry only would hand a
                             // `context(P) R.(X) -> T` lambda its own receiver as a value parameter.
@@ -31331,7 +31256,7 @@ impl<'a> Checker<'a> {
                             if context_count > 0 {
                                 let value_start = context_count + usize::from(receiver.is_some());
                                 return self.with_lambda_mutation(inline, |checker| {
-                                    checker.check_lambda_with_implicit_receivers_labeled(
+                                    checker.check_lambda_with_implicit_receivers_and_return_labeled(
                                         scope,
                                         a,
                                         LambdaShape {
@@ -31339,19 +31264,31 @@ impl<'a> Checker<'a> {
                                             extension_receiver: receiver,
                                             value_types: pt.get(value_start..).unwrap_or_default(),
                                         },
-                                        false,
                                         call_fn_name.as_deref(),
+                                        LambdaCheckMode {
+                                            suspend: false,
+                                            coerce_return_to_unit,
+                                            expected_return: None,
+                                        },
                                     )
                                 });
                             }
                             if let Some(receiver) = receiver {
                                 return self.with_lambda_mutation(inline, |checker| {
-                                    checker.check_lambda_with_receiver_labeled(
+                                    checker.check_lambda_with_implicit_receivers_and_return_labeled(
                                         scope,
                                         a,
-                                        receiver,
-                                        pt.get(1..).unwrap_or_default(),
+                                        LambdaShape {
+                                            context_types: &[],
+                                            extension_receiver: Some(receiver),
+                                            value_types: pt.get(1..).unwrap_or_default(),
+                                        },
                                         call_fn_name.as_deref(),
+                                        LambdaCheckMode {
+                                            suspend: false,
+                                            coerce_return_to_unit,
+                                            expected_return: None,
+                                        },
                                     )
                                 });
                             }
@@ -49297,6 +49234,10 @@ struct MemberExtensionLambdaPlan {
     priority: MemberExtensionPriority,
     score: (usize, std::cmp::Reverse<usize>, bool),
     param_types: Vec<Vec<Ty>>,
+    /// The instantiated function type of each lambda argument's parameter. The decomposed inputs
+    /// above cannot answer the body's POSITION: only the declared result says whether the last
+    /// expression is a statement, which is what makes a trailing `when` with no `else` legal.
+    expected_types: Vec<Option<Ty>>,
     receivers: Vec<Option<Ty>>,
     context_counts: Vec<usize>,
 }
@@ -76545,8 +76486,24 @@ impl<'a> Checker<'a> {
         if !matches!(self.file.expr(arg), Expr::Lambda { .. }) {
             return self.expr(scope, arg);
         }
+        // The declared result decides the body's POSITION, not just its type: a `Unit` result puts
+        // the last expression in statement position, so a trailing `when` with no `else` is legal
+        // there. Dropping it made every builder block reject the `when` a Kotlin DSL is written
+        // around.
+        let coerce_return_to_unit = expectation.result == Some(Ty::Unit);
+        // A result the declaration fixes also CONTEXTUALIZES the body: the tail expression is
+        // checked against it, which is the only thing that can bind a bare generic call there
+        // (`m.onErrorResume { Mono.empty() }` takes its element type from the SAM's own result).
+        // A result that still mentions a callee formal is not fixed yet and must not be pushed —
+        // overload inference owns it until it is.
+        let expected_return = expectation
+            .result
+            .filter(|result| *result != Ty::Unit)
+            .filter(|result| {
+                *result != Ty::Error && !result.mentions_ty_param() && !result.mentions_pending()
+            });
         if !expectation.context_types.is_empty() || expectation.receiver.is_some() {
-            self.check_lambda_with_implicit_receivers_labeled(
+            self.check_lambda_with_implicit_receivers_and_return_labeled(
                 scope,
                 arg,
                 LambdaShape {
@@ -76554,11 +76511,29 @@ impl<'a> Checker<'a> {
                     extension_receiver: expectation.receiver,
                     value_types: &expectation.value_params,
                 },
-                false,
                 label,
+                LambdaCheckMode {
+                    suspend: false,
+                    coerce_return_to_unit,
+                    expected_return,
+                },
             )
         } else {
-            self.check_lambda_with_types_labeled(scope, arg, &expectation.value_params, label)
+            self.check_lambda_with_implicit_receivers_and_return_labeled(
+                scope,
+                arg,
+                LambdaShape {
+                    context_types: &[],
+                    extension_receiver: None,
+                    value_types: &expectation.value_params,
+                },
+                label,
+                LambdaCheckMode {
+                    suspend: false,
+                    coerce_return_to_unit,
+                    expected_return,
+                },
+            )
         }
     }
 
@@ -76732,7 +76707,11 @@ impl<'a> Checker<'a> {
                     generic_formals: Vec::new(),
                     argument_parameters: Vec::new(),
                     param_types: Some(plan.param_types),
-                    expected_types: None,
+                    expected_types: plan
+                        .expected_types
+                        .iter()
+                        .any(Option::is_some)
+                        .then_some(plan.expected_types),
                     fixed_expected_types: None,
                     receivers: plan
                         .receivers

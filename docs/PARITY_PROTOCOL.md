@@ -1949,3 +1949,41 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the recorded sibling capability into `Row$$serializer.INSTANCE`; there is no accessor-name lookup
   or backend retry.
   `tests/serialization_companion_byte_parity_e2e.rs::a_sibling_files_generated_serializer_accessor_matches_kotlinc`.
+- **A lambda parameter's declared result decides its body's POSITION (fix).** A lambda whose declared
+  result is `Unit` ends in statement position, which is what makes a trailing `when` with no `else`
+  legal — the shape every Kotlin builder DSL is written around.
+  The expectation krusty builds for a functional argument carried the context types, the receiver and
+  the value parameters, but not the result, and the channel that consumes it hardcoded "a value is
+  required". A classpath TOP-LEVEL function was unaffected (a different channel reads its signature),
+  so the same block was accepted at top level and rejected on a member — with
+  `'when' expression must be exhaustive`, on source kotlinc accepts, taking the whole module's output
+  with it.
+  Still open, and deliberately not covered: a generic member EXTENSION
+  (`fun <T : Cfg> Holder<T>.engine(block: T.() -> Unit)`) reaches a plan whose `expected_types` entry
+  is `None`, so the result is unknown there for a different reason.
+  `tests/classpath_member_lambda_unit_e2e.rs::a_classpath_member_receiver_lambda_is_a_statement_position`.
+- **A decomposed lambda shape still needs its declared result (fix).** Once a functional parameter's
+  shape is decomposed into context types, a receiver and value parameters, nothing left in it says
+  whether the body ends in statement position — and only the declared result does. Three carriers
+  reach the same decomposed fall-through, and each had to be taught to keep it: the member-extension
+  plan (which recorded no expected type at all), the extension lambda shape (which had the
+  instantiated `Ty::Fun` and never read it), and the provider expectation.
+  The visible failure is a builder block: `h.configure { when { … } }` against
+  `fun configure(block: T.() -> Unit)` judged the trailing `when` in value position and reported it
+  non-exhaustive, on source kotlinc accepts. The body is checked TWICE — once on the decomposed
+  carrier and once with the result known — and the first pass's diagnostic was never retracted, so
+  the later correct pass could not save it.
+  `tests/generic_member_extension_lambda_result_e2e.rs::a_member_lambda_typed_by_a_class_type_parameter_is_a_statement_position`.
+- **A fixed result also CONTEXTUALIZES the lambda body (fix).** The declared result decides more than
+  statement-vs-expression position: it is the expected type the body's tail is checked against, and
+  for a bare generic call there that is the only evidence its type argument can have.
+  `m.onErrorResume { Mono.empty() }` — the reactive fallback shape — left the body at `Mono<T>` with
+  `T` unsolved, and the argument was then reported as `(Throwable!) -> Mono<T>!` against
+  `Function<Throwable!, Mono<Auth>!>!`. A result still mentioning a callee formal is deliberately NOT
+  pushed; overload inference owns it until it is fixed.
+  This also corrects a diagnostic that had diverged: `NumericApi.supply { "wrong" }` reported
+  "unresolved Java static" because the body was never checked against the interface's result at all.
+  kotlinc 2.4.10 reports a body mismatch there, and krusty now does too —
+  `tests/classpath_jdk_static_e2e.rs::incomparable_literal_overloads_are_ambiguous` was asserting the
+  krusty-only outcome and is updated with the measured reference wording.
+  `tests/sam_lambda_expected_result_e2e.rs::a_reactive_chain_binds_its_element_type_through_to_the_fallback`.
