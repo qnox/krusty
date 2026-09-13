@@ -1949,3 +1949,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the recorded sibling capability into `Row$$serializer.INSTANCE`; there is no accessor-name lookup
   or backend retry.
   `tests/serialization_companion_byte_parity_e2e.rs::a_sibling_files_generated_serializer_accessor_matches_kotlinc`.
+- **Genericity is a TIEBREAKER, not a filter (fix).** A non-generic candidate outranks a generic one
+  only once neither is more specific by parameter types. krusty dropped every generic candidate as
+  soon as any concrete one was applicable, so `of(Class<T>)` lost to `of(Type)` for a `Class<Resp>`
+  argument — and the `Type` overload's `Argument<?>` result carries no element type at all.
+  The damage travels: `Argument.of(Resp::class.java)` typed as `Argument<out Any!>` makes the
+  surrounding `exchange(…).awaitSingle().body()` produce `Any?`, so an enclosing `HttpResponse.ok(…)`
+  yields `MutableHttpResponse<out Any>` against a declared `HttpResponse<Resp>`. One overload choice
+  produced two separate module errors.
+  A generic candidate is now retained only when it is STRICTLY more specific than every concrete one,
+  comparing DECLARED (pre-instantiation) parameters by classifier — the part that survives the
+  callee's own type variable. Being merely incomparable is not enough: `assertDoesNotThrow(Executable)`
+  against `<T> assertDoesNotThrow(ThrowingSupplier<T>)` takes unrelated SAM interfaces, and the
+  tiebreaker still picks the non-generic one.
+  `tests/overload_declaration_specificity_e2e.rs::a_generic_candidate_wins_when_its_parameter_is_more_specific`.

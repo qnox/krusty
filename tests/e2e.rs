@@ -1063,6 +1063,8 @@ mod int_when_switch_e2e;
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
 mod operator_index_e2e;
+#[path = "overload_declaration_specificity_e2e.rs"]
+mod overload_declaration_specificity_e2e;
 #[path = "overloaded_extension_e2e.rs"]
 mod overloaded_extension_e2e;
 #[path = "overloaded_inferred_return_e2e.rs"]

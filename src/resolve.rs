@@ -54543,6 +54543,54 @@ impl<'a> Checker<'a> {
         let selecting_extension = applicable
             .iter()
             .all(|(_, _, _, _, _, candidate, _, _)| candidate.is_extension());
+        // Compare DECLARED parameters by classifier. A declared parameter still carries the callee's
+        // own type variable (`Class<T>`), which no assignability check can place against a concrete
+        // `Type`; the classifiers `java.lang.Class` and `java.lang.reflect.Type` are exactly the
+        // comparable part. A parameter with no classifier — a primitive — only matches itself, so
+        // `int` and `long` stay incomparable.
+        let specificity_context = crate::assignable::TyCtx::new();
+        let erased_parameter = |ty: Ty| {
+            let ty = ty.non_null();
+            ty.kotlin_class_internal().map_or(ty, Ty::obj_name)
+        };
+        let at_least_as_specific = |left: &[Ty], right: &[Ty]| {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(&left, &right)| {
+                    let (left, right) = (erased_parameter(left), erased_parameter(right));
+                    left == right
+                        || crate::assignable::is_assignable(
+                            &specificity_context,
+                            self,
+                            left,
+                            right,
+                        )
+                })
+        };
+        // A non-generic candidate outranks a generic one — but that is Kotlin's TIEBREAKER, applied
+        // only once neither is more specific by parameter types. `of(Class<T>)` against `of(Type)`
+        // for a `Class<Resp>` argument is decided by the parameters, and dropping the generic
+        // candidate first selected `of(Type)`, whose `Arg<?>` result discards the element type.
+        // Keep a generic candidate that no concrete one matches on every parameter.
+        let concrete_parameter_shapes = applicable
+            .iter()
+            .filter(|(rank, generic, _, missing_context, _, candidate, _, _)| {
+                *rank == best
+                    && !generic
+                    && (!has_context || !missing_context)
+                    && candidate.receiver_rank == nearest_receiver
+            })
+            .map(|(_, _, _, _, _, _, _, params)| params.clone())
+            .collect::<Vec<_>>();
+        // Keep a generic candidate only when it is STRICTLY more specific than every concrete one.
+        // Merely being incomparable is not enough: `assertDoesNotThrow(Executable)` and
+        // `<T> assertDoesNotThrow(ThrowingSupplier<T>)` take unrelated SAM interfaces, and Kotlin's
+        // tiebreaker picks the non-generic one there.
+        let strictly_more_specific_than_every_concrete = |params: &[Ty]| {
+            !concrete_parameter_shapes.is_empty()
+                && concrete_parameter_shapes.iter().all(|concrete| {
+                    at_least_as_specific(params, concrete) && !at_least_as_specific(concrete, params)
+                })
+        };
         let prefer_concrete = !selecting_extension
             && applicable
                 .iter()
@@ -54554,11 +54602,13 @@ impl<'a> Checker<'a> {
                 });
         let mut maximal = applicable
             .into_iter()
-            .filter(|(rank, generic, _, missing_context, _, candidate, _, _)| {
+            .filter(|(rank, generic, _, missing_context, _, candidate, _, params)| {
                 *rank == best
                     && (!has_context || !missing_context)
                     && candidate.receiver_rank == nearest_receiver
-                    && (!prefer_concrete || !generic)
+                    && (!prefer_concrete
+                        || !generic
+                        || strictly_more_specific_than_every_concrete(params))
             })
             .collect::<Vec<_>>();
         if maximal.len() > 1 {
@@ -54596,6 +54646,38 @@ impl<'a> Checker<'a> {
                                     signature,
                                 )
                             })
+                        })
+                        .then_some(index)
+                })
+                .collect::<std::collections::HashSet<_>>();
+            maximal = maximal
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
+                .collect();
+        }
+        // Kotlin's most-specific rule is per-parameter domination, not a total score: a candidate
+        // wins only when its DECLARED parameter is at least as specific in EVERY position and
+        // strictly more specific in one. The per-argument scores above are summed, which cannot
+        // express that — `of(Class<T>)` and `of(Type)` tie for a `Class<Resp>` argument once the
+        // parameter has been instantiated, and the `Type` overload's `Arg<?>` result then discards
+        // the element type. Compare the pre-instantiation parameters here, where `Class` is still
+        // visibly below `Type`.
+        //
+        // Domination requires strictness, so a pair that is merely incomparable — `(int, Object)`
+        // against `(long, String)`, where each wins one position — eliminates neither and remains
+        // ambiguous, exactly as kotlinc reports it.
+        if maximal.len() > 1 {
+            let dominated = maximal
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (_, _, _, _, _, _, _, params))| {
+                    maximal
+                        .iter()
+                        .any(|(_, _, _, _, _, _, _, other_params)| {
+                            other_params != params
+                                && at_least_as_specific(other_params, params)
+                                && !at_least_as_specific(params, other_params)
                         })
                         .then_some(index)
                 })
