@@ -747,6 +747,72 @@ scaffold with an expiry date rather than a target to grow features on. Go's coll
 concurrent because the Go compiler emits the stack maps; SubstrateVM's is precise too, at 39 seconds
 a build.
 
+#### What a runtime of our own would cost
+
+"Write our own Go-like runtime" is the alternative to emitting a host language, so it is worth
+sizing rather than waving at. Go's runtime, measured on this host, is **105,680 lines of Go plus
+61,190 of assembly** across eleven architectures.
+
+Most of that is not ours to write. Under Kotlin/Native's memory model the target uses OS threads,
+and `suspend` is already CPS-transformed before the backend, so green threads, growable stacks,
+channels and Go's own map implementation — 18,318 lines together — are all out of scope. What
+remains is:
+
+| component | Go's line count |
+|---|---|
+| garbage collector | 7,010 |
+| allocator | 6,280 |
+| OS layer (one OS) | 2,392 |
+| panic / unwinding | 1,532 |
+| type descriptors + interface dispatch | 1,365 |
+| sync primitives | 874 |
+| **total, one OS** | **~19,500** |
+
+plus a few hundred lines of assembly per architecture for context save, atomics and thread entry.
+
+Against krusty's ~496,000 lines that looks like 4 % of the project, and that comparison is the trap.
+Runtime code is not compiler code: it is concurrent, it is memory-ordering-sensitive, its bugs are
+non-deterministic, and — unlike every other part of krusty — **it has no oracle**. There is no
+`kotlinc` to diff a collector against.
+
+**The runtime is also not the expensive half.** Each of these lives in the *code generator*, not in
+the line counts above:
+
+1. **Stack maps** — at every safepoint, which references are live in which slots and registers.
+   Requires liveness analysis over a register-allocated function. This is the same wall recorded
+   above under *The collector is where emitting C stops being viable*.
+2. **Write-barrier insertion** at every pointer store, with elision rules — a barrier on every store
+   without them is a large, pervasive slowdown.
+3. **Safepoint placement** at call sites and loop back-edges, so threads can be stopped.
+4. **Per-type GC bitmaps**, emitted by the compiler.
+
+So "write a Go-like runtime" is really "write a code generator with GC support, and then a runtime",
+and the first half is the larger one. Three honest tiers:
+
+* **Stop-the-world precise mark-sweep, OS threads.** Perhaps 4–8k lines of runtime — but it still
+  needs the whole stack-map and safepoint apparatus, so the compiler work dominates. This is the
+  floor, and it is already a major project.
+* **Parity with Kotlin/Native** — concurrent mark-and-sweep, non-generational, write barriers.
+  Roughly 15–25k lines plus the codegen work. JetBrains rewrote Kotlin/Native's memory model once
+  already (the freezing model, replaced in 1.7.20); that was a multi-year effort with a team.
+* **Go-class** — sub-millisecond pauses, hybrid write barriers, escape analysis feeding stack
+  allocation. ~100k lines and a team indefinitely. Go's collector has been rewritten more than once.
+
+For calibration at the other end: the C runtime this repository currently ships is **617 lines** and
+has no collector, no threads and no exceptions. The distance from there to the first tier is the
+quantity in question.
+
+**The one cheap option, and its price.** A conservative Boehm-style collector needs no compiler
+support at all — no stack maps, no safepoints — and would work with emitted C. Perhaps 1–3k lines,
+or a vendored dependency. It buys a working GC today and permanently forecloses moving collection:
+no compaction, no bump-allocating nursery, and retained garbage whenever a stack word happens to
+look like a pointer. If the C path is ever to ship, this is how it gets a collector; it should be
+chosen deliberately rather than arrived at.
+
+Set against all of this: emitting Go supplies the third tier for zero lines and zero maintenance.
+That is the substance of the Go-versus-own-backend decision, and it is much larger than the ~5 % 
+round-trip tax measured above.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows
