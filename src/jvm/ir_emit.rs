@@ -175,19 +175,9 @@ pub(crate) fn realize_lambda_impl_names(ir: &mut IrFile) {
         .lambda_origins
         .iter()
         .map(|(&function, origin)| {
-            let implementation_name = if origin.implementation_name.is_empty() {
-                // Common IR records class initialization as an empty executable-name segment. JVM
-                // synthetic methods use kotlinc's legal constructor-context spelling.
-                "_init_"
-            } else {
-                origin.implementation_name.as_str()
-            };
             (
                 function,
-                format!(
-                    "{}$lambda${}",
-                    implementation_name, origin.implementation_ordinal
-                ),
+                super::debug_local_names::lambda_implementation_name(origin),
             )
         })
         .collect::<Vec<_>>();
@@ -14325,13 +14315,17 @@ impl<'a> Emitter<'a> {
                     self.slots.insert(index, (slot, jt));
                     store(jt, slot, code);
                     // A source local becomes visible after its initializing store.
-                    if let Some(name) = self.ir.value_names.get(&e).filter(|_| self.record_locals) {
+                    if let Some(name) = self
+                        .record_locals
+                        .then(|| super::debug_local_names::name(self.ir, e))
+                        .flatten()
+                    {
                         if code.bytes.len() <= u16::MAX as usize {
                             self.open_locals.push((
                                 self.block_depth,
                                 slot,
                                 code.bytes.len() as u16,
-                                name.clone(),
+                                name,
                                 local_variable_desc(jt),
                             ));
                         }
@@ -14347,13 +14341,17 @@ impl<'a> Emitter<'a> {
                     // Its declaration emits no store, so open the debug range at the declaration's
                     // current bytecode position; the later checked assignment only initializes the
                     // already-live slot.
-                    if let Some(name) = self.ir.value_names.get(&e).filter(|_| self.record_locals) {
+                    if let Some(name) = self
+                        .record_locals
+                        .then(|| super::debug_local_names::name(self.ir, e))
+                        .flatten()
+                    {
                         if code.bytes.len() <= u16::MAX as usize {
                             self.open_locals.push((
                                 self.block_depth,
                                 slot,
                                 code.bytes.len() as u16,
-                                name.clone(),
+                                name,
                                 local_variable_desc(jt),
                             ));
                         }

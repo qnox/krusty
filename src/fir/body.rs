@@ -11,6 +11,7 @@ use super::header::{
     OriginId, PropertyId, SourceFileId, TypeParameterId,
 };
 use super::identities::ExternalCallableId;
+use super::inline_body::FirInlineBodyPlan;
 use super::signature::ResolvedTy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -266,74 +267,6 @@ pub enum FirClassifierCallable {
     EnumValueOf,
     ArrayConstructor { element: ResolvedTy },
     SamConstructor { conversion: Box<FirSamConversion> },
-}
-
-/// Source-independent control flow decoded from the exact selected inline declaration. Parameter
-/// ordinals refer to the checked call's semantic parameter list; no callable spelling or backend
-/// linkage is retained here.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirInlineValue {
-    Receiver,
-    Parameter(u32),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirInlineBodyPlan {
-    InvokeLambda {
-        lambda_parameter: u32,
-        arguments: Box<[FirInlineValue]>,
-        result: Option<FirInlineValue>,
-    },
-    /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
-    /// All three convention calls were selected by the checker at the call site; lowering only
-    /// splices the checked lambda body into the resulting loop.
-    ForEach {
-        lambda_parameter: u32,
-        iterator_ty: ResolvedTy,
-        iterator: Box<FirIteratorCall>,
-        has_next: Box<FirIteratorCall>,
-        next: Box<FirIteratorCall>,
-    },
-    /// Checked structural expansion of an exact collection inline declaration. Iterator convention
-    /// calls were selected in the declaration's lookup scope; factory/append are opaque provider
-    /// identities. Common lowering therefore performs no library lookup or target-ABI reasoning.
-    CollectionTransform {
-        lambda_parameter: u32,
-        flatten: bool,
-        iterator_ty: ResolvedTy,
-        iterator: Box<FirIteratorCall>,
-        has_next: Box<FirIteratorCall>,
-        next: Box<FirIteratorCall>,
-        factory: ExternalCallableId,
-        factory_classifier: crate::types::TypeName,
-        append: ExternalCallableId,
-        accumulator: ResolvedTy,
-        append_parameter: ResolvedTy,
-        append_result: ResolvedTy,
-    },
-    /// Inline a declaration whose checked body enters a suspending region, invokes a zero-argument
-    /// lambda, and leaves the region from `finally`. The selected member identities are opaque;
-    /// target-specific owners, descriptors, and invocation opcodes remain provider/backend data.
-    SuspendBeforeLambdaFinally {
-        lambda_parameter: u32,
-        state_parameter: u32,
-        state_default: FirInlineDefaultValue,
-        enter: FirInlineMemberCall,
-        cleanup: FirInlineMemberCall,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirInlineDefaultValue {
-    Null,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirInlineMemberCall {
-    pub declaration: ExternalCallableId,
-    pub parameters: Box<[ResolvedTy]>,
-    pub result: ResolvedTy,
-    pub suspend: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -10785,6 +10785,8 @@ impl<'a> Lower<'a> {
             (ty_to_ir(method_ret), b, inline)
         };
         let seq = self.next_synthetic_seq();
+        let own_params_from =
+            u32::try_from(captures.len()).expect("too many lambda capture parameters");
         let lambda_origin = if let Some(origin) = self.lambda_origin_by_source.get(&e.0) {
             origin.clone()
         } else {
@@ -10797,8 +10799,7 @@ impl<'a> Lower<'a> {
                         None,
                     )
                 });
-            // Mirror the backend's name rendering (empty segments dropped) so the counter key IS
-            // the rendered prefix — see the field's comment for the collision this prevents.
+            // Match the backend's empty-segment handling so the counter key is the rendered prefix.
             let rendered_prefix = [Some(enclosing_name.as_str()), binding_name.as_deref()]
                 .into_iter()
                 .flatten()
@@ -10826,14 +10827,13 @@ impl<'a> Lower<'a> {
                 ordinal,
                 implementation_name: self.cur_fn.source_name.clone(),
                 implementation_ordinal: seq,
+                receiver_parameter: sig.has_receiver.then_some(own_params_from),
             };
             self.lambda_origin_by_source.insert(e.0, origin.clone());
             origin
         };
         let impl_name = format!("{}$lambda${}", self.cur_fn.source_name, seq);
-        // Impl parameters: captured variables first, then the lambda's own parameters.
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
-        let own_params_from = params_ir.len() as u32;
         params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
         let params_len = params_ir.len() as u32;
         // kotlinc guards a RECEIVER lambda's non-null reference receiver in the static impl with

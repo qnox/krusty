@@ -3791,50 +3791,6 @@ fn inline_plan_member(target: (&str, &str, &str, bool), suspend: bool) -> Option
     Some(member)
 }
 
-/// Structural dependencies of the exact stdlib collection `map`/`flatMap` inline declarations.
-/// They are registered as opaque external identities before checked FIR is built; common lowering
-/// never sees these JVM owners or descriptors.
-fn collection_transform_inline_plan(flatten: bool) -> InlineBodyPlan {
-    let any = Ty::nullable(Ty::obj("kotlin/Any"));
-    let mut factory = LibraryMember::new(
-        "<init>".to_string(),
-        Vec::new(),
-        Ty::Unit,
-        "()V".to_string(),
-    );
-    factory.owner = Some(type_name("java/util/ArrayList"));
-
-    let append_parameter = if flatten {
-        Ty::obj_args("kotlin/collections/Collection", &[any])
-    } else {
-        any
-    };
-    let mut append = LibraryMember::new(
-        if flatten { "addAll" } else { "add" }.to_string(),
-        vec![append_parameter],
-        Ty::Boolean,
-        if flatten {
-            "(Ljava/util/Collection;)Z".to_string()
-        } else {
-            "(Ljava/lang/Object;)Z".to_string()
-        },
-    );
-    append.owner = Some(type_name("java/util/List"));
-    append.physical_params = vec![if flatten {
-        Ty::obj("kotlin/collections/Collection")
-    } else {
-        any
-    }];
-    append.set_is_interface(true);
-
-    InlineBodyPlan::CollectionTransform {
-        lambda_parameter: 1,
-        flatten,
-        factory: Box::new(factory),
-        append: Box::new(append),
-    }
-}
-
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
@@ -5449,10 +5405,11 @@ impl JvmLibraries {
                         crate::libraries::CompilerIntrinsic::Map
                             | crate::libraries::CompilerIntrinsic::FlatMap
                     ) {
-                        overload.callable.inline_body_plan =
-                            Some(Box::new(collection_transform_inline_plan(
+                        overload.callable.inline_body_plan = Some(Box::new(
+                            super::collection_inline_plan::collection_transform(
                                 intrinsic == crate::libraries::CompilerIntrinsic::FlatMap,
-                            )));
+                            ),
+                        ));
                     }
                     if matches!(
                         intrinsic,
