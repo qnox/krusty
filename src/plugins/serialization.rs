@@ -769,6 +769,24 @@ fn collection_serializer_builder(classifier: TypeName) -> Option<(&'static str, 
     }
 }
 
+/// The serializer a class declared in THIS file names for itself (`@Serializable(with = X::class)`).
+/// Such a class has NO generated `$serializer`, so a containing class's element serializer must be `X`
+/// — read straight off the class's applied annotations, the same data the declaration pass uses.
+fn declared_custom_serializer(ir: &IrFile, fq_name: TypeName) -> Option<String> {
+    let class = ir.classes.iter().find(|c| c.fq_name_id() == fq_name)?;
+    let serializable = type_name(SERIALIZABLE_FQ);
+    let value = class
+        .applied_annotations
+        .applications()
+        .find(|application| application.internal == serializable)
+        .and_then(|application| application.values.first())
+        .map(|(_, value)| value)?;
+    match value {
+        crate::ir::AnnoValue::Class(classifier) => Some(classifier.render()),
+        _ => None,
+    }
+}
+
 fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
     let nn = ty.non_null();
     // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
@@ -854,6 +872,38 @@ fn element_serializer_expr(ir: &mut IrFile, ty: &Ty) -> Option<ExprId> {
                             .any(|&m| ir.functions[m as usize].name == "serializer"))))
     }) {
         return Some(build_polymorphic_serializer(ir, &fq_internal));
+    }
+    // A same-file class that names its OWN serializer has no generated `$serializer` at all: the
+    // element serializer is that class. Non-generic — a singleton `object` or a no-arg class; generic
+    // — one `KSerializer` constructor argument per type parameter, each derived recursively, which is
+    // the contract a custom serializer for a generic class is written to.
+    if let Some(custom) = declared_custom_serializer(ir, fq_name) {
+        let declared_type_params = ir
+            .classes
+            .iter()
+            .find(|c| c.fq_name_id() == fq_name)
+            .map(|c| c.type_params.len())
+            .unwrap_or(0);
+        if declared_type_params == 0 {
+            return Some(build_field_serializer_instance(ir, &custom));
+        }
+        let mut arg_sers = Vec::with_capacity(declared_type_params);
+        for argument in type_args.iter().take(declared_type_params) {
+            let readable = match argument {
+                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
+                Ty::InProjection(_) => return None,
+                _ => *argument,
+            };
+            arg_sers.push(element_serializer_expr(ir, &readable)?);
+        }
+        if arg_sers.len() != declared_type_params {
+            return None;
+        }
+        let descriptor = format!(
+            "({})V",
+            "Lkotlinx/serialization/KSerializer;".repeat(declared_type_params)
+        );
+        return Some(ir.new_external(&custom, &descriptor, arg_sers));
     }
     let serializer_name = fq_name.nested_child("$serializer");
     if let Some(sid) = ir
@@ -987,6 +1037,26 @@ fn can_derive_element_serializer(ir: &IrFile, ty: &Ty) -> bool {
         && generated_serializer_accessor(ir, fq_name, 0).is_some()
     {
         return true;
+    }
+    // A same-file class that names its own serializer (mirrors `element_serializer_expr`): derivable,
+    // provided every type argument the custom serializer's constructor takes is derivable too.
+    if declared_custom_serializer(ir, fq_name).is_some() {
+        let declared_type_params = ir
+            .classes
+            .iter()
+            .find(|c| c.fq_name_id() == fq_name)
+            .map(|c| c.type_params.len())
+            .unwrap_or(0);
+        return type_args
+            .iter()
+            .take(declared_type_params)
+            .all(|argument| match argument {
+                Ty::InProjection(_) => false,
+                Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                    can_derive_element_serializer(ir, inner)
+                }
+                _ => can_derive_element_serializer(ir, argument),
+            });
     }
     // A standard COLLECTION field (mirrors `element_serializer_expr`): derivable iff every element type is.
     if let Some((_, n)) = collection_serializer_builder(fq_name) {

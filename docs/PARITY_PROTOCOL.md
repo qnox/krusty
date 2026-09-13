@@ -1819,3 +1819,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   The `continuation_metadata_uses_returned_expression_end_line` fixture was an `if` whose arms are TAIL
   suspend calls — kotlinc emits no continuation class for it at all, so its pinned `nl` had no ground
   truth. The arms now feed a later expression, and the test compares `l`/`nl` against kotlinc's own.
+- **A same-file class's own `@Serializable(with = X::class)` is its element serializer (fix).** Such a
+  class has NO generated `$serializer`, so a containing class's element serializer must be `X`. The
+  derivation consulted only the CLASSPATH map (a dependency's serializer), so a same-file `with` left
+  the element underivable: the plugin's `serialize-body` placeholder survived to emit, `jvm_can_emit`
+  declined the file, and its module emitted nothing.
+  Non-generic → the serializer's singleton `object` (or its no-arg construction); GENERIC → one
+  `KSerializer` constructor argument per type parameter, each derived recursively — the contract a
+  custom serializer for a generic class is written to. The derivability gate mirrors both.
+  `tests/same_file_custom_serializer_e2e.rs`.
