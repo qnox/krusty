@@ -519,6 +519,112 @@ kotlinc's); then a low native IR; then a code generator; then a runtime. The run
 allocation and collection, object layout and dispatch, exceptions, threading and a coroutine
 scheduler.
 
+#### Requirement: every target buildable from any host
+
+Cross-compilation is not a later convenience. Go's defining build property is that
+`GOOS=linux GOARCH=arm64 go build` works on any machine with nothing else installed, and a native
+target that needs a toolchain per architecture has given up the thing worth copying. This is
+therefore a requirement on the native track, at the same level as build speed.
+
+What makes cross-compiling C painful is not the compiler — `clang` targets every architecture it
+was built with, and `ld.lld` links all of them — it is the **sysroot**: target headers and a target
+libc. So the requirement is really a constraint on the *runtime*: it must not use a C library. The
+landed runtime therefore talks to the kernel directly (write, mmap, exit_group) through a syscall
+shim per architecture, uses only the compiler-provided freestanding headers, and supplies its own
+`_start`. One host then builds every supported target with no sysroot, and the test asserts the
+produced binary's ELF machine number rather than trusting that it cross-compiled.
+
+Supported today: `linux-x86_64`, `linux-aarch64`, `linux-riscv64`. Adding an architecture is a
+register convention and two syscall numbers, not a port — that is the whole point of keeping
+everything above the shim portable C. Adding an *operating system* is a real port, because the
+syscall interface is the part that is not portable: macOS and Windows do not have a stable one, so
+those targets need either a libc (and its sysroot) or a different strategy entirely.
+
+#### Landed: a native backend that emits C
+
+`src/native/` compiles checked common IR to C and links it with `cc`. `fun main() { println(…) }`
+builds to an executable that runs with `JAVA_HOME` and `PATH` emptied, and so do arithmetic, locals,
+`while`, a lowered `for`, recursion, string concatenation and string templates
+(`tests/native_hello_world_e2e.rs`).
+
+**C, not Cranelift, and not LLVM.** This document's whole argument is that the code-generator choice
+deserves a decision rather than a default, and printing `Hello, world!` through either candidate
+would have made that decision by accident. Emitting C decides nothing: the same lowering feeds a
+real backend when the choice is made, and in the meantime `cc` is already present wherever this
+compiler builds. The emitted program links against the generated `krusty_rt.c` and the C library —
+a native binary, produced without committing the project to anything.
+
+What this does NOT do, in order of how much it matters:
+
+* **Classes, properties, and almost all of the stdlib.** Each one makes the backend decline, by
+  name, with a diagnostic. The runtime implements `kotlin.io`'s console functions, `String.plus`
+  and `toString`.
+* **Memory management.** The runtime never frees. Choosing a strategy is a real design decision and
+  a placeholder would prejudge it badly.
+* **klib ingestion (phase 7).** Symbols still come from the Kotlin/JVM stdlib jar, since that is the
+  only provider krusty has. Only *signatures* come from there — no JVM reaches the output — but two
+  seams exist because of it and both disappear with phase 7: a top-level function arrives owned by a
+  JVM file facade (`kotlin/io/ConsoleKt`), and `kotlin.String` arrives spelled `java/lang/String`.
+  Both are normalized in one place (`src/native/intrinsics.rs`) so nothing else is written in JVM
+  spellings.
+* **Anything about speed.** No measurement is claimed. `-O0` is passed to `cc` deliberately — a
+  target whose premise is that build time is the scarce resource has no business asking the C
+  compiler to spend the time it exists to save — but the thesis stands unmeasured until there is
+  enough of a language to measure.
+
+The backend is not wired into the CLI: it is reachable from the library API and exercised by tests.
+Exposing a `--target native` flag would advertise a language subset this small as a target.
+
+#### Open: emit Go instead of C?
+
+Worth taking seriously, and measured rather than argued. "Reuse Go's backend" has exactly one
+workable form — **emit Go source and run `go build`**. The other two do not work: `cmd/compile`'s SSA
+backend is not a library another language can drive, and `-buildmode=c-archive` gives Go's collector
+only over Go-allocated objects, so a Kotlin heap stays invisible to it.
+
+Measured on one machine, the same hello world, cross-built from `linux/amd64`:
+
+| | C, freestanding | Go |
+|---|---|---|
+| cross-build, warm | 0.18–0.20 s | 0.17–0.21 s |
+| cross-build, first time for a target | 0.18–0.20 s | ~5 s (one-off: compiles that target's stdlib) |
+| binary size | ~10 KB | ~1.9–2.2 MB |
+| targets from one host | 3, each needing a hand-written syscall shim | 48 `GOOS/GOARCH` pairs, including macOS and Windows |
+| toolchain needed | clang + lld | go |
+
+The build-speed numbers are the surprise: once a target's stdlib is cached, Go costs nothing
+measurable. Since the thesis already accepts larger binaries, size is the weaker objection — and
+against it Go supplies, at no implementation cost, precisely what this document calls the
+multi-year item: a precise generational GC, growable stacks, goroutines and channels (a plausible
+`suspend` realization that would retire the CPS transform), `panic`/`recover` for exceptions, and
+strings, slices and maps.
+
+**The target list is the decisive difference, not the runtime.** Freestanding C reaches every
+architecture but only one operating system, and that is structural rather than a matter of effort:
+the trick that removes the sysroot is issuing syscalls directly, and Linux is the only mainstream
+system with a stable syscall ABI. macOS and Windows require their own libraries, which brings the
+per-target toolchain problem straight back. A prototype Go emitter cross-built the same program to
+`linux/arm64`, `darwin/arm64` and `windows/amd64` from this Linux host with nothing installed but
+Go. If "cross-compile for all supported architectures on the same host, like Go" is a requirement,
+the C path satisfies it only within Linux.
+
+What it does not solve, and what a prototype has to answer before this becomes the plan:
+
+* **Inheritance.** Go has none, so an open class still needs an emitted interface plus embedding,
+  and virtual dispatch still needs designing. No saving here over C.
+* **`Double.toString`.** Go prints `1e+20` where Kotlin prints `1.0E20`; a prototype shim over
+  `strconv.FormatFloat` got to `1.0E+20`, so this is tractable but real work — it is not free just
+  because the runtime is rich.
+* **Constant overflow is a compile error in Go.** `int32(2147483647) + 1` is rejected at compile
+  time, where Kotlin folds it to `-2147483648`; folded constants must be emitted so they do not
+  trip this.
+* **Generics.** Go's have no variance and no reification.
+* **A second full compiler in the pipeline**, and Go frames in every stack trace.
+
+The emitter is a printer over checked common IR, and the lowering, tests and target model are
+target-agnostic, so a Go emitter is a sibling of the C one rather than a rewrite. That is the
+experiment to run, and this section stays open until it has been.
+
 ---
 
 ## Correctness strategy
@@ -534,6 +640,11 @@ scheduler.
 | 6 | Existing differential harness stays green through the split |
 | 7 | Diagnostic parity vs. `kotlinc -Xmetadata-only` |
 | 8+ | klib differential vs. kotlinc; `codegen/box` **behavioral** parity vs. `kotlinc-native` |
+
+The C backend already runs under that relaxation in its smallest possible form: every native test
+compiles a program, links it, executes it and compares its OUTPUT. No test inspects generated C — a
+C program that reads correctly and prints the wrong thing is exactly what a code-shape assertion
+cannot catch.
 
 **The relaxation:** native output is judged by `box()` returning `OK`, not byte identity. The
 `docs/PARITY_PROTOCOL.md` invariant carries over unchanged — never miscompile a case krusty accepts;
@@ -556,6 +667,12 @@ hand-written: (1) precise versus conservative GC — precise requires explicit s
 nodes in the IR; (2) exception propagation — table-driven unwinding versus explicit result
 propagation; (3) whether `suspend` lowers through the existing CPS transform or to native stack
 switching.
+
+**The C backend must not become the answer by inertia.** It was built to keep the code-generator
+question open, and a working thing has a way of settling questions no one meant to settle. C cannot
+express what a real native target needs — precise GC stack maps, a chosen exception mechanism,
+stack switching for `suspend` — so the low-IR decisions below stay open, and the C emitter stays a
+scaffold with an expiry date rather than a target to grow features on.
 
 **The code-generator dependency is a project-values decision.** The compiler *library* has four
 runtime dependencies (`zip`, `flate2`, `unicode-general-category`, `stacker`), hand-writes its own

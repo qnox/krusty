@@ -5289,6 +5289,89 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at class load rather than a wrong answer.
   Tests: `tests/context_parameter_signature_order_e2e.rs`.
 
+### Native target (`src/native/`)
+
+The native backend has no `kotlinc` to be differential against — Kotlin/Native's output is LLVM
+bitcode, not comparable bytes — so each decision below is recorded here with the test that pins it,
+and behavior is checked by RUNNING the emitted program.
+
+- **`Int?` is a reference, `Int` is a machine scalar.** A nullable primitive has to represent
+  `null`, so it boxes, exactly as it does on the JVM. Anything else would need a sentinel value,
+  and Kotlin has no integer that is not a legal `Int`.
+  Tests: `src/native/emit.rs` (`a_nullable_primitive_is_carried_as_a_reference`).
+
+- **`compareTo` on floating-point values is a TOTAL order, not C's `<`/`>`.** Kotlin orders every
+  `NaN` above every other value (including itself) and `-0.0` below `0.0`; C's comparison operators
+  answer `false` to all four relations on `NaN`. The runtime falls back to the IEEE-754 bit patterns
+  after the ordinary comparisons, which is what `java.lang.Double.compare` does and what Kotlin's
+  `Double.compareTo` is specified to do. The same operation reached through `<` (`a < b`) keeps IEEE
+  semantics — the two spellings genuinely differ in Kotlin.
+  Tests: `tests/native_hello_world_e2e.rs`; the ordering itself lives in `src/native/runtime.rs`.
+
+- **`compareTo` is a runtime call, not an emitted `a < b ? -1 : …`.** The lowered form has the
+  receiver and the argument as arbitrary expressions, and a ternary would evaluate each of them
+  twice — changing the program whenever either has a side effect.
+
+- **A floating-point value cannot be rendered, and therefore cannot be boxed.** Kotlin's
+  `Double.toString` is Java's shortest-round-trip algorithm: `1.0` prints as `1.0`, `1e20` as
+  `1.0E20`. C's `%g` is not that algorithm — it printed `1` and `1e+20` — so the runtime was already
+  producing strings Kotlin never would. The runtime therefore has no `kt_box_double`/`kt_box_float`
+  at all, which makes it *impossible* for a floating-point value to reach a position where something
+  would render it: `println(1.0)` is declined at compile time with a diagnostic instead. Arithmetic
+  and `compareTo` on floating-point values are unaffected.
+
+- **The native runtime is freestanding — it uses no C library.** This is what makes
+  cross-compilation work: `clang` compiles for every architecture and `ld.lld` links all of them,
+  but a libc call would demand a target sysroot (headers plus a target C library) for each one,
+  which is the per-architecture toolchain problem the native track exists to avoid. The runtime
+  issues `write`, `mmap` and `exit_group` directly through a syscall shim per architecture, uses
+  only the freestanding headers C11 §4 guarantees (`stdint.h`, `stddef.h`, `stdbool.h`), defines
+  `memcpy`/`memset` itself (a compiler may synthesize calls to them), and supplies its own `_start`
+  — in assembly, because at process entry the stack is aligned as if nothing had been called, which
+  is not the alignment a compiled function's prologue assumes.
+  Tests: `tests/native_hello_world_e2e.rs`
+  (`one_host_builds_an_executable_for_every_supported_architecture`), which asserts each produced
+  binary's ELF machine number rather than trusting that the cross build happened.
+
+- **`String` is UTF-8 bytes in the native runtime, and exposes no `length`.** Kotlin's
+  `String.length` counts UTF-16 code units, which is not the byte count for any non-ASCII text.
+  Exposing a byte count under that name would be wrong for `"é".length`, so the runtime exposes
+  nothing rather than something wrong. A string constant containing an unpaired surrogate — legal
+  in Kotlin, unencodable in UTF-8 — makes the backend decline the file with a diagnostic.
+  Tests: `src/native/emit.rs` (`an_unpaired_surrogate_is_declined_rather_than_mangled`,
+  `a_non_ascii_literal_uses_octal_escapes_with_a_fixed_width`),
+  `tests/native_hello_world_e2e.rs` (`non_ascii_text_survives_the_round_trip`).
+
+- **`+`, `-`, `*` and unary `-` wrap; `/`, `%` and the shifts are defined where C is not.** Kotlin
+  wraps integer arithmetic on overflow; signed overflow is UNDEFINED in C, which a compiler may
+  assume never happens. The emitter therefore spells wrapping arithmetic through the unsigned type
+  of the same width, where C defines the wrap. Division by zero throws in Kotlin (the runtime aborts
+  with a message, having no exceptions yet); `Int.MIN_VALUE / -1` wraps in Kotlin and is undefined
+  in C; and a shift count outside `0..31` (or `0..63`) is masked in Kotlin and undefined in C. Each
+  of those goes through a runtime function rather than a C operator.
+  Tests: `tests/native_hello_world_e2e.rs` (`integer_arithmetic_follows_kotlin_where_c_is_undefined`).
+
+- **`==` on references is declined, not emitted as C's `==`.** Kotlin's `==` is `equals`; C's
+  compares addresses. A structural-equality runtime does not exist yet, and emitting the address
+  comparison would compile, link, run and answer a different question.
+  Tests: `tests/native_hello_world_e2e.rs`
+  (`structural_equality_on_references_is_declined_rather_than_compared_by_address`).
+
+- **Arithmetic on `Byte`/`Short`/`Char` produces `Int`.** Kotlin has no `Byte.plus(Byte): Byte`, so
+  the result of a built-in arithmetic operator on a narrow integer type is carried as `kt_int`.
+
+- **A Kotlin loop label becomes a pair of `goto` targets, and so does an ordinary `continue` in a
+  loop that has an update.** C has no labeled loop. Separately, a lowered `for` carries its step as
+  a statement SEQUENCE (the step plus an overflow guard), which cannot go in a `for` header — so the
+  update lands at the end of the body and every `continue` must jump to a point before it, or the
+  loop would never advance.
+  Tests: `tests/native_hello_world_e2e.rs` (`arithmetic_locals_and_control_flow_run`).
+
+- **An unsupported construct declines the whole file with a diagnostic.** The JVM backend can afford
+  a best effort because `kotlinc` decides what is correct; nothing decides that for native yet, so a
+  partial emission would produce a program that links and misbehaves.
+  Tests: `tests/native_hello_world_e2e.rs` (`an_unsupported_construct_is_declined_with_a_diagnostic`).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

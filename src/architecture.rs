@@ -322,6 +322,59 @@ mod tests {
     }
 
     #[test]
+    fn native_facade_has_no_crate_dependencies() {
+        assert_allowed_crate_modules("src/native/mod.rs", &[]);
+    }
+
+    #[test]
+    fn the_native_runtime_and_linker_are_target_text_only() {
+        // `runtime.rs` is C source and `link.rs` drives a C compiler. Neither has any business
+        // knowing what a Kotlin type or a compiler IR is.
+        assert_allowed_crate_modules("src/native/runtime.rs", &[]);
+        assert_allowed_crate_modules("src/native/link.rs", &[]);
+    }
+
+    #[test]
+    fn the_native_emitter_uses_only_ir_contract_dependencies() {
+        // `jvm` is on this list for ONE reason: the only symbol provider krusty has reads a JVM
+        // classpath, so a selected dependency declaration is resolved through
+        // `Classpath::external_callable`. It is the seam phase 7 of `docs/BUILD_AND_NATIVE_PLAN.md`
+        // removes, and this budget is what keeps it from spreading in the meantime.
+        assert_allowed_crate_modules("src/native/emit.rs", &["ir", "jvm", "kt_string", "types"]);
+        assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
+    }
+
+    #[test]
+    fn the_native_backend_adapter_uses_only_common_backend_dependencies() {
+        assert_allowed_crate_modules(
+            "src/native/backend.rs",
+            &["backend", "diag", "frontend", "jvm"],
+        );
+    }
+
+    #[test]
+    fn jvm_spellings_of_kotlin_builtins_stay_in_one_place() {
+        // `kotlin.String` reaches the backend spelled `java/lang/String`, and a top-level function
+        // reaches it owned by a file facade. Both are artifacts of reading signatures out of a JVM
+        // jar, and both are normalized in `intrinsics.rs`. A second file learning to recognize
+        // those spellings is how a temporary bridge becomes permanent.
+        for path in rust_files_under("src/native") {
+            if path.ends_with("intrinsics.rs") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).expect("read native source");
+            for forbidden in ["java/lang", "java/util", "Kt\""] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} spells a JVM provider detail (`{forbidden}`); normalize it in \
+                     src/native/intrinsics.rs instead",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ir_lower_uses_only_common_lowering_dependencies() {
         assert_allowed_crate_modules(
             "src/ir_lower.rs",
@@ -537,6 +590,7 @@ mod tests {
             "tests",
             &[
                 "ast",
+                "backend",
                 "compiler",
                 "conformance",
                 "dhat",
@@ -548,6 +602,7 @@ mod tests {
                 "js",
                 "jvm",
                 "lexer",
+                "native",
                 "libraries",
                 "metadata",
                 "parser",
