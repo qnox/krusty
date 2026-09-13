@@ -1830,3 +1830,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `no parameter with name 'x' found` — one such shadowing pair produced eight errors in one file, and
   a module with any error emits nothing.
   `tests/explicit_import_shadows_same_package_e2e.rs::explicit_import_wins_over_same_package_class`.
+- **A spliced inline body names the locals it materializes (fix).** Every local an inline expansion
+  introduces — the callee's own parameters and its body locals — is in scope at a suspension inside
+  the spliced body, and kotlinc spills each under the callee's SOURCE name with one `$iv` per
+  expansion depth (`urlString$iv`, `builder$iv`, `builder$iv$iv` one frame deeper), escaping a `$`
+  inside the name itself as `_u24`. krusty lost both halves: the callee's parameters became unnamed
+  temps, and the cloned body declarations lost the names their originals carried, so a continuation's
+  `@DebugMetadata` held only the caller's own locals and the fields came out short.
+  Still open: kotlinc also spills the inline LAMBDA's receiver under the lambda's synthetic method
+  name (`$this$<fn>$lambda$<n>`), which needs a kotlinc-compatible per-function lambda ordinal krusty
+  does not compute yet; it takes a position with no name for now. Classpath inline functions splice as
+  BYTECODE (`src/jvm/inline.rs`), which carries no local names at all — the corpus's largest remaining
+  continuation family is that shape.
+  `tests/suspend_inline_splice_names_e2e.rs`.
