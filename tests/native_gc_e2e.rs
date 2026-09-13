@@ -187,7 +187,7 @@ typedef struct Node {
     kt_long value;
 } Node;
 static const uint32_t node_references[] = {offsetof(Node, next)};
-static const KType node_type = {"Node", 4, sizeof(Node), 1, node_references};
+static const KType node_type = {"Node", 4, sizeof(Node), 1, 0, node_references};
 
 /* No reference fields at all: `address` holds a pointer's BITS in a kt_long, which a precise
    tracer must not follow. */
@@ -196,14 +196,14 @@ typedef struct Leaf {
     kt_long value;
     kt_long address;
 } Leaf;
-static const KType leaf_type = {"Leaf", 4, sizeof(Leaf), 0, NULL};
+static const KType leaf_type = {"Leaf", 4, sizeof(Leaf), 0, 0, NULL};
 
 /* Larger than the largest small size class, so it takes the large-object path. */
 typedef struct Big {
     KObjectHeader header;
     kt_long values[512];
 } Big;
-static const KType big_type = {"Big", 3, sizeof(Big), 0, NULL};
+static const KType big_type = {"Big", 3, sizeof(Big), 0, 0, NULL};
 
 static void fail(kt_int code) { kt_exit(code); }
 

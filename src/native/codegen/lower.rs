@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod arrays;
 mod functions;
 mod objects;
 mod statics;
@@ -945,6 +946,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.field_read(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::NewArray { array_type, size } => self.new_array(array_type, size),
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } => self.vararg(array_type, &spreads, &elements),
             IrExpr::Lambda { .. } => self.lambda(id),
             IrExpr::InvokeFunction {
                 func,
@@ -1125,6 +1132,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.file.ir.classes[*class as usize].fields[*index as usize].ty
             }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             // A function value and a captured-variable holder are both objects.
@@ -1674,6 +1682,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 }
                 self.runtime_call("kt_string_plus", &[any(), any()], ret, &[left, right])
+            }
+            IrIntrinsic::ArrayGet => {
+                let (Some(receiver), [index]) = (receiver, args) else {
+                    return Err("a malformed array read".to_string());
+                };
+                self.array_get(receiver, *index, ret)
+            }
+            IrIntrinsic::ArraySet => {
+                let (Some(receiver), [index, value]) = (receiver, args) else {
+                    return Err("a malformed array store".to_string());
+                };
+                self.array_set(receiver, *index, *value)
+            }
+            IrIntrinsic::ArraySize => {
+                let Some(receiver) = receiver else {
+                    return Err("a malformed array size".to_string());
+                };
+                self.array_size(receiver)
             }
             IrIntrinsic::NullableAnyToString => {
                 let Some(receiver) = receiver else {

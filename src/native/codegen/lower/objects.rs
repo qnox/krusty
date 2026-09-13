@@ -572,7 +572,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Fail loudly on a null receiver, as the runtime's `kt_dispatch` did: a member access on
     /// `null` is a checked failure, never a load from address zero.
-    fn null_check(&mut self, receiver: Value) -> Result<(), Unsupported> {
+    pub(super) fn null_check(&mut self, receiver: Value) -> Result<(), Unsupported> {
         let is_null = self.is_null(receiver);
         let fail = self.builder.create_block();
         let proceed = self.builder.create_block();

@@ -14,3 +14,4 @@ statics/incInObject.kt	`r2++`/`++r2` on an object property with a custom getter 
 statics/incInClassObject.kt	same increment shape as statics/incInObject.kt; krusty's JVM backend prints the identical failure
 contextParameters/classMemberAndTopLevelWithContext.kt	a context parameter picks the wrong receiver — krusty's JVM backend prints the identical "NOK", so this is the frontend's, not the generator's
 extensionFunctions/executionOrder.kt	an extension call evaluates its receiver and function in the wrong order — krusty's JVM backend prints the identical "fail getReceiver->getFun()->End"
+multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt	a name-based destructuring with a renamed underscore binds the wrong component — krusty's JVM backend prints the identical "FAIL: 0", so this is the frontend's

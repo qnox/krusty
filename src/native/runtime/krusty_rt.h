@@ -33,6 +33,10 @@ typedef struct KType {
     uint32_t name_length;
     uint32_t instance_size;            /* bytes including the header; the fixed part, for arrays */
     uint32_t reference_count;          /* how many reference-typed fields */
+    /* An array's element stride, or 0 for everything else. Elements begin at `instance_size`, so
+       one object shape serves every array: the fixed part says where they start and this says how
+       far apart they are. */
+    uint32_t element_size;
     const uint32_t *reference_offsets; /* byte offset of each reference field */
     /* The superclass, or NULL for kotlin.Any only. `is` walks this chain. */
     const struct KType *super;
@@ -41,7 +45,11 @@ typedef struct KType {
        valid for every subclass. The first three slots are kotlin.Any's (see KT_SLOT_*). */
     const kt_fn *vtable;
     uint32_t vtable_length;
+    /* Whether an array's elements are references the collector must trace. Separate from
+       `element_size` because a `LongArray`'s elements are the same width and must NOT be traced. */
+    uint32_t element_references;
 } KType;
+
 
 typedef struct KObjectHeader {
     const KType *type;
@@ -98,6 +106,34 @@ extern const KType kt_type_long;
 extern const KType kt_type_char;
 extern const KType kt_type_boolean;
 extern const KType kt_type_unit;
+
+/* Every array: the header, the length, then `element_size` bytes per element beginning at the
+   type's `instance_size`. One shape for `IntArray` and `Array<T>` alike — what differs is the
+   stride and whether the collector looks inside. */
+typedef struct KArray {
+    KObjectHeader header;
+    kt_int length;
+} KArray;
+
+/* Allocate a zeroed array of `length` elements. Zero is the right initial value for every element
+   kind Kotlin has here: `0`, `false`, `\u0000`, `0.0` and `null` are all zero bits. */
+KRef kt_array_new(const KType *type, kt_int length);
+
+/* An index outside `0 until size`. Kotlin throws IndexOutOfBoundsException; with no exception
+   machinery yet the honest realization is a diagnosable exit. */
+void kt_index_out_of_bounds(kt_int index, kt_int size);
+
+/* The array types, all runtime-owned: an array's descriptor depends on its element WIDTH, not on
+   the element type a program wrote, so `Array<String>` and `Array<Foo>` share one. */
+extern const KType kt_type_array; /* Array<T>: references */
+extern const KType kt_type_byte_array;
+extern const KType kt_type_short_array;
+extern const KType kt_type_int_array;
+extern const KType kt_type_long_array;
+extern const KType kt_type_char_array;
+extern const KType kt_type_boolean_array;
+extern const KType kt_type_float_array;
+extern const KType kt_type_double_array;
 
 /* Defaults, callable directly for `super.toString()` and friends. */
 kt_boolean kt_any_equals(KRef self, KRef other);

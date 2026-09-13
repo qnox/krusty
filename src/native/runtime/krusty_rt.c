@@ -48,28 +48,55 @@ static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_c
 
 /* kotlin.Any itself is never instantiated; the descriptor exists as the root of every `super`
    chain and the owner of the three default slots. */
-const KType kt_type_any = {"kotlin.Any", 10, sizeof(KObjectHeader), 0, NULL, NULL, kt_any_vtable, 3};
+const KType kt_type_any = {"kotlin.Any", 10,   sizeof(KObjectHeader), 0, 0, NULL, NULL,
+                           kt_any_vtable, 3, 0};
 
 #define KT_TYPE(identifier, kotlin_name, size, count, offsets)                                     \
-    const KType identifier = {kotlin_name,   sizeof(kotlin_name) - 1, size, count, offsets, \
-                              &kt_type_any, kt_builtin_vtable,      3};
+    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, size,  count,                  \
+                              0,           offsets,                 &kt_type_any,                  \
+                              kt_builtin_vtable, 3, 0};
 
-/* Raw bytes: the storage behind a string's text and behind rendered numbers. It holds no
-   references, so the collector never looks inside it. The bytes follow the header directly. */
-typedef struct KByteArray {
-    KObjectHeader header;
-    kt_int length;
-} KByteArray;
+/* An array type. Its members are compared by IDENTITY, which is what Kotlin's `==` on arrays means,
+   so it takes `kotlin.Any`'s vtable rather than the built-in value one. */
+#define KT_ARRAY_TYPE(identifier, kotlin_name, stride, references)                                 \
+    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, sizeof(KArray), 0,             \
+                              stride,      NULL,                    &kt_type_any,                  \
+                              kt_any_vtable, 3, references};
 
-KT_TYPE(kt_type_byte_array, "kotlin.ByteArray", sizeof(KByteArray), 0, NULL)
+/* Every array, including the raw bytes behind a string's text. `KArray` says where the elements
+   begin; the type says how wide they are and whether the collector looks inside. */
+KT_ARRAY_TYPE(kt_type_array, "kotlin.Array", sizeof(void *), 1)
+KT_ARRAY_TYPE(kt_type_byte_array, "kotlin.ByteArray", 1, 0)
+KT_ARRAY_TYPE(kt_type_short_array, "kotlin.ShortArray", 2, 0)
+KT_ARRAY_TYPE(kt_type_int_array, "kotlin.IntArray", 4, 0)
+KT_ARRAY_TYPE(kt_type_long_array, "kotlin.LongArray", 8, 0)
+KT_ARRAY_TYPE(kt_type_char_array, "kotlin.CharArray", 2, 0)
+KT_ARRAY_TYPE(kt_type_boolean_array, "kotlin.BooleanArray", 1, 0)
+KT_ARRAY_TYPE(kt_type_float_array, "kotlin.FloatArray", 4, 0)
+KT_ARRAY_TYPE(kt_type_double_array, "kotlin.DoubleArray", 8, 0)
+
+KRef kt_array_new(const KType *type, kt_int length) {
+    if (length < 0) {
+        KT_FAIL("krusty: negative array size\n");
+    }
+    KArray *array = (KArray *)kt_gc_allocate(
+        type, (uint32_t)sizeof(KArray) + (uint32_t)length * type->element_size);
+    array->length = length;
+    return (KRef)array;
+}
+
+void kt_index_out_of_bounds(kt_int index, kt_int size) {
+    (void)index;
+    (void)size;
+    KT_FAIL("krusty: array index out of bounds\n");
+}
+
+typedef KArray KByteArray;
 
 static char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }
 
 static KByteArray *kt_bytes_new(kt_int length) {
-    KByteArray *array =
-        (KByteArray *)kt_gc_allocate(&kt_type_byte_array, (uint32_t)sizeof(KByteArray) + (uint32_t)length);
-    array->length = length;
-    return array;
+    return (KByteArray *)kt_array_new(&kt_type_byte_array, length);
 }
 
 /* Every built-in value is one of these; the header's type says which. */

@@ -5403,6 +5403,24 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_codegen_e2e.rs`
   (`a_when_whose_arms_have_different_types_is_carried_as_a_reference`).
 
+- **An array is one object shape, and what varies is its type descriptor.** A header, a length,
+  then the elements; the descriptor says how wide an element is and whether the collector should
+  look inside. So `IntArray` and `Array<String>` are the same shape, every array type belongs to
+  the RUNTIME rather than to a program (an array's descriptor depends on the element WIDTH, not on
+  the element type someone wrote), and a `LongArray` is never walked as pointers even though its
+  elements are pointer-width.
+  **What an array stores is not always what its element type says**: `Array<Int>` holds boxed
+  elements while `IntArray` holds the integers, so a read converts from the stored carrier to the
+  type the operation declares — the boundary the JVM crosses with a `checkcast` and an
+  `intValue()`. **Every access is bounds-checked**, compared unsigned so one comparison catches a
+  negative index too; Kotlin throws `IndexOutOfBoundsException` and, with no exception machinery
+  yet, the honest realization is a diagnosable exit. `==` on arrays is identity, as Kotlin says, so
+  array types take `kotlin.Any`'s vtable rather than the built-in value one.
+  Tests: `tests/native_codegen_e2e.rs` (`arrays_read_write_and_know_their_size`,
+  `an_array_index_outside_its_bounds_fails_loudly`,
+  `a_reference_array_is_traced_through_collection`,
+  `a_reference_array_of_a_primitive_boxes_at_the_element_boundary`).
+
 - **`Unit` is a value, and it is the runtime's.** A position that wants a reference — `val u: Any =
   Unit`, an `Any?` argument, a `Unit`-returning lambda's result — gets the runtime's singleton, so
   there is one `Unit` program-wide and a file that merely mentions it emits nothing.

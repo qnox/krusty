@@ -205,6 +205,18 @@ static void kt_trace(void) {
                 kt_mark_candidate((uintptr_t)field);
             }
         }
+        /* An array of references: its elements are as precisely traced as a field is. The count is
+           the array's own, so a `LongArray` of the same width is never walked as pointers. */
+        if (type->element_references) {
+            const KArray *array = (const KArray *)object;
+            for (kt_int i = 0; i < array->length; i++) {
+                void *element =
+                    *(void **)(object + type->instance_size + (uint32_t)i * type->element_size);
+                if (element != NULL) {
+                    kt_mark_candidate((uintptr_t)element);
+                }
+            }
+        }
     }
 }
 

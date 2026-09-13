@@ -977,3 +977,147 @@ fn the_unit_value_is_the_runtimes_own() {
         "kotlin.Unit\ntrue\ntrue\n"
     );
 }
+
+#[test]
+fn arrays_read_write_and_know_their_size() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A primitive array and a reference array, built three ways: element by element, sized and
+    // zero-filled, and filled by a loop. Every element kind has a stride of its own, and reading
+    // back what was written is what proves the generator and the runtime agree on it.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val ints = intArrayOf(3, 1, 4)\n\
+             \x20   println(ints.size)\n\
+             \x20   println(ints[0])\n\
+             \x20   ints[0] = ints[2]\n\
+             \x20   println(ints[0])\n\
+             \x20   val zeros = IntArray(4)\n\
+             \x20   println(zeros.size)\n\
+             \x20   println(zeros[3])\n\
+             \x20   var i = 0\n\
+             \x20   var total = 0\n\
+             \x20   while (i < ints.size) { total = total + ints[i]; i = i + 1 }\n\
+             \x20   println(total)\n\
+             \x20   val words = arrayOf(\"a\", \"bb\")\n\
+             \x20   println(words.size)\n\
+             \x20   println(words[1])\n\
+             \x20   words[0] = words[1]\n\
+             \x20   println(words[0])\n\
+             \x20   val longs = longArrayOf(1L, 2L)\n\
+             \x20   println(longs[1])\n\
+             \x20   val flags = booleanArrayOf(true, false)\n\
+             \x20   println(flags[0])\n\
+             \x20   println(flags[1])\n\
+             \x20   val chars = charArrayOf('k', 't')\n\
+             \x20   println(chars[1])\n\
+             \x20   val bytes = byteArrayOf(7, 8)\n\
+             \x20   println(bytes[1])\n\
+             }\n"),
+        "3\n3\n4\n4\n0\n9\n2\nbb\nbb\n2\ntrue\nfalse\nt\n8\n"
+    );
+}
+
+#[test]
+fn an_array_index_outside_its_bounds_fails_loudly() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // Kotlin throws IndexOutOfBoundsException; there are no exceptions yet, so the honest
+    // realization is a diagnosable exit. A negative index must be caught by the same check.
+    for index in ["3", "-1"] {
+        let (artifacts, diagnostics) = compile(
+            &[(
+                "Main",
+                &format!(
+                    "fun at(a: IntArray, i: Int): Int = a[i]\n\
+                     fun main() {{ println(\"before\"); println(at(intArrayOf(1, 2, 3), {index})) }}\n"
+                ),
+            )],
+            target,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let objects = artifacts
+            .iter()
+            .map(|(_, bytes)| bytes.as_slice())
+            .collect::<Vec<_>>();
+        let image = krusty::native::link_program(&objects, target).expect("link");
+        let scratch = Scratch::new("bounds");
+        let executable = scratch.path().join("program");
+        std::fs::write(&executable, &image).expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output =
+            common::run_freshly_written(std::process::Command::new(&executable).env_clear())
+                .expect("run");
+        assert!(!output.status.success(), "index {index} must not continue");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("array index out of bounds"),
+            "index {index}: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn a_reference_array_is_traced_through_collection() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The array holds the only reference to each of its heap strings, and the loop allocates far
+    // past the collection threshold — so the elements have to be traced as references, at the
+    // stride the descriptor declares. A `LongArray` of the same element width must NOT be walked
+    // as pointers, which is why the descriptor carries both the stride and whether to look inside.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val kept = arrayOfNulls<String>(3)\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 3) { kept[i] = \"kept-$i\"; i = i + 1 }\n\
+             \x20   val decoys = LongArray(3)\n\
+             \x20   i = 0\n\
+             \x20   while (i < 3) { decoys[i] = 140737488355328L + i; i = i + 1 }\n\
+             \x20   var garbage = \"\"\n\
+             \x20   var n = 0\n\
+             \x20   while (n < 100000) { garbage = \"garbage-$n\"; n = n + 1 }\n\
+             \x20   println(kept[0])\n\
+             \x20   println(kept[2])\n\
+             \x20   println(decoys[1])\n\
+             \x20   println(garbage)\n\
+             }\n"),
+        "kept-0\nkept-2\n140737488355329\ngarbage-99999\n"
+    );
+}
+
+#[test]
+fn a_reference_array_of_a_primitive_boxes_at_the_element_boundary() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Array<Int>` stores BOXED elements, unlike `IntArray`. A read therefore produces a reference
+    // where the reader may want an `Int` — the conversion belongs at the element boundary, which
+    // is the same place the JVM puts its `checkcast` and `intValue()`.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val a = arrayOfNulls<Int>(5)\n\
+             \x20   for (i in 0..4) a[i] = i + 1\n\
+             \x20   var sum = 0\n\
+             \x20   for (el in (a as Array<Int>)) sum = sum + el\n\
+             \x20   println(sum)\n\
+             \x20   val ints = IntArray(5)\n\
+             \x20   for (i in 0..4) ints[i] = i + 1\n\
+             \x20   var plain = 0\n\
+             \x20   for (el in ints) plain = plain + el\n\
+             \x20   println(plain)\n\
+             }\n"),
+        "15\n15\n"
+    );
+}
