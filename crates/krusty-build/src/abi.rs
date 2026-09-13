@@ -101,6 +101,13 @@ impl AbiFingerprint {
     pub fn value(self) -> u64 {
         self.0
     }
+
+    /// Rebuild a fingerprint from a previously stored value — used when a cache hit supplies a
+    /// module's ABI without recomputing it. Not for minting fingerprints: those come from
+    /// [`fingerprint`].
+    pub fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 impl std::fmt::Display for AbiFingerprint {

@@ -14,15 +14,23 @@
 //! * [`abi`] — an ABI model carrying no method bodies, and its fingerprint. This is the artifact a
 //!   dependent compiles against and the hash every dependent's cache key folds in.
 //! * [`cache`] — the cache key. Every input that can change emitted bytes is in it by default.
+//! * [`store`] — the content-addressed artifact store. Its one job beyond lookup is integrity: a
+//!   partially written entry must never read as a hit.
+//! * [`driver`] — plan, look up, compile, store, materialize. Sequential, because the compiler is
+//!   not `Send`.
+//! * [`compiler`] — a [`driver::BuildEnvironment`] that drives the real `krusty` binary, one
+//!   process per module.
 //!
 //! # What is NOT here
 //!
-//! No build providers (Gradle/Maven/BSP/JPS), no driver, no artifact store, no scheduler. The
-//! providers are ~10,000 lines living in `crates/krusty-lsp/src/project/` and lifting them is its
-//! own change; this crate establishes the types they will populate and the two algorithms that are
-//! pure logic, so both can be reviewed and tested before anything is moved.
+//! No build providers (Gradle/Maven/BSP/JPS) and no parallel scheduling. The providers are ~10,000
+//! lines living in `crates/krusty-lsp/src/project/` and lifting them is its own change; this crate
+//! establishes the types they will populate. Parallelism needs a process pool with crash isolation
+//! and interleaved diagnostics, and the sequential driver is its oracle: the same graph must
+//! produce the same artifacts either way.
 //!
-//! Nothing here is wired into the compiler or the CLI yet. The crate builds and tests standalone.
+//! Nothing here is wired into the compiler or the shipped CLI yet. The crate builds and tests
+//! standalone.
 //!
 //! # The property this all rests on
 //!
@@ -33,13 +41,19 @@
 
 pub mod abi;
 pub mod cache;
+pub mod compiler;
+pub mod driver;
 pub mod graph;
 pub mod model;
+pub mod store;
 
 pub use abi::{AbiClass, AbiFingerprint, AbiMember, MemberKind};
 pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
+pub use compiler::KrustyCli;
+pub use driver::{BuildEnvironment, BuildReport, CompiledModule, Driver, Outcome};
 pub use graph::{GraphError, ModuleGraph};
 pub use model::{Module, ModuleId, ModuleOutput, SourceRoot, SourceRootKind};
+pub use store::{ArtifactStore, CachedModule, MissReason};
 
 /// FNV-1a over `bytes`.
 ///
