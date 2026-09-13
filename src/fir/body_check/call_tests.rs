@@ -1313,6 +1313,31 @@ fn postponed_generic_result_inside_an_input_projection_is_fully_solved() {
 }
 
 #[test]
+fn postponed_result_completion_preserves_an_input_owned_type_argument() {
+    let (body, index) = checked_function_body(
+        "class Inv<T>\n\
+         fun <T : V, U : V, V> accept(x: T, y: Inv<in U>) {}\n\
+         fun <A, E> materialize(value: A): Inv<in Inv<E>?> = Inv()\n\
+         fun test(inv: Inv<Int>) { accept(inv, materialize(\"kept\")) }\n",
+        "test",
+    );
+    let materialize = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target)? == "materialize").then_some(call)
+        })
+        .expect("postponed nested call");
+    let [input, result] = materialize.substitutions.as_ref() else {
+        panic!("the nested call must publish both declaration-owned type arguments")
+    };
+    assert_eq!(input.value.get(), Ty::String);
+    assert_eq!(result.value.get(), Ty::Nothing);
+}
+
+#[test]
 fn covariant_star_argument_infers_its_readable_bound_for_a_generic_call() {
     let (body, index) = checked_function_body_with_platform(
         "interface A<out T : Any>\n\
