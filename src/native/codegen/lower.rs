@@ -162,7 +162,7 @@ pub fn lower_file(
         ir,
         classpath,
         module: &mut module,
-        symbols: model::symbols(ir),
+        symbols: model::symbols(ir, super::super::linker::runtime_symbols(target.arch)),
         model: class_model,
         functions: Vec::new(),
         imports: HashMap::new(),

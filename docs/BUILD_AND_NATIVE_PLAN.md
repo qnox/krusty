@@ -1208,6 +1208,15 @@ before:**
    the operator path unified operands by MACHINE type, so a pointer and an integer "unified" into
    pointer arithmetic that printed as an answer. Operators now unbox through the bound, and the
    result of one is the primitive rather than the reference the declaration spells.
+   The suite itself then became the second corpus. Every test that asserts `box()` prints `OK` now
+   compiles, links and runs its source through the native backend as well — 599 programs written to
+   pin krusty's own semantics, with the oracle the native lane already uses, for about 6% of the
+   suite's wall time and no second suite to keep in step. A decline is a skip; an accepted program
+   that prints anything but `OK` fails the test it came from. The first run found a defect the
+   7,352-case corpus never had: a Kotlin `fun cast(…)` is named `kt_cast`, which the runtime also
+   defines, and the link failed with a duplicate symbol that said nothing about the Kotlin name
+   behind it. The generator now reserves the symbols the prebuilt runtime defines, read out of the
+   runtime objects rather than listed beside them.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

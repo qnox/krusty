@@ -1162,8 +1162,11 @@ fn class_symbol_family(base: &str) -> [String; 6] {
     ]
 }
 
-pub(super) fn symbols(ir: &IrFile) -> Symbols {
-    let mut taken: HashSet<String> = HashSet::new();
+pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
+    // The runtime's own symbols are taken before any of the program's are handed out. A Kotlin
+    // `fun cast(value: Any)` would otherwise be named `kt_cast`, which the runtime already defines,
+    // and the link fails with a duplicate symbol that says nothing about the Kotlin name behind it.
+    let mut taken: HashSet<String> = reserved;
     let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
         let mut candidate = base.clone();
         let mut ordinal = 0;

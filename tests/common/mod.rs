@@ -1661,6 +1661,139 @@ pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
         "OK",
         "{stem}"
     );
+    also_run_natively(src, stem);
+}
+
+/// The prefix every native decline carries, so a decline can be told from a wrong answer.
+const NATIVE_DECLINE: &str = "krusty: the native backend does not support ";
+
+/// Run the same `box()` source through the NATIVE backend as well, when this build has a runtime
+/// for the host.
+///
+/// The suite's own programs are a better corpus for the native track than anything written for it:
+/// they were written to pin krusty's semantics, they are small, and their oracle is already
+/// `box()` printing `OK` — the exact contract the box-corpus lane holds the generator to. Reusing
+/// them costs one flag rather than a second suite.
+///
+/// A construct the generator DECLINES is a skip. The native track is younger than the suite, and a
+/// decline is how it says a construct is not lowered yet; failing the test for one would turn every
+/// JVM-side test into a native to-do list. A program the generator ACCEPTS must print `OK`, and
+/// anything else — a wrong answer, a crash, a failed link — fails the test it came from, which is
+/// where the shape that provoked it is already written down.
+#[allow(dead_code)]
+pub fn also_run_natively(src: &str, stem: &str) {
+    // On by default where there is a runtime to link against: the cost is about a tenth of the
+    // suite's time, and the first run of it found a symbol collision between a Kotlin `fun cast`
+    // and the runtime's own `kt_cast` that the box corpus had never provoked. `KRUSTY_NATIVE_E2E=0`
+    // turns it off for a run that only cares about the JVM path.
+    if std::env::var("KRUSTY_NATIVE_E2E").is_ok_and(|value| value == "0") {
+        return;
+    }
+    let Some(target) = krusty::native::NativeTarget::host() else {
+        return;
+    };
+    if !krusty::native::can_link(target) {
+        return;
+    }
+    match native_box_outcome(src, stem, target) {
+        NativeBox::Pass | NativeBox::Declined => {}
+        NativeBox::Failed(reason) => panic!("{stem}: the native backend ran it wrong — {reason}"),
+    }
+}
+
+#[allow(dead_code)]
+enum NativeBox {
+    Pass,
+    /// Declined by the generator, or refused by the frontend before it — neither is the native
+    /// backend running a program wrong.
+    Declined,
+    Failed(String),
+}
+
+#[allow(dead_code)]
+fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarget) -> NativeBox {
+    use krusty::diag::DiagSink;
+    use krusty::jvm::classpath::Classpath;
+    use krusty::native::{CraneliftBackend, Entry};
+    use krusty::source::SourceInput;
+
+    let Some(jar) = krusty::toolchain::stdlib_jar() else {
+        return NativeBox::Declined;
+    };
+    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
+        classpath.clone(),
+    ));
+    let inputs = vec![SourceInput::kotlin(src).with_file_stem(stem)];
+    let stems = vec![stem.to_string()];
+    let mut features = krusty::features::LangFeatures::new();
+    features.apply_source_directives(src);
+    let mut diags = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs, platform, &features, &mut diags,
+    );
+    if !diags.diags.is_empty() {
+        return NativeBox::Declined;
+    }
+    let backend = CraneliftBackend::new(classpath, target).with_entry(Entry::Box);
+    let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, stem, &mut diags);
+    if diags
+        .diags
+        .iter()
+        .any(|diagnostic| diagnostic.msg.starts_with(NATIVE_DECLINE))
+    {
+        return NativeBox::Declined;
+    }
+    if !diags.diags.is_empty() {
+        return NativeBox::Declined;
+    }
+    let Some((_, object)) = artifacts.into_iter().next() else {
+        return NativeBox::Declined;
+    };
+    let image = match krusty::native::link_program(&[&object], target) {
+        Ok(image) => image,
+        Err(error) => return NativeBox::Failed(format!("link: {error}")),
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-native-e2e-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    if std::fs::create_dir_all(&directory).is_err() {
+        return NativeBox::Declined;
+    }
+    let executable = directory.join(stem);
+    if let Err(error) = std::fs::write(&executable, &image) {
+        return NativeBox::Failed(format!("writing the executable: {error}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755));
+    }
+    let output = run_freshly_written(
+        std::process::Command::new(&executable)
+            .env_clear()
+            .stdin(std::process::Stdio::null()),
+    );
+    let _ = std::fs::remove_file(&executable);
+    match output {
+        Err(error) => NativeBox::Failed(format!("running it: {error}")),
+        Ok(output) if !output.status.success() => NativeBox::Failed(format!(
+            "exit {}; stdout {:?}; stderr {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            if stdout == "OK\n" {
+                NativeBox::Pass
+            } else {
+                NativeBox::Failed(format!("box() printed {stdout:?}"))
+            }
+        }
+    }
 }
 
 /// Multi-file form of [`expect_box_ok_with_stdlib`].

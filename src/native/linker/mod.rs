@@ -64,6 +64,8 @@ impl std::error::Error for ProgramLinkError {}
 /// Link a program's objects with the prebuilt runtime for `target` into a static executable.
 ///
 /// The returned bytes are a complete ELF file; the caller decides where to write it.
+pub(crate) use elf::runtime_symbols;
+
 pub fn link_program(
     program_objects: &[&[u8]],
     target: NativeTarget,

@@ -308,6 +308,24 @@ Use the shared helpers in `tests/common`:
 These helpers compile in process where possible and reuse persistent JVM runners/servers inside a test
 binary. Per-test JVM startup is one of the easiest ways to degrade the suite.
 
+## The Suite Runs on Both Backends
+
+Every test that asserts `box()` prints `OK` through `common::expect_box_ok_with_stdlib` also
+compiles, links and RUNS the same source through the native backend. There is no separate native
+suite to write and keep in step: the programs the suite already has were written to pin krusty's
+semantics, they are small, and their oracle is exactly the one the native lane uses.
+
+What the second run means:
+
+- A construct the generator **declines** is a skip. The native track is younger than the suite, and
+  a decline is how it says a construct is not lowered yet.
+- A program it **accepts** must print `OK`. A wrong answer, a crash or a failed link fails the test
+  it came from, where the shape that provoked it is already written down.
+
+It costs about 6% of the suite's wall time and needs a prebuilt runtime for the host, which is the
+same condition the native tests already carry. `KRUSTY_NATIVE_E2E=0` turns it off for a run that
+only cares about the JVM path.
+
 ## Environment Overrides
 
 The harness usually sets these itself through `just`. Override them only when testing a specific local

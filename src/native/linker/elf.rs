@@ -13,6 +13,34 @@
 use std::collections::HashMap;
 
 use object::read::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
+
+/// Every global symbol the prebuilt runtime for `arch` DEFINES.
+///
+/// The code generator asks for this so it never names a function of its own after one of them: a
+/// Kotlin `fun cast(...)` becomes `kt_cast`, which is also the runtime's cast helper, and two
+/// definitions of one symbol fail the link with nothing to say about where the Kotlin name was.
+/// Reading the answer out of the runtime objects keeps it true as the runtime grows, which a list
+/// written down beside them would not.
+pub(crate) fn runtime_symbols(arch: Arch) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let Some(objects) = super::prebuilt::runtime_objects(arch) else {
+        return names;
+    };
+    for (_, bytes) in objects {
+        let Ok(file) = object::File::parse(*bytes) else {
+            continue;
+        };
+        for symbol in file.symbols() {
+            if symbol.section_index().is_none() || !symbol.is_global() {
+                continue;
+            }
+            if let Ok(name) = symbol.name() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
 use object::{RelocationFlags, SectionKind, SymbolKind};
 
 use super::super::target::{Arch, NativeTarget};
