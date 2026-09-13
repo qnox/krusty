@@ -1869,3 +1869,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
   parameter descriptors and every constant the body introduces.
   `tests/java_parameters_attribute_e2e.rs`.
+- **A bare receiver-property name smart-casts (fix).** `if (ref != null) take(ref)` inside an
+  EXTENSION function read `ref` through the extension receiver and saw the declared `String?`: the
+  bare name reached neither the local-binding path nor the `this.<name>` path, so no flow narrowing
+  applied and kotlinc-accepted source was rejected. A bare own-member read inside a CLASS body was
+  already normalized to `this.<name>`; the same normalization now covers a bare name that is a
+  property of the CURRENT receiver, so the qualified spelling's stability rules make the decision —
+  a `var`, a custom getter, a delegate, or an open property on a non-final class still declines.
+  The read side consults the narrowing at both implicit-receiver seams.
+  `tests/implicit_receiver_smartcast_e2e.rs`.

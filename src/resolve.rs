@@ -58336,6 +58336,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The flow-narrowed type of a BARE property name read through an implicit receiver (an
+    /// extension function reading its receiver's property, a class body reading its own). A
+    /// preceding `name != null` / `name is T` records the root-only path, exactly as it does for a
+    /// local or a top-level property, and the read must see it — the same fact the `this.name` and
+    /// `receiver.name` spellings already honor.
+    ///
+    /// Re-validated against the CURRENT scope: `stable_path_ty` is what rejects a `var`, a
+    /// closure-mutated binding, or a receiver that changed since the proof, so an unstable property
+    /// keeps its declared type here as everywhere else.
+    fn implicit_receiver_narrowed_read_ty(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        declared: Ty,
+        site: Span,
+    ) -> Ty {
+        let path = NarrowPath::root_only(name);
+        let Some(narrowed) = self.lookup_path_narrowing(scope, &path) else {
+            return declared;
+        };
+        if self.stable_path_ty(scope, &path, site) == Some(declared) {
+            narrowed
+        } else {
+            declared
+        }
+    }
+
     fn top_level_property_read_ty(
         &self,
         scope: &CheckerScope<'_>,
@@ -65452,6 +65479,28 @@ impl<'a> Checker<'a> {
             scope.this_ty()?
         } else {
             let Some(local) = self.lookup(scope, &path.root) else {
+                // A bare name that is a property of the CURRENT receiver — an extension function
+                // reading its own receiver's property — is an alias for `this.<name>`, exactly as a
+                // bare own-member read is inside a class body. Normalize so the qualified spelling's
+                // stability rules make the decision (they reject a `var`, a custom getter, a
+                // delegate, an open property on a non-final class).
+                if path.segments.is_empty() {
+                    if let Some(this_ty) = scope.this_ty() {
+                        if self
+                            .lookup_prop_name(this_ty.non_null(), &path.root)
+                            .is_some()
+                        {
+                            return self.stable_path_ty(
+                                scope,
+                                &NarrowPath {
+                                    root: "this".to_string(),
+                                    segments: vec![path.root.clone()],
+                                },
+                                site,
+                            );
+                        }
+                    }
+                }
                 // A same-file top-level `val` with its compiler-default backing-field getter is a
                 // stable value just like a local `val`. Cross-module and computed/delegated
                 // properties remain unstable because an accessor call can return a different value.
@@ -79825,6 +79874,7 @@ impl<'a> Checker<'a> {
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
                     self.mark_implicit_receiver_selection(e, receiver);
+                    let ty = self.implicit_receiver_narrowed_read_ty(scope, &n, ty, self.span(e));
                     return self.set(e, ty);
                 }
             }
@@ -80033,6 +80083,8 @@ impl<'a> Checker<'a> {
                         self.read_implicit_receiver_name(scope, e, &n, implicit_receiver)
                     {
                         self.mark_implicit_receiver_selection(e, implicit_receiver);
+                        let ty =
+                            self.implicit_receiver_narrowed_read_ty(scope, &n, ty, self.span(e));
                         return self.set(e, ty);
                     }
                 }
@@ -80045,6 +80097,8 @@ impl<'a> Checker<'a> {
                         self.read_implicit_receiver_name(scope, e, &n, implicit_receiver)
                     {
                         self.mark_implicit_receiver_selection(e, implicit_receiver);
+                        let ty =
+                            self.implicit_receiver_narrowed_read_ty(scope, &n, ty, self.span(e));
                         return self.set(e, ty);
                     }
                 }
