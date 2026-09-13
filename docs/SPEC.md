@@ -4391,9 +4391,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An `inline` call's block is the call site's own code.** `x.apply { … }` and its siblings are
   `inline`, and the checked lowering splices the block into the caller rather than making a
   function value of it. What it leaves behind is a cleared standalone implementation and an
-  orphaned lambda node, both unreachable; a backend must emit neither. Emitting the node's thunk
-  fails at LINK time, not at compile time, because the thunk calls the implementation the splice
-  cleared (`src/native/codegen/lower.rs`, `src/native/codegen/lower/functions.rs`,
+  orphaned lambda node, both unreachable; a backend must emit neither, and must not DECLARE the
+  cleared implementation either — an exported symbol that is never defined fails the object's own
+  consistency check. Emitting the node's thunk fails later still, at the link, because the thunk
+  calls that implementation (`src/native/codegen/lower.rs`, `src/native/codegen/lower/functions.rs`,
   `tests/native_codegen_e2e.rs::the_stdlib_scope_functions_are_expanded_at_the_call_site`).
 
 - **Equality on a function value is declined natively.** Kotlin answers `::f == ::f` with `true`:

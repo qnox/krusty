@@ -274,9 +274,13 @@ impl<'a> FileLowering<'a> {
 
     fn declare_functions(&mut self) -> Result<(), Unsupported> {
         for (index, function) in self.ir.functions.iter().enumerate() {
-            if function.body.is_none() && function.dispatch_receiver.is_some() {
-                // Abstract: its vtable entry is the runtime's loud failure, and nothing calls it
-                // by name.
+            if function.body.is_none() {
+                // Nothing to emit, and therefore nothing to DECLARE: an exported symbol that is
+                // never defined fails the object's own consistency check, not the link. Two shapes
+                // reach here — an abstract method, whose vtable entry is the runtime's loud
+                // failure, and a lambda the checked lowering spliced into an `inline` caller and
+                // then cleared. Neither is called by name; a call site that somehow named one
+                // finds no id and declines.
                 self.functions.push(None);
                 continue;
             }
@@ -386,14 +390,8 @@ impl<'a> FileLowering<'a> {
             return Ok(());
         };
         let Some(body) = function.body else {
-            // A lambda passed to an `inline` declaration has already been spliced into its caller
-            // by the checked lowering, which then clears the standalone implementation it no
-            // longer needs. Nothing calls it, so there is nothing to emit — and declining the file
-            // over it would decline every `x.apply { … }` in the corpus.
-            if self.ir.inline_only_fns.contains(&(index as u32)) {
-                return Ok(());
-            }
-            return Err(format!("a body-less function `{}`", function.name));
+            // Declared as nothing above, so there is nothing to define either.
+            return Ok(());
         };
         // A `tailrec` the checked lowering could not rewrite into a loop still recurses, and this
         // generator emits an ordinary call for that recursion. The source wrote `tailrec` because
@@ -1624,7 +1622,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.terminated {
                     return Ok(None);
                 }
-                let id = self.file.functions[*function as usize].expect("a local call has a body");
+                let Some(id) = self.file.functions[*function as usize] else {
+                    return Err(format!(
+                        "a call to `{}`, which has no body",
+                        self.file.ir.functions[*function as usize].name
+                    ));
+                };
                 let func_ref = self.func_ref(id);
                 let call = self.builder.ins().call(func_ref, &arguments);
                 Ok(self.builder.inst_results(call).first().copied())

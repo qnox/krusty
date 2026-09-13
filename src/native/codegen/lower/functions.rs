@@ -168,9 +168,9 @@ impl<'a> FileLowering<'a> {
                 .ok_or_else(|| "a function value with no body function".to_string())?;
             // A lambda the checked lowering spliced into an `inline` caller leaves its expression
             // node behind in the arena, orphaned, with the implementation it named already
-            // cleared. Declaring a thunk for it would emit a call to a function nobody defines —
-            // the link fails, not the compile. Nothing reaches the node, so nothing needs it.
-            if body.body.is_none() && self.ir.inline_only_fns.contains(&impl_fn) {
+            // cleared. Declaring a thunk for it would emit a call to a function nobody defines.
+            // Nothing reaches the node, so nothing needs it.
+            if body.body.is_none() {
                 continue;
             }
             // What the body takes beyond the captures is what a caller supplies. A SUSPEND lambda's
