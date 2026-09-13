@@ -832,6 +832,8 @@ mod labeled_receiver_lambda_e2e;
 mod labeled_super_e2e;
 #[path = "labeled_this_e2e.rs"]
 mod labeled_this_e2e;
+#[path = "labelled_return_expected_type_e2e.rs"]
+mod labelled_return_expected_type_e2e;
 #[path = "lambda_e2e.rs"]
 mod lambda_e2e;
 #[path = "lambda_result_inference_e2e.rs"]

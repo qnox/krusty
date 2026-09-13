@@ -1869,3 +1869,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
   parameter descriptors and every constant the body introduces.
   `tests/java_parameters_attribute_e2e.rs`.
+- **A labelled return is typed against the lambda's expected return (fix).** `return@label x` was
+  checked with NO expectation, so an argument-less generic call in an early return
+  (`return@withContext emptyList()`) bottomed out at `List<Nothing>`; merging that with the tail
+  value's `List<Long>` dragged the lambda's inferred return to `Any` and the file was rejected.
+  kotlinc types the returned expression against the lambda's expected return, exactly as an
+  unlabelled `return` is typed against the declared one — and the expectation is threaded to the
+  STATEMENT form (`stmt_return`), which is where a `return@label` in a block body actually lands.
+  One such file cost its whole module every class.
+  `tests/labelled_return_expected_type_e2e.rs`.
