@@ -1091,9 +1091,15 @@ before:**
    value, `while`/`do…while`/lowered `for` with labeled `break`/`continue`, early `return`,
    recursion, `compareTo`, string templates, `String.plus`, boxing for `Any?` positions, `== null`
    and `===`, and the 200,000-iteration allocation loop under collection. Its C-path test file is
-   deleted. Remaining: classes, vtables, `is`/`as`, `object` singletons, and the collector's
-   Kotlin-visible tests — then `emit.rs`, the emitter half of `classes.rs`, `link.rs` and
-   `backend.rs` go.
+   deleted. Then the whole class suite (`tests/native_classes_e2e.rs`, rewritten in place to run
+   through the generator): `KType` descriptors emitted byte for byte as `krusty_rt.h` declares
+   them, vtables as tables of function addresses, constructors that run the superclass's first,
+   field loads and stores at the model's offsets, dispatch through the receiver's descriptor with a
+   checked null receiver, `super` as a direct call, synthesized accessors for open properties,
+   `is`/`as`/`as?` through the runtime, `object` singletons in a registered root slot, and the
+   40,000-node chain built under collection. The cross-architecture link now carries a class
+   hierarchy too. Remaining: the collector's C-program test, which still links through the C path
+   — then `emit.rs`, the emitter half of `classes.rs`, `link.rs` and `backend.rs` go.
 4. Per-module objects and ABI-hash caching — the incremental half.
 5. The `codegen/box` corpus through the native pipeline as the conformance gate: skipping permitted,
    miscompiling never; declined reasons sorted by frequency are the backlog.

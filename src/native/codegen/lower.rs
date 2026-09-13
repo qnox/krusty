@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod objects;
+
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockArg, InstBuilder, Signature, StackSlotData, StackSlotKind,
@@ -25,10 +27,13 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use crate::ir::{
+    Callee, ClassId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp,
+};
 use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
 
+use super::super::classes::{self as model, ClassModel, Slot, Symbols};
 use super::super::target::NativeTarget;
 use super::PROGRAM_ENTRY;
 
@@ -125,12 +130,10 @@ pub fn lower_file(
     target: NativeTarget,
     stem: &str,
 ) -> Result<Lowered, Unsupported> {
-    if !ir.classes.is_empty() {
-        return Err("a class declaration".to_string());
-    }
     if !ir.statics.is_empty() {
         return Err("a top-level property".to_string());
     }
+    let class_model = model::build(ir)?;
 
     let isa = isa_for(target)?;
     let builder = ObjectBuilder::new(
@@ -145,17 +148,23 @@ pub fn lower_file(
         ir,
         classpath,
         module: &mut module,
-        symbols: function_symbols(ir),
+        symbols: model::symbols(ir),
+        model: class_model,
         functions: Vec::new(),
         imports: HashMap::new(),
+        data_imports: HashMap::new(),
         strings: HashMap::new(),
+        classes: Vec::new(),
+        accessors: HashMap::new(),
     };
     lowering.declare_functions()?;
+    lowering.declare_classes()?;
+    lowering.define_classes()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
         let function = &ir.functions[index];
-        if function.name == "main" && function.params.is_empty() {
+        if function.name == "main" && function.params.is_empty() && function.is_static {
             lowering.define_program_entry(index)?;
             defines_entry = true;
         }
@@ -175,14 +184,22 @@ struct FileLowering<'a> {
     ir: &'a IrFile,
     classpath: &'a Rc<Classpath>,
     module: &'a mut ObjectModule,
-    /// Symbol per IR function index.
-    symbols: Vec<String>,
-    /// Declared Cranelift function per IR function index.
-    functions: Vec<FuncId>,
+    /// Symbols of this file's classes and functions.
+    symbols: Symbols,
+    /// Layouts and vtables of this file's classes.
+    model: ClassModel,
+    /// Declared Cranelift function per IR function index; `None` for an abstract method.
+    functions: Vec<Option<FuncId>>,
     /// Runtime functions this file imports, by symbol.
     imports: HashMap<String, FuncId>,
+    /// Runtime data this file imports (the built-in type descriptors), by symbol.
+    data_imports: HashMap<String, DataId>,
     /// String literal data, deduplicated by content.
     strings: HashMap<Vec<u8>, DataId>,
+    /// Per-class emitted items, parallel to `ir.classes`.
+    classes: Vec<objects::ClassItems>,
+    /// Synthesized field accessors the vtables reference, by slot.
+    accessors: HashMap<Slot, FuncId>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -200,17 +217,39 @@ impl<'a> FileLowering<'a> {
         Ok(signature)
     }
 
+    /// The signature of an IR function: a method takes its receiver first.
+    fn function_signature(
+        &self,
+        function: &crate::ir::IrFunction,
+    ) -> Result<Signature, Unsupported> {
+        let mut params = Vec::with_capacity(function.params.len() + 1);
+        if let Some(owner) = function.dispatch_receiver {
+            if self.ir.class_id_by_name(owner).is_none() {
+                return Err(format!(
+                    "a method of `{}`, which is not declared in this file",
+                    owner.render()
+                ));
+            }
+            params.push(any());
+        }
+        params.extend_from_slice(&function.params);
+        self.signature_of(&params, function.ret)
+    }
+
     fn declare_functions(&mut self) -> Result<(), Unsupported> {
         for (index, function) in self.ir.functions.iter().enumerate() {
-            if function.dispatch_receiver.is_some() {
-                return Err(format!("an instance method `{}`", function.name));
+            if function.body.is_none() && function.dispatch_receiver.is_some() {
+                // Abstract: its vtable entry is the runtime's loud failure, and nothing calls it
+                // by name.
+                self.functions.push(None);
+                continue;
             }
-            let signature = self.signature_of(&function.params, function.ret)?;
+            let signature = self.function_signature(function)?;
             let id = self
                 .module
-                .declare_function(&self.symbols[index], Linkage::Export, &signature)
+                .declare_function(&self.symbols.functions[index], Linkage::Export, &signature)
                 .map_err(|error| format!("declaring `{}` ({error})", function.name))?;
-            self.functions.push(id);
+            self.functions.push(Some(id));
         }
         Ok(())
     }
@@ -251,12 +290,18 @@ impl<'a> FileLowering<'a> {
         Ok(id)
     }
 
-    fn define_function(&mut self, index: usize) -> Result<(), Unsupported> {
-        let function = &self.ir.functions[index];
-        let Some(body) = function.body else {
-            return Err(format!("a body-less function `{}`", function.name));
-        };
-        let signature = self.signature_of(&function.params, function.ret)?;
+    /// Compile one function body. `fill` receives the body lowering positioned in the entry block
+    /// with the function's parameters, and lowers whatever the function is; the tail is shared —
+    /// a `Unit` function returns when it falls off its end, and a body that already left
+    /// (its last statement was a `return`) closes its unreachable continuation with a trap.
+    fn emit_function(
+        &mut self,
+        id: FuncId,
+        signature: Signature,
+        result: Carrier,
+        name: &str,
+        fill: &mut dyn FnMut(&mut BodyLowering<'_, '_, '_>, &[Value]) -> Result<(), Unsupported>,
+    ) -> Result<(), Unsupported> {
         let frontend_config = self.module.target_config();
         let mut context = self.module.make_context();
         context.func.signature = signature;
@@ -267,46 +312,68 @@ impl<'a> FileLowering<'a> {
             builder.append_block_params_for_function_params(entry);
             builder.switch_to_block(entry);
             builder.seal_block(entry);
-
             {
-                let mut body_lowering = BodyLowering {
+                let mut body = BodyLowering {
                     file: self,
                     builder: &mut builder,
                     values: HashMap::new(),
-                    result: carrier(function.ret),
+                    result,
                     loops: Vec::new(),
                     terminated: false,
                 };
-                // Parameters occupy the leading value slots.
-                let params = body_lowering.builder.block_params(entry).to_vec();
-                for (slot, (value, ty)) in params.iter().zip(function.params.iter()).enumerate() {
-                    let variable = body_lowering.declare_value(slot as u32, *ty)?;
-                    body_lowering.builder.def_var(variable, *value);
-                }
-                body_lowering.statement(body)?;
-                if body_lowering.terminated {
-                    // The builder sits in the block after the last terminator, which nothing
-                    // reaches; a trap closes it so every block is complete.
-                    body_lowering.builder.ins().trap(TrapCode::unwrap_user(1));
+                let params = body.builder.block_params(entry).to_vec();
+                fill(&mut body, &params)?;
+                if body.terminated {
+                    body.builder.ins().trap(TrapCode::unwrap_user(1));
                 } else {
-                    // Falling off the end of a `Unit` function is a `return`.
-                    if body_lowering.result != Carrier::Void {
+                    if result != Carrier::Void {
                         return Err(format!(
-                            "a non-`Unit` function `{}` that falls off its end",
-                            function.name
+                            "a non-`Unit` function `{name}` that falls off its end"
                         ));
                     }
-                    body_lowering.builder.ins().return_(&[]);
+                    body.builder.ins().return_(&[]);
                 }
             }
             builder.seal_all_blocks();
             builder.finalize(frontend_config);
         }
         self.module
-            .define_function(self.functions[index], &mut context)
-            .map_err(|error| format!("compiling `{}` ({error})", function.name))?;
+            .define_function(id, &mut context)
+            .map_err(|error| format!("compiling `{name}` ({error})"))?;
         self.module.clear_context(&mut context);
         Ok(())
+    }
+
+    fn define_function(&mut self, index: usize) -> Result<(), Unsupported> {
+        let function = &self.ir.functions[index];
+        let Some(id) = self.functions[index] else {
+            return Ok(());
+        };
+        let Some(body) = function.body else {
+            return Err(format!("a body-less function `{}`", function.name));
+        };
+        let signature = self.function_signature(function)?;
+        // `this`, when there is one, is value slot 0 and the parameters follow it.
+        let mut slots: Vec<Ty> = Vec::with_capacity(function.params.len() + 1);
+        if let Some(owner) = function.dispatch_receiver {
+            slots.push(Ty::Obj(owner, &[]));
+        }
+        slots.extend_from_slice(&function.params);
+        let name = function.name.clone();
+        let ret = function.ret;
+        self.emit_function(
+            id,
+            signature,
+            carrier(ret),
+            &name,
+            &mut |lowering, params| {
+                for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
+                    let variable = lowering.declare_value(slot as u32, *ty)?;
+                    lowering.builder.def_var(variable, *value);
+                }
+                lowering.statement(body)
+            },
+        )
     }
 
     /// `kt_program_entry`: what the runtime's `_start` calls. Records the stack bottom for the
@@ -319,7 +386,7 @@ impl<'a> FileLowering<'a> {
             .map_err(|error| format!("declaring `{PROGRAM_ENTRY}` ({error})"))?;
         let init = self.import("kt_runtime_init", &[Ty::obj("kotlin/Any")], Ty::Unit)?;
         let exit = self.import("kt_exit", &[Ty::Int], Ty::Unit)?;
-        let main = self.functions[main_index];
+        let main = self.functions[main_index].expect("`main` has a body");
         let frontend_config = self.module.target_config();
 
         let mut context = self.module.make_context();
@@ -519,6 +586,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .continue_block;
                 self.builder.ins().jump(target, &[]);
                 self.terminate();
+            }
+            IrExpr::SetField {
+                receiver,
+                class,
+                index,
+                value,
+            } => self.field_write(receiver, class, index, value)?,
+            IrExpr::Checked(IrCheckedOperation::PropertyWrite {
+                target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                value,
+                ..
+            }) => {
+                if extension_receiver.is_some() || !context_arguments.is_empty() {
+                    return Err("an extension or context property".to_string());
+                }
+                let (class, index) = self.checked_property(&target)?;
+                self.property_write(class, index, dispatch_receiver, value)?;
             }
             _ => {
                 self.expression(id)?;
@@ -724,25 +811,59 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let result = self.type_of(id);
                 self.when(&branches, result)
             }
-            IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull,
-                arg,
-                type_operand,
-            } => self.coerce(arg, type_operand),
             IrExpr::Call {
                 callee,
                 dispatch_receiver,
                 args,
             } => self.call(&callee, dispatch_receiver, &args),
+            IrExpr::TypeOp {
+                op,
+                arg,
+                type_operand,
+            } => self.type_operation(op, arg, type_operand),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
             IrExpr::StringConcat(parts) => self.concat(&parts),
+            IrExpr::New {
+                internal,
+                args,
+                ctor_params,
+                defaults,
+                ..
+            } => self.construction(internal, &args, ctor_params.is_some(), !defaults.is_empty()),
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } => self.method_call(class, index, receiver, &args),
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => self.field_read(receiver, class, index),
+            IrExpr::SingletonValue { classifier } => self.singleton(classifier),
+            IrExpr::Checked(IrCheckedOperation::PropertyRead {
+                target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                ..
+            }) => {
+                if extension_receiver.is_some() || !context_arguments.is_empty() {
+                    return Err("an extension or context property".to_string());
+                }
+                let (class, index) = self.checked_property(&target)?;
+                self.property_read(class, index, dispatch_receiver)
+            }
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
             | IrExpr::While { .. }
             | IrExpr::Break { .. }
-            | IrExpr::Continue { .. } => {
+            | IrExpr::Continue { .. }
+            | IrExpr::SetField { .. }
+            | IrExpr::Checked(IrCheckedOperation::PropertyWrite { .. }) => {
                 self.statement(id)?;
                 Ok(None)
             }
@@ -842,9 +963,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             },
             IrExpr::Call { callee, .. } => match callee {
                 Callee::Local(function) => self.file.ir.functions[*function as usize].ret,
-                Callee::External { ret, .. } | Callee::Intrinsic { ret, .. } => *ret,
+                Callee::External { ret, .. }
+                | Callee::Intrinsic { ret, .. }
+                | Callee::Super { ret, .. } => *ret,
+                Callee::Special { source, .. } => {
+                    let function = self.file.ir.checked_callable_functions.get(&(*source)?)?;
+                    self.file.ir.functions[*function as usize].ret
+                }
                 _ => return None,
             },
+            IrExpr::New { internal, .. }
+            | IrExpr::SingletonValue {
+                classifier: internal,
+            } => Ty::Obj(*internal, &[]),
+            IrExpr::MethodCall { class, index, .. } => {
+                let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
+                self.file.ir.functions[fid as usize].ret
+            }
+            IrExpr::GetField { class, index, .. } => {
+                self.file.ir.classes[*class as usize].fields[*index as usize].ty
+            }
+            IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
+                self.file.ir.checked_properties.get(target)?.ty
+            }
             _ => return None,
         })
     }
@@ -1166,10 +1307,33 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.terminated {
                     return Ok(None);
                 }
-                let id = self.file.functions[*function as usize];
+                let id = self.file.functions[*function as usize].expect("a local call has a body");
                 let func_ref = self.func_ref(id);
                 let call = self.builder.ins().call(func_ref, &arguments);
                 Ok(self.builder.inst_results(call).first().copied())
+            }
+            Callee::Super {
+                owner,
+                name,
+                source,
+                params,
+                ..
+            } => {
+                let Some(receiver) = dispatch_receiver else {
+                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                };
+                self.direct_call(*owner, name, *source, Some(params), receiver, args)
+            }
+            Callee::Special {
+                owner,
+                name,
+                source,
+                ..
+            } => {
+                let Some(receiver) = dispatch_receiver else {
+                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                };
+                self.direct_call(*owner, name, *source, None, receiver, args)
             }
             Callee::Intrinsic { operation, ret } => {
                 self.intrinsic(*operation, *ret, dispatch_receiver, args)
@@ -1382,39 +1546,6 @@ fn box_suffix(ty: Ty) -> Option<&'static str> {
         Ty::Long => "long",
         _ => return None,
     })
-}
-
-/// One symbol per IR function, unique within the file — the scheme the rest of the native track
-/// already uses (`kt_<package>_<name>`, with a suffix on a repeat).
-pub(super) fn function_symbols(ir: &IrFile) -> Vec<String> {
-    let package = ir
-        .package
-        .as_deref()
-        .map(c_identifier)
-        .filter(|package| !package.is_empty());
-    let mut taken = std::collections::HashSet::new();
-    ir.functions
-        .iter()
-        .map(|function| {
-            let base = match &package {
-                Some(package) => format!("kt_{package}_{}", c_identifier(&function.name)),
-                None => format!("kt_{}", c_identifier(&function.name)),
-            };
-            let mut candidate = base.clone();
-            let mut ordinal = 0;
-            while !taken.insert(candidate.clone()) {
-                ordinal += 1;
-                candidate = format!("{base}__{ordinal}");
-            }
-            candidate
-        })
-        .collect()
-}
-
-fn c_identifier(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
 }
 
 fn callee_kind(callee: &Callee) -> &'static str {

@@ -188,7 +188,8 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
     // runtime. Every produced binary is asserted to be for the architecture asked for; the host's
     // is also RUN. The others cannot be executed here (no emulator), so for them the assertion is
     // that the link resolved every symbol and every relocation — a wrong relocation kind or an
-    // out-of-range field fails the link, not the run.
+    // out-of-range field fails the link, not the run. The program uses a class hierarchy so the
+    // descriptors, vtables and constructor path are cross-compiled too, not only straight code.
     let mut linked = Vec::new();
     for &target in NativeTarget::ALL {
         if !krusty::native::can_link(target) {
@@ -198,11 +199,16 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
         let (artifacts, diagnostics) = compile(
             &[(
                 "Main",
-                "fun fib(n: Int): Int = if (n < 2) n else fib(n - 1) + fib(n - 2)\n\
+                "open class Greeting(val who: String) { open fun text(): String = \"Hello, $who!\" }\n\
+                 class Counted(who: String, val n: Long) : Greeting(who) {\n\
+                 \x20   override fun text(): String = super.text() + \" $n\"\n\
+                 }\n\
+                 fun fib(n: Int): Int = if (n < 2) n else fib(n - 1) + fib(n - 2)\n\
                  fun main() {\n\
                  \x20   var total = 0L\n\
                  \x20   for (i in 1..10) { if (i % 2 == 0) continue; total = total + fib(i) }\n\
-                 \x20   println(\"Hello, world! $total\")\n\
+                 \x20   val g: Greeting = Counted(\"world\", total)\n\
+                 \x20   println(g.text())\n\
                  }\n",
             )],
             target,

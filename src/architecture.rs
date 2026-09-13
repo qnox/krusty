@@ -362,6 +362,11 @@ mod tests {
             &["backend", "diag", "frontend", "jvm"],
         );
         assert_allowed_crate_modules("src/native/codegen/lower.rs", &["ir", "jvm", "types"]);
+        // `fir` only for the checked property and callable ids the IR itself carries.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower/objects.rs",
+            &["fir", "ir", "types"],
+        );
     }
 
     #[test]
