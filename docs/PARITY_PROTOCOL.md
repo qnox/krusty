@@ -1819,3 +1819,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   The `continuation_metadata_uses_returned_expression_end_line` fixture was an `if` whose arms are TAIL
   suspend calls — kotlinc emits no continuation class for it at all, so its pinned `nl` had no ground
   truth. The arms now feed a later expression, and the test compares `l`/`nl` against kotlinc's own.
+- **An explicit import outranks the current package (fix).** Kotlin's classifier scope tower ranks
+  explicit (non-star) imports ABOVE the file's own package, which in turn outranks star imports.
+  krusty's `import_levels` already encoded package-vs-star correctly, but `select_classifier_binding`
+  asked the same-package declaration BEFORE it ever reached the explicit-import map, so a file that
+  imported `other.Widget` while a sibling file in its own package also declared `Widget` bound every
+  mention to the sibling.
+  The failure is silent at the type level and loud at the call: the wrong class supplies the
+  constructor, so named arguments that exist only on the imported class report
+  `no parameter with name 'x' found` — one such shadowing pair produced eight errors in one file, and
+  a module with any error emits nothing.
+  `tests/explicit_import_shadows_same_package_e2e.rs::explicit_import_wins_over_same_package_class`.
