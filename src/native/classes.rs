@@ -1,19 +1,17 @@
 //! Object layout and virtual-dispatch tables for the classes of one IR file.
 //!
-//! Everything here is a pure function over an [`IrFile`]; nothing prints C. The emitter asks two
-//! questions of the result — "where is this field" and "which vtable slot is this member" — and
-//! this module answers both from the IR's own hierarchy and override tables
+//! Everything here is a pure function over an [`IrFile`]; nothing emits code. The code generator
+//! asks two questions of the result — "where is this field" and "which vtable slot is this member"
+//! — and this module answers both from the IR's own hierarchy and override tables
 //! (`IrFile::classifier_hierarchies`, `function_overrides`, `property_overrides`) rather than by
 //! matching names.
 //!
 //! **Layout** is the classic single-inheritance one: the object header, then the superclass's
 //! fields as a prefix in the superclass's order, then this class's fields in declaration order,
-//! each aligned to its C size, and the whole rounded up to 8. A subclass's first field follows
-//! the superclass's last one directly (not the superclass's rounded size), because the emitted
-//! struct spells the inherited fields out as members and C packs them. Because the layout is computed here
-//! and not by the C compiler, the emitter asserts every offset with `_Static_assert` in the
-//! generated C — a disagreement is a compile error instead of a collector that follows the wrong
-//! word.
+//! each aligned to its size, and the whole rounded up to 8. A subclass's first field follows the
+//! superclass's last one directly, not the superclass's rounded size. The same offsets feed both
+//! the loads and stores the generator emits and the `reference_offsets` table in the class's
+//! descriptor, so the program and the collector cannot disagree about where a reference is.
 //!
 //! **Vtables** are the classic single-inheritance ones too: a class's table is its superclass's
 //! with overridden slots replaced and newly declared members appended. Slot numbers are assigned
@@ -26,11 +24,11 @@
 //! the slot is a synthesized field access, so `x.v` through an `A`-typed `x` reads `B`'s `v` when
 //! `B` overrides it. A property that is neither open nor an override is a direct field access.
 //!
-//! **Refusals.** Constructs this step does not lower — interfaces, data classes, `inner` classes,
-//! enums, secondary constructors, constructor defaults, a superclass declared in another file, an
-//! override that changes a parameter's machine representation (which would need a bridge) — are
-//! reported by name from [`check_supported`] so the file declines with a diagnostic instead of
-//! emitting something unverified.
+//! **Refusals.** Constructs not lowered yet — interfaces, data classes, `inner` classes, enums,
+//! secondary constructors, constructor defaults, a superclass declared in another file, an override
+//! that changes a parameter's machine representation (which would need a bridge) — are reported by
+//! name from [`check_supported`] so the file declines with a diagnostic instead of emitting
+//! something unverified.
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,26 +39,18 @@ use crate::types::{Ty, TypeName};
 /// The construct a lowering declined, phrased for a diagnostic.
 pub(super) type Unsupported = String;
 
-/// How a Kotlin type is carried in C.
+/// How a Kotlin type is carried in memory, named by the runtime's `kt_*` typedef for the scalar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CKind {
-    /// `void` — Kotlin `Unit` in return position.
+    /// Kotlin `Unit` in return position: no value.
     Void,
-    /// A machine scalar, spelled as one of the runtime's `kt_*` typedefs.
+    /// A machine scalar, named by the runtime's `kt_*` typedef.
     Scalar(&'static str),
     /// A `KRef`: every reference, including a boxed `Int?` and an erased type parameter.
     Ref,
 }
 
 impl CKind {
-    pub(super) fn spelling(self) -> &'static str {
-        match self {
-            Self::Void => "void",
-            Self::Scalar(name) => name,
-            Self::Ref => "KRef",
-        }
-    }
-
     /// The carrier's size in bytes, which is also its alignment on every supported target.
     pub(super) fn size(self) -> u32 {
         match self {
@@ -73,8 +63,8 @@ impl CKind {
     }
 }
 
-/// The C carrier for a Kotlin type. A nullable primitive is deliberately NOT a scalar: `Int?` has
-/// to represent `null`, so it boxes, exactly as it does on the JVM. A type parameter erases to a
+/// The carrier for a Kotlin type. A nullable primitive is deliberately NOT a scalar: `Int?` has to
+/// represent `null`, so it boxes, exactly as it does on the JVM. A type parameter erases to a
 /// reference, as it does there too.
 pub(super) fn c_kind(ty: Ty) -> CKind {
     match ty {
@@ -656,7 +646,7 @@ fn check_same_representation(
     ))
 }
 
-/// A C/assembler-safe spelling of a Kotlin name: every non-alphanumeric character becomes `_`.
+/// A symbol-safe spelling of a Kotlin name: every non-alphanumeric character becomes `_`.
 pub(super) fn c_identifier(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for character in name.chars() {

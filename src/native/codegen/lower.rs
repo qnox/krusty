@@ -300,7 +300,7 @@ impl<'a> FileLowering<'a> {
         signature: Signature,
         result: Carrier,
         name: &str,
-        fill: &mut dyn FnMut(&mut BodyLowering<'_, '_, '_>, &[Value]) -> Result<(), Unsupported>,
+        fill: &mut Fill<'_>,
     ) -> Result<(), Unsupported> {
         let frontend_config = self.module.target_config();
         let mut context = self.module.make_context();
@@ -422,6 +422,10 @@ impl<'a> FileLowering<'a> {
         Ok(())
     }
 }
+
+/// What fills a function body: given the body lowering in the entry block and the function's
+/// parameter values, lowers whatever the function is.
+type Fill<'f> = dyn FnMut(&mut BodyLowering<'_, '_, '_>, &[Value]) -> Result<(), Unsupported> + 'f;
 
 /// One enclosing loop, for `break`/`continue` to target.
 struct LoopFrame {
@@ -1574,4 +1578,33 @@ fn describe(node: &IrExpr) -> String {
         .find(|piece| !piece.is_empty())
         .unwrap_or("expression");
     format!("`{head}`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift_codegen::ir::ArgumentExtension;
+
+    #[test]
+    fn a_nullable_primitive_is_carried_as_a_reference() {
+        assert_eq!(carrier(Ty::Int), Carrier::Scalar(types::I32, true));
+        assert_eq!(
+            carrier(Ty::nullable(Ty::Int)),
+            Carrier::Ref,
+            "`Int?` must represent `null`, so it boxes exactly as it does on the JVM"
+        );
+        assert_eq!(carrier(Ty::Unit), Carrier::Void);
+        assert_eq!(carrier(Ty::String), Carrier::Ref);
+    }
+
+    #[test]
+    fn narrow_scalars_extend_to_the_c_abi_by_their_kotlin_signedness() {
+        // `Byte` is signed and `Char` is not; passing either to the runtime in a 32-bit register
+        // must extend it the way the C prototype's type does, or `kt_println_char('é')` prints a
+        // negative code point.
+        assert!(carrier(Ty::Byte).abi_param().unwrap().extension == ArgumentExtension::Sext);
+        assert!(carrier(Ty::Char).abi_param().unwrap().extension == ArgumentExtension::Uext);
+        assert!(carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext);
+        assert!(carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
+    }
 }

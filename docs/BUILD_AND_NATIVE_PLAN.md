@@ -384,7 +384,7 @@ just-produced output.
 ### Target contract for native
 
 A native target implements `SemanticPlatform` + `TargetRuntime` (`KlibPlatform`) and `Backend`
-(`NativeBackend`, via `lower_ir_file`). Two things must land first, and neither is optional:
+(`CraneliftBackend`, via `lower_ir_file`). Two things must land first, and neither is optional:
 
 1. **`TargetRuntime` must reach `fir_lower`**, which today has no access to it.
 2. **The IR split** (`docs/COMPILER_REVIEW.md` §4, Step 3 of its refactor order) must remove
@@ -540,7 +540,11 @@ everything above the shim portable C. Adding an *operating system* is a real por
 syscall interface is the part that is not portable: macOS and Windows do not have a stable one, so
 those targets need either a libc (and its sysroot) or a different strategy entirely.
 
-#### Landed: a native backend that emits C
+#### Landed, then retired: a native backend that emits C
+
+*Historical.* The C emitter described here was the scaffold; it is deleted now that every test
+written against it runs through krusty's own code generator (see *Decided: krusty owns the code
+generator too*). The runtime and object model it was built around are what survived.
 
 `src/native/` compiles checked common IR to C and links it with `cc`. `fun main() { println(…) }`
 builds to an executable that runs with `JAVA_HOME` and `PATH` emptied, and so do arithmetic, locals,
@@ -1041,11 +1045,11 @@ What that changes, and what it does not:
   with the distribution. A *user's* build then needs krusty and nothing else. The one honest
   consequence: building krusty needs a C cross-compiler (`clang` targets every architecture from
   one host), which is a build-time dependency of the compiler, not of anyone using it.
-* **The C emitter is retired.** `src/native/emit.rs` and the emitter half of `classes.rs` — about
-  3,600 lines — lowered common IR to C text. They go, replaced by a lowering to machine code. The
-  five class slices landed against them are not wasted: their tests are Kotlin programs with
-  expected output, and every one of them becomes a test of the new code generator the moment it can
-  run them. Their runtime and object-model halves stay.
+* **The C emitter is retired — done.** `src/native/emit.rs`, `backend.rs` and `link.rs` (about
+  2,300 lines) lowered common IR to C text and drove a C compiler; they are deleted. The class
+  slices landed against them were not wasted: their tests were Kotlin programs with expected
+  output, and every one of them now runs through the code generator. The class model half of
+  `classes.rs`, the runtime and the object model stayed.
 * **A linker becomes krusty's.** Zero-toolchain cross-compilation — the property this whole track
   is built on — needs the final link done by krusty, not by a system `ld`: Go has its own linker
   for exactly this reason. Scope for a static executable from a handful of objects is bounded
@@ -1085,21 +1089,22 @@ before:**
    (no emulator), so every call and literal-pool relocation in their program text was decoded from
    the linked image and compared against symbol addresses computed independently from the input
    objects' own tables — all match. Running them is one `qemu-user-static` install away on CI.
-3. **In progress.** Re-run the landed tests against the new generator, slice by slice, until they
-   all pass. Landed so far: the whole hello-world suite — arithmetic with Kotlin's wrapping,
-   division and shift rules, `Byte`/`Short`/`Char` widening, locals, `if`/`when` as statement and as
-   value, `while`/`do…while`/lowered `for` with labeled `break`/`continue`, early `return`,
-   recursion, `compareTo`, string templates, `String.plus`, boxing for `Any?` positions, `== null`
-   and `===`, and the 200,000-iteration allocation loop under collection. Its C-path test file is
-   deleted. Then the whole class suite (`tests/native_classes_e2e.rs`, rewritten in place to run
-   through the generator): `KType` descriptors emitted byte for byte as `krusty_rt.h` declares
-   them, vtables as tables of function addresses, constructors that run the superclass's first,
-   field loads and stores at the model's offsets, dispatch through the receiver's descriptor with a
-   checked null receiver, `super` as a direct call, synthesized accessors for open properties,
-   `is`/`as`/`as?` through the runtime, `object` singletons in a registered root slot, and the
-   40,000-node chain built under collection. The cross-architecture link now carries a class
-   hierarchy too. Remaining: the collector's C-program test, which still links through the C path
-   — then `emit.rs`, the emitter half of `classes.rs`, `link.rs` and `backend.rs` go.
+3. **Landed.** Every test written against the C path runs through the new generator, and the C
+   path is deleted. First the hello-world suite — arithmetic with Kotlin's wrapping, division and
+   shift rules, `Byte`/`Short`/`Char` widening, locals, `if`/`when` as statement and as value,
+   `while`/`do…while`/lowered `for` with labeled `break`/`continue`, early `return`, recursion,
+   `compareTo`, string templates, `String.plus`, boxing for `Any?` positions, `== null` and `===`,
+   the 200,000-iteration allocation loop under collection. Then the class suite
+   (`tests/native_classes_e2e.rs`, rewritten in place): `KType` descriptors emitted byte for byte as
+   `krusty_rt.h` declares them, vtables as tables of function addresses, constructors that run the
+   superclass's first, field loads and stores at the model's offsets, dispatch through the
+   receiver's descriptor with a checked null receiver, `super` as a direct call, synthesized
+   accessors for open properties, `is`/`as`/`as?` through the runtime, `object` singletons in a
+   registered root slot, and the 40,000-node chain built under collection. Finally the collector's
+   C-program test (`tests/native_gc_e2e.rs`) compiles its program with clang and links it with
+   krusty's linker against the prebuilt runtime, so `emit.rs`, `backend.rs` and `link.rs` are gone
+   and nothing in the tree drives a C compiler at a user's build. The cross-architecture link
+   carries a class hierarchy for every target.
 4. Per-module objects and ABI-hash caching — the incremental half.
 5. The `codegen/box` corpus through the native pipeline as the conformance gate: skipping permitted,
    miscompiling never; declined reasons sorted by frequency are the backlog.

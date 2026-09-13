@@ -5,20 +5,20 @@
 //! choice below.
 //!
 //! **Roots are found conservatively; the heap is traced precisely.** A precise collector must know
-//! which stack slots and registers hold references at the moment it runs, which requires stack maps,
-//! which requires control of frame layout — and emitting C gives that control to the C compiler. So
-//! the stack and the callee-saved registers are scanned *conservatively*: any word that looks like a
-//! pointer into the heap keeps its object alive. Inside the heap there is no such limitation, because
+//! which stack slots and registers hold references at the moment it runs, which requires stack maps
+//! at every call site — which the code generator does not emit yet. So the stack and the
+//! callee-saved registers are scanned *conservatively*: any word that looks like a pointer into the
+//! heap keeps its object alive. Inside the heap there is no such limitation, because
 //! every object carries its `KType` and the type names exactly which fields are references. That
 //! "conservative roots, precise heap" split is the most precision obtainable without a code
 //! generator, and it is strictly better than scanning objects conservatively too: a `Long` field
 //! holding `0x7f…` cannot retain garbage.
 //!
 //! **Nothing here needs the compiler's cooperation.** No stack maps, no safepoints, no write
-//! barriers. That is what lets the runtime be built and tested now, while the emitter is still C,
-//! and it is why this is not the multi-year item. When krusty owns its code generator the tracing,
-//! the allocator and the object model survive unchanged; only root-finding is replaced, and it gets
-//! more precise rather than differently shaped.
+//! barriers. That is what let the runtime be built and tested before the code generator existed,
+//! and it is why this is not the multi-year item. When the generator learns to emit stack maps the
+//! tracing, the allocator and the object model survive unchanged; only root-finding is replaced,
+//! and it gets more precise rather than differently shaped.
 //!
 //! The cost, stated so it is chosen rather than discovered: conservative roots forbid *moving*
 //! objects, because a word that merely looks like a pointer cannot be updated — it might be an

@@ -1,21 +1,23 @@
 //! The native runtime's object model, allocator and collector, exercised from C.
 //!
-//! The emitter cannot reach the collector's interesting cases yet — it declines classes, so no
-//! Kotlin program can build a cycle or an interior pointer — but the runtime has to be right before
-//! those land, not after. So this test links a hand-written C program against the emitted runtime
-//! artifacts (the same `krusty_rt.c`, `krusty_gc.c` and `krusty_start.c` every Kotlin program
-//! links) and RUNS it. The program supplies `kt_program_entry` itself, in place of the shim the
-//! backend generates for a Kotlin `main`, and exits with a distinct nonzero code per failed
-//! assertion so a failure names the property that broke.
+//! The collector's interesting cases — cycles, interior pointers, a reference reachable only from
+//! the heap — are easiest to arrange from C, where the test can hold or drop a root exactly when it
+//! means to. So this test compiles a hand-written C program against `krusty_rt.h` and links it with
+//! krusty's OWN linker against the SAME prebuilt runtime objects every Kotlin program links: the
+//! program supplies `kt_program_entry` itself, in place of the entry the code generator emits for
+//! a Kotlin `main`, and exits with a distinct nonzero code per failed assertion so a failure names
+//! the property that broke.
 //!
-//! Nothing here inspects generated C. A collector that looks right and frees a live object is the
-//! failure a text assertion cannot see.
+//! Nothing here inspects generated code. A collector that looks right and frees a live object is
+//! the failure a text assertion cannot see.
 //!
-//! Skips rather than fails when no C compiler can build for this host.
+//! Skips rather than fails when there is no C compiler for the test program, or when this build of
+//! krusty carries no prebuilt runtime for the host.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use krusty::native::{NativeBackend, NativeTarget};
+use krusty::native::NativeTarget;
 
 /// A scratch directory that cleans itself up.
 struct Scratch(PathBuf);
@@ -30,6 +32,7 @@ impl Scratch {
                 .map_or(0, |elapsed| elapsed.as_nanos())
         ));
         let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create scratch directory");
         Self(path)
     }
 
@@ -44,9 +47,66 @@ impl Drop for Scratch {
     }
 }
 
-/// Whether this environment can build and run a native program at all.
-fn available() -> bool {
-    NativeTarget::host().is_some_and(krusty::native::can_build)
+/// The C compiler for the TEST PROGRAM only — the runtime itself was compiled when krusty was
+/// built. `$KRUSTY_RUNTIME_CC` is what `build.rs` honours, so the same compiler serves both.
+fn c_compiler() -> Option<String> {
+    if let Ok(compiler) = std::env::var("KRUSTY_RUNTIME_CC") {
+        if !compiler.trim().is_empty() {
+            return Some(compiler);
+        }
+    }
+    ["clang", "cc", "gcc"].into_iter().find_map(|candidate| {
+        Command::new(candidate)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|_| candidate.to_string())
+    })
+}
+
+/// The host target, when this build can link for it and a C compiler exists for the test program.
+fn host() -> Option<NativeTarget> {
+    let target = NativeTarget::host()?;
+    (krusty::native::can_link(target) && c_compiler().is_some()).then_some(target)
+}
+
+/// Compile the C program to a freestanding object with the runtime's own flags — except at `-O0`,
+/// as the C path always compiled it: the program drops its roots by overwriting locals, which an
+/// optimizer is free to keep in a register the conservative scanner then finds.
+fn compile_c(scratch: &Path, source: &str) -> Vec<u8> {
+    let compiler = c_compiler().expect("checked by `available`");
+    std::fs::write(
+        scratch.join("krusty_sys.h"),
+        krusty::native::runtime::SYS_HEADER,
+    )
+    .expect("write header");
+    std::fs::write(scratch.join("krusty_rt.h"), krusty::native::runtime::HEADER)
+        .expect("write header");
+    let program = scratch.join("gc_test.c");
+    std::fs::write(&program, source).expect("write program");
+    let object = scratch.join("gc_test.o");
+    let output = Command::new(&compiler)
+        .args([
+            "-std=c11",
+            "-ffreestanding",
+            "-nostdlib",
+            "-fno-pic",
+            "-fno-stack-protector",
+            "-O0",
+            "-c",
+            "-o",
+        ])
+        .arg(&object)
+        .arg(&program)
+        .output()
+        .expect("run the C compiler");
+    assert!(
+        output.status.success(),
+        "the test program must compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read(&object).expect("read object")
 }
 
 /// What each nonzero exit code of the C program means. The program and this table are written
@@ -391,27 +451,26 @@ void kt_program_entry(void) {
 
 #[test]
 fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
-    if !available() {
-        eprintln!("skipping: needs a C compiler that can build for this host");
+    let Some(target) = host() else {
+        eprintln!("skipping: needs a C compiler and a prebuilt native runtime for the host");
         return;
-    }
-    // The program links against exactly what a Kotlin program links against; only the entry shim
-    // is replaced, because the program IS the entry.
-    let mut artifacts = NativeBackend::runtime_artifacts();
-    artifacts.push(NativeBackend::start_artifact());
-    artifacts.push(("gc_test.c".to_string(), PROGRAM.as_bytes().to_vec()));
-
+    };
+    // The program links against exactly what a Kotlin program links against — the prebuilt
+    // runtime, through krusty's linker — only the entry point is the program's own.
     let scratch = Scratch::new("collector");
+    let object = compile_c(scratch.path(), PROGRAM);
+    let image = krusty::native::link_program(&[&object], target)
+        .unwrap_or_else(|error| panic!("the test program must link against the runtime: {error}"));
     let executable = scratch.path().join("program");
-    krusty::native::link_executable(
-        &artifacts,
-        scratch.path(),
-        &executable,
-        NativeTarget::host().expect("checked by `available`"),
-    )
-    .unwrap_or_else(|error| panic!("the runtime and the test program must compile: {error}"));
-
-    let output = std::process::Command::new(&executable)
+    std::fs::write(&executable, &image).expect("write executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+    }
+    let output = Command::new(&executable)
+        .env_clear()
         .output()
         .expect("run the built executable");
     let code = output.status.code().unwrap_or(-1);
@@ -437,25 +496,24 @@ fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
 
 #[test]
 fn the_runtime_ships_the_collector_with_every_program() {
-    // `link.rs` compiles every `.c` artifact, so a program gets the collector by the backend
-    // emitting it — this pins that it does, independent of whether a C compiler is present.
-    let names = NativeBackend::runtime_artifacts()
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect::<Vec<_>>();
-    for required in [
-        krusty::native::SYS_HEADER,
-        krusty::native::RUNTIME_HEADER,
-        krusty::native::RUNTIME_SOURCE,
-        krusty::native::GC_SOURCE,
-    ] {
-        assert!(
-            names.iter().any(|name| name == required),
-            "the runtime must emit {required}: {names:?}"
-        );
+    // A program gets the collector by linking against the prebuilt runtime, and the runtime is
+    // three objects per architecture: values, heap, entry. This pins that the heap is among them
+    // for every target this build carries, independent of whether a C compiler is present here.
+    let mut carried = 0;
+    for &target in NativeTarget::ALL {
+        let Some(objects) = krusty::native::runtime_objects(target.arch) else {
+            continue;
+        };
+        carried += 1;
+        let names = objects.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        for required in ["krusty_rt", "krusty_gc", "krusty_start"] {
+            assert!(
+                names.iter().any(|name| name.contains(required)),
+                "the prebuilt runtime for {target} must carry {required}: {names:?}"
+            );
+        }
     }
-    assert_eq!(
-        NativeBackend::start_artifact().0,
-        krusty::native::START_SOURCE
-    );
+    if carried == 0 {
+        eprintln!("skipping: this build of krusty carries no prebuilt runtime");
+    }
 }

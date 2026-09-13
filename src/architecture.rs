@@ -327,27 +327,18 @@ mod tests {
     }
 
     #[test]
-    fn the_native_runtime_and_linker_are_target_text_only() {
-        // `runtime.rs` and `gc.rs` are C source and `link.rs` drives a C compiler. None of them
-        // has any business knowing what a Kotlin type or a compiler IR is.
+    fn the_native_runtime_sources_are_target_text_only() {
+        // `runtime.rs` and `gc.rs` carry C source and its design notes. Neither has any business
+        // knowing what a Kotlin type or a compiler IR is.
         assert_allowed_crate_modules("src/native/runtime.rs", &[]);
         assert_allowed_crate_modules("src/native/gc.rs", &[]);
-        assert_allowed_crate_modules("src/native/link.rs", &[]);
     }
 
     #[test]
-    fn the_native_emitter_uses_only_ir_contract_dependencies() {
-        // `jvm` is on this list for ONE reason: the only symbol provider krusty has reads a JVM
-        // classpath, so a selected dependency declaration is resolved through
-        // `Classpath::external_callable`. It is the seam phase 7 of `docs/BUILD_AND_NATIVE_PLAN.md`
-        // removes, and this budget is what keeps it from spreading in the meantime.
+    fn the_class_model_uses_only_ir_contract_dependencies() {
         // `fir` is on this list for the identities common IR carries by value: a checked property
         // operation names a `PropertyId`, and an override edge names the `CallableId` it resolved.
         // Both are part of the IR contract, not a way back into the frontend.
-        assert_allowed_crate_modules(
-            "src/native/emit.rs",
-            &["fir", "ir", "jvm", "kt_string", "types"],
-        );
         assert_allowed_crate_modules("src/native/classes.rs", &["fir", "ir", "types"]);
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
     }
@@ -376,14 +367,6 @@ mod tests {
         assert_allowed_crate_modules("src/native/linker/mod.rs", &[]);
         assert_allowed_crate_modules("src/native/linker/elf.rs", &[]);
         assert_allowed_crate_modules("src/native/prebuilt.rs", &[]);
-    }
-
-    #[test]
-    fn the_native_backend_adapter_uses_only_common_backend_dependencies() {
-        assert_allowed_crate_modules(
-            "src/native/backend.rs",
-            &["backend", "diag", "frontend", "jvm"],
-        );
     }
 
     #[test]

@@ -561,3 +561,22 @@ fn the_same_source_produces_the_same_object_for_a_given_target() {
     assert!(!first.is_empty());
     assert_eq!(first, second, "code generation must be deterministic");
 }
+
+#[test]
+fn a_string_literal_with_an_unpaired_surrogate_is_declined() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // Kotlin admits a lone surrogate in a string; UTF-8 cannot encode one and the runtime's strings
+    // are UTF-8. Emitting some other bytes would be a silent miscompilation, so the file declines.
+    let (artifacts, diagnostics) =
+        compile(&[("Main", "fun main() { println(\"\\uD800\") }")], target);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unpaired surrogate")),
+        "expected the backend to decline, got {diagnostics:?}"
+    );
+    assert!(artifacts.is_empty());
+}

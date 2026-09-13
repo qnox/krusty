@@ -5298,7 +5298,7 @@ and behavior is checked by RUNNING the emitted program.
 - **`Int?` is a reference, `Int` is a machine scalar.** A nullable primitive has to represent
   `null`, so it boxes, exactly as it does on the JVM. Anything else would need a sentinel value,
   and Kotlin has no integer that is not a legal `Int`.
-  Tests: `src/native/emit.rs` (`a_nullable_primitive_is_carried_as_a_reference`).
+  Tests: `src/native/codegen/lower.rs` (`a_nullable_primitive_is_carried_as_a_reference`).
 
 - **`compareTo` on floating-point values is a TOTAL order, not C's `<`/`>`.** Kotlin orders every
   `NaN` above every other value (including itself) and `-0.0` below `0.0`; C's comparison operators
@@ -5350,9 +5350,8 @@ and behavior is checked by RUNNING the emitted program.
   Exposing a byte count under that name would be wrong for `"é".length`, so the runtime exposes
   nothing rather than something wrong. A string constant containing an unpaired surrogate — legal
   in Kotlin, unencodable in UTF-8 — makes the backend decline the file with a diagnostic.
-  Tests: `src/native/emit.rs` (`an_unpaired_surrogate_is_declined_rather_than_mangled`,
-  `a_non_ascii_literal_uses_octal_escapes_with_a_fixed_width`),
-  `tests/native_codegen_e2e.rs` (`non_ascii_text_survives_the_round_trip`).
+  Tests: `tests/native_codegen_e2e.rs` (`a_string_literal_with_an_unpaired_surrogate_is_declined`,
+  `non_ascii_text_survives_the_round_trip`).
 
 - **`+`, `-`, `*` and unary `-` wrap; `/` and `%` go through the runtime; shifts mask their count.**
   Kotlin wraps integer arithmetic on overflow, and so do the machine's `iadd`/`isub`/`imul`/`ineg`,
@@ -5399,8 +5398,8 @@ and behavior is checked by RUNNING the emitted program.
   roots are conservative and whose heap tracing is precise.** A `KType` descriptor names the byte
   offset of every reference-typed field, and the collector follows exactly those; a `Long` field
   holding a pointer's bits does not keep anything alive. Roots — the stack and the callee-saved
-  registers — are the one place scanned conservatively, because emitting C leaves frame layout to
-  the C compiler and so no stack maps exist: any stack word that points into an allocated object
+  registers — are the one place scanned conservatively, because the code generator emits no stack
+  maps yet: any stack word that points into an allocated object
   (interior pointers included) roots it. Global slots are roots only when registered
   (`kt_gc_add_global_root`); static storage is never scanned and never treated as an object.
   Collection is triggered by allocation volume since the last collection (never by heap size, which
@@ -5435,13 +5434,12 @@ and behavior is checked by RUNNING the emitted program.
 - **A class instance is a header followed by the superclass's fields, then its own.** The object
   header stays one word — the collector's contract is `header->type` and nothing here changes it.
   Fields follow in the classic single-inheritance layout: the superclass's fields as a prefix in the
-  superclass's order, then this class's in declaration order, each aligned to its C size
+  superclass's order, then this class's in declaration order, each aligned to its size
   (`Boolean`/`Byte` 1, `Short`/`Char` 2, `Int`/`Float` 4, `Long`/`Double`/reference 8), and a
-  subclass's first field packed directly after the superclass's last (not after its rounded size),
-  because the emitted struct spells the inherited fields out as members and C packs them. The
-  instance size rounds up to 8. The layout is computed by the compiler, not read back from C: the
-  generated program asserts every field offset and every size with `_Static_assert`, so a
-  disagreement is a compile error and never a collector tracing the wrong word.
+  subclass's first field packed directly after the superclass's last (not after its rounded size).
+  The instance size rounds up to 8. One computation of the layout feeds both the loads and stores
+  the code generator emits and the `reference_offsets` table in the class's descriptor, so the
+  program and the collector cannot disagree about where a reference is.
   Tests: `src/native/classes.rs` (`fields_follow_the_superclass_prefix_and_align_to_their_size`,
   `a_subclass_field_packs_after_the_superclass_field_not_after_its_rounded_size`);
   `tests/native_classes_e2e.rs`

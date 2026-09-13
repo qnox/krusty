@@ -1,4 +1,7 @@
-//! The C runtime the native backend emits against.
+//! The runtime every native program links against: freestanding C under `runtime/`, compiled once
+//! per target when krusty itself is built (`build.rs`) and carried inside the compiler
+//! ([`super::prebuilt`]). The sources are exposed here so tests can exercise the runtime from C
+//! directly, and so the design is documented next to what it documents.
 //!
 //! **It is freestanding: it does not use a C library.** That is not minimalism for its own sake —
 //! it is what makes `docs/BUILD_AND_NATIVE_PLAN.md`'s cross-compilation requirement achievable. Go's
@@ -6,8 +9,9 @@
 //! nothing installed, because nothing in a Go binary needs a target C toolchain. A runtime that
 //! called `printf` would need a target libc, its headers and a target linker for every architecture
 //! — the per-target toolchain problem Go exists to avoid. Talking to the kernel directly removes it:
-//! `clang --target=<triple>` compiles any registered architecture with no sysroot, and `ld.lld`
-//! links any of them, so one host produces binaries for all of them.
+//! `clang --target=<triple>` compiles any registered architecture with no sysroot at krusty's build
+//! time, and krusty's own linker ([`super::linker`]) joins the result with a program's objects, so
+//! one host produces binaries for all of them and a user's build touches no C toolchain at all.
 //!
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
@@ -59,7 +63,7 @@
 /// than porting a runtime.
 pub const SYS_HEADER: &str = include_str!("runtime/krusty_sys.h");
 
-/// The header emitted code includes.
+/// The header a C program that links against the runtime includes.
 pub const HEADER: &str = include_str!("runtime/krusty_rt.h");
 
 /// The value runtime: built-in types, boxing, strings, rendering and `kotlin.io`.

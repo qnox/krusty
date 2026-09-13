@@ -15,32 +15,18 @@
 //! build touches no C toolchain; building krusty needs a C cross-compiler (clang) or gets no native
 //! targets, and says so.
 //!
-//! **Transitional.** The retired C emitter (`emit.rs`, the emitter half of `classes.rs`, `link.rs`,
-//! `backend.rs`) is still compiled only because the class and collector tests were written against
-//! it; each of those tests is a Kotlin program with expected output, and as the code generator
-//! learns to run it the test moves over and the corresponding emitter code is deleted. No new work
-//! goes into the C path.
-//!
 //! Every construct the code generator has not been taught declines with a diagnostic naming it.
 
-pub mod backend;
 mod classes;
 mod codegen;
-mod emit;
-mod gc;
+pub mod gc;
 mod intrinsics;
-mod link;
 mod linker;
 mod prebuilt;
-mod runtime;
+pub mod runtime;
 mod target;
 
-pub use backend::{
-    NativeBackend, ENTRY_SOURCE, GC_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, START_SOURCE,
-    SYS_HEADER,
-};
 pub use codegen::CraneliftBackend;
-pub use link::{c_compiler, can_build, link_executable, LinkError};
 pub use linker::{can_link, link_program, ProgramLinkError};
 pub use prebuilt::{prebuilt_available, runtime_objects};
 pub use target::{Arch, NativeTarget, Os};
