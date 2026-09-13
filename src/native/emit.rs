@@ -11,54 +11,26 @@
 //! afford a best effort because `kotlinc` decides what is correct; nothing decides that here yet,
 //! so a wrong emission would be indistinguishable from a right one until someone ran it.
 //!
+//! **Classes.** A class becomes a C struct whose first member is the object header, laid out by
+//! [`super::classes`]; construction allocates through the collector and runs an emitted
+//! constructor function; an instance method is a C function taking the receiver first and is
+//! called directly. Inheritance is declined until there is a vtable to dispatch through. What the
+//! IR presents for a property access is not quite what its declarations suggest, and the emitter
+//! follows the IR: the access arrives as a *checked* operation naming a `PropertyId`
+//! (`IrExpr::Checked`), resolved here to the declaring class's accessor or backing field.
+//!
 //! One GNU C extension is used: the statement expression `({ …; value; })`, which is how a Kotlin
-//! block with a value renders in expression position. gcc and clang both support it; a portable
+//! block with a value renders in expression position, and how a freshly allocated object is held
+//! across its constructor call. gcc and clang both support it; a portable
 //! spelling would mean hoisting temporaries through a lowering pass, which is real work that
 //! belongs with the rest of the native lowering rather than in the first emitter.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
+use super::classes::{c_kind, CKind, ClassModel};
+use crate::ir::{Callee, ClassId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::classpath::Classpath;
-use crate::types::Ty;
-
-/// How a Kotlin type is carried in C.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CKind {
-    /// `void` — Kotlin `Unit` in return position.
-    Void,
-    /// A machine scalar, spelled as one of the runtime's `kt_*` typedefs.
-    Scalar(&'static str),
-    /// A `KRef`: every reference, including a boxed `Int?`.
-    Ref,
-}
-
-impl CKind {
-    fn spelling(self) -> &'static str {
-        match self {
-            Self::Void => "void",
-            Self::Scalar(name) => name,
-            Self::Ref => "KRef",
-        }
-    }
-}
-
-/// The C carrier for a Kotlin type. A nullable primitive is deliberately NOT a scalar: `Int?` has
-/// to represent `null`, so it boxes, exactly as it does on the JVM.
-fn c_kind(ty: Ty) -> CKind {
-    match ty {
-        Ty::Unit => CKind::Void,
-        Ty::Boolean => CKind::Scalar("kt_boolean"),
-        Ty::Byte => CKind::Scalar("kt_byte"),
-        Ty::Short => CKind::Scalar("kt_short"),
-        Ty::Int => CKind::Scalar("kt_int"),
-        Ty::Long => CKind::Scalar("kt_long"),
-        Ty::Char => CKind::Scalar("kt_char"),
-        Ty::Float => CKind::Scalar("kt_float"),
-        Ty::Double => CKind::Scalar("kt_double"),
-        _ => CKind::Ref,
-    }
-}
+use crate::types::{Ty, TypeName};
 
 /// The runtime's suffix for a scalar carrier, used to name its `kt_*` helpers.
 fn scalar_suffix(kind: CKind) -> Option<&'static str> {
@@ -87,6 +59,11 @@ fn box_suffix(kind: CKind) -> Option<&'static str> {
 /// does not encode them, and the runtime is UTF-8 — so this is declined rather than mangled.
 fn c_string_literal(value: &crate::kt_string::KtString) -> Option<(String, usize)> {
     let text = value.as_str()?;
+    Some((c_literal_of(&text), text.len()))
+}
+
+/// A C string literal for UTF-8 `text`.
+fn c_literal_of(text: &str) -> String {
     let mut literal = String::with_capacity(text.len() + 2);
     literal.push('"');
     for byte in text.bytes() {
@@ -104,7 +81,7 @@ fn c_string_literal(value: &crate::kt_string::KtString) -> Option<(String, usize
         }
     }
     literal.push('"');
-    Some((literal, text.len()))
+    literal
 }
 
 /// Sanitize a Kotlin name into something C will accept as an identifier.
@@ -153,11 +130,97 @@ pub(super) struct CTranslationUnit {
     pub entry: Option<String>,
 }
 
+/// Every C symbol the file defines, allocated up front from one pool so no two can collide.
+///
+/// Kotlin overloads share a name and C has no overloading, so a repeat gets a suffix. The suffixed
+/// spelling is itself checked for collisions: a file declaring both `greet` and `greet__1` would
+/// otherwise hand two functions the same symbol, and the linker would silently pick one of them.
+/// Classes draw from the same pool as functions because their descriptors and constructors are
+/// ordinary C objects too: a class `X` and a top-level function `type_X` must not both become
+/// `kt_type_X`.
+pub(super) struct Symbols {
+    /// The sanitized, unique base name of each class, from which `struct kt_class_<base>`,
+    /// `kt_type_<base>`, `kt_<base>__init` and the struct members `<base>_f<i>` derive.
+    classes: Vec<String>,
+    /// C symbol per IR function index.
+    functions: Vec<String>,
+}
+
+/// The names a class's base reserves. Kept in one place so the reservation and the uses agree.
+fn class_symbol_family(base: &str) -> [String; 3] {
+    [
+        format!("kt_type_{base}"),
+        format!("kt_refs_{base}"),
+        format!("kt_{base}__init"),
+    ]
+}
+
+pub(super) fn symbols(ir: &IrFile) -> Symbols {
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
+        let mut candidate = base.clone();
+        let mut ordinal = 0;
+        loop {
+            let names = family(&candidate);
+            if names.iter().all(|name| !taken.contains(name)) {
+                taken.extend(names);
+                return candidate;
+            }
+            ordinal += 1;
+            candidate = format!("{base}__{ordinal}");
+        }
+    };
+
+    // Classes first: a class reserves a whole family of names, and a function only one.
+    let classes: Vec<String> = ir
+        .classes
+        .iter()
+        .map(|class| {
+            unique(c_identifier(&class.fq_name()), &|base| {
+                class_symbol_family(base).to_vec()
+            })
+        })
+        .collect();
+
+    let package = ir
+        .package
+        .as_deref()
+        .map(c_identifier)
+        .filter(|package| !package.is_empty());
+    let mut functions = vec![String::new(); ir.functions.len()];
+    // Methods are named by their class, then everything else by the package.
+    for (class, base) in ir.classes.iter().zip(&classes) {
+        for &fid in &class.methods {
+            let function = &ir.functions[fid as usize];
+            let method = format!("kt_{base}_{}", c_identifier(&function.name));
+            functions[fid as usize] = unique(method, &|name| vec![name.to_string()]);
+        }
+    }
+    for (index, function) in ir.functions.iter().enumerate() {
+        if !functions[index].is_empty() {
+            continue;
+        }
+        let base = match &package {
+            Some(package) => format!("kt_{package}_{}", c_identifier(&function.name)),
+            None => format!("kt_{}", c_identifier(&function.name)),
+        };
+        functions[index] = unique(base, &|name| vec![name.to_string()]);
+    }
+    Symbols { classes, functions }
+}
+
+/// One C symbol per IR function, unique within the file.
+#[cfg(test)]
+fn function_symbols(ir: &IrFile) -> Vec<String> {
+    symbols(ir).functions
+}
+
 pub(super) struct Emitter<'a> {
     ir: &'a IrFile,
     classpath: &'a Classpath,
-    /// C symbol per IR function index.
-    symbols: Vec<String>,
+    symbols: Symbols,
+    /// Layouts and vtables of this file's classes; built by `emit_file`, empty until then.
+    model: Option<ClassModel>,
     /// Declared type of each value slot in the function being emitted.
     values: HashMap<u32, Ty>,
     /// The C carrier of the enclosing function's result. A `return` has to know it, and a `return`
@@ -167,6 +230,8 @@ pub(super) struct Emitter<'a> {
     /// Loops enclosing the statement being emitted, innermost last.
     loops: Vec<LoopFrame>,
     label_count: u32,
+    /// Temporaries introduced for values evaluated once and used twice.
+    temp_count: u32,
     out: String,
 }
 
@@ -176,34 +241,56 @@ pub(super) type Unsupported = String;
 impl<'a> Emitter<'a> {
     pub(super) fn new(ir: &'a IrFile, classpath: &'a Classpath) -> Self {
         Self {
-            symbols: function_symbols(ir),
+            symbols: symbols(ir),
             ir,
             classpath,
+            model: None,
             values: HashMap::new(),
             result: CKind::Void,
             loops: Vec::new(),
             label_count: 0,
+            temp_count: 0,
             out: String::new(),
         }
     }
 
+    fn model(&self) -> &ClassModel {
+        self.model.as_ref().expect("the class model is built first")
+    }
+
     pub(super) fn emit_file(mut self) -> Result<CTranslationUnit, Unsupported> {
-        if !self.ir.classes.is_empty() {
-            return Err("a class declaration".to_string());
-        }
         if !self.ir.statics.is_empty() {
             return Err("a top-level property".to_string());
         }
+        self.model = Some(super::classes::build(self.ir)?);
 
         self.out.push_str("/* Generated by krusty. */\n");
         self.out.push_str("#include \"krusty_rt.h\"\n\n");
 
-        // Forward declarations first, so order of definition never decides what resolves.
+        // Layouts first: every struct is complete (inherited fields are spelled out), so nothing
+        // depends on definition order, and the offsets the collector will trace are asserted
+        // against what the C compiler actually laid out.
+        for &class in &self.model().order.clone() {
+            self.class_struct(class)?;
+        }
+
+        // Forward declarations next, so order of definition never decides what resolves.
         for (index, function) in self.ir.functions.iter().enumerate() {
             self.out
                 .push_str(&format!("{};\n", self.signature(index, function)?));
         }
+        for class in 0..self.ir.classes.len() {
+            let class = class as ClassId;
+            self.out
+                .push_str(&format!("{};\n", self.constructor_signature(class)));
+        }
         self.out.push('\n');
+
+        for class in 0..self.ir.classes.len() {
+            let class = class as ClassId;
+            self.class_descriptor(class);
+            self.constructor(class)?;
+        }
 
         let mut entry = None;
         for index in 0..self.ir.functions.len() {
@@ -211,17 +298,18 @@ impl<'a> Emitter<'a> {
             let Some(body) = function.body else {
                 return Err(format!("a body-less function `{}`", function.name));
             };
-            if function.dispatch_receiver.is_some() {
-                return Err(format!("an instance method `{}`", function.name));
-            }
-            if function.name == "main" && function.params.is_empty() {
-                entry = Some(self.symbols[index].clone());
+            if function.name == "main" && function.params.is_empty() && function.is_static {
+                entry = Some(self.symbols.functions[index].clone());
             }
 
-            self.values = HashMap::new();
-            self.loops.clear();
+            self.begin_frame();
+            let mut first_slot = 0;
+            if let Some(owner) = function.dispatch_receiver {
+                self.values.insert(0, Ty::Obj(owner, &[]));
+                first_slot = 1;
+            }
             for (slot, ty) in function.params.iter().enumerate() {
-                self.values.insert(slot as u32, *ty);
+                self.values.insert(slot as u32 + first_slot, *ty);
             }
             self.collect_variable_types(body);
 
@@ -238,16 +326,35 @@ impl<'a> Emitter<'a> {
         })
     }
 
+    /// Reset the per-function state.
+    fn begin_frame(&mut self) {
+        self.values = HashMap::new();
+        self.loops.clear();
+        self.temp_count = 0;
+        self.result = CKind::Void;
+    }
+
     fn signature(
         &self,
         index: usize,
         function: &crate::ir::IrFunction,
     ) -> Result<String, Unsupported> {
-        let mut parameters = Vec::with_capacity(function.params.len());
+        let mut parameters = Vec::with_capacity(function.params.len() + 1);
+        let mut first_slot = 0;
+        if let Some(owner) = function.dispatch_receiver {
+            if self.ir.class_id_by_name(owner).is_none() {
+                return Err(format!(
+                    "a method of `{}`, which is not declared in this file",
+                    owner.render()
+                ));
+            }
+            parameters.push("KRef v0".to_string());
+            first_slot = 1;
+        }
         for (slot, ty) in function.params.iter().enumerate() {
             match c_kind(*ty) {
                 CKind::Void => return Err(format!("a `Unit` parameter of `{}`", function.name)),
-                kind => parameters.push(format!("{} v{slot}", kind.spelling())),
+                kind => parameters.push(format!("{} v{}", kind.spelling(), slot + first_slot)),
             }
         }
         let parameters = if parameters.is_empty() {
@@ -258,7 +365,7 @@ impl<'a> Emitter<'a> {
         Ok(format!(
             "{} {}({parameters})",
             c_kind(function.ret).spelling(),
-            self.symbols[index]
+            self.symbols.functions[index]
         ))
     }
 
@@ -275,6 +382,214 @@ impl<'a> Emitter<'a> {
             }
             crate::ir::for_each_child(&self.ir.exprs, id, &mut |child| pending.push(child));
         }
+    }
+
+    // ---- classes -----------------------------------------------------------------------------
+
+    fn struct_name(&self, class: ClassId) -> String {
+        format!("struct kt_class_{}", self.symbols.classes[class as usize])
+    }
+
+    fn type_symbol(&self, class: ClassId) -> String {
+        format!("kt_type_{}", self.symbols.classes[class as usize])
+    }
+
+    fn constructor_symbol(&self, class: ClassId) -> String {
+        format!("kt_{}__init", self.symbols.classes[class as usize])
+    }
+
+    /// The struct member holding field `index` of `class` — named by the DECLARING class, so a
+    /// subclass field that shadows a superclass field's Kotlin name still gets its own member.
+    fn member(&self, class: ClassId, index: u32) -> String {
+        format!("{}_f{index}", self.symbols.classes[class as usize])
+    }
+
+    /// The superclass chain of `class`, root first, ending with `class` itself.
+    fn chain(&self, class: ClassId) -> Vec<ClassId> {
+        let mut chain = vec![class];
+        let mut at = class;
+        while let Some(parent) = self.model().layout(at).superclass {
+            chain.push(parent);
+            at = parent;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// The Kotlin-facing qualified name of a class: what its default `toString` prints.
+    fn kotlin_name(&self, class: ClassId) -> String {
+        self.ir.classes[class as usize]
+            .fq_name()
+            .replace(['/', '$'], ".")
+    }
+
+    fn class_struct(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let name = self.struct_name(class);
+        self.out
+            .push_str(&format!("{name} {{\n    KObjectHeader header;\n"));
+        let mut asserts = Vec::new();
+        for owner in self.chain(class) {
+            let fields = self.model().layout(owner).fields.clone();
+            for (index, field) in fields.iter().enumerate() {
+                let member = self.member(owner, index as u32);
+                self.out
+                    .push_str(&format!("    {} {member};\n", field.kind.spelling()));
+                asserts.push(format!(
+                    "_Static_assert(offsetof({name}, {member}) == {}, \"krusty: layout of {}.{}\");\n",
+                    field.offset,
+                    self.ir.classes[owner as usize].fq_name(),
+                    self.ir.classes[owner as usize].fields[index].name
+                ));
+            }
+        }
+        self.out.push_str("};\n");
+        for assert in asserts {
+            self.out.push_str(&assert);
+        }
+        self.out.push_str(&format!(
+            "_Static_assert(sizeof({name}) == {}, \"krusty: size of {}\");\n\n",
+            self.model().layout(class).instance_size,
+            self.ir.classes[class as usize].fq_name()
+        ));
+        Ok(())
+    }
+
+    /// The reference-offset table and the `KType` of one class: what the collector reads to trace
+    /// an instance precisely, and what the default rendering reads to name it.
+    fn class_descriptor(&mut self, class: ClassId) {
+        let layout = self.model().layout(class).clone();
+        let base = self.symbols.classes[class as usize].clone();
+        let references = if layout.reference_offsets.is_empty() {
+            "NULL".to_string()
+        } else {
+            let offsets = layout
+                .reference_offsets
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.out.push_str(&format!(
+                "static const uint32_t kt_refs_{base}[] = {{{offsets}}};\n"
+            ));
+            format!("kt_refs_{base}")
+        };
+        let kotlin_name = self.kotlin_name(class);
+        self.out.push_str(&format!(
+            "static const KType kt_type_{base} = {{{}, {}, {}, {}, {references}}};\n\n",
+            c_literal_of(&kotlin_name),
+            kotlin_name.len(),
+            layout.instance_size,
+            layout.reference_offsets.len()
+        ));
+    }
+
+    fn constructor_signature(&self, class: ClassId) -> String {
+        let declaration = &self.ir.classes[class as usize];
+        let mut parameters = vec!["KRef v0".to_string()];
+        for (index, argument) in declaration.ctor_args.iter().enumerate() {
+            parameters.push(format!("{} v{}", c_kind(argument.ty).spelling(), index + 1));
+        }
+        format!(
+            "static void {}({})",
+            self.constructor_symbol(class),
+            parameters.join(", ")
+        )
+    }
+
+    /// The constructor: the superclass constructor first, then this class's parameter stores,
+    /// then its initializers in source order — Kotlin's order, which a base-class `init` that
+    /// prints can observe.
+    fn constructor(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let declaration = self.ir.classes[class as usize].clone();
+        let signature = self.constructor_signature(class);
+        self.begin_frame();
+        self.values
+            .insert(0, Ty::Obj(declaration.fq_name_id(), &[]));
+        for (index, argument) in declaration.ctor_args.iter().enumerate() {
+            if c_kind(argument.ty) == CKind::Void {
+                return Err(format!(
+                    "a `Unit` constructor parameter of `{}`",
+                    declaration.fq_name()
+                ));
+            }
+            self.values.insert(index as u32 + 1, argument.ty);
+        }
+        for &expression in declaration
+            .super_arg_prelude
+            .iter()
+            .chain(&declaration.super_args)
+            .chain(&declaration.init_body)
+        {
+            self.collect_variable_types(expression);
+        }
+
+        self.out.push_str(&format!("{signature} {{\n"));
+        for &statement in &declaration.super_arg_prelude {
+            self.statement(statement, 1)?;
+        }
+        if let Some(parent) = self.model().layout(class).superclass {
+            let parent_declaration = &self.ir.classes[parent as usize];
+            if declaration.super_args.len() != parent_declaration.ctor_args.len() {
+                return Err(format!(
+                    "a superclass constructor call with defaulted arguments (`{}`)",
+                    declaration.fq_name()
+                ));
+            }
+            let mut arguments = vec!["v0".to_string()];
+            let parameter_types: Vec<Ty> = parent_declaration
+                .ctor_args
+                .iter()
+                .map(|argument| argument.ty)
+                .collect();
+            for (&argument, ty) in declaration.super_args.iter().zip(parameter_types) {
+                arguments.push(self.coerce(argument, ty)?);
+            }
+            let call = format!(
+                "{}({});",
+                self.constructor_symbol(parent),
+                arguments.join(", ")
+            );
+            self.line(1, &call);
+        } else if !declaration.super_args.is_empty() {
+            return Err(format!(
+                "a superclass constructor call to `{}`",
+                declaration.superclass.render()
+            ));
+        }
+        if !declaration.explicit_param_stores {
+            let mut next_field = 0;
+            for (index, argument) in declaration.ctor_args.iter().enumerate() {
+                if !argument.is_field {
+                    continue;
+                }
+                let field = argument.field_index.unwrap_or(next_field);
+                next_field = field + 1;
+                let field_type = declaration.fields[field as usize].ty;
+                let value = self.convert(format!("v{}", index + 1), argument.ty, field_type)?;
+                let store = format!(
+                    "(({} *)v0)->{} = {value};",
+                    self.struct_name(class),
+                    self.member(class, field)
+                );
+                self.line(1, &store);
+            }
+        }
+        if let Some(body) = declaration.init_body {
+            self.result = CKind::Void;
+            self.statement(body, 1)?;
+        }
+        self.out.push_str("}\n\n");
+        Ok(())
+    }
+
+    /// The in-file class a name denotes, or the decline for one declared elsewhere.
+    fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
+        self.ir.class_id_by_name(internal).ok_or_else(|| {
+            format!(
+                "{what} `{}`, which is not declared in this file",
+                internal.render()
+            )
+        })
     }
 
     // ---- types -------------------------------------------------------------------------------
@@ -302,6 +617,7 @@ impl<'a> Emitter<'a> {
                 op, type_operand, ..
             } => match op {
                 IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
+                IrTypeOp::SafeCast => Ty::nullable(*type_operand),
                 _ => *type_operand,
             },
             IrExpr::StringConcat(_) => Ty::String,
@@ -330,6 +646,18 @@ impl<'a> Emitter<'a> {
             },
             IrExpr::When { branches } => self.ty_of(branches.first()?.1)?,
             IrExpr::Call { callee, .. } => self.callee_result(callee)?,
+            IrExpr::New { internal, .. } => Ty::Obj(*internal, &[]),
+            IrExpr::MethodCall { class, index, .. } => {
+                let fid = self.ir.classes[*class as usize].methods[*index as usize];
+                self.ir.functions[fid as usize].ret
+            }
+            IrExpr::GetField { class, index, .. } => {
+                self.ir.classes[*class as usize].fields[*index as usize].ty
+            }
+            IrExpr::PropertyRead { ty, .. } => *ty,
+            IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
+                self.ir.checked_properties.get(target)?.ty
+            }
             _ => return None,
         })
     }
@@ -381,7 +709,7 @@ impl<'a> Emitter<'a> {
                 } else {
                     let declaration = match init {
                         Some(init) => {
-                            format!("{} v{index} = {};", kind.spelling(), self.expression(init)?)
+                            format!("{} v{index} = {};", kind.spelling(), self.coerce(init, ty)?)
                         }
                         None => format!("{} v{index};", kind.spelling()),
                     };
@@ -389,8 +717,37 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::SetValue { var, value } => {
-                let value = self.expression(value)?;
+                let target = self.values.get(&var).copied();
+                let value = match target {
+                    Some(ty) => self.coerce(value, ty)?,
+                    None => self.expression(value)?,
+                };
                 self.line(depth, &format!("v{var} = {value};"));
+            }
+            IrExpr::SetField {
+                receiver,
+                class,
+                index,
+                value,
+            } => {
+                let field_type = self.ir.classes[class as usize].fields[index as usize].ty;
+                let value = self.coerce(value, field_type)?;
+                let target = self.field_access(receiver, class, index)?;
+                self.line(depth, &format!("{target} = {value};"));
+            }
+            IrExpr::Checked(IrCheckedOperation::PropertyWrite {
+                target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                value,
+                ..
+            }) => {
+                if extension_receiver.is_some() || !context_arguments.is_empty() {
+                    return Err("an extension or context property".to_string());
+                }
+                let written = self.property_write(target, dispatch_receiver, value)?;
+                self.line(depth, &format!("{written};"));
             }
             IrExpr::When { branches } => {
                 let mut first = true;
@@ -577,15 +934,48 @@ impl<'a> Emitter<'a> {
                 Ok(rendered)
             }
             IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull,
+                op,
                 arg,
                 type_operand,
-            } => self.coerce(arg, type_operand),
+            } => self.type_operation(op, arg, type_operand),
             IrExpr::Call {
                 callee,
                 dispatch_receiver,
                 args,
             } => self.call(&callee, dispatch_receiver, &args),
+            IrExpr::New {
+                internal,
+                args,
+                ctor_params,
+                defaults,
+                ..
+            } => self.construction(internal, &args, ctor_params.is_some(), !defaults.is_empty()),
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } => self.method_call(class, index, receiver, &args),
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => self.field_access(receiver, class, index),
+            IrExpr::Checked(IrCheckedOperation::PropertyRead {
+                target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                ..
+            }) => {
+                if extension_receiver.is_some() || !context_arguments.is_empty() {
+                    return Err("an extension or context property".to_string());
+                }
+                self.property_read(target, dispatch_receiver)
+            }
+            IrExpr::Checked(other) => {
+                Err(format!("a checked {} operation", describe_debug(&other)))
+            }
             IrExpr::Block { stmts, value } => {
                 // A block with a value in expression position becomes a GNU statement expression.
                 let Some(value) = value else {
@@ -630,7 +1020,9 @@ impl<'a> Emitter<'a> {
     /// Three families of operator cannot be C's spelling of the same symbol, and each is a silent
     /// wrong answer rather than a compile error if it is emitted naively:
     ///
-    /// * `==` on references is Kotlin's STRUCTURAL equality; C's compares addresses.
+    /// * `==` on references is Kotlin's STRUCTURAL equality; C's compares addresses. The one case
+    ///   where the two agree — a comparison against the `null` literal — is emitted; the rest is
+    ///   declined.
     /// * `+`, `-`, `*` and unary `-` WRAP on overflow in Kotlin; signed overflow is undefined in C,
     ///   which a compiler is free to assume never happens.
     /// * `/`, `%` and the shifts are defined by Kotlin for operands C leaves undefined.
@@ -639,7 +1031,15 @@ impl<'a> Emitter<'a> {
         let scalar = operand.and_then(scalar_suffix);
 
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
+            let against_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null))
+                || matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
             match operand {
+                // `x == null` is `x === null` in Kotlin: no `equals` is ever called.
+                _ if against_null => {
+                    let left = self.reference(lhs)?;
+                    let right = self.reference(rhs)?;
+                    return Ok(format!("({left} {} {right})", c_operator(op)?));
+                }
                 Some(CKind::Ref) => return Err("structural equality on references".to_string()),
                 // Neither a known scalar nor a known reference: emitting either equality would be
                 // a guess about which one Kotlin means.
@@ -709,25 +1109,237 @@ impl<'a> Emitter<'a> {
     /// Realize a representation change between two carriers.
     fn coerce(&mut self, arg: u32, target: Ty) -> Result<String, Unsupported> {
         let rendered = self.expression(arg)?;
-        let target = c_kind(target);
-        let source = self.ty_of(arg).map(c_kind);
-        match (source, target) {
+        match self.ty_of(arg) {
             // Unknown source: the only safe move is to leave the value alone.
-            (None, _) => Ok(rendered),
-            (Some(source), target) if source == target => Ok(rendered),
-            (Some(source @ CKind::Scalar(_)), CKind::Ref) => match box_suffix(source) {
+            None => Ok(rendered),
+            Some(source) => self.convert(rendered, source, target),
+        }
+    }
+
+    /// Convert an already-rendered value of type `source` to the carrier of `target`.
+    fn convert(&self, rendered: String, source: Ty, target: Ty) -> Result<String, Unsupported> {
+        let source = c_kind(source);
+        let target = c_kind(target);
+        match (source, target) {
+            (source, target) if source == target => Ok(rendered),
+            (source @ CKind::Scalar(_), CKind::Ref) => match box_suffix(source) {
                 Some(suffix) => Ok(format!("kt_box_{suffix}({rendered})")),
                 None => Err(unrenderable(source)),
             },
-            (Some(CKind::Ref), CKind::Scalar(_)) => match box_suffix(target) {
+            (CKind::Ref, CKind::Scalar(_)) => match box_suffix(target) {
                 Some(suffix) => Ok(format!("kt_unbox_{suffix}({rendered})")),
                 None => Err(unrenderable(target)),
             },
             // Scalar to a different scalar is a widening/narrowing C cast.
-            (Some(CKind::Scalar(_)), CKind::Scalar(name)) => Ok(format!("(({name}){rendered})")),
-            (Some(CKind::Ref), CKind::Ref) => Ok(rendered),
-            (Some(_), CKind::Void) => Ok(rendered),
-            (Some(CKind::Void), _) => Err("a coercion from `Unit`".to_string()),
+            (CKind::Scalar(_), CKind::Scalar(name)) => Ok(format!("(({name}){rendered})")),
+            (_, CKind::Void) => Ok(rendered),
+            (CKind::Void, _) => Err("a coercion from `Unit`".to_string()),
+            (CKind::Ref, CKind::Ref) => unreachable!("equal carriers are handled above"),
+        }
+    }
+
+    /// The coercions the frontend inserts, and casts between carriers. A check against a class
+    /// (`is`, `as?`) needs the runtime to know the class hierarchy, which it does not yet.
+    fn type_operation(
+        &mut self,
+        op: IrTypeOp,
+        arg: u32,
+        type_operand: Ty,
+    ) -> Result<String, Unsupported> {
+        match op {
+            IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Err(format!(
+                "an `is` check against `{}`",
+                type_name_of(type_operand)
+            )),
+            IrTypeOp::SafeCast => Err(format!("an `as?` to `{}`", type_name_of(type_operand))),
+            IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull => {
+                self.coerce(arg, type_operand)
+            }
+        }
+    }
+
+    fn temp(&mut self) -> String {
+        self.temp_count += 1;
+        format!("kt_r{}", self.temp_count)
+    }
+
+    /// `receiver.<field>` as a C lvalue.
+    fn field_access(
+        &mut self,
+        receiver: u32,
+        class: ClassId,
+        index: u32,
+    ) -> Result<String, Unsupported> {
+        let object = self.reference(receiver)?;
+        Ok(format!(
+            "(({} *)({object}))->{}",
+            self.struct_name(class),
+            self.member(class, index)
+        ))
+    }
+
+    fn construction(
+        &mut self,
+        internal: TypeName,
+        args: &[u32],
+        secondary: bool,
+        defaulted: bool,
+    ) -> Result<String, Unsupported> {
+        let name = internal.render();
+        if secondary {
+            return Err(format!("a secondary constructor call (`{name}`)"));
+        }
+        if defaulted {
+            return Err(format!("a constructor default argument (`{name}`)"));
+        }
+        let class = self.class_of(internal, "construction of")?;
+        let declaration = &self.ir.classes[class as usize];
+        if declaration.is_object {
+            return Err(format!("construction of the object declaration `{name}`"));
+        }
+        if declaration.is_abstract || declaration.is_sealed {
+            return Err(format!("construction of the abstract class `{name}`"));
+        }
+        if args.len() != declaration.ctor_args.len() {
+            return Err(format!(
+                "a constructor call with omitted arguments (`{name}`)"
+            ));
+        }
+        let parameter_types: Vec<Ty> = declaration
+            .ctor_args
+            .iter()
+            .map(|argument| argument.ty)
+            .collect();
+        let temp = self.temp();
+        let mut arguments = vec![temp.clone()];
+        for (&argument, ty) in args.iter().zip(parameter_types) {
+            arguments.push(self.coerce(argument, ty)?);
+        }
+        Ok(format!(
+            "({{ KRef {temp} = (KRef)kt_gc_allocate(&{}, sizeof({})); {}({}); {temp}; }})",
+            self.type_symbol(class),
+            self.struct_name(class),
+            self.constructor_symbol(class),
+            arguments.join(", ")
+        ))
+    }
+
+    /// A call of an instance method. Direct: with inheritance declined, the method named is the
+    /// method that runs.
+    fn method_call(
+        &mut self,
+        class: ClassId,
+        index: u32,
+        receiver: u32,
+        args: &[Option<u32>],
+    ) -> Result<String, Unsupported> {
+        let fid = self.ir.classes[class as usize].methods[index as usize];
+        let function = &self.ir.functions[fid as usize];
+        let arguments: Option<Vec<u32>> = args.iter().copied().collect();
+        let Some(arguments) = arguments else {
+            return Err(format!(
+                "a call with a defaulted argument (`{}.{}`)",
+                self.ir.classes[class as usize].fq_name(),
+                function.name
+            ));
+        };
+        if function.dispatch_receiver.is_none() {
+            return Err(format!("a class-static call (`{}`)", function.name));
+        }
+        let parameters = function.params.clone();
+        let symbol = self.symbols.functions[fid as usize].clone();
+        let mut rendered = vec![self.reference(receiver)?];
+        for (&argument, ty) in arguments.iter().zip(parameters) {
+            rendered.push(self.coerce(argument, ty)?);
+        }
+        Ok(format!("{symbol}({})", rendered.join(", ")))
+    }
+
+    /// The property a checked operation names, as (class, property index).
+    fn checked_property(
+        &self,
+        target: crate::fir::PropertyId,
+    ) -> Result<(ClassId, usize), Unsupported> {
+        let Some(property) = self.ir.checked_properties.get(&target) else {
+            return Err("a property with no checked declaration".to_string());
+        };
+        let Some(class) = property.class else {
+            return Err(format!("a top-level property (`{}`)", property.name));
+        };
+        let declaration = &self.ir.classes[class as usize];
+        let index = declaration
+            .properties
+            .iter()
+            .position(|candidate| candidate.name == property.name)
+            .ok_or_else(|| format!("an undeclared property (`{}`)", property.name))?;
+        Ok((class, index))
+    }
+
+    fn property_read(
+        &mut self,
+        target: crate::fir::PropertyId,
+        receiver: Option<u32>,
+    ) -> Result<String, Unsupported> {
+        let (class, index) = self.checked_property(target)?;
+        let property = self.ir.classes[class as usize].properties[index].clone();
+        let Some(receiver) = receiver else {
+            return Err(format!("a receiver-less read of `{}`", property.name));
+        };
+        if property
+            .storage_ty
+            .is_some_and(|storage| c_kind(storage) != c_kind(property.ty))
+        {
+            return Err(format!(
+                "a property whose storage differs from its type (`{}`)",
+                property.name
+            ));
+        }
+        if let Some(getter) = property.getter {
+            let object = self.reference(receiver)?;
+            return Ok(format!(
+                "{}({object})",
+                self.symbols.functions[getter as usize]
+            ));
+        }
+        match property.backing_field {
+            Some(field) => self.field_access(receiver, class, field),
+            None => Err(format!(
+                "a property with neither storage nor a getter (`{}`)",
+                property.name
+            )),
+        }
+    }
+
+    fn property_write(
+        &mut self,
+        target: crate::fir::PropertyId,
+        receiver: Option<u32>,
+        value: u32,
+    ) -> Result<String, Unsupported> {
+        let (class, index) = self.checked_property(target)?;
+        let property = self.ir.classes[class as usize].properties[index].clone();
+        let Some(receiver) = receiver else {
+            return Err(format!("a receiver-less write of `{}`", property.name));
+        };
+        if let Some(setter) = property.setter {
+            let object = self.reference(receiver)?;
+            let value = self.coerce(value, property.ty)?;
+            return Ok(format!(
+                "{}({object}, {value})",
+                self.symbols.functions[setter as usize]
+            ));
+        }
+        match property.backing_field {
+            Some(field) => {
+                let field_type = self.ir.classes[class as usize].fields[field as usize].ty;
+                let value = self.coerce(value, field_type)?;
+                let target = self.field_access(receiver, class, field)?;
+                Ok(format!("{target} = {value}"))
+            }
+            None => Err(format!(
+                "a property with neither storage nor a setter (`{}`)",
+                property.name
+            )),
         }
     }
 
@@ -746,8 +1358,9 @@ impl<'a> Emitter<'a> {
                 Err(format!("a {} call with a receiver", callee_kind(callee)))
             }
             Callee::Local(function) => {
-                let symbol = self.symbols[*function as usize].clone();
-                let arguments = self.arguments(args)?;
+                let symbol = self.symbols.functions[*function as usize].clone();
+                let parameters = self.ir.functions[*function as usize].params.clone();
+                let arguments = self.arguments(args, &parameters)?;
                 Ok(format!("{symbol}({arguments})"))
             }
             Callee::External { target, params, .. } => {
@@ -775,7 +1388,7 @@ impl<'a> Emitter<'a> {
                         else {
                             return Err(undeclared(&owner, &name));
                         };
-                        let arguments = self.arguments(args)?;
+                        let arguments = self.arguments(args, params)?;
                         Ok(format!("{symbol}({arguments})"))
                     }
                 }
@@ -826,12 +1439,24 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn arguments(&mut self, args: &[u32]) -> Result<String, Unsupported> {
+    /// Arguments coerced to the parameter carriers they are passed as.
+    fn arguments(&mut self, args: &[u32], parameters: &[Ty]) -> Result<String, Unsupported> {
         let mut rendered = Vec::with_capacity(args.len());
-        for argument in args {
-            rendered.push(self.expression(*argument)?);
+        for (index, argument) in args.iter().enumerate() {
+            rendered.push(match parameters.get(index) {
+                Some(ty) => self.coerce(*argument, *ty)?,
+                None => self.expression(*argument)?,
+            });
         }
         Ok(rendered.join(", "))
+    }
+}
+
+/// A type's spelling for a diagnostic: the class name when it has one, else the debug form.
+fn type_name_of(ty: Ty) -> String {
+    match ty.non_null().obj_internal() {
+        Some(name) => name.render(),
+        None => format!("{:?}", ty.non_null()),
     }
 }
 
@@ -854,36 +1479,6 @@ fn undeclared(owner: &str, name: &str) -> Unsupported {
 
 fn indent_of(depth: usize) -> String {
     "    ".repeat(depth)
-}
-
-/// One C symbol per IR function, unique within the file.
-fn function_symbols(ir: &IrFile) -> Vec<String> {
-    let package = ir
-        .package
-        .as_deref()
-        .map(c_identifier)
-        .filter(|package| !package.is_empty());
-    // Kotlin overloads share a name and C has no overloading, so a repeat gets a suffix. The
-    // suffixed spelling is itself checked for collisions: a file declaring both `greet` and
-    // `greet__1` would otherwise hand two functions the same symbol, and the linker would silently
-    // pick one of them.
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
-    ir.functions
-        .iter()
-        .map(|function| {
-            let base = match &package {
-                Some(package) => format!("kt_{package}_{}", c_identifier(&function.name)),
-                None => format!("kt_{}", c_identifier(&function.name)),
-            };
-            let mut candidate = base.clone();
-            let mut ordinal = 0;
-            while !taken.insert(candidate.clone()) {
-                ordinal += 1;
-                candidate = format!("{base}__{ordinal}");
-            }
-            candidate
-        })
-        .collect()
 }
 
 fn constant_expression(constant: &IrConst) -> Result<String, Unsupported> {
@@ -921,8 +1516,9 @@ fn c_operator(op: IrBinOp) -> Result<&'static str, Unsupported> {
         IrBinOp::Le => "<=",
         IrBinOp::Gt => ">",
         IrBinOp::Ge => ">=",
-        // `Eq`/`Ne` reach here only for scalar operands; `binary` declines the reference case,
-        // where Kotlin means structural equality and C's `==` would compare addresses.
+        // `Eq`/`Ne` reach here only for scalar operands and comparisons against `null`; `binary`
+        // declines the rest of the reference case, where Kotlin means structural equality and C's
+        // `==` would compare addresses.
         IrBinOp::Eq | IrBinOp::RefEq => "==",
         IrBinOp::Ne | IrBinOp::RefNe => "!=",
         IrBinOp::And => "&&",
@@ -955,14 +1551,19 @@ fn callee_kind(callee: &Callee) -> &'static str {
     }
 }
 
-/// A short phrase naming the construct, for the declining diagnostic.
-fn describe(node: &IrExpr) -> String {
+/// The leading identifier of a `Debug` rendering: the variant name.
+fn describe_debug<T: std::fmt::Debug>(node: &T) -> String {
     let debug = format!("{node:?}");
     let head = debug
         .split(|c: char| !c.is_ascii_alphanumeric())
         .find(|piece| !piece.is_empty())
         .unwrap_or("expression");
     format!("`{head}`")
+}
+
+/// A short phrase naming the construct, for the declining diagnostic.
+fn describe(node: &IrExpr) -> String {
+    describe_debug(node)
 }
 
 #[cfg(test)]
@@ -974,6 +1575,18 @@ mod tests {
         let mut buffer = KtStringBuf::new();
         buffer.push_str(text);
         buffer.finish()
+    }
+
+    fn top_level(name: &str) -> crate::ir::IrFunction {
+        crate::ir::IrFunction {
+            name: name.to_string(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        }
     }
 
     #[test]
@@ -1027,15 +1640,7 @@ mod tests {
         // the linker would silently pick one of them.
         let mut ir = IrFile::default();
         for _ in 0..3 {
-            ir.functions.push(crate::ir::IrFunction {
-                name: "greet".to_string(),
-                params: Vec::new(),
-                ret: Ty::Unit,
-                body: None,
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
+            ir.functions.push(top_level("greet"));
         }
         assert_eq!(
             function_symbols(&ir),
@@ -1050,15 +1655,7 @@ mod tests {
         // keep one of the two bodies.
         let mut ir = IrFile::default();
         for name in ["greet", "greet__1", "greet"] {
-            ir.functions.push(crate::ir::IrFunction {
-                name: name.to_string(),
-                params: Vec::new(),
-                ret: Ty::Unit,
-                body: None,
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
+            ir.functions.push(top_level(name));
         }
         let symbols = function_symbols(&ir);
         assert_eq!(symbols, vec!["kt_greet", "kt_greet__1", "kt_greet__2"]);
@@ -1075,16 +1672,58 @@ mod tests {
     fn a_package_qualifies_the_symbol() {
         let mut ir = IrFile::default();
         ir.package = Some("com.example.app".to_string());
+        ir.functions.push(top_level("main"));
+        assert_eq!(function_symbols(&ir), vec!["kt_com_example_app_main"]);
+    }
+
+    #[test]
+    fn two_classes_whose_names_sanitize_alike_get_distinct_symbols() {
+        // A nested class is spelled `Outer$Nested` and a top-level class may be spelled
+        // `Outer_Nested`; both sanitize to the same C identifier. One of them has to move, or the
+        // two descriptors and the two constructors would be the same symbols.
+        let mut ir = IrFile::default();
+        ir.classes
+            .push(crate::ir::IrClass::synthetic(crate::types::type_name(
+                "Outer$Nested",
+            )));
+        ir.classes
+            .push(crate::ir::IrClass::synthetic(crate::types::type_name(
+                "Outer_Nested",
+            )));
+        let symbols = symbols(&ir);
+        assert_eq!(symbols.classes, vec!["Outer_Nested", "Outer_Nested__1"]);
+    }
+
+    #[test]
+    fn a_class_and_a_function_cannot_share_a_symbol() {
+        // A class `X` owns `kt_type_X`; a top-level function `type_X` would be `kt_type_X` too.
+        let mut ir = IrFile::default();
+        ir.classes
+            .push(crate::ir::IrClass::synthetic(crate::types::type_name("X")));
+        ir.functions.push(top_level("type_X"));
+        ir.functions.push(top_level("X__init"));
+        let symbols = symbols(&ir);
+        assert_eq!(symbols.classes, vec!["X"]);
+        assert_eq!(symbols.functions, vec!["kt_type_X__1", "kt_X__init__1"]);
+    }
+
+    #[test]
+    fn a_method_is_named_by_its_class_and_kept_apart_from_a_like_named_function() {
+        let mut ir = IrFile::default();
+        let mut class = crate::ir::IrClass::synthetic(crate::types::type_name("A"));
         ir.functions.push(crate::ir::IrFunction {
-            name: "main".to_string(),
+            name: "f".to_string(),
             params: Vec::new(),
             ret: Ty::Unit,
             body: None,
-            is_static: true,
-            dispatch_receiver: None,
+            is_static: false,
+            dispatch_receiver: Some(crate::types::type_name("A")),
             param_checks: Vec::new(),
         });
-        assert_eq!(function_symbols(&ir), vec!["kt_com_example_app_main"]);
+        class.methods.push(0);
+        ir.classes.push(class);
+        ir.functions.push(top_level("A_f"));
+        assert_eq!(function_symbols(&ir), vec!["kt_A_f", "kt_A_f__1"]);
     }
 
     #[test]

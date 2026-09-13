@@ -11,12 +11,16 @@
 //! * **klib ingestion** (phase 7). Symbols still come from the Kotlin/JVM stdlib jar, because that
 //!   is the only provider krusty has. Only *signatures* come from there; the emitted program links
 //!   against `krusty_rt.c` and nothing else.
-//! * **Classes on the heap.** The runtime has an object model, an allocator and a collector
-//!   (`runtime.rs`, `gc.rs`); the emitter does not yet put a Kotlin class onto them.
-//! * **Classes, properties, and most of the stdlib.** Every one of them makes the backend decline
-//!   with a diagnostic naming the construct, rather than emit something unverified.
+//! * **Inheritance.** A final class with fields, methods and properties lives on the heap
+//!   (`classes.rs` lays it out, `emit.rs` constructs it and calls its methods directly); a class
+//!   with a superclass, an open class, or an override declines until there is a vtable to dispatch
+//!   through.
+//! * **Most of the stdlib, and objects, interfaces, data classes, enums, lambdas.** Every one of
+//!   them makes the backend decline with a diagnostic naming the construct, rather than emit
+//!   something unverified.
 
 pub mod backend;
+mod classes;
 mod emit;
 mod gc;
 mod intrinsics;

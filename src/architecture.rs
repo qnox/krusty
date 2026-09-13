@@ -341,7 +341,14 @@ mod tests {
         // classpath, so a selected dependency declaration is resolved through
         // `Classpath::external_callable`. It is the seam phase 7 of `docs/BUILD_AND_NATIVE_PLAN.md`
         // removes, and this budget is what keeps it from spreading in the meantime.
-        assert_allowed_crate_modules("src/native/emit.rs", &["ir", "jvm", "kt_string", "types"]);
+        // `fir` is on this list for the identities common IR carries by value: a checked property
+        // operation names a `PropertyId`, and an override edge names the `CallableId` it resolved.
+        // Both are part of the IR contract, not a way back into the frontend.
+        assert_allowed_crate_modules(
+            "src/native/emit.rs",
+            &["fir", "ir", "jvm", "kt_string", "types"],
+        );
+        assert_allowed_crate_modules("src/native/classes.rs", &["fir", "ir", "types"]);
         assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
     }
 

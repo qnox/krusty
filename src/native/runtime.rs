@@ -455,6 +455,34 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
     return 3;
 }
 
+/* An instance of an emitted class: `<qualified name>@<hex>`, Kotlin's default shape. The hex part
+   derives from the address, which is stable for the object's whole life because the collector
+   never moves an object; a class's own `toString` has nowhere to hang yet, so this is every class's
+   rendering until dispatch exists. */
+static const char *kt_render_object(KRef value, kt_int *byte_length, KRef *storage) {
+    const KType *type = value->header.type;
+    uintptr_t address = (uintptr_t)value;
+    uint32_t hash = (uint32_t)((address >> 4) ^ (address >> 36));
+    char digits[8];
+    kt_int digit_count = 0;
+    do {
+        uint32_t nibble = hash & 0xFu;
+        digits[digit_count++] = (char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));
+        hash >>= 4;
+    } while (hash != 0);
+    kt_int length = (kt_int)type->name_length + 1 + digit_count;
+    KByteArray *buffer = kt_bytes_new(length);
+    char *out = kt_bytes_of(buffer);
+    memcpy(out, type->name, type->name_length);
+    out[type->name_length] = '@';
+    for (kt_int i = 0; i < digit_count; i++) {
+        out[type->name_length + 1 + i] = digits[digit_count - 1 - i];
+    }
+    *byte_length = length;
+    *storage = (KRef)buffer;
+    return out;
+}
+
 /* Render any value as bytes. `*storage` receives the heap object that owns the bytes (NULL when
    they are in static storage); a caller that allocates before it has finished with the bytes
    must keep it in a local, so the collector sees a root. */
@@ -495,8 +523,10 @@ static const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
         number = value->as.short_value;
     } else if (type == &kt_type_int) {
         number = value->as.int_value;
-    } else {
+    } else if (type == &kt_type_long) {
         number = value->as.long_value;
+    } else {
+        return kt_render_object(value, byte_length, storage);
     }
     KByteArray *buffer = kt_bytes_new(24);
     *byte_length = kt_render_long(number, kt_bytes_of(buffer));

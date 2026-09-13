@@ -319,11 +319,11 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: needs the Kotlin stdlib and a C compiler");
         return;
     }
-    // Classes are not implemented yet. The contract is that the backend SAYS so: emitting a
+    // Lambdas are not implemented yet. The contract is that the backend SAYS so: emitting a
     // partial program that links and misbehaves would be far worse than refusing.
     let (artifacts, diagnostics) = compile(&[(
         "Main",
-        "class Point(val x: Int)\nfun main() { println(Point(1).x) }\n",
+        "fun main() { val f = { x: Int -> x + 1 }; println(f(1)) }\n",
     )]);
     assert!(
         diagnostics
@@ -412,8 +412,13 @@ fn one_host_builds_an_executable_for_every_supported_architecture() {
     // host, with no per-target toolchain installed. It works because the emitted runtime is
     // freestanding — no target libc, so no sysroot to find — and because one clang compiles every
     // architecture while one `ld.lld` links them.
-    let (artifacts, diagnostics) =
-        compile(&[("Main", "fun main() { println(\"Hello, world!\") }")]);
+    // The program uses a class so the object model, the vtable dispatch and the constructor path
+    // are cross-compiled too, not only the runtime's own values.
+    let (artifacts, diagnostics) = compile(&[(
+        "Main",
+        "class Greeter(val name: String) { fun greet(): String = \"Hello, $name!\" }\n\
+         fun main() { println(Greeter(\"world\").greet()) }\n",
+    )]);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
     let mut built = Vec::new();
