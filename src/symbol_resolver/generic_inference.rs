@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod nullable_actual;
+use nullable_actual::nullable_generic_actual;
+
 /// Whether `left` is the same callable parameter shape as `right` with a strict superset of
 /// declaration constraints. Kotlin uses this after ordinary call-site applicability: for overloads
 /// `<T : Comparable<T>> f(T)` and `<T : Comparable<T>, T : Number> f(T)`, an `Int` argument selects
@@ -1164,14 +1167,6 @@ pub(crate) fn inference_actual(actual: Ty) -> Ty {
 
 fn null_only(actual: Ty) -> bool {
     actual == Ty::Null || matches!(actual, Ty::Nullable(inner) if *inner == Ty::Nothing)
-}
-
-fn nullable_generic_actual(actual: Ty) -> Ty {
-    if null_only(actual) {
-        Ty::Nothing
-    } else {
-        actual.non_null()
-    }
 }
 
 pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {

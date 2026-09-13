@@ -1255,6 +1255,8 @@ mod spread_in_annotation_e2e;
 mod spread_operator_e2e;
 #[path = "star_projection_member_read_e2e.rs"]
 mod star_projection_member_read_e2e;
+#[path = "star_projection_nullable_receiver_e2e.rs"]
+mod star_projection_nullable_receiver_e2e;
 #[path = "star_projection_wildcard_e2e.rs"]
 mod star_projection_wildcard_e2e;
 #[path = "static_member_import_e2e.rs"]
