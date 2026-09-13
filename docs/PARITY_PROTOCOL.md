@@ -1941,3 +1941,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   krusty still emits no `decodeSequentially` fast path, so its decoder-call set is kotlinc's minus
   that one — the remaining difference in this method.
   `tests/serialization_companion_byte_parity_e2e.rs::a_nullable_serializable_element_is_actually_decoded`.
+- **A serialization-only use in one file reaches a sibling declaration's serializer (fix).**
+  `Row.serializer()` is checked to a plugin placeholder carrying `Row`'s stable classifier identity.
+  A file that declared no `@Serializable` class skipped the plugin entirely, so that placeholder
+  survived and the JVM backend rejected the whole file. The plugin trigger now recognizes its own
+  checked placeholders, and the same provider-backed `ElementSerializerPlan` used for fields turns
+  the recorded sibling capability into `Row$$serializer.INSTANCE`; there is no accessor-name lookup
+  or backend retry.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_sibling_files_generated_serializer_accessor_matches_kotlinc`.

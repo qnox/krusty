@@ -372,12 +372,22 @@ pub fn run_enabled(
     ir: &mut IrFile,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
-    classifiers: &dyn crate::backend::BackendClassifierSource,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
 ) {
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
-    if ctx
-        .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
-        .is_empty()
+    let uses_serialization = ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            crate::ir::IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                ..
+            }
+        )
+    });
+    if !uses_serialization
+        && ctx
+            .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
+            .is_empty()
     {
         return;
     }
@@ -385,41 +395,16 @@ pub fn run_enabled(
     enabled_plugins(module_name).run(ir, &ctx);
 }
 
-/// Temporary adapter for syntax-lowering tests and tools that have not migrated to frozen backend
-/// classifier facts. New compiler emission calls [`run_enabled`] with the checked provider.
-pub fn run_enabled_legacy_bridge(
-    ir: &mut IrFile,
-    module_name: &str,
-    target_type_descriptor: fn(Ty) -> Option<String>,
-    serializer_for: &dyn Fn(TypeName) -> Option<TypeName>,
-) {
-    let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
-    if ctx
-        .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
-        .is_empty()
-    {
-        return;
-    }
-    let external = external_classifier_candidates(ir)
-        .filter_map(|classifier| {
-            serializer_for(classifier).map(|serializer| (classifier, serializer))
-        })
-        .collect();
-    let ctx = ctx.with_external_serializers(external);
-    enabled_plugins(module_name).run(ir, &ctx);
-}
-
 /// Field classifiers this file does not declare, normalized through the single checked provider.
 fn external_serializers(
     ir: &IrFile,
-    classifiers: &dyn crate::backend::BackendClassifierSource,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
 ) -> std::collections::HashMap<TypeName, TypeName> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
     external_classifier_candidates(ir)
         .filter_map(|classifier| {
-            let fact = classifiers.classifier(classifier)?;
-            let application = fact
-                .annotations
+            let annotations = classifiers.classifier_annotations(classifier)?;
+            let application = annotations
                 .iter()
                 .find(|annotation| annotation.annotation == serializable);
             let custom = application.and_then(|annotation| {
@@ -436,7 +421,9 @@ fn external_serializers(
                 .or_else(|| application.map(|_| classifier.nested_child("$serializer")))
                 .or_else(|| {
                     let generated = classifier.nested_child("$serializer");
-                    classifiers.classifier(generated).map(|_| generated)
+                    classifiers
+                        .classifier_annotations(generated)
+                        .map(|_| generated)
                 })
                 .map(|serializer| (classifier, serializer))
         })
@@ -453,6 +440,21 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
         .collect();
     let mut seen = std::collections::HashSet::new();
     let mut external = Vec::new();
+    for expression in &ir.exprs {
+        let crate::ir::IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            data,
+            ..
+        } = expression
+        else {
+            continue;
+        };
+        for &classifier in data {
+            if seen.insert(classifier) && !declared.contains(&classifier) {
+                external.push(classifier);
+            }
+        }
+    }
     while let Some(ty) = candidates.pop() {
         // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
         candidates.extend(ty.non_null().type_args().iter().copied());

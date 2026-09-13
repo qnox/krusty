@@ -76,52 +76,20 @@ pub fn run_backend_passes(
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
 ) -> Result<(), SkipReason> {
     let mut discard = crate::jvm::suspend::ContinuationMetadataMap::default();
-    run_backend_passes_with_metadata(ir, facade, module_name, syms, classpath, &mut discard)
+    run_backend_passes_with_metadata(
+        ir,
+        facade,
+        module_name,
+        syms,
+        classpath,
+        classifiers,
+        &mut discard,
+    )
 }
 
-/// Whether `internal` already HAS a plugin-generated serializer the emitted code can name: a
-/// dependency compiled with the serialization plugin carries `<type>$serializer` on the classpath.
-/// A `@Serializable` class of THIS module declared in another file has one too, but it is generated
-/// as that file compiles — the classpath cannot answer for it, and the module's own facts do.
-fn legacy_generated_serializer(
-    classifier: crate::types::TypeName,
-    classpath: &crate::jvm::classpath::Classpath,
-    module_serializable: &dyn Fn(crate::types::TypeName) -> bool,
-) -> Option<crate::types::TypeName> {
-    // A class that NAMES its serializer has no generated one: `@Serializable(with = X::class)` is
-    // where kotlinx's own types (`JsonObject` → `JsonObjectSerializer`) put theirs, and a consumer
-    // storing such a type references that class.
-    if let Some(named) = classpath.find_name(classifier).and_then(|class| {
-        class
-            .annotations
-            .iter()
-            .find(|annotation| {
-                annotation
-                    .annotation
-                    .matches(crate::plugins::serialization::SERIALIZABLE_FQ)
-            })
-            .and_then(|annotation| {
-                annotation.arguments.iter().find_map(|(name, value)| {
-                    (name == "with")
-                        .then_some(value)
-                        .and_then(|value| match value {
-                            crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
-                            _ => None,
-                        })
-                })
-            })
-    }) {
-        return Some(named);
-    }
-    let serializer = classifier.nested_child("$serializer");
-    (classpath.find_name(serializer).is_some() || module_serializable(classifier))
-        .then_some(serializer)
-}
-
-/// Whether the classifier is declared in THIS module and carries `@Serializable` — its generated
-/// serializer will exist once that declaration's own file is emitted.
 /// Run the JVM pass pipeline and retain continuation metadata for class emission.
 pub fn run_backend_passes_with_metadata(
     ir: &mut crate::ir::IrFile,
@@ -129,23 +97,10 @@ pub fn run_backend_passes_with_metadata(
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled_legacy_bridge(
-        ir,
-        module_name,
-        jvm_plugin_type_descriptor,
-        &|classifier| {
-            legacy_generated_serializer(classifier, classpath, &|classifier| {
-                syms.classes.values().any(|class| {
-                    class.internal == classifier
-                        && class.annotations.iter().any(|annotation| {
-                            annotation.matches(crate::plugins::serialization::SERIALIZABLE_FQ)
-                        })
-                })
-            })
-        },
-    );
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
     let module_value_classes: std::collections::HashMap<_, _> = syms
         .classes
         .values()
@@ -767,6 +722,7 @@ impl JvmBackend {
         mut ir: crate::ir::IrFile,
         checked: &CheckedFile<'_>,
         stem: &str,
+        classifiers: &dyn crate::types::ClassifierAnnotationSource,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -783,6 +739,7 @@ impl JvmBackend {
             module_name,
             syms,
             &self.cp,
+            classifiers,
             &mut continuation_metadata,
         ) {
             report_backend_pass_failure(reason, diags);
@@ -1019,7 +976,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         };
-        self.emit_legacy_ir(ir, &checked, stem, state, diags)
+        self.emit_legacy_ir(ir, &checked, stem, &runtime, state, diags)
     }
 
     fn lower_ir_file(

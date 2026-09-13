@@ -5504,6 +5504,15 @@ impl SymbolSource for JvmLibraries {
     }
 }
 
+impl crate::types::ClassifierAnnotationSource for JvmLibraries {
+    fn classifier_annotations(
+        &self,
+        classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        SymbolSource::classifier(self, classifier).map(|shape| shape.annotations.clone())
+    }
+}
+
 impl JvmLibraries {
     fn inline_body_plan(&self, callable: &LibraryCallable) -> Option<InlineBodyPlan> {
         if !callable.inline.can_inline() {

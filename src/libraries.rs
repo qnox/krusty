@@ -2952,6 +2952,15 @@ pub struct LibraryConst {
 /// common hierarchy and `Any` declarations so the resolver never needs a builtin-name fallback.
 pub struct EmptySymbolSource;
 
+impl crate::types::ClassifierAnnotationSource for EmptySymbolSource {
+    fn classifier_annotations(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        None
+    }
+}
+
 pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner: TypeName) {
     fn member_function(
         classifier: &mut LibraryType,

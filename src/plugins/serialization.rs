@@ -13,6 +13,7 @@
 
 mod deserialization_constructor;
 mod deserialize_body;
+mod element_serializer;
 mod enum_serializer;
 mod generated_members;
 mod serialize_body;
@@ -30,6 +31,7 @@ use crate::plugins::{
 use crate::types::{type_name, Ty, TypeName};
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
+use element_serializer::{element_serializer_expr, element_serializer_plan};
 use generated_members::{add_serializer_members, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
@@ -491,6 +493,35 @@ fn class_ty(fq: &str) -> Ty {
     Ty::obj(fq)
 }
 
+fn call_external_companion_serializer(
+    ir: &mut IrFile,
+    classifier: TypeName,
+    owner: TypeName,
+    args: Vec<ExprId>,
+) -> Option<ExprId> {
+    if owner == classifier {
+        return None;
+    }
+    let receiver = ir.add_expr(IrExpr::ExternalStaticInstance {
+        owner: classifier,
+        ty: owner,
+        field: "Companion".to_string(),
+    });
+    let params = vec![kserializer_of(class_ty("kotlin/Any")); args.len()];
+    let ret = kserializer_of(Ty::obj_name(classifier));
+    Some(ir.add_expr(IrExpr::Call {
+        callee: Callee::Virtual {
+            owner,
+            name: "serializer".to_string(),
+            descriptor: String::new(),
+            params: Some((params, ret)),
+            interface: false,
+        },
+        dispatch_receiver: Some(receiver),
+        args,
+    }))
+}
+
 /// Rewrite every `PluginPlaceholder { plugin: "serialization" }` core emitted for a reified
 /// `StringFormat` round-trip into the concrete 2-arg member call. Core recorded the operands
 /// (`exprs = [receiver, serializer, value-or-string]`) and the resolved name ids (`data = [format
@@ -498,7 +529,7 @@ fn class_ty(fq: &str) -> Ty {
 /// placeholder's arena slot is overwritten in place (the index-based IR makes this a local edit):
 /// encode becomes the `encodeToString` call; decode becomes the `decodeFromString` call wrapped in a
 /// `checkcast` to the decoded class (the member returns erased `Object`).
-fn specialize_reified_placeholders(ir: &mut IrFile) {
+fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
     let markers: Vec<usize> = ir
         .exprs
         .iter()
@@ -522,15 +553,28 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
         let exprs = exprs.clone();
         let data = data.clone();
         if kind == "serializer" {
-            let [class_internal] = data.as_slice() else {
+            let [class_internal, selected_owner] = data.as_slice() else {
                 continue;
             };
-            let class_internal = *class_internal;
-            let Some(accessor) = generated_serializer_accessor(ir, class_internal, exprs.len())
-            else {
-                continue;
+            let (class_internal, selected_owner) = (*class_internal, *selected_owner);
+            let realized = if let Some(accessor) =
+                generated_serializer_accessor(ir, class_internal, exprs.len())
+            {
+                call_generated_serializer(ir, class_internal, accessor, exprs.clone())
+            } else {
+                if ctx.external_serializer(class_internal).is_none() {
+                    continue;
+                }
+                let Some(call) = call_external_companion_serializer(
+                    ir,
+                    class_internal,
+                    selected_owner,
+                    exprs.clone(),
+                ) else {
+                    continue;
+                };
+                call
             };
-            let realized = call_generated_serializer(ir, class_internal, accessor, exprs.clone());
             ir.exprs[mid] = ir.exprs[realized as usize].clone();
             continue;
         }
@@ -543,11 +587,11 @@ fn specialize_reified_placeholders(ir: &mut IrFile) {
         let (recv, ser, arg) = match exprs.as_slice() {
             [recv, ser, arg] => (*recv, *ser, *arg),
             [recv, arg] => {
-                let Some(accessor) = generated_serializer_accessor(ir, class_internal, 0) else {
+                let Some(serializer) =
+                    element_serializer_expr(ir, ctx, &Ty::obj_name(class_internal))
+                else {
                     continue;
                 };
-                let serializer =
-                    call_generated_serializer(ir, class_internal, accessor, Vec::new());
                 (*recv, serializer, *arg)
             }
             _ => continue,
@@ -771,249 +815,6 @@ fn collection_serializer_builder(classifier: TypeName) -> Option<(&'static str, 
     } else {
         None
     }
-}
-
-#[derive(Clone)]
-enum ElementSerializerPlan {
-    Generated {
-        classifier: TypeName,
-        arguments: Vec<ElementSerializerPlan>,
-    },
-    Collection {
-        builder: &'static str,
-        arguments: Vec<ElementSerializerPlan>,
-    },
-    Nullable(Box<ElementSerializerPlan>),
-    Contextual(TypeName),
-    Polymorphic(TypeName),
-    LocalSingleton(ClassId),
-    ExternalSingleton(TypeName),
-    Builtin(&'static str),
-}
-
-/// Select one complete serializer plan without mutating IR. Applicability checks and expression
-/// construction consume this same decision, so they cannot drift into parallel overload systems.
-fn element_serializer_plan(
-    ir: &IrFile,
-    ctx: &PluginContext,
-    ty: &Ty,
-) -> Option<ElementSerializerPlan> {
-    let nn = ty.non_null();
-    // Include de-erased primitives/`String` (`List<Int>` element `Ty::Int`): they own no `Obj` internal
-    // name but DO have a builtin element serializer (resolved at the tail via `builtin_element_serializer`).
-    // The old `obj_internal()` guard returned `None` for them, leaving a null child serializer → runtime NPE.
-    let fq_name = ty.kotlin_class_internal()?;
-    let type_args = nn.type_args();
-    // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
-    // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
-    // generated `serializer()` accessor (i.e. the class IS `@Serializable`) — else a plain sealed type
-    // would call a non-existent method.
-    if ir
-        .classes
-        .iter()
-        .any(|c| c.fq_name_id() == fq_name && c.is_sealed)
-        && generated_serializer_accessor(ir, fq_name, 0).is_some()
-    {
-        return Some(ElementSerializerPlan::Generated {
-            classifier: fq_name,
-            arguments: Vec::new(),
-        });
-    }
-    // An element whose TYPE the file declares contextual (`@file:UseContextualSerialization`)
-    // serializes through a `ContextualSerializer`, exactly as a property of that type would. The
-    // property-level rule cannot see this one: the contextual type appears only as a collection's
-    // element (`List<FlexibleMap>`).
-    if type_is_contextual(ctx, ir, fq_name) {
-        return Some(ElementSerializerPlan::Contextual(fq_name));
-    }
-    // A `@Serializable` ENUM element has no `$serializer` class of its own: kotlinc's accessor builds
-    // the serializer at run time (`createSimpleEnumSerializer`/`createAnnotatedEnumSerializer`), so an
-    // element reads it through the enum's own `serializer()` — `Level.Companion.serializer()`. The
-    // accessor's presence is what proves the enum is `@Serializable`.
-    if ir
-        .classes
-        .iter()
-        .any(|c| c.fq_name_id() == fq_name && !c.enum_entries.is_empty())
-        && generated_serializer_accessor(ir, fq_name, 0).is_some()
-    {
-        return Some(ElementSerializerPlan::Generated {
-            classifier: fq_name,
-            arguments: Vec::new(),
-        });
-    }
-    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes through
-    // the kotlinx builtin collection serializer over its element serializer(s):
-    // `ListSerializer(<T>)` / `SetSerializer(<T>)` / `MapSerializer(<K>, <V>)` (top-level functions in
-    // `BuiltinSerializersKt`). The element serializers are derived recursively; if any can't be, the whole
-    // collection can't (a clean `null`/bail, as before).
-    if let Some((builder, n)) = collection_serializer_builder(fq_name) {
-        if type_args.len() >= n {
-            let mut arguments = Vec::with_capacity(n);
-            for a in type_args.iter().take(n) {
-                // A NULLABLE element (`List<String?>`) needs a `.nullable` element serializer — the
-                // collection serializer applies it per element (unlike a nullable FIELD, whose nullability
-                // is the `encodeNullableSerializableElement` method, not a wrapped serializer).
-                let element = element_serializer_plan(ir, ctx, a)?;
-                arguments.push(if is_nullable(a) {
-                    ElementSerializerPlan::Nullable(Box::new(element))
-                } else {
-                    element
-                });
-            }
-            return Some(ElementSerializerPlan::Collection { builder, arguments });
-        }
-    }
-    // A field with OPEN-polymorphic dispatch serializes via `PolymorphicSerializer(<type>::class)`
-    // (descriptor serialName `kotlinx.serialization.Polymorphic<T>`), not a generated `$serializer`. Two
-    // cases (both non-sealed; a sealed type took the SealedClassSerializer branch above): (a) an INTERFACE
-    // type (`InterfaceMultiple<*,*>`) — kotlinx's default for an interface property, no `@Serializable`
-    // needed; (b) an ABSTRACT `@Serializable` class (`Poly`/`Poly<*>`) — gated on the generated
-    // `serializer()` accessor so a plain abstract base isn't mis-serialized.
-    // Scope: matches only a FILE-DECLARED class in `ir.classes`. A stdlib collection interface
-    // (`kotlin/collections/List`, …) is not an `ir.classes` entry, so it never lands here — it keeps its
-    // builtin/None handling below (a `List` field has no element serializer yet → a clean `null`).
-    // An INTERFACE is open-polymorphic whether or not it is `sealed` here: a `@Serializable` SEALED
-    // interface was already claimed by the SealedClassSerializer branch above (which requires the
-    // `serializer()` accessor), so only a plain interface or a NON-`@Serializable` sealed interface
-    // reaches this — both serialize as `PolymorphicSerializer` (kind OPEN). An abstract CLASS still
-    // requires the `serializer()` accessor and must not be sealed (a sealed class took the branch above).
-    if ir.classes.iter().any(|c| {
-        c.fq_name_id() == fq_name
-            && (c.is_interface
-                || (c.is_abstract
-                    && !c.is_sealed
-                    // `@Serializable` ⇒ a `serializer()` accessor exists — on the class itself (sealed/
-                    // enum/custom) OR relocated to its `Companion` (a plain data/abstract class).
-                    && (c.companion_class.is_some()
-                        || c.methods
-                            .iter()
-                            .any(|&m| ir.functions[m as usize].name == "serializer"))))
-    }) {
-        return Some(ElementSerializerPlan::Polymorphic(fq_name));
-    }
-    let serializer_name = fq_name.nested_child("$serializer");
-    if let Some(sid) = ir
-        .classes
-        .iter()
-        .position(|c| c.fq_name_id() == serializer_name)
-    {
-        // The declared type-parameter count comes from the BASE class (the `$serializer` is erased).
-        let n_tp = ir
-            .classes
-            .iter()
-            .find(|c| c.fq_name_id() == fq_name)
-            .map(|c| c.type_params.len())
-            .unwrap_or(0);
-        if n_tp == 0 {
-            return Some(ElementSerializerPlan::LocalSingleton(sid as ClassId));
-        }
-        // Generic: `Foo.serializer(<arg serializer>…)`, each type argument's serializer derived
-        // recursively. A star projection carries its checked readable upper bound separately from
-        // an explicit `out` projection, so consume that semantic read type directly.
-        // An in-projection has no readable element type from which a serializer can be derived.
-        let mut arguments = Vec::with_capacity(n_tp);
-        for argument in type_args.iter().take(n_tp) {
-            let readable = match argument {
-                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
-                Ty::InProjection(_) => return None,
-                _ => *argument,
-            };
-            arguments.push(element_serializer_plan(ir, ctx, &readable)?);
-        }
-        if arguments.len() != n_tp {
-            return None;
-        }
-        return Some(ElementSerializerPlan::Generated {
-            classifier: fq_name,
-            arguments,
-        });
-    }
-    // A DEPENDENCY's `@Serializable` class brings its own generated serializer: read that singleton
-    // off the classpath, which is exactly what kotlinc emits
-    // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
-    // generates serializers for what this file declares.
-    // Scope: the non-generic shape. A generic dependency serializer is built through
-    // `Foo.Companion.serializer(<argument serializers>)`, which needs the companion's ABI read back
-    // from the classpath; until then such a field stays underivable and the caller bails cleanly.
-    if type_args.is_empty() {
-        if let Some(serializer) = ctx.external_serializer(fq_name) {
-            return Some(ElementSerializerPlan::ExternalSingleton(serializer));
-        }
-    }
-    if let Some(ser) = builtin_element_serializer(ty) {
-        return Some(ElementSerializerPlan::Builtin(ser));
-    }
-    None
-}
-
-fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {
-    match plan {
-        ElementSerializerPlan::Generated {
-            classifier,
-            arguments,
-        } => {
-            let arity = arguments.len();
-            let arguments = arguments
-                .into_iter()
-                .map(|argument| emit_element_serializer(ir, argument))
-                .collect();
-            serializer_of_name(
-                ir,
-                classifier,
-                vec![kserializer_of(class_ty("kotlin/Any")); arity],
-                kserializer_of(Ty::obj_name(classifier)),
-                arguments,
-            )
-        }
-        ElementSerializerPlan::Collection { builder, arguments } => {
-            let arity = arguments.len();
-            let arguments = arguments
-                .into_iter()
-                .map(|argument| emit_element_serializer(ir, argument))
-                .collect();
-            let parameters = "Lkotlinx/serialization/KSerializer;".repeat(arity);
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name("kotlinx/serialization/builtins/BuiltinSerializersKt"),
-                    name: builder.to_string(),
-                    descriptor: format!("({parameters})Lkotlinx/serialization/KSerializer;"),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
-                args: arguments,
-            })
-        }
-        ElementSerializerPlan::Nullable(inner) => {
-            let inner = emit_element_serializer(ir, *inner);
-            wrap_nullable_serializer(ir, inner)
-        }
-        ElementSerializerPlan::Contextual(classifier) => {
-            build_contextual_serializer(ir, classifier)
-        }
-        ElementSerializerPlan::Polymorphic(classifier) => {
-            build_polymorphic_serializer(ir, classifier)
-        }
-        ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
-            owner: class,
-            ty: class,
-            field: "INSTANCE",
-        }),
-        ElementSerializerPlan::ExternalSingleton(serializer) => {
-            ir.add_expr(IrExpr::ExternalStaticInstance {
-                owner: serializer,
-                ty: serializer,
-                field: "INSTANCE".to_string(),
-            })
-        }
-        ElementSerializerPlan::Builtin(serializer) => {
-            ir.external_static_instance(serializer, serializer, "INSTANCE")
-        }
-    }
-}
-
-fn element_serializer_expr(ir: &mut IrFile, ctx: &PluginContext, ty: &Ty) -> Option<ExprId> {
-    let plan = element_serializer_plan(ir, ctx, ty)?;
-    Some(emit_element_serializer(ir, plan))
 }
 
 /// The element serializer for property `name` of type `ty` IF it is contextual (`name` ∈ `contextual`):
@@ -1772,7 +1573,7 @@ impl IrPlugin for SerializationPlugin {
                 PluginExpressionPlan {
                     plugin: implementation.plugin,
                     operation: implementation.operation,
-                    data: vec![classifier],
+                    data: vec![classifier, call.owner],
                     operands,
                 },
             ));
@@ -2346,7 +2147,7 @@ impl IrPlugin for SerializationPlugin {
         // Specialize the generic reified-serialization placeholders core emitted in user bodies
         // (`fmt.encodeToString(x)` / `fmt.decodeFromString<C>(s)`) into the concrete `StringFormat`
         // member calls — the kotlinx descriptors live here, not in core lowering.
-        specialize_reified_placeholders(ir);
+        specialize_reified_placeholders(ir, ctx);
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             // `@Serializable(with=X)` classes have no generated `$serializer` to fill (handled wholly in
             // `generate_declarations`).
@@ -3291,7 +3092,7 @@ mod tests {
     #[test]
     fn reified_encode_placeholder_specialized() {
         let (mut ir, mid, [recv, ser, arg]) = placeholder("encodeToString");
-        specialize_reified_placeholders(&mut ir);
+        specialize_reified_placeholders(&mut ir, &PluginContext::default());
         match &ir.exprs[mid as usize] {
             IrExpr::Call {
                 callee:
@@ -3319,7 +3120,7 @@ mod tests {
     #[test]
     fn reified_decode_placeholder_specialized_with_checkcast() {
         let (mut ir, mid, [recv, ser, arg]) = placeholder("decodeFromString");
-        specialize_reified_placeholders(&mut ir);
+        specialize_reified_placeholders(&mut ir, &PluginContext::default());
         // The slot becomes a checkcast to the decoded class wrapping the decode member call.
         let inner = match &ir.exprs[mid as usize] {
             IrExpr::TypeOp {
@@ -3350,6 +3151,47 @@ mod tests {
     }
 
     #[test]
+    fn external_serializer_placeholder_becomes_the_recorded_singleton() {
+        let mut ir = IrFile::default();
+        let classifier = type_name("demo/Row");
+        let serializer = type_name("demo/Row$$serializer");
+        let marker = ir.add_expr(IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            kind: "serializer",
+            exprs: Vec::new(),
+            data: vec![classifier, type_name("demo/Row$Companion")],
+        });
+        let ctx = PluginContext::default()
+            .with_external_serializers([(classifier, serializer)].into_iter().collect());
+
+        specialize_reified_placeholders(&mut ir, &ctx);
+
+        match &ir.exprs[marker as usize] {
+            IrExpr::Call {
+                callee: Callee::Virtual { owner, name, .. },
+                dispatch_receiver: Some(receiver),
+                args,
+            } => {
+                assert_eq!(
+                    (*owner, name.as_str()),
+                    (type_name("demo/Row$Companion"), "serializer")
+                );
+                assert_eq!(args, &Vec::<ExprId>::new());
+                match &ir.exprs[*receiver as usize] {
+                    IrExpr::ExternalStaticInstance { owner, ty, field } => assert_eq!(
+                        (*owner, *ty, field.as_str()),
+                        (classifier, type_name("demo/Row$Companion"), "Companion")
+                    ),
+                    expression => panic!("expected exact companion singleton, got {expression:?}"),
+                }
+            }
+            expression => {
+                panic!("expected exact external serializer accessor, got {expression:?}")
+            }
+        }
+    }
+
+    #[test]
     fn surviving_placeholder_declines_emit() {
         // A placeholder that reaches the JVM emitter (plugin never ran) must make the file decline,
         // not miscompile. `run` here is a non-`@Serializable` no-op, so the marker survives.
@@ -3359,7 +3201,7 @@ mod tests {
             "a surviving PluginPlaceholder must be declined by jvm_can_emit"
         );
         // After specialization the file is emittable again.
-        specialize_reified_placeholders(&mut ir);
+        specialize_reified_placeholders(&mut ir, &PluginContext::default());
         assert!(crate::jvm::ir_emit::jvm_can_emit(&ir));
     }
 }
