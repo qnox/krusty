@@ -647,7 +647,52 @@ therefore does not discriminate between emitting Go and emitting C at all. What 
 between is *emitting a host language* and *emitting machine code ourselves*, which is the
 Cranelift-or-own-backend decision this document already defers.
 
-**Can the round-trip be skipped while keeping Go's runtime?** No, and the reason is structural
+**Using Go's runtime is easy — emitting Go source IS how you use it.** That bears stating plainly,
+because "we cannot skip Go's frontend" reads like "we cannot use Go's runtime", and those are
+different claims. The runtime, its collector, its scheduler and 48 target platforms are all
+available; the measured entry fee is the ~5–9 % round-trip tax above. The rest of this section is
+only about whether that fee can be avoided, and the answer is no.
+
+**Three ways to reach the runtime without Go's compiler, all tested on this host, all closed.**
+
+*Linking `-buildmode=c-archive`.* Go can be built as a C archive and linked into a C program, so the
+Go runtime and its collector are genuinely present in the process. It still does not give emitted C
+a garbage-collected heap: Go refuses to hand a Go pointer to C at all, at the boundary, before any
+GC question arises —
+
+```
+panic: runtime error: cgo result is unpinned Go pointer or points to unpinned Go pointer
+```
+
+The sanctioned escape is `runtime.Pinner`, and pinning is the opposite of what is wanted: a pinned
+object is never moved *and never collected* until explicitly unpinned. Allocating a million
+short-lived objects through a pinning allocator and forcing two collections leaves **1,000,000 of
+1,000,000 still live**, at 86 MB resident for 64 MB of payload. That is manual memory management
+with extra steps, which is what a collector exists to remove.
+
+*Injecting into Go's IR.* Go's compiler does have internal IRs — a typed `ir` after type-checking,
+then `ssa`. Neither is reachable: both are `internal/` packages, and the restriction is enforced by
+the compiler rather than by convention.
+
+```
+use of internal package cmd/compile/internal/ir not allowed
+use of internal package cmd/internal/obj not allowed
+```
+
+Even with that barrier removed, the injection points do not pay. Building `ir` nodes requires
+constructing correct `types2` objects, which *is* type-checking — so it would save the parse and not
+the type-check, in exchange for tracking an unstable internal IR across every Go release. Injecting
+lower, at `ssa`, skips the middle-end *and* skips the liveness pass that produces the stack maps,
+which puts them back on us.
+
+*Writing object files.* Same `internal/` barrier, plus an unstable format.
+
+So **Go source is the API** to the Go runtime. The text round-trip is not an accident of how an
+emitter would be written; it is the only stable, supported interface to that collector. The
+question is therefore whether the fee is worth paying, which the measurements above answer: about
+5–9 % of build time, for a runtime that would otherwise take years.
+
+**Why the fee cannot be engineered away.** The reason is structural
 rather than a matter of effort. Producing Go object files directly requires supplying, per function:
 machine code for the target; `FUNCDATA_ArgsPointerMaps` and `FUNCDATA_LocalsPointerMaps` — the
 precise GC stack maps — plus `PCDATA_StackMapIndex` saying which map is live at each PC; pcln
