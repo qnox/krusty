@@ -76071,7 +76071,25 @@ impl<'a> Checker<'a> {
 
     /// A generic result that a conditional sibling may constrain. Return-only formals remain
     /// eligible when an enclosing expectation supplied their provisional binding.
+    /// The expression whose VALUE a conditional branch produces. A branch written as a block
+    /// (`if (c) { … } else { … }`) yields its trailing expression, and it is that expression's call
+    /// — not the block — that carries the generic signature a sibling branch can rebind. Walks
+    /// nested blocks; a block with no trailing expression produces no value and stays itself.
+    fn branch_value_expression(&self, expression: ExprId) -> ExprId {
+        let mut current = expression;
+        loop {
+            let Expr::Block { trailing, .. } = self.file.expr(current) else {
+                return current;
+            };
+            match trailing {
+                Some(trailing) => current = *trailing,
+                None => return current,
+            }
+        }
+    }
+
     fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
+        let expression = self.branch_value_expression(expression);
         if let Some(signature) = self.unbound_call_result_signature(expression) {
             return Some(signature);
         }
