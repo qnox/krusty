@@ -252,19 +252,40 @@ KRef kt_string_plus(KRef a, KRef b) {
 
 /* ---- boxing -------------------------------------------------------------------------------- */
 
-#define KT_BOX(suffix, type_descriptor, field, type)                                               \
-    KRef kt_box_##suffix(type value) {                                                             \
+/* Boxing a SMALL value hands out the same object every time, and a program can see that:
+   `boxBoolean(true) === boxBoolean(true)` is true in Kotlin. The cached range is the one the JVM
+   specifies and Kotlin/Native also caches — every `Byte`, `Short`/`Int`/`Long` in -128..127,
+   `Char` in 0..127, and both `Boolean`s. Outside it a box is a fresh object and identity is
+   unspecified, which is what Kotlin says as well; nothing here promises more than that.
+
+   The cache is static storage, not the heap, and that is deliberate on two counts: these objects
+   must outlive every collection, and the collector ignores them for free — both the conservative
+   root scan and the precise field tracer resolve a candidate address to its heap chunk and drop
+   one that belongs to no chunk. An entry is filled on first use rather than at startup, with a
+   NULL type as the "not yet" marker (static storage starts zeroed), so the runtime pays for only
+   the values a program actually boxes. */
+#define KT_BOX(suffix, type_descriptor, field, carrier, low, high)                                 \
+    static KObject kt_cache_##suffix[(high) - (low) + 1];                                          \
+    KRef kt_box_##suffix(carrier value) {                                                          \
+        if ((int)value >= (low) && (int)value <= (high)) {                                         \
+            KObject *cached = &kt_cache_##suffix[(int)value - (low)];                              \
+            if (cached->header.type == NULL) {                                                     \
+                cached->header.type = &type_descriptor;                                            \
+                cached->as.field = value;                                                          \
+            }                                                                                      \
+            return cached;                                                                         \
+        }                                                                                          \
         KRef object = kt_new(&type_descriptor);                                                    \
         object->as.field = value;                                                                  \
         return object;                                                                             \
     }
 
-KT_BOX(byte, kt_type_byte, byte_value, kt_byte)
-KT_BOX(short, kt_type_short, short_value, kt_short)
-KT_BOX(int, kt_type_int, int_value, kt_int)
-KT_BOX(long, kt_type_long, long_value, kt_long)
-KT_BOX(char, kt_type_char, char_value, kt_char)
-KT_BOX(boolean, kt_type_boolean, boolean_value, kt_boolean)
+KT_BOX(byte, kt_type_byte, byte_value, kt_byte, -128, 127)
+KT_BOX(short, kt_type_short, short_value, kt_short, -128, 127)
+KT_BOX(int, kt_type_int, int_value, kt_int, -128, 127)
+KT_BOX(long, kt_type_long, long_value, kt_long, -128, 127)
+KT_BOX(char, kt_type_char, char_value, kt_char, 0, 127)
+KT_BOX(boolean, kt_type_boolean, boolean_value, kt_boolean, 0, 1)
 
 #undef KT_BOX
 

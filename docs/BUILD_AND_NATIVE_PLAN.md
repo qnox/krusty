@@ -1125,9 +1125,13 @@ before:**
    (70), reference arrays (50) and array intrinsics (85), callable references (49), data classes,
    interfaces, inner and local classes, value classes, `vararg`, `!!`, extension properties,
    floating-point rendering, `try`.
-6. **Growing the generator by that backlog, biggest first.** Top-level properties (499 declines,
-   the largest single item) landed: **408 pass**, and the construct left the decline table
-   entirely.
+6. **Growing the generator by that backlog, biggest first.** Top-level properties (499 declines)
+   and structural equality on references (171) landed, and both left the decline table entirely:
+   **551 pass**, still 0 unexpected failures. Realizing them exposed three native defects the gate
+   caught and that are now fixed with tests — a `when` whose arms disagree on a carrier was typed
+   from its first arm, boxed small values were not cached so `===` on them was false, and a
+   companion object's initializers never ran — plus three more corpus cases traced to common
+   lowering's `++`/`--` shape by getting the same wrong answer from krusty's JVM backend.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

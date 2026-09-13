@@ -410,36 +410,28 @@ fn comparisons_and_boolean_logic_run() {
 }
 
 #[test]
-fn structural_equality_on_references_is_declined_rather_than_compared_by_address() {
-    let Some(target) = host() else {
+fn a_null_check_and_identity_stay_pointer_comparisons() {
+    if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
-    };
-    // `"a" == "b"` is `equals`, not pointer identity. Comparing the two `i64`s would compile, link,
-    // run, and answer the wrong question — the failure mode this backend refuses to have.
-    let (_, diagnostics) = compile(
-        &[(
-            "Main",
-            "fun same(a: String, b: String): Boolean = a == b\nfun main() { println(same(\"a\", \"a\")) }\n",
-        )],
-        target,
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("structural equality on references")),
-        "expected the backend to decline, got {diagnostics:?}"
-    );
-    // Identity and null checks are pointer comparisons in Kotlin too, so those are emitted.
+    }
+    // `x == null` is `x === null` in Kotlin — no `equals` is ever called, so it must not go through
+    // the runtime's structural comparison (which would be a call on a null receiver). `===` is
+    // address identity on references, and stays one even when the two values are equal.
     assert_eq!(
-        run("fun main() {\n\
-             \x20   val s: String? = \"x\"\n\
+        run("fun build(n: Int): String = \"value-$n\"\n\
+             fun main() {\n\
+             \x20   val s: String? = build(1)\n\
              \x20   val n: String? = null\n\
              \x20   println(s == null)\n\
              \x20   println(n == null)\n\
+             \x20   println(n != null)\n\
              \x20   println(s === s)\n\
+             \x20   println(build(1) === build(1))\n\
+             \x20   println(build(1) == build(1))\n\
              }\n"),
-        "false\ntrue\ntrue\n"
+        "false\ntrue\nfalse\ntrue\nfalse\ntrue\n",
+        "`===` compares addresses where `==` compares contents"
     );
 }
 
@@ -706,5 +698,100 @@ fn a_top_level_property_with_custom_accessors_runs_their_bodies() {
              \x20   println(guarded)\n\
              }\n"),
         "6\n10\n101\n100\n107\n"
+    );
+}
+
+#[test]
+fn structural_equality_on_references_asks_the_receiver() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `==` on references is `equals`, not an address comparison: two separately built strings with
+    // the same text are equal, a class with an overridden `equals` answers for itself, one without
+    // falls back to identity, and `null` equals only `null`. Every value here is built at runtime
+    // so no literal can be shared into a false positive.
+    assert_eq!(
+        run("class Point(val x: Int, val y: Int) {\n\
+             \x20   override fun equals(other: Any?): Boolean = other is Point && other.x == x && other.y == y\n\
+             \x20   override fun hashCode(): Int = x * 31 + y\n\
+             }\n\
+             class Opaque(val v: Int)\n\
+             fun build(n: Int): String = \"value-$n\"\n\
+             fun main() {\n\
+             \x20   println(build(1) == build(1))\n\
+             \x20   println(build(1) == build(2))\n\
+             \x20   println(Point(1, 2) == Point(1, 2))\n\
+             \x20   println(Point(1, 2) == Point(3, 4))\n\
+             \x20   println(Point(1, 2) != Point(3, 4))\n\
+             \x20   println(Opaque(1) == Opaque(1))\n\
+             \x20   val o = Opaque(1)\n\
+             \x20   println(o == o)\n\
+             \x20   val missing: String? = null\n\
+             \x20   println(missing == build(1))\n\
+             \x20   println(build(1) == missing)\n\
+             \x20   val boxed: Int? = 5\n\
+             \x20   println(boxed == 5)\n\
+             \x20   println(boxed == 6)\n\
+             }\n"),
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn a_when_whose_arms_have_different_types_is_carried_as_a_reference() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `when (s) { "a" -> 1; else -> null }` is `Int?`. Taking the first arm's type would carry it
+    // as `Int` and store the `null` arm's pointer into a 32-bit slot — so the result is a
+    // reference whenever the arms' carriers disagree, and the `Int` arm boxes on its way out.
+    assert_eq!(
+        run("fun pick(s: String): Int? = when (s) {\n\
+             \x20   \"a\" -> 1\n\
+             \x20   \"b\" -> 2\n\
+             \x20   else -> null\n\
+             }\n\
+             fun describe(n: Int): Any = if (n > 0) n else \"negative\"\n\
+             fun main() {\n\
+             \x20   println(pick(\"a\"))\n\
+             \x20   println(pick(\"b\"))\n\
+             \x20   println(pick(\"z\"))\n\
+             \x20   println(pick(\"z\") == null)\n\
+             \x20   println(pick(\"a\") == 1)\n\
+             \x20   println(describe(5))\n\
+             \x20   println(describe(-5))\n\
+             }\n"),
+        "1\n2\nnull\ntrue\ntrue\n5\nnegative\n"
+    );
+}
+
+#[test]
+fn boxing_a_small_value_hands_out_the_same_object() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin lets a program observe box identity for small values (`===` on two boxings of `true`
+    // is true), because both the JVM and Kotlin/Native cache them. The cached range is the JVM's:
+    // -128..127 for the integer types and both `Boolean`s. Above it, identity is unspecified and
+    // only equality is asserted here.
+    assert_eq!(
+        run("fun boxed(b: Boolean): Any = b\n\
+             fun boxedInt(n: Int): Any = n\n\
+             fun main() {\n\
+             \x20   println(boxed(true) === boxed(true))\n\
+             \x20   println(boxed(false) === boxed(false))\n\
+             \x20   println(boxed(true) === boxed(false))\n\
+             \x20   println(boxed(true) == boxed(true))\n\
+             \x20   println(boxedInt(127) === boxedInt(127))\n\
+             \x20   println(boxedInt(-128) === boxedInt(-128))\n\
+             \x20   println(boxedInt(5) === boxedInt(6))\n\
+             \x20   println(boxedInt(1000) == boxedInt(1000))\n\
+             \x20   println(boxedInt(42))\n\
+             \x20   println(boxedInt(1000))\n\
+             }\n"),
+        "true\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\n42\n1000\n"
     );
 }

@@ -549,3 +549,34 @@ fn a_linked_chain_built_under_collection_pressure_is_traced_through_emitted_layo
         "40000\n799980000\ngarbage-39999-119997-40006\n"
     );
 }
+
+#[test]
+fn a_companion_object_is_initialized_when_its_class_is_first_constructed() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Constructing a class is where the JVM would have run its `<clinit>`, and for a class with a
+    // companion that means creating the companion instance — so its initializers run BEFORE the
+    // class's own, and not at all until something constructs the class. Each step appends to a
+    // top-level property, so both the order and the laziness are visible in one string.
+    assert_eq!(
+        run("var global = \"A\"\n\
+             class C {\n\
+             \x20   init { global += \"D\" }\n\
+             \x20   companion object {\n\
+             \x20       init { global += \"B\" }\n\
+             \x20       init { global += \"C\" }\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(global)\n\
+             \x20   C()\n\
+             \x20   println(global)\n\
+             \x20   C()\n\
+             \x20   println(global)\n\
+             }\n"),
+        "A\nABCD\nABCDD\n",
+        "the companion initializes once, before the first instance, and never again"
+    );
+}

@@ -384,6 +384,19 @@ impl<'a> FileLowering<'a> {
             None => None,
         };
 
+        // Constructing a class is the moment the JVM would have run its `<clinit>`, and what a
+        // `<clinit>` does for a class with a companion is create the companion instance — running
+        // its initializers. The singleton getter is idempotent and lazy, so calling it here gives
+        // Kotlin's order (companion initializers, then the superclass constructor, then this
+        // class's) and leaves a class nobody constructs untouched. Construction is the ONLY such
+        // trigger the generator can see today; a class-static call, the JVM's other one, is
+        // declined by name.
+        let companion = declaration
+            .companion_class
+            .and_then(|companion| self.ir.class_id_by_name(companion))
+            .and_then(|companion| self.classes[companion as usize].singleton)
+            .map(|(_, getter)| getter);
+
         let name = format!("{}.<init>", declaration.fq_name());
         self.emit_function(id, signature, Carrier::Void, &name, &mut |body, params| {
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
@@ -391,6 +404,10 @@ impl<'a> FileLowering<'a> {
                 body.builder.def_var(variable, *value);
             }
             let this = params[0];
+            if let Some(getter) = companion {
+                let func_ref = body.func_ref(getter);
+                body.builder.ins().call(func_ref, &[]);
+            }
             for &statement in &declaration.super_arg_prelude {
                 body.statement(statement)?;
             }

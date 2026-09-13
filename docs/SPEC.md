@@ -5371,6 +5371,38 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_codegen_e2e.rs`
   (`structural_equality_on_references_is_declined_rather_than_compared_by_address`).
 
+- **`==` on references is `equals`, dispatched through the receiver.** Kotlin's `==` is
+  `a?.equals(b) ?: (b === null)`, which is exactly what the runtime's `kt_equals` does: null-safe,
+  then a call through the receiver's vtable, so an overridden `equals` answers for itself and a
+  class without one falls back to identity. Two separately built strings with the same text are
+  equal, and a scalar on either side boxes, because `any == 5` means `any?.equals(5)` there too.
+  Tests: `tests/native_codegen_e2e.rs` (`structural_equality_on_references_asks_the_receiver`,
+  `a_null_check_and_identity_stay_pointer_comparisons`).
+
+- **Boxing a small value hands out the same object every time.** A program can observe box
+  identity — `boxBoolean(true) === boxBoolean(true)` is true in Kotlin — because the JVM and
+  Kotlin/Native both cache small boxes. The runtime caches the range the JVM specifies: every
+  `Byte`, `Short`/`Int`/`Long` in -128..127, `Char` in 0..127, and both `Boolean`s. The cache is
+  static storage, which both keeps it alive across every collection and costs the collector
+  nothing: a candidate address that resolves to no heap chunk is dropped, by the conservative root
+  scan and the precise field tracer alike. Outside the range a box is a fresh object and identity
+  is unspecified, as Kotlin says.
+  Tests: `tests/native_codegen_e2e.rs` (`boxing_a_small_value_hands_out_the_same_object`).
+
+- **A `when` whose arms disagree on a carrier is a reference.** `when (s) { "a" -> 1; else -> null }`
+  is `Int?`: taking the first arm's type would carry it as `Int` and store the `null` arm's pointer
+  into a 32-bit slot. An arm that leaves (a `return`) has no type and does not vote.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_when_whose_arms_have_different_types_is_carried_as_a_reference`).
+
+- **A companion object is initialized when its class is first constructed.** That is the moment the
+  JVM would have run the class's `<clinit>`, and what a `<clinit>` does for a class with a companion
+  is create the companion instance, running its initializers — so they run before the constructed
+  class's own, once, and not at all until something constructs the class. Construction is the only
+  such trigger the generator can see; the JVM's other one, a class-static call, is declined by name.
+  Tests: `tests/native_classes_e2e.rs`
+  (`a_companion_object_is_initialized_when_its_class_is_first_constructed`).
+
 - **`===` between two primitives compares the values.** Kotlin defines identity equality on values
   of a primitive type as `==` (it warns that the distinction is meaningless there). Boxing each
   side and comparing the boxes' addresses would say `0L !== 0L`, which the corpus caught. Identity

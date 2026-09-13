@@ -1010,7 +1010,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value: Some(value), ..
             } => self.type_of(*value)?,
             IrExpr::Block { value: None, .. } => Ty::Unit,
-            IrExpr::When { branches } => self.type_of(branches.first()?.1)?,
+            IrExpr::When { branches } => {
+                // NOT the first arm's type: `when (s) { "a" -> 1; else -> null }` is `Int?`, and
+                // carrying it as the `Int` the first arm produces would make the `null` arm store
+                // a pointer into a 32-bit slot. Arms whose carriers disagree — a `null` arm being
+                // the common case — make the whole `when` a reference, which is what nullability
+                // means here. An arm that leaves (a `return`) has no type and does not vote.
+                let mut result: Option<Ty> = None;
+                for (_, body) in branches {
+                    let Some(ty) = self.type_of(*body) else {
+                        continue;
+                    };
+                    result = Some(match result {
+                        None => ty,
+                        Some(previous) if carrier(previous) == carrier(ty) => previous,
+                        Some(_) => any(),
+                    });
+                }
+                result?
+            }
             IrExpr::StringConcat(_) => Ty::String,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
             IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
@@ -1249,7 +1267,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 return Ok(Some(self.builder.ins().icmp(condition, left, right)));
             }
             if on_references {
-                return Err("structural equality on references".to_string());
+                // Kotlin's `==` on references is `equals`, dispatched through the receiver's
+                // vtable and null-safe in Kotlin's sense (`null` equals only `null`) — which is
+                // exactly what `kt_equals` is. A scalar on either side boxes, because `any == 5`
+                // means `any?.equals(5)` there too.
+                let left = self.reference(lhs)?;
+                let right = self.reference(rhs)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                let equal = self
+                    .runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])?
+                    .expect("`kt_equals` returns a Boolean");
+                return Ok(Some(if op == IrBinOp::Ne {
+                    let one = self.builder.ins().iconst(types::I8, 1);
+                    self.builder.ins().bxor(equal, one)
+                } else {
+                    equal
+                }));
             }
             if lhs_ty.is_none() && rhs_ty.is_none() {
                 // Neither a known scalar nor a known reference: either equality would be a guess.

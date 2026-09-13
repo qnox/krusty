@@ -268,6 +268,12 @@ vendored `tests/box_data/` is the fallback); `KRUSTY_NATIVE_CONFORMANCE_REPORT=<
 report line and the decline table. The lane skips, and says so in its report, when this build of
 krusty carries no prebuilt runtime (no clang at build time).
 
+**Triaging a native failure.** Before listing a case as a known failure, compile the same source
+with krusty's JVM backend (`common::compile_in_process` + `common::run_box`, the two helpers the
+JVM lane uses) and compare. An identical wrong answer means the defect is in the shared frontend or
+common lowering, and the list entry should say so and quote it; anything else is the generator's and
+gets fixed, not listed.
+
 ## JVM-Running Tests
 
 Do not spawn `javac` or `java` per test unless the test is explicitly about the CLI/process boundary.
