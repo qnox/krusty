@@ -30705,6 +30705,7 @@ impl<'a> Checker<'a> {
                                 arg_names.as_deref(),
                                 self.file.call_has_trailing_lambda.contains(&call.0),
                                 &explicit_type_args,
+                                expected,
                             )
                         })
                     });
@@ -55938,6 +55939,7 @@ impl<'a> Checker<'a> {
     /// Lambda shape for a `Type(args) { … }` factory call answered by a semantic companion's
     /// `operator fun invoke`. The companion's callable metadata enters the same mapping,
     /// applicability, binding, and shape operations as every other provider overload.
+    #[allow(clippy::too_many_arguments)]
     fn companion_invoke_lambda_shape(
         &self,
         scope: &CheckerScope<'_>,
@@ -55946,6 +55948,7 @@ impl<'a> Checker<'a> {
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
         type_args: &[Ty],
+        expected_result: Option<Ty>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let (args, arg_tys) = args_and_partial;
         let overloads = self.companion_invoke_overloads(scope, name);
@@ -55986,7 +55989,11 @@ impl<'a> Checker<'a> {
                     &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
                 ),
                 type_args,
-                None,
+                // The EXPECTED result binds the companion's formals just as it does a top-level
+                // function's. A formal that appears only in a lambda PARAMETER position has no other
+                // source — `set: (S, B) -> T` learns nothing about `B` from `{ s, _ -> s }` — so
+                // without this the call's result carries an unbound formal.
+                expected_result,
             ) {
                 return Some(shape);
             }

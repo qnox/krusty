@@ -1869,3 +1869,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
   parameter descriptors and every constant the body introduces.
   `tests/java_parameters_attribute_e2e.rs`.
+- **A companion `operator invoke` binds its formals from the expected type (fix).** The
+  `Type(args)` factory shape reached `lambda_shape_for_overload` with `expected_result: None`, while
+  the top-level and extension shapes both pass it. A formal that appears ONLY in a lambda PARAMETER
+  position has no other source — `set: (S, B) -> T` learns nothing about `B` from `{ s, _ -> s }` —
+  so the call's result carried an unbound formal and was rejected against the declared type. The
+  optics shape (`Lens<S, A>` = `PLens<S, S, A, A>`, built through `PLens`'s companion) is exactly
+  this, and one corpus module compiled to nothing because of it.
+  `tests/companion_invoke_expected_binding_e2e.rs`.
