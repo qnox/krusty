@@ -31,6 +31,15 @@
 //! reference, so the collector keeps text alive exactly as long as a string that uses it; a literal
 //! keeps pointing into static storage and owns no heap text at all.
 //!
+//! **The descriptor is also the class.** `KType` names its superclass and carries the vtable, so
+//! `is` walks the `super` chain and a method call is `obj->type->vtable[slot]` — the header stays
+//! one word and the collector's contract stays `header->type`. `kotlin.Any` is defined here as the
+//! root of every chain, with the three slots every table begins with: `equals` (identity),
+//! `hashCode` (from the address, which the collector never changes) and `toString`
+//! (`<name>@<hex>`). The built-in value types hang off the same root with value equality, so
+//! `kt_equals` and `kt_hash_code` answer for a boxed `Int` as Kotlin does. A failed cast and an
+//! abstract method exit loudly: there are no exceptions yet, and a wrong answer must not be quiet.
+//!
 //! Two limits are deliberate and must not be mistaken for oversights:
 //!
 //! * **`String` is UTF-8 bytes.** Kotlin's `String.length` counts UTF-16 code units, which is not

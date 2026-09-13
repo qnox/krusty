@@ -556,12 +556,14 @@ a native binary, produced without committing the project to anything.
 
 What this does NOT do, in order of how much it matters:
 
-* **Classes, properties, and almost all of the stdlib.** Each one makes the backend decline, by
-  name, with a diagnostic. The runtime implements `kotlin.io`'s console functions, `String.plus`
-  and `toString`.
-* **Classes on the heap.** The runtime now has an object model, an allocator and a collector (see
-  *Decided: krusty owns its runtime* below), but the emitter does not yet put a Kotlin class onto
-  them; `class` still declines.
+* **Almost all of the stdlib.** Each declaration the runtime does not implement makes the backend
+  decline, by name, with a diagnostic. The runtime implements `kotlin.io`'s console functions,
+  `String.plus`, and `kotlin.Any`'s `toString`/`hashCode`/`equals`.
+* **Interfaces, data classes, enums, `inner` classes, secondary constructors, constructor
+  defaults, closures, exceptions, collections, threads, and a class used from another file of the
+  module.** Classes with single inheritance, virtual dispatch, `is`/`as` and `object` declarations
+  run (see *Decided: krusty owns its runtime* below); each item on this list still declines by
+  name.
 * **klib ingestion (phase 7).** Symbols still come from the Kotlin/JVM stdlib jar, since that is the
   only provider krusty has. Only *signatures* come from there — no JVM reaches the output — but two
   seams exist because of it and both disappear with phase 7: a top-level function arrives owned by a
@@ -790,9 +792,30 @@ collector with conservative roots and precise heap tracing, triggered by allocat
 large objects unmapped when they die. `tests/native_gc_e2e.rs` drives it from C and pins each
 property (garbage reclaimed, reachable objects intact, cycles collected, interior pointers rooted,
 a pointer hidden in a `Long` field NOT rooted, freed slots reused); the runtime's syscall shim and
-page mapping moved into a shared `krusty_sys.h`. What is NOT there: strings still render through
-the runtime rather than being a Kotlin class; the emitter still declines `class`, so nothing but
-the runtime's own values reaches the heap yet; there is one thread and no synchronization; and
+page mapping moved into a shared `krusty_sys.h`.
+
+Classes and vtables — the fourth item of step 2 — exist now. `src/native/classes.rs` lays a class
+out (header, superclass fields as a prefix, own fields aligned to their C size, the whole asserted
+with `_Static_assert` in the generated C) and builds its vtable from the IR's own override edges:
+classic single inheritance, every table beginning with `kotlin.Any`'s `equals`/`hashCode`/
+`toString`. `KType` grew `super`, `vtable` and `vtable_length`; the object header did not, so the
+collector's contract is untouched and dispatch is `obj->type->vtable[slot]`. Construction goes
+through `kt_gc_allocate` and an emitted constructor that runs the superclass's first; `is`/`as`
+walk the `super` chain, and a failed `as` fails loudly as the placeholder for ClassCastException;
+an `object` is a lazily constructed instance in a static slot registered with
+`kt_gc_add_global_root`, the first consumer of that API. `tests/native_classes_e2e.rs` runs each
+of these — including a 40,000-node chain built under collection pressure, which is the test that
+catches a wrong reference-offset table. `docs/SPEC.md` records every semantic decision with its
+test.
+
+What is NOT there, and still declines by name: interface dispatch (no itable — a class's vtable is
+its superclass chain's, and an interface method has no fixed slot across unrelated implementors),
+data classes, `inner` classes, enums, secondary constructors and constructor default arguments, a
+class used from another file of the module (this needs a per-module generated header of layouts
+and `extern` descriptors, which the build layer will want anyway), an override that changes a
+parameter's machine representation (no bridge methods), closures, exceptions (a failed cast and a
+`null` unboxing exit instead of throwing), collections, and threads. Strings still render through
+the runtime rather than being a Kotlin class; there is one thread and no synchronization; and
 root-finding stays conservative until step 3.
 
 What this concedes, honestly: no macOS or Windows targets while the runtime is freestanding-Linux
@@ -996,6 +1019,60 @@ chosen deliberately rather than arrived at.
 Set against all of this: emitting Go supplies the third tier for zero lines and zero maintenance.
 That is the substance of the Go-versus-own-backend decision, and it is much larger than the ~5 % 
 round-trip tax measured above.
+
+#### Decided: krusty owns the code generator too — no C emission
+
+*Decided: krusty owns its runtime* drew the ownership line at the runtime and kept the C emitter as
+a scaffold, on the argument that the runtime is the durable asset and the emitter is disposable.
+The user has moved the line: **krusty emits no C.** Compiling a user's program must not involve
+another language's compiler at all, for the same reason emitting Go was rejected — a compiler that
+prints source for another toolchain to compile is a transpiler, whatever it owns underneath. The
+requirement is Go's: krusty's own code generator, **fast and incremental**, from one host to every
+target.
+
+What that changes, and what it does not:
+
+* **The runtime survives unchanged.** Allocator, collector, object model, `KType` and vtables,
+  strings, `_start`, syscalls — ~1,470 lines of freestanding C — are krusty's, and nothing about
+  them depends on how user code is generated. They are compiled **once, when krusty itself is
+  built**, for every supported target, and shipped inside the compiler as prebuilt objects. That is
+  exactly Go's arrangement: Go's runtime is compiled by the Go toolchain into archives that ship
+  with the distribution. A *user's* build then needs krusty and nothing else. The one honest
+  consequence: building krusty needs a C cross-compiler (`clang` targets every architecture from
+  one host), which is a build-time dependency of the compiler, not of anyone using it.
+* **The C emitter is retired.** `src/native/emit.rs` and the emitter half of `classes.rs` — about
+  3,600 lines — lowered common IR to C text. They go, replaced by a lowering to machine code. The
+  five class slices landed against them are not wasted: their tests are Kotlin programs with
+  expected output, and every one of them becomes a test of the new code generator the moment it can
+  run them. Their runtime and object-model halves stay.
+* **A linker becomes krusty's.** Zero-toolchain cross-compilation — the property this whole track
+  is built on — needs the final link done by krusty, not by a system `ld`: Go has its own linker
+  for exactly this reason. Scope for a static executable from a handful of objects is bounded
+  (symbol resolution, the relocation kinds three architectures use, program headers); it is not
+  Go's linker, which does far more.
+* **Incremental means per-module objects, cached by ABI hash.** That is the build layer this
+  document began with, applied to native: a module compiles to an object once, dependents rebuild
+  only when its ABI moves, and the link is the only whole-program step — as in Go.
+
+**The one decision this leaves open is the code generator itself**, and it is the project-values
+question the *Risks* section reserved: drive **Cranelift** (a Rust library; measured at 46 transitive
+crates against a compiler library that has four today; Go-league compile speed; x86-64, AArch64,
+RISC-V and s390x backends already written), or **hand-write** the instruction selection and
+encoding for each architecture (maximal ownership, as Go did; the truly multi-year item across three
+targets). The lowering from common IR, the ABI, object layout, GC integration and the linker are
+krusty's under either choice; the choice is only who owns instruction selection and register
+allocation.
+
+**Sequencing, in runnable increments — every commit runs a Kotlin program that could not run
+before:**
+
+1. `fun main() { println("Hello, world!") }` through krusty's own code generator on linux-x86_64:
+   lowering, an object, a link against the prebuilt runtime, a static ELF, run, compare output.
+2. The same on linux-aarch64 and linux-riscv64 from the same host, with the ELF machine asserted.
+3. Re-run the landed class tests against the new generator, slice by slice, until they all pass.
+4. Per-module objects and ABI-hash caching — the incremental half.
+5. The `codegen/box` corpus through the native pipeline as the conformance gate: skipping permitted,
+   miscompiling never; declined reasons sorted by frequency are the backlog.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

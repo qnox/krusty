@@ -5420,6 +5420,87 @@ and behavior is checked by RUNNING the emitted program.
   literal and `Unit` pass through a collection untouched);
   `tests/native_hello_world_e2e.rs` (`a_program_that_allocates_heavily_runs_in_bounded_memory`).
 
+- **A class instance is a header followed by the superclass's fields, then its own.** The object
+  header stays one word — the collector's contract is `header->type` and nothing here changes it.
+  Fields follow in the classic single-inheritance layout: the superclass's fields as a prefix in the
+  superclass's order, then this class's in declaration order, each aligned to its C size
+  (`Boolean`/`Byte` 1, `Short`/`Char` 2, `Int`/`Float` 4, `Long`/`Double`/reference 8), and a
+  subclass's first field packed directly after the superclass's last (not after its rounded size),
+  because the emitted struct spells the inherited fields out as members and C packs them. The
+  instance size rounds up to 8. The layout is computed by the compiler, not read back from C: the
+  generated program asserts every field offset and every size with `_Static_assert`, so a
+  disagreement is a compile error and never a collector tracing the wrong word.
+  Tests: `src/native/classes.rs` (`fields_follow_the_superclass_prefix_and_align_to_their_size`,
+  `a_subclass_field_packs_after_the_superclass_field_not_after_its_rounded_size`);
+  `tests/native_classes_e2e.rs`
+  (`a_three_level_hierarchy_inherits_fields_and_overrides_at_each_level`,
+  `a_linked_chain_built_under_collection_pressure_is_traced_through_emitted_layouts` — the test that
+  catches a wrong `reference_offsets`).
+
+- **Virtual dispatch goes through the type descriptor, and every vtable begins with `kotlin.Any`'s
+  three slots: `equals`, `hashCode`, `toString`, in that order.** A call is
+  `obj->type->vtable[slot]`: one indirection more than a vtable pointer in the header, in exchange
+  for leaving the header — and the collector — untouched. A class's table is its superclass's with
+  overridden slots replaced and new members appended, so a slot assigned at the declaring class is
+  valid down the whole hierarchy. Open properties are members too: an `open`/`override` property
+  dispatches through a getter (and, for a `var`, a setter) slot, synthesized as a field access when
+  the source wrote no accessor. `super.f()` is a direct call to the named class's body. An abstract
+  member's slot is a runtime function that fails loudly rather than a NULL to jump through. An
+  override that changes a parameter's or result's machine representation (`T` specialized to `Int`)
+  would need a bridge method and is declined by name.
+  Tests: `src/native/classes.rs` (`a_new_method_appends_and_an_override_replaces_the_slot`,
+  `a_three_level_chain_keeps_slot_numbers_stable`,
+  `an_override_that_changes_representation_is_declined`); `tests/native_classes_e2e.rs`
+  (`a_call_through_a_base_typed_value_reaches_the_override`,
+  `a_super_call_runs_the_base_implementation_then_the_override`,
+  `an_abstract_method_dispatches_to_each_implementation`,
+  `an_open_property_read_through_the_base_type_reaches_the_override`).
+
+- **The default `hashCode` derives from the object's address, and the default `toString` is
+  `<qualified name>@<hex hashCode>`.** An identity hash from the address is legitimate only because
+  this collector never moves an object — conservative roots forbid it — so the address is stable
+  for the object's whole life. `equals` defaults to reference identity. A user `toString` is reached
+  from `println(obj)`, from `"$obj"` and from an explicit call alike, because the runtime's
+  rendering dispatches through slot 2 for anything that is not one of its own value types; the
+  built-in values compare by value and hash as Kotlin specifies (a `String` over its UTF-16 code
+  units). Structural `==` between references stays declined (see above); `x == null` is emitted as
+  the pointer comparison Kotlin defines it to be.
+  Tests: `tests/native_classes_e2e.rs`
+  (`a_user_to_string_is_reached_through_println_templates_and_explicit_calls`).
+
+- **`is` walks the superclass chain; a failed `as` fails loudly, as the placeholder for
+  `ClassCastException`.** `obj is T` is false for `null` and true when `T`'s descriptor is on the
+  object's `super` chain; `as?` yields the object or `null`; `as T?` and a compiler-inserted smart
+  cast let `null` through; `as T` to a non-null type fails on `null`. There are no exceptions in the
+  runtime yet, so a failed cast exits with a message naming both types — the same realization
+  unboxing `null` already uses — rather than passing the object through and letting the program read
+  a subclass's fields off a base object. A check against a type that is neither a class of the file
+  nor a runtime value type declines.
+  Tests: `tests/native_classes_e2e.rs` (`is_and_safe_casts_follow_the_superclass_chain`,
+  `a_failed_cast_fails_loudly_naming_both_types`).
+
+- **An `object` declaration is one lazily constructed instance in a static slot registered as a
+  collector root.** Static storage is never scanned, so the emitted getter registers the slot with
+  `kt_gc_add_global_root` before it allocates and assigns the slot before running the constructor;
+  whatever the singleton references then survives every collection. The test creates the singleton
+  in a frame that is gone and overwritten before the churn, so only the registration keeps it alive
+  — removing the registration makes the program fault.
+  Tests: `tests/native_classes_e2e.rs`
+  (`an_object_declaration_is_one_instance_rooted_across_collections`).
+
+- **Initialization order is Kotlin's: superclass constructor first, then this class's parameter
+  stores, then its property initializers and `init` blocks in source order.** The superclass
+  constructor's arguments are evaluated from the derived constructor's parameters before the call.
+  Slots are zeroed by the allocator, so a field read before its store observes `null`/`0`, as it
+  does on the JVM.
+  Tests: `tests/native_classes_e2e.rs`
+  (`initialization_runs_the_superclass_first_then_fields_then_init_blocks`).
+
+- **A generic class erases its type parameters to references.** `Box<T>(val value: T)` stores `T`
+  as a `KRef`; a scalar argument boxes on the way in and unboxes on the way out, exactly as on the
+  JVM.
+  Tests: `tests/native_classes_e2e.rs` (`a_generic_class_erases_its_parameter_to_a_reference`).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
