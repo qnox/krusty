@@ -159,6 +159,8 @@ pub struct ClassInfo {
     /// use of this annotation is emitted `RuntimeVisibleAnnotations` for RUNTIME, `RuntimeInvisible…` for
     /// CLASS, and dropped for SOURCE.
     pub retention: Option<String>,
+    /// All class-level annotation applications normalized to resolved identities and typed values.
+    pub annotations: Vec<crate::types::ResolvedAnnotation>,
     /// For an annotation type: the `@kotlin.annotation.Target` `allowedTargets` entries
     /// (`AnnotationTarget` constant names) — a KOTLIN annotation's declared target set, which has no
     /// Java equivalent for `PROPERTY`. Empty when the annotation declares no `@Target` (applicable
@@ -558,6 +560,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         meta,
         signature: attrs.signature,
         retention: attrs.retention,
+        annotations: attrs.annotations,
         kotlin_targets: attrs.kotlin_targets,
         java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
@@ -579,6 +582,7 @@ struct ClassAttrs {
     pn: Option<String>,
     signature: Option<String>,
     retention: Option<String>,
+    annotations: Vec<crate::types::ResolvedAnnotation>,
     kotlin_targets: Vec<String>,
     java_targets: Vec<String>,
     inner_classes: Vec<InnerClassRef>,
@@ -636,6 +640,11 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 });
             }
             continue;
+        }
+        if (name == "RuntimeVisibleAnnotations" || name == "RuntimeInvisibleAnnotations")
+            && read_class_annotations(body, cp, &mut out.annotations).is_err()
+        {
+            return out;
         }
         if name != "RuntimeVisibleAnnotations" {
             continue;
@@ -731,6 +740,169 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
         }
     }
     out
+}
+
+/// Decode class annotation applications once into the common semantic model. Feature consumers
+/// select by resolved annotation identity; the class reader never has feature-specific branches.
+fn read_class_annotations(
+    body: &[u8],
+    cp: &[C],
+    out: &mut Vec<crate::types::ResolvedAnnotation>,
+) -> Result<(), ReadError> {
+    let mut reader = Reader { b: body, i: 0 };
+    let count = reader.u2()?;
+    for _ in 0..count {
+        out.push(read_resolved_annotation(&mut reader, cp)?);
+    }
+    Ok(())
+}
+
+fn read_resolved_annotation(
+    reader: &mut Reader<'_>,
+    cp: &[C],
+) -> Result<crate::types::ResolvedAnnotation, ReadError> {
+    let descriptor = cp_utf8(cp, reader.u2()?).ok_or(ReadError::Truncated)?;
+    let annotation = descriptor_classifier(descriptor).ok_or(ReadError::Truncated)?;
+    let count = reader.u2()?;
+    let mut arguments = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let name = cp_utf8(cp, reader.u2()?)
+            .ok_or(ReadError::Truncated)?
+            .to_string();
+        arguments.push((name, read_annotation_value(reader, cp)?));
+    }
+    Ok(crate::types::ResolvedAnnotation {
+        annotation,
+        arguments,
+    })
+}
+
+fn read_annotation_value(
+    reader: &mut Reader<'_>,
+    cp: &[C],
+) -> Result<crate::types::AnnotationValue, ReadError> {
+    use crate::types::AnnotationValue;
+
+    let tag = reader.u1()? as char;
+    let mut index = || reader.u2();
+    match tag {
+        'B' => match cp.get(index()? as usize) {
+            Some(C::Integer(value)) => Ok(AnnotationValue::Byte(*value as i8)),
+            _ => Err(ReadError::Truncated),
+        },
+        'C' => match cp.get(index()? as usize) {
+            Some(C::Integer(value)) => Ok(AnnotationValue::Char(*value as u16)),
+            _ => Err(ReadError::Truncated),
+        },
+        'D' => match cp.get(index()? as usize) {
+            Some(C::Double(value)) => Ok(AnnotationValue::Double(f64::from_bits(*value))),
+            _ => Err(ReadError::Truncated),
+        },
+        'F' => match cp.get(index()? as usize) {
+            Some(C::Float(value)) => Ok(AnnotationValue::Float(f32::from_bits(*value))),
+            _ => Err(ReadError::Truncated),
+        },
+        'I' => match cp.get(index()? as usize) {
+            Some(C::Integer(value)) => Ok(AnnotationValue::Int(*value)),
+            _ => Err(ReadError::Truncated),
+        },
+        'J' => match cp.get(index()? as usize) {
+            Some(C::Long(value)) => Ok(AnnotationValue::Long(*value)),
+            _ => Err(ReadError::Truncated),
+        },
+        'S' => match cp.get(index()? as usize) {
+            Some(C::Integer(value)) => Ok(AnnotationValue::Short(*value as i16)),
+            _ => Err(ReadError::Truncated),
+        },
+        'Z' => match cp.get(index()? as usize) {
+            Some(C::Integer(value)) => Ok(AnnotationValue::Boolean(*value != 0)),
+            _ => Err(ReadError::Truncated),
+        },
+        's' => match cp.get(index()? as usize) {
+            Some(C::Utf8(value)) => Ok(AnnotationValue::String(KtString::from(value.clone()))),
+            Some(C::Utf8Units(value)) => {
+                Ok(AnnotationValue::String(KtString::from_units(value.clone())))
+            }
+            _ => Err(ReadError::Truncated),
+        },
+        'e' => {
+            let classifier = cp_utf8(cp, reader.u2()?)
+                .and_then(descriptor_classifier)
+                .ok_or(ReadError::Truncated)?;
+            let constant = cp_utf8(cp, reader.u2()?)
+                .ok_or(ReadError::Truncated)?
+                .to_string();
+            Ok(AnnotationValue::Enum(classifier, constant))
+        }
+        'c' => {
+            let classifier = cp_utf8(cp, reader.u2()?)
+                .and_then(class_literal_classifier)
+                .ok_or(ReadError::Truncated)?;
+            Ok(AnnotationValue::Class(classifier))
+        }
+        '@' => {
+            let nested = read_resolved_annotation(reader, cp)?;
+            Ok(AnnotationValue::Annotation {
+                internal: nested.annotation,
+                values: nested.arguments,
+            })
+        }
+        '[' => {
+            let count = reader.u2()?;
+            let mut values = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                values.push(read_annotation_value(reader, cp)?);
+            }
+            Ok(AnnotationValue::Array(values))
+        }
+        _ => Err(ReadError::BadConstant(tag as u8)),
+    }
+}
+
+fn cp_utf8(cp: &[C], index: u16) -> Option<&str> {
+    match cp.get(index as usize) {
+        Some(C::Utf8(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn descriptor_classifier(descriptor: &str) -> Option<TypeName> {
+    descriptor
+        .strip_prefix('L')
+        .and_then(|value| value.strip_suffix(';'))
+        .map(crate::types::type_name)
+        .map(|classifier| {
+            crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(classifier)
+                .unwrap_or(classifier)
+        })
+}
+
+fn class_literal_classifier(descriptor: &str) -> Option<TypeName> {
+    descriptor_classifier(descriptor).or_else(|| {
+        Some(crate::types::type_name(match descriptor {
+            "[B" => "kotlin/ByteArray",
+            "[C" => "kotlin/CharArray",
+            "[D" => "kotlin/DoubleArray",
+            "[F" => "kotlin/FloatArray",
+            "[I" => "kotlin/IntArray",
+            "[J" => "kotlin/LongArray",
+            "[S" => "kotlin/ShortArray",
+            "[Z" => "kotlin/BooleanArray",
+            _ if descriptor.starts_with('[') => "kotlin/Array",
+            _ => match descriptor.as_bytes().first()? {
+                b'B' => "kotlin/Byte",
+                b'C' => "kotlin/Char",
+                b'D' => "kotlin/Double",
+                b'F' => "kotlin/Float",
+                b'I' => "kotlin/Int",
+                b'J' => "kotlin/Long",
+                b'S' => "kotlin/Short",
+                b'Z' => "kotlin/Boolean",
+                b'V' => "kotlin/Unit",
+                _ => return None,
+            },
+        }))
+    })
 }
 
 /// What [`read_element_value`] should pull out of an element_value ARRAY; every other shape is
@@ -1151,6 +1323,61 @@ mod tests {
         assert_eq!(ci.methods.len(), 1);
         assert_eq!(ci.methods[0].name, "add");
         assert_eq!(ci.methods[0].descriptor, "(II)I");
+    }
+
+    #[test]
+    fn class_annotations_round_trip_as_resolved_typed_applications() {
+        let mut writer = ClassWriter::new("demo/Annotated", "java/lang/Object");
+        writer.set_class_annotations(&crate::ir::DeclarationAnnotations::new(vec![
+            crate::ir::RetainedAnnotation {
+                retention: crate::types::AnnotationRetention::Runtime,
+                annotation: crate::ir::AppliedAnnotation {
+                    internal: crate::types::type_name("demo/Marker"),
+                    values: vec![
+                        (
+                            "target".to_string(),
+                            crate::ir::AnnoValue::Class(crate::types::type_name("demo/Target")),
+                        ),
+                        (
+                            "label".to_string(),
+                            crate::ir::AnnoValue::Const(crate::ir::IrConst::String(
+                                KtString::from("exact"),
+                            )),
+                        ),
+                        (
+                            "builtin".to_string(),
+                            crate::ir::AnnoValue::Class(crate::types::type_name("kotlin/String")),
+                        ),
+                    ],
+                },
+            },
+        ]));
+
+        let parsed = parse_class(&writer.finish()).expect("read emitted class");
+        assert_eq!(
+            parsed.annotations,
+            vec![crate::types::ResolvedAnnotation {
+                annotation: crate::types::type_name("demo/Marker"),
+                arguments: vec![
+                    (
+                        "target".to_string(),
+                        crate::types::AnnotationValue::Class(crate::types::type_name(
+                            "demo/Target"
+                        )),
+                    ),
+                    (
+                        "label".to_string(),
+                        crate::types::AnnotationValue::String(KtString::from("exact")),
+                    ),
+                    (
+                        "builtin".to_string(),
+                        crate::types::AnnotationValue::Class(crate::types::type_name(
+                            "kotlin/String",
+                        )),
+                    ),
+                ],
+            }]
+        );
     }
 
     #[test]

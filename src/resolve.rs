@@ -36601,6 +36601,7 @@ val result = object { fun value(): String = captured }
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
             named_parameter_lists: Vec::new(),
+            annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
         }
@@ -39442,6 +39443,7 @@ fun box(): String {
                     enum_entries: Vec::new(),
                     enum_entries_accessor: None,
                     named_parameter_lists: Vec::new(),
+                    annotations: Vec::new(),
                     retention: None,
                     annotation_targets: None,
                 }));
@@ -39596,6 +39598,7 @@ fun box(): String {
                     },
                     enum_entries_accessor: None,
                     named_parameter_lists: vec![],
+                    annotations: Vec::new(),
                     retention: None,
                     annotation_targets: None,
                 })

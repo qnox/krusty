@@ -2775,6 +2775,7 @@ impl JvmLibraries {
                 enum_entries,
                 enum_entries_accessor,
                 named_parameter_lists,
+                annotations: ci.annotations.clone(),
                 // JLS default: an annotation declaration without `@Retention` has CLASS retention.
                 // Normalize that provider fact here so common checking never branches on declaration
                 // origin or tries to interpret an absent classfile attribute.
@@ -3551,6 +3552,7 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         enum_entries: Vec::new(),
         enum_entries_accessor: None,
         named_parameter_lists: Vec::new(),
+        annotations: Vec::new(),
         retention: None,
         annotation_targets: None,
     })
@@ -3625,6 +3627,7 @@ fn builtin_library_type(
         enum_entries: Vec::new(),
         enum_entries_accessor: None,
         named_parameter_lists: Vec::new(),
+        annotations: Vec::new(),
         retention: None,
         annotation_targets: None,
     }
@@ -5498,6 +5501,15 @@ impl SymbolSource for JvmLibraries {
 
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         super::jvm_class_map::platform_flexible_upper_bound(lower)
+    }
+}
+
+impl crate::types::ClassifierAnnotationSource for JvmLibraries {
+    fn classifier_annotations(
+        &self,
+        classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        SymbolSource::classifier(self, classifier).map(|shape| shape.annotations.clone())
     }
 }
 

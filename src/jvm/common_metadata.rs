@@ -186,6 +186,7 @@ fn annotation_type(declaration: super::metadata::BuiltinClass) -> LibraryType {
         enum_entries_accessor: None,
         named_parameter_lists,
         // No JVM actual exists, so this platform erases the optional annotation after checking.
+        annotations: Vec::new(),
         retention: Some("SOURCE".to_string()),
         annotation_targets: None,
     }

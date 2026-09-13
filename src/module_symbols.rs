@@ -474,6 +474,15 @@ impl<'a> ModuleSymbols<'a> {
             enum_entries,
             enum_entries_accessor,
             named_parameter_lists,
+            annotations: c
+                .annotations
+                .iter()
+                .copied()
+                .map(|annotation| crate::types::ResolvedAnnotation {
+                    annotation,
+                    arguments: Vec::new(),
+                })
+                .collect(),
             retention: None,
             annotation_targets: None,
         };

@@ -2067,6 +2067,21 @@ pub enum AnnotationValue {
     Array(Vec<AnnotationValue>),
 }
 
+/// One resolved annotation application published as part of a classifier record. This is the
+/// provider-neutral semantic payload consumers may inspect: the annotation and every class-valued
+/// argument are stable identities, never descriptors or source spellings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedAnnotation {
+    pub annotation: TypeName,
+    pub arguments: Vec<(String, AnnotationValue)>,
+}
+
+/// Provider-neutral resolved annotations for a classifier. Consumers receive stable identities and
+/// typed values without gaining name lookup, callable selection, or backend access.
+pub trait ClassifierAnnotationSource {
+    fn classifier_annotations(&self, classifier: TypeName) -> Option<Vec<ResolvedAnnotation>>;
+}
+
 /// A resolved annotation application, including its declaration-ordered element values and
 /// semantic retention. This is a frontend decision; common lowering must not reopen source or a
 /// symbol provider to reconstruct it.

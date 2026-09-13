@@ -2674,6 +2674,9 @@ pub struct LibraryType {
     /// [`ParamList::annotation`] = `None`; a declaration format without a constructor can publish
     /// its annotation element list with the application policy attached.
     pub named_parameter_lists: Vec<ParamList>,
+    /// Resolved annotations applied to this classifier. Providers normalize classfile or source
+    /// representations into this common semantic shape at their boundary.
+    pub annotations: Vec<crate::types::ResolvedAnnotation>,
     /// For a classpath annotation type: the `java.lang.annotation.RetentionPolicy` constant name of its
     /// `@Retention` (`"RUNTIME"` / `"CLASS"` / `"SOURCE"`), or `None` if absent. Drives whether a use of
     /// the annotation is emitted `RuntimeVisibleAnnotations` (RUNTIME) / `RuntimeInvisibleAnnotations`
@@ -2787,6 +2790,7 @@ impl LibraryType {
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
             named_parameter_lists: Vec::new(),
+            annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
         }
@@ -2947,6 +2951,15 @@ pub struct LibraryConst {
 /// classpath. Kotlin's language-level builtin classifiers still exist: this provider publishes their
 /// common hierarchy and `Any` declarations so the resolver never needs a builtin-name fallback.
 pub struct EmptySymbolSource;
+
+impl crate::types::ClassifierAnnotationSource for EmptySymbolSource {
+    fn classifier_annotations(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        None
+    }
+}
 
 pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner: TypeName) {
     fn member_function(
@@ -3601,6 +3614,7 @@ mod tests {
             enum_entries: vec![],
             enum_entries_accessor: None,
             named_parameter_lists: vec![],
+            annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
         };
