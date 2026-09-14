@@ -67,6 +67,15 @@ pub struct FirInlineDefault {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineRecovery {
+    pub caught: ResolvedTy,
+    pub constructor: ExternalCallableId,
+    pub classifier: crate::types::TypeName,
+    pub constructor_parameters: Box<[ResolvedTy]>,
+    pub failure: Box<FirInlineCall>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirInlineBodyPlan {
     InvokeLambda {
         lambda_parameter: u32,
@@ -75,6 +84,7 @@ pub enum FirInlineBodyPlan {
         cleanup: Box<[FirInlineCall]>,
         /// Nullable semantic throwable type recorded by the checked catch template.
         cause: Option<ResolvedTy>,
+        recovery: Option<Box<FirInlineRecovery>>,
         defaults: Box<[FirInlineDefault]>,
         result: Option<FirInlineValue>,
     },

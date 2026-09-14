@@ -15,13 +15,19 @@ pub(super) fn plain_invoke_lambda(
         prologue,
         cleanup,
         cause,
+        recovery,
         defaults,
         result,
     } = plan
     else {
         return None;
     };
-    if !prologue.is_empty() || !cleanup.is_empty() || cause.is_some() || !defaults.is_empty() {
+    if !prologue.is_empty()
+        || !cleanup.is_empty()
+        || cause.is_some()
+        || recovery.is_some()
+        || !defaults.is_empty()
+    {
         return None;
     }
     let parameter = |value: &InlineBodyValue| match value {

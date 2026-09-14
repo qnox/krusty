@@ -565,6 +565,119 @@ fn local_class_member_write_uses_shared_capture_storage() {
 }
 
 #[test]
+fn class_capture_write_retains_nullable_cell_type_over_non_null_rhs() {
+    let (_, bodies) = checked_streamed_bodies(
+        "class Result<T>\n\
+         fun publish(result: Result<String>): Result<String>? {\n\
+             var outcome: Result<String>? = null\n\
+             val sink = object {\n\
+                 fun accept(value: Result<String>) { outcome = value }\n\
+             }\n\
+             sink.accept(result)\n\
+             return outcome\n\
+         }\n",
+    );
+    let writes = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+                let FirExprKind::ClassStorageSharedWrite { element, value, .. } = &expression.kind
+                else {
+                    return None;
+                };
+                Some((element.get(), body.expr(*value)?.ty.get()))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let result = Ty::obj_args("Result", &[Ty::String]);
+    assert_eq!(writes, [(Ty::nullable(result), result)]);
+}
+
+#[test]
+fn class_capture_write_lowers_its_declared_cell_type() {
+    let mut index = ResolvedModuleIndex::default();
+    let classifier = crate::types::type_name("test/CaptureOwner");
+    let declaration = index.intern_checked_local_declaration(
+        crate::fir::DeclarationAnchor {
+            source: SourceFileId::from_raw(0),
+            range: crate::diag::Span::new(0, 1),
+            owner: None,
+            kind: DeclarationKind::Classifier,
+            sibling: 0,
+        },
+        crate::fir::ResolvedDeclarationHeader {
+            kind: DeclarationKind::Classifier,
+            owner: None,
+            name: None,
+            visibility: crate::types::Visibility::Private,
+            flags: crate::fir::DeclarationFlags::default()
+                .with(crate::fir::DeclarationFlags::LOCAL_CLASS, true),
+            initialization_order: None,
+        },
+        "CaptureOwner",
+    );
+    index
+        .publish_classifier_header(declaration, classifier, None, [], [], [], [])
+        .unwrap();
+
+    let result = Ty::obj_args("kotlin/Result", &[Ty::String]);
+    let nullable_result = Ty::nullable(result);
+    let mut ir = crate::ir::IrFile::default();
+    let mut owner = crate::ir::IrClass::synthetic(classifier);
+    owner.fields.push(crate::ir::IrField::new(
+        "outcome".to_string(),
+        nullable_result,
+    ));
+    let owner = ir.add_class(owner);
+    ir.checked_classifier_classes.insert(declaration, owner);
+    ir.shared_class_capture_fields
+        .insert((owner, 0), nullable_result);
+
+    let origin = OriginId::from_raw(0);
+    let mut body = FirBody::new(BodyOwnerId::from_raw(declaration.raw()));
+    let parameter = body.allocate_local_value();
+    body.add_parameter(FirValueParameter {
+        origin,
+        value: parameter,
+        ty: ResolvedTy::new(result).unwrap(),
+    });
+    let read = body.add_expr(FirExpr {
+        origin,
+        ty: ResolvedTy::new(result).unwrap(),
+        kind: FirExprKind::ValueRead(parameter),
+    });
+    let write = body.add_expr(FirExpr {
+        origin,
+        ty: ResolvedTy::new(Ty::Unit).unwrap(),
+        kind: FirExprKind::ClassStorageSharedWrite {
+            owner: declaration,
+            enclosing_depth: 0,
+            field: 0,
+            element: ResolvedTy::new(nullable_result).unwrap(),
+            value: read,
+            conversion: None,
+        },
+    });
+    let statement = body.add_statement(FirStatement {
+        origin,
+        kind: FirStatementKind::Expression(write),
+    });
+    body.push_root(statement);
+
+    let lowered = crate::fir_lower::lower_body(body, &index, &mut ir).unwrap();
+    let [root] = lowered.roots.as_ref() else {
+        panic!("one shared-cell write root expected")
+    };
+    let crate::ir::IrExpr::RefSet { elem, value, .. } = ir.expr(*root) else {
+        panic!("checked class-capture write must lower to a shared-cell write")
+    };
+    assert_eq!(*elem, nullable_result);
+    assert!(matches!(ir.expr(*value), crate::ir::IrExpr::GetValue(1)));
+}
+
+#[test]
 fn local_class_inferred_properties_see_plain_primary_constructor_parameters() {
     let (body, _) = checked_function_body(
         "fun box(): String {\n\

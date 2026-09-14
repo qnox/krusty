@@ -1197,6 +1197,8 @@ mod resolver_regression_e2e;
 mod result_companion_targs_e2e;
 #[path = "result_e2e.rs"]
 mod result_e2e;
+#[path = "run_catching_inline_e2e.rs"]
+mod run_catching_inline_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
 #[path = "safe_call_any_member_e2e.rs"]
