@@ -30,6 +30,7 @@ use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeK
 
 mod callable_reference_selection;
 mod capture_analysis;
+mod capture_storage;
 mod collection_literals;
 mod collection_transform_bridge;
 mod compound_assignments;
@@ -57,9 +58,16 @@ mod stable_path_legacy_bridge;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
+
+// The capture storage-kind contract and the write analysis behind it. Imported by name so the call
+// sites read as they did when these lived here: what moved is the responsibility, not the spelling.
 pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
 use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
+use capture_storage::{
+    anonymous_body_bound_value_names, anonymous_body_expressions, anonymous_descendant_writes_name,
+    anonymous_descendants, local_class_capture_expressions,
+};
 use collection_literals::{default_factory, standard_factory};
 use constant_evaluation::{
     checked_constant_expression, source_literal_constant, CheckedConstantExpression,
@@ -20915,6 +20923,7 @@ struct ValueBindingDeclaration {
     origin: ReceiverFnValueOrigin,
     error_provenance: ErrorProvenance,
     is_context_parameter: bool,
+    shared_storage_cell: bool,
 }
 
 impl ValueBindingDeclaration {
@@ -20923,6 +20932,7 @@ impl ValueBindingDeclaration {
             origin,
             error_provenance,
             is_context_parameter: false,
+            shared_storage_cell: false,
         }
     }
 
@@ -20931,6 +20941,15 @@ impl ValueBindingDeclaration {
             origin: ReceiverFnValueOrigin::Local,
             error_provenance: ErrorProvenance::None,
             is_context_parameter: true,
+            shared_storage_cell: false,
+        }
+    }
+
+    /// The same binding, marked as a capture field realized by one shared mutable cell.
+    fn in_shared_cell(self, shared_storage_cell: bool) -> Self {
+        Self {
+            shared_storage_cell,
+            ..self
         }
     }
 }
@@ -20957,6 +20976,11 @@ struct Local {
     /// A local delegated property reads and writes through this immutable storage object. Capturing
     /// a mutable delegated property captures this value, not a mutable plain local.
     delegate_storage_ty: Option<Ty>,
+    /// This binding is a local/anonymous classifier's CAPTURE FIELD already realized as one shared
+    /// mutable cell. A nested classifier capturing it must forward that cell, not a copy of the
+    /// element: the write that made the capture shared lives in an enclosing callable, so the
+    /// reassignment sets a checker of this body consults are empty here and say nothing about it.
+    shared_storage_cell: bool,
     /// Ephemeral identity of the runtime lexical value during one resolver check. Narrowing
     /// shadows copy it; fresh declarations allocate another. It never enters TypeInfo or FIR.
     lexical_capture_identity: Option<u32>,
@@ -27585,15 +27609,19 @@ impl<'a> Checker<'a> {
                         } else {
                             narrows.get(name).copied().unwrap_or(local.ty)
                         },
-                        shared_cell: local.delegate_storage_ty.is_none()
-                            && local.is_var
-                            && (self.fn_reassigned.contains(name)
+                        shared_cell: capture_storage::CapturedBinding {
+                            delegated: local.delegate_storage_ty.is_some(),
+                            mutable: local.is_var,
+                            already_shared: local.shared_storage_cell,
+                            written_here: self.fn_reassigned.contains(name)
                                 || anonymous_descendant_writes_name(
                                     self.file,
                                     declaration,
                                     &self.anonymous_lexical_scope,
                                     name,
-                                )),
+                                ),
+                        }
+                        .is_shared_cell(),
                         source,
                         delegate_storage: local.delegate_storage_ty,
                         receiver_label: None,
@@ -33449,9 +33477,13 @@ impl<'a> Checker<'a> {
                     if let Some(local) = self.lookup(scope, &captured) {
                         captures.values.push(AnonymousObjectCapture {
                             ty: local.ty,
-                            shared_cell: local.delegate_storage_ty.is_none()
-                                && local.is_var
-                                && self.fn_reassigned.contains(&captured),
+                            shared_cell: capture_storage::CapturedBinding {
+                                delegated: local.delegate_storage_ty.is_some(),
+                                mutable: local.is_var,
+                                already_shared: local.shared_storage_cell,
+                                written_here: self.fn_reassigned.contains(&captured),
+                            }
+                            .is_shared_cell(),
                             storage_ty: local.delegate_storage_ty,
                             name: captured,
                             source: AnonymousObjectCaptureSource::LexicalValue,
@@ -46381,195 +46413,6 @@ fn enclosing_receiver_labels(
         .collect()
 }
 
-/// Value-namespace declarations owned by an anonymous body.
-///
-/// Member function names are deliberately absent. An enclosing callable value has the earlier
-/// lexical-value rung in call syntax, so `encode(value)` inside an anonymous member also named
-/// `encode` must capture and invoke the enclosing value.
-fn anonymous_body_bound_value_names(
-    file: &File,
-    declaration: DeclId,
-) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
-    let Decl::Class(class) = file.decl(declaration) else {
-        return names;
-    };
-    names.extend(class.props.iter().map(|property| property.name.clone()));
-    names.extend(
-        class
-            .body_props
-            .iter()
-            .map(|property| property.name.clone()),
-    );
-    for method in &class.methods {
-        names.extend(method.params.iter().map(|parameter| parameter.name.clone()));
-    }
-    names
-}
-
-fn expression_writes_name(file: &File, expression: ExprId, name: &str) -> bool {
-    // A postfix/prefix increment may be the trailing expression of a lambda. In that shape the
-    // parent block exposes the `Expr::IncDec` itself rather than a `Stmt::IncDec`, so inspecting only
-    // child statements loses the write and incorrectly freezes an anonymous-class capture as a
-    // synthetic `val` field. The target identity is still lexical here; member/index increments use
-    // their own target forms and must not make an unrelated same-spelled local mutable.
-    if matches!(
-        file.expr(expression),
-        Expr::IncDec { target, .. }
-            if matches!(file.expr(*target), Expr::Name(target_name) if target_name == name)
-    ) {
-        return true;
-    }
-    let mut child_expressions = Vec::new();
-    let mut child_statements = Vec::new();
-    file.any_child_expr(
-        expression,
-        &mut |child| {
-            child_expressions.push(child);
-            false
-        },
-        &mut |statement| {
-            child_statements.push(statement);
-            false
-        },
-    );
-    if child_statements.iter().any(|statement| {
-        matches!(
-            file.stmt(*statement),
-            Stmt::Assign { name: target, .. } | Stmt::IncDec { name: target, .. }
-                if target == name
-        )
-    }) {
-        return true;
-    }
-    child_expressions
-        .into_iter()
-        .any(|child| expression_writes_name(file, child, name))
-        || child_statements.into_iter().any(|statement| {
-            let mut expressions = Vec::new();
-            file.any_child_stmt(statement, &mut |child| {
-                expressions.push(child);
-                false
-            });
-            expressions
-                .into_iter()
-                .any(|child| expression_writes_name(file, child, name))
-        })
-}
-
-/// Every expression a class body can evaluate while observing an enclosing lexical capture. Read
-/// and write discovery must share this inventory; omitting a body form records immutable or missing
-/// storage and leaves checked FIR unable to represent the source capture.
-fn class_capture_expressions(class: &ClassDecl) -> Vec<ExprId> {
-    let mut expressions = class
-        .methods
-        .iter()
-        .filter_map(|method| fun_body_expr(&method.body))
-        .chain(class.body_props.iter().filter_map(|property| property.init))
-        .chain(
-            class
-                .body_props
-                .iter()
-                .filter_map(|property| property.delegate),
-        )
-        .chain(
-            class
-                .body_props
-                .iter()
-                .filter_map(|property| property.getter.as_ref().and_then(fun_body_expr)),
-        )
-        .chain(class.body_props.iter().filter_map(|property| {
-            property
-                .setter
-                .as_ref()
-                .and_then(|setter| setter.body.as_ref())
-                .and_then(fun_body_expr)
-        }))
-        .chain(class.base_args.iter().copied())
-        .chain(class.props.iter().filter_map(|property| property.default))
-        .chain(class.init_order.iter().filter_map(|step| match step {
-            ClassInit::Block(body) => Some(*body),
-            ClassInit::PropInit(_) => None,
-        }))
-        .collect::<Vec<_>>();
-    for constructor in &class.secondary_ctors {
-        expressions.extend(constructor.body);
-        expressions.extend(
-            constructor
-                .params
-                .iter()
-                .filter_map(|parameter| parameter.default),
-        );
-        expressions.extend(match &constructor.delegation {
-            CtorDelegation::None => &[][..],
-            CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
-        });
-    }
-    expressions
-}
-
-/// Statement-position local classifiers evaluate interface-delegate values in their constructor
-/// context, so those values participate in outer capture and mutation analysis. Anonymous objects
-/// evaluate the same syntax at their lexical construction expression and carry it as explicit FIR;
-/// their ordinary body-capture inventory deliberately uses [`class_capture_expressions`] instead.
-fn local_class_capture_expressions(class: &ClassDecl) -> Vec<ExprId> {
-    let mut expressions = class_capture_expressions(class);
-    expressions.extend(
-        class
-            .interface_delegations
-            .iter()
-            .map(|delegation| delegation.value),
-    );
-    expressions
-}
-
-fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Vec<ExprId> {
-    let Decl::Class(class) = file.decl(declaration) else {
-        return Vec::new();
-    };
-    class_capture_expressions(class)
-}
-
-fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {
-    anonymous_body_expressions(file, declaration)
-        .into_iter()
-        .any(|expression| expression_writes_name(file, expression, name))
-}
-
-fn anonymous_descendants(
-    declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
-) -> impl Iterator<Item = DeclId> + '_ {
-    std::iter::once(declaration).chain(lexical_scope.owners.keys().copied().filter(
-        move |candidate| {
-            *candidate != declaration
-                && lexical_scope
-                    .declaration_chain(*candidate)
-                    .into_iter()
-                    .skip(1)
-                    .any(|owner| owner == declaration)
-        },
-    ))
-}
-
-fn anonymous_descendant_writes_name(
-    file: &File,
-    declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
-    name: &str,
-) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        (!anonymous_body_bound_value_names(file, candidate).contains(name)
-            || capture_analysis::own_property_initializer_uses_outer_name(file, candidate, name))
-            && (anonymous_body_writes_name(file, candidate, name)
-                || candidate != declaration
-                    && matches!(file.decl(candidate), Decl::Class(class) if class
-                        .interface_delegations
-                        .iter()
-                        .any(|delegation| expression_writes_name(file, delegation.value, name))))
-    })
-}
-
 fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str) -> bool {
     // A nested lambda is another runtime closure, but a value from outside the anonymous class
     // still has to cross the class boundary before that closure can capture it. Descend through the
@@ -50541,9 +50384,14 @@ impl<'a> Checker<'a> {
                 } else {
                     narrows.get(&name).copied().unwrap_or(local.ty)
                 },
-                shared_cell: local.delegate_storage_ty.is_none()
-                    && local.is_var
-                    && (self.fn_reassigned.contains(&name) || class_reassigned.contains(&name)),
+                shared_cell: capture_storage::CapturedBinding {
+                    delegated: local.delegate_storage_ty.is_some(),
+                    mutable: local.is_var,
+                    already_shared: local.shared_storage_cell,
+                    written_here: self.fn_reassigned.contains(&name)
+                        || class_reassigned.contains(&name),
+                }
+                .is_shared_cell(),
                 storage_ty: local.delegate_storage_ty,
                 name,
                 source: AnonymousObjectCaptureSource::LexicalValue,
@@ -60397,6 +60245,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter: false,
                 callable_reference_type: Some(function_type),
                 delegate_storage_ty: None,
+                shared_storage_cell: false,
                 lexical_capture_identity,
                 safe_call_origin: None,
             }),
@@ -60526,7 +60375,7 @@ impl<'a> Checker<'a> {
         is_var: bool,
     ) {
         if let Some(field) = property.class_storage {
-            self.declare_class_storage(scope, &property.name, property.ty, is_var, field);
+            self.declare_class_storage(scope, &property.name, property.ty, is_var, field, false);
             return;
         }
         let error_provenance = if property.ty == Ty::Error
@@ -60569,6 +60418,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         field: u32,
+        shared_cell: bool,
     ) {
         self.declare_with_origin(
             scope,
@@ -60578,7 +60428,8 @@ impl<'a> Checker<'a> {
             ValueBindingDeclaration::ordinary(
                 ReceiverFnValueOrigin::ClassStorage(field),
                 ErrorProvenance::None,
-            ),
+            )
+            .in_shared_cell(shared_cell),
         );
     }
 
@@ -60793,6 +60644,7 @@ impl<'a> Checker<'a> {
             capture.ty,
             capture.shared_cell,
             u32::try_from(field).expect("too many local-class captures"),
+            capture.shared_cell,
         );
     }
 
@@ -60819,6 +60671,7 @@ impl<'a> Checker<'a> {
                     capture.ty,
                     capture.shared_cell,
                     field as u32,
+                    capture.shared_cell,
                 );
             }
         }
@@ -61000,6 +60853,7 @@ impl<'a> Checker<'a> {
             origin,
             error_provenance,
             is_context_parameter,
+            shared_storage_cell,
         } = declaration;
         // A NEW binding under an existing name invalidates the property-path narrowings rooted at
         // the old one (`if (a.p == null) return; val a = …` — the proof was about the OLD `a`).
@@ -61028,6 +60882,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter,
                 callable_reference_type: matches!(ty, Ty::Fun(_)).then_some(ty),
                 delegate_storage_ty: None,
+                shared_storage_cell,
                 lexical_capture_identity,
                 safe_call_origin: None,
             }),
@@ -61080,6 +60935,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter,
                 callable_reference_type,
                 delegate_storage_ty,
+                shared_storage_cell: previous.is_some_and(|local| local.shared_storage_cell),
                 lexical_capture_identity,
                 safe_call_origin,
             }),
@@ -71979,6 +71835,7 @@ impl<'a> Checker<'a> {
                             capture.ty,
                             capture.shared_cell,
                             field as u32,
+                            capture.shared_cell,
                         );
                     }
                 }
