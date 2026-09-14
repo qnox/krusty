@@ -3270,10 +3270,17 @@ fn suspension_ret_unit(ir: &IrFile, e: ExprId, set: &HashSet<u32>, orig_rets: &[
 
 /// Rewrite the body's tail so it `return`s the forwarded suspend call directly — the CPS `Object` result,
 /// unboxed and unwrapped (no state machine). A trailing VALUE is promoted to a `Return`; a BARE trailing
-/// call STATEMENT (the `Unit` forward) is replaced with `return <call>`; an existing `return <call>` is
-/// already in the right shape.
+/// call STATEMENT (the `Unit` forward) is replaced with `return <call>`; an existing return has its
+/// operand replaced too, because checked bottom completion may wrap the physical call.
 fn make_forward_body(ir: &mut IrFile, b: ExprId, call: ExprId) {
     match ir.exprs[b as usize].clone() {
+        // Before checked bottom completion was explicit, an existing tail return already held
+        // `call`. It may now hold `BottomValue(call)`: replace that semantic boundary just like a
+        // block value, because this frame forwards the physical CPS Object and its caller owns the
+        // resumed completion.
+        IrExpr::Return(Some(_)) => {
+            ir.exprs[b as usize] = IrExpr::Return(Some(call));
+        }
         IrExpr::Block {
             stmts,
             value: Some(_),
@@ -3285,6 +3292,14 @@ fn make_forward_body(ir: &mut IrFile, b: ExprId, call: ExprId) {
             let mut stmts = stmts;
             stmts.push(ir.add_expr(IrExpr::Return(Some(call))));
             ir.exprs[b as usize] = IrExpr::Block { stmts, value: None };
+        }
+        IrExpr::Block { stmts, value: None }
+            if stmts.last().is_some_and(|last| {
+                matches!(ir.exprs[*last as usize], IrExpr::Return(Some(_)))
+            }) =>
+        {
+            let last = *stmts.last().expect("guard proved a trailing return");
+            ir.exprs[last as usize] = IrExpr::Return(Some(call));
         }
         IrExpr::Block {
             mut stmts,

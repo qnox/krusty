@@ -51,8 +51,14 @@ pub(super) fn unwrap_suspend_cast(
             IrExpr::BottomValue {
                 producer,
                 completion: selected,
-            } if !ref_only && completion.is_none() => {
-                completion = Some(selected);
+            } => {
+                // A tail-forward must expose the physical suspend call so the caller's
+                // continuation owns completion. It deliberately returns the callee's Object
+                // result verbatim, so the checked bottom completion does not run in this frame.
+                // The state-machine path keeps the exact completion for its resume state.
+                if !ref_only && completion.is_none() {
+                    completion = Some(selected);
+                }
                 peeled = producer;
             }
             _ => break,
@@ -139,9 +145,20 @@ mod tests {
             suspension_completion(plain, false),
             SuspensionCompletion::default()
         );
+    }
 
-        let tail = unwrap_suspend_cast(&ir, fallthrough, &suspend_set, true);
-        assert_eq!(tail.point, fallthrough);
+    #[test]
+    fn tail_forward_exposes_the_call_without_claiming_its_bottom_completion() {
+        let mut ir = IrFile::with_package(None);
+        let point = ir.add_expr(IrExpr::UnitInstance);
+        ir.suspend_calls.insert(point, Ty::Nothing);
+        let wrapped = ir.add_expr(IrExpr::BottomValue {
+            producer: point,
+            completion: IrBottomValueCompletion::Diverge,
+        });
+
+        let tail = unwrap_suspend_cast(&ir, wrapped, &HashSet::new(), true);
+        assert_eq!(tail.point, point);
         assert_eq!(tail.completion, None);
     }
 }
