@@ -54,6 +54,9 @@ pub enum FirInlineBodyPlan {
     /// splices the checked lambda body into the resulting loop.
     ForEach {
         lambda_parameter: u32,
+        /// Whether the lambda takes the element's zero-based position before the element itself.
+        /// `forEachIndexed` is `forEach` plus that counter, and nothing else about the loop differs.
+        indexed: bool,
         iterator_ty: ResolvedTy,
         iterator: Box<FirIteratorCall>,
         has_next: Box<FirIteratorCall>,

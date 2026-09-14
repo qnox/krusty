@@ -743,9 +743,11 @@ impl BodyLowering<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn external_inline_for_each(
         &mut self,
         lambda_parameter: u32,
+        indexed: bool,
         iterator_ty: ResolvedTy,
         iterator: &crate::fir::FirIteratorCall,
         has_next: &crate::fir::FirIteratorCall,
@@ -796,7 +798,7 @@ impl BodyLowering<'_> {
             } => (impl_fn, captures, inline_body, arity as usize),
             _ => return None,
         };
-        if arity != 1 {
+        if arity != 1 + usize::from(indexed) {
             return None;
         }
 
@@ -833,6 +835,24 @@ impl BodyLowering<'_> {
             declaration_position..declaration_position,
             capture_declarations,
         );
+        // `forEachIndexed` declares the counter BEFORE the element, so its slot is claimed first and
+        // the element type is read from the parameter that follows it.
+        let index = indexed
+            .then(|| {
+                let index_type = *self
+                    .ir
+                    .functions
+                    .get(implementation as usize)?
+                    .params
+                    .get(formal_slots.len())?;
+                let index_slot = self.allocate_temporary();
+                formal_slots.push(index_slot);
+                Some((index_slot, index_type))
+            })
+            .flatten();
+        if indexed && index.is_none() {
+            return None;
+        }
         let element_type = *self
             .ir
             .functions
@@ -848,6 +868,18 @@ impl BodyLowering<'_> {
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
 
+        // The counter is a loop-carried local, so it is declared once, before the iterator.
+        if let Some((index_slot, index_type)) = index {
+            let zero = self
+                .ir
+                .add_expr(IrExpr::Const(IrConst::zero_for_value_type(index_type)));
+            statements.push(self.ir.add_expr(IrExpr::Variable {
+                index: index_slot,
+                ty: index_type,
+                init: Some(zero),
+                named: true,
+            }));
+        }
         let iterator_value = self.iterator_call(iterator, iterable).ok()?;
         let iterator_slot = self.allocate_temporary();
         let loop_label = format!("$fir_inline_foreach_{iterator_slot}");
@@ -871,10 +903,27 @@ impl BodyLowering<'_> {
             stmts: vec![element_declaration, inline_body],
             value: None,
         });
+        // The increment belongs in the loop's UPDATE, not at the end of the body: a
+        // `return@forEachIndexed` lowers to a `continue`, which jumps to the update, and an
+        // increment written after the body would be skipped by it — numbering every later element
+        // one short.
+        let update = index.map(|(index_slot, _)| {
+            let current = self.ir.add_expr(IrExpr::GetValue(index_slot));
+            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let next_index = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: crate::ir::IrBinOp::Add,
+                lhs: current,
+                rhs: one,
+            });
+            self.ir.add_expr(IrExpr::SetValue {
+                var: index_slot,
+                value: next_index,
+            })
+        });
         let loop_expression = self.ir.add_expr(IrExpr::While {
             cond: condition,
             body: loop_body,
-            update: None,
+            update,
             post_test: false,
             label: Some(loop_label),
         });

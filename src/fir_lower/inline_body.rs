@@ -44,6 +44,7 @@ impl BodyLowering<'_> {
         ) = match plan {
             crate::fir::FirInlineBodyPlan::ForEach {
                 lambda_parameter,
+                indexed,
                 iterator_ty,
                 iterator,
                 has_next,
@@ -51,6 +52,7 @@ impl BodyLowering<'_> {
             } => {
                 return self.external_inline_for_each(
                     *lambda_parameter,
+                    *indexed,
                     *iterator_ty,
                     iterator,
                     has_next,
