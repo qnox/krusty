@@ -1,14 +1,14 @@
-//! JVM realization of operations on declaration-owned reified type parameters.
+//! JVM realization of reified operations at declarations and call sites.
 //!
-//! Common IR retains the checked Kotlin operation and the exact semantic type-parameter identity.
-//! An emitted JVM inline method instead carries kotlinc-compatible marker instructions around the
-//! erased operation so either compiler can specialize it at an inline call site. This pass runs
-//! before generic erasure removes those identities from physical function signatures.
+//! Common IR retains checked Kotlin operations, substitutions, and exact semantic type-parameter
+//! identities. For a declaration, this module realizes those operations as kotlinc-compatible
+//! marker instructions before generic erasure. For a call site, it converts the checked semantic
+//! substitutions into the JVM classifier names consumed by the bytecode splicer.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
-use crate::types::{Ty, TypeName};
+use crate::types::{stored_value_ty, Ty, TypeName};
 
 #[derive(Clone)]
 struct ReifiedParameter {
@@ -44,6 +44,26 @@ fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&
         return None;
     };
     parameters.get(identity)
+}
+
+/// JVM class names for the checked reified substitutions attached to one call. Common IR retains
+/// semantic [`Ty`] values; the conversion to physical classifier names belongs here at the backend
+/// boundary. A `Unit` value uses its stored classifier form, just like every other value that a
+/// reified type-bearing instruction materializes.
+pub(super) fn splice_type_map(ir: &IrFile, expression: ExprId) -> HashMap<String, String> {
+    ir.reified_call_subst
+        .get(&expression)
+        .map(|substitutions| {
+            substitutions
+                .iter()
+                .filter_map(|(name, ty)| {
+                    let internal = stored_value_ty(*ty).kotlin_class_internal()?.render();
+                    let internal = super::jvm_class_map::to_jvm_internal(&internal);
+                    Some((name.clone(), internal.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn realize_expression_dag(
@@ -146,6 +166,24 @@ mod tests {
             param_checks: vec![],
         });
         ir.signatures.insert(0, reified_signature(identity));
+    }
+
+    #[test]
+    fn splice_type_map_uses_the_stored_unit_classifier() {
+        let expression = 7;
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(
+            expression,
+            vec![("T".to_owned(), Ty::Unit), ("R".to_owned(), Ty::String)],
+        );
+
+        assert_eq!(
+            splice_type_map(&ir, expression),
+            HashMap::from([
+                ("T".to_owned(), "kotlin/Unit".to_owned()),
+                ("R".to_owned(), "java/lang/String".to_owned()),
+            ])
+        );
     }
 
     #[test]

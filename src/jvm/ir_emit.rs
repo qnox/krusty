@@ -13955,34 +13955,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Attempt to splice a cross-module `inline fun`'s compiled body at the call site (the bytecode
-    /// inliner; the callee body comes from [`MethodBodies::body`]). Returns `true` if spliced; `false`
-    /// means the caller must report an inline backend gap rather than silently treating this as an
-    /// ordinary call-resolution fallback.
-    /// The reified type substitution (type-parameter name → JVM internal name) for the value expression
-    /// `e` being emitted, from [`IrFile::reified_call_subst`]. Empty for a call that isn't a
-    /// `<reified T>` classpath-extension splice — the common case. Fed to `splice_unified` so a
-    /// `reifiedOperationMarker`/`T::class` in the spliced body specializes to the concrete type.
-    fn reified_type_map(&self, e: u32) -> HashMap<String, String> {
-        self.ir
-            .reified_call_subst
-            .get(&e)
-            .map(|subst| {
-                subst
-                    .iter()
-                    .filter_map(|(name, ty)| {
-                        // `kotlin_class_internal` (not `obj_internal`): a reified type arg inferred from a
-                        // receiver arrives as a bare `Ty::Int`/`Ty::String` variant whose `obj_internal()`
-                        // is `None` — the boxed reified array element is `java/lang/Integer` etc.
-                        let internal = ty.kotlin_class_internal()?.render();
-                        let internal = crate::jvm::jvm_class_map::to_jvm_internal(&internal);
-                        Some((name.clone(), internal.to_string()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// Splice `owner.name` whose REAL (body-fetch) descriptor is `descriptor`, mapping the body's locals
     /// per `splice_desc`. For an ordinary static they are equal; for an INSTANCE inline method spliced
     /// through this path, `splice_desc` PREPENDS the receiver as the first parameter (`this` = local 0)
@@ -16784,7 +16756,7 @@ impl<'a> Emitter<'a> {
                         "resolve",
                         "emit static {owner}.{name}{descriptor} inline={inline:?}"
                     );
-                    let reified = self.reified_type_map(e);
+                    let reified = crate::jvm::reified_operations::splice_type_map(self.ir, e);
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
                     // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run

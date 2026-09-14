@@ -1526,3 +1526,6 @@ mod when_statement_value_arm_e2e;
 mod when_throwing_branch_e2e;
 #[path = "wrapped_param_type_e2e.rs"]
 mod wrapped_param_type_e2e;
+
+#[path = "reified_unit_splice_e2e.rs"]
+mod reified_unit_splice_e2e;

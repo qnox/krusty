@@ -2076,3 +2076,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   asserts krusty emitted the exact legal facade call, and compares the same consumer's `box()` result
   under kotlinc and krusty.
   `tests/non_reified_inline_splice_fallback_e2e.rs`.
+- **A reified type argument of `Unit` reaches the splicer (fix).** A reified `inline fun` is spliced
+  by specializing its `reifiedOperationMarker` against the call's type arguments; with none to
+  specialize the splice declines, and a `MustInline` callee then bails the whole FILE. That map was
+  built by asking each argument for its class name, and `Unit` — unlike `Int` or `String` — has no
+  `Obj` spelling, so it was silently dropped and the map went EMPTY, which reads as "this call
+  supplied no reified arguments". `suspend fun f(): Unit = response.body()` therefore failed while
+  the identical call at any other result type spliced fine.
+  `tests/reified_unit_splice_e2e.rs::a_reified_unit_result_still_splices`,
+  `a_reified_reference_result_still_splices`.
