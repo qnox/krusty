@@ -3520,11 +3520,8 @@ impl BodyFirChecker<'_> {
                 } else {
                     None
                 };
-                // `c++` where `c` is a MEMBER property of the enclosing classifier is neither a local
-                // nor a capture; the checker resolved it through the implicit receiver and recorded
-                // the write target. The updated value is discarded here, but the prefix/postfix
-                // distinction still survives: `++c` re-reads the property after the write, and for
-                // a property with a custom getter that read is an observable call.
+                // A member property reached through an implicit receiver has no local/capture slot.
+                // Although discarded, `++c` re-reads it; a custom getter makes that observable.
                 if target.is_none() && captured.is_none() && class_storage.is_none() {
                     // `field++` inside a property accessor. The checker records the backing-field
                     // write; read and write both address the enclosing property's storage directly,
