@@ -164,6 +164,18 @@ pub fn emit_analyzed<B: Backend>(
     } = streamed;
     if diagnostic_recovery || diags.has_errors() {
         recover_pass_two_diagnostics(&reparse_sources, &mut symbols, module, diags);
+        // Recovery exists to attribute a Pass-1 signature failure to the source that caused it.
+        // When it attributes nothing, the compilation is still a failure — there is no module to
+        // emit — and reporting it as one is the only honest answer. Returning an empty artifact
+        // list instead made the driver print a successful run that wrote no class file at all, so
+        // a module that failed to compile was indistinguishable from one that compiled.
+        if !diags.has_errors() {
+            diags.error(
+                Span::new(0, 0),
+                "internal error: module signatures were not finalized and no source diagnostic \
+                 explains it",
+            );
+        }
         return Vec::new();
     }
     debug_assert!(
@@ -3537,6 +3549,39 @@ mod tests {
             .iter()
             .any(|(path, _)| path == "AnonymousAccessorCaptureKt.class"));
         assert!(outputs.iter().any(|(path, _)| path.contains("build$1")));
+    }
+
+    /// A Pass-1 signature failure that diagnostic recovery cannot attribute to any source is still
+    /// a failed compilation. Reporting it as a success left the driver printing a clean run that
+    /// wrote no class file, so a module that failed to compile was indistinguishable from one that
+    /// compiled and happened to declare nothing.
+    #[test]
+    fn an_unattributed_signature_failure_is_reported_rather_than_silently_empty() {
+        let mut diags = DiagSink::new();
+        let symbols = collect_signatures(&[], &mut diags).into_pass_two_symbols();
+        let analysis = crate::frontend::StreamingSourceSetAnalysis {
+            symbols,
+            // No source to re-check means recovery has nothing it can blame, which is exactly the
+            // state that used to slip through.
+            reparse_sources: Vec::new(),
+            streamed: Some(crate::frontend::StreamedPassState {
+                module: crate::fir::FrontendModule::new(
+                    crate::fir::ResolvedModuleIndex::default(),
+                    crate::fir::InlineBodyStore::default(),
+                    crate::fir::DefaultArgumentStore::default(),
+                    crate::fir::SourceMap::default(),
+                ),
+                diagnostic_recovery: true,
+            }),
+        };
+
+        let outputs = emit_analyzed(analysis, &[], &RecordingBackend, "main", &mut diags);
+
+        assert!(outputs.is_empty(), "a failed module emits nothing");
+        assert!(
+            diags.has_errors(),
+            "an unattributed signature failure must be reported"
+        );
     }
 
     #[test]

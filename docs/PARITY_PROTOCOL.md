@@ -2142,3 +2142,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/nullable_function_parameter_lambda_e2e.rs::a_lambda_literal_fits_a_nullable_function_parameter`,
   `a_defaulted_nullable_function_parameter_still_selects`, `a_nullable_sam_parameter_still_converts`,
   `a_nullable_non_function_parameter_still_rejects_a_lambda`.
+- **A signature failure recovery cannot attribute is reported (fix).** A Pass-1 signature failure
+  puts the module into diagnostic recovery, whose job is to attribute the failure to the source that
+  caused it. When it attributed nothing the empty artifact list was returned with an empty diagnostic
+  sink, so the driver printed a successful run that wrote no class file at all — a module that failed
+  to compile was indistinguishable from one that compiled, both to a person reading the output and to
+  any harness counting diagnostics. Measured on a private corpus, eight whole modules were passing
+  this way.
+  `src/compiler.rs::tests::an_unattributed_signature_failure_is_reported_rather_than_silently_empty`.
