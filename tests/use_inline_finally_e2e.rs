@@ -16,18 +16,23 @@ fn run(src: &str) -> String {
 
 const RESOURCE: &str = "class Probe : java.io.Closeable {\n\
     \x20   var closed = 0\n\
-    \x20   override fun close() { closed++ }\n\
+    \x20   val events = mutableListOf<String>()\n\
+    \x20   override fun close() { events += \"close\"; closed++ }\n\
     }\n";
 
 fn suspending_use_source() -> String {
     format!(
         "import kotlinx.coroutines.runBlocking\n\
         {RESOURCE}\
-        suspend fun load(key: String): String = key.uppercase()\n\
+        suspend fun load(key: String, events: MutableList<String>): String {{\n\
+        \x20   events += \"body\"\n\
+        \x20   return key.uppercase()\n\
+        }}\n\
         fun box(): String = runBlocking {{\n\
         \x20   val probe = Probe()\n\
-        \x20   val r = probe.use {{ load(\"ok\") }}\n\
-        \x20   if (r == \"OK\" && probe.closed == 1) \"OK\" else \"F:$r/${{probe.closed}}\"\n\
+        \x20   val r = probe.use {{ load(\"ok\", probe.events) }}\n\
+        \x20   if (r == \"OK\" && probe.closed == 1 && probe.events == listOf(\"body\", \"close\")) \"OK\"\n\
+        \x20   else \"F:$r/${{probe.closed}}/${{probe.events}}\"\n\
         }}\n"
     )
 }
@@ -39,7 +44,7 @@ fn use_hosts_a_suspension_in_its_lambda() {
 }
 
 #[test]
-fn kotlinc_and_krusty_accept_the_suspend_use_fixture() {
+fn kotlinc_and_krusty_run_suspend_use_identically() {
     let source_text = suspending_use_source();
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
@@ -62,17 +67,22 @@ fn kotlinc_and_krusty_accept_the_suspend_use_fixture() {
     ])
     .expect("reference kotlinc available");
     assert_eq!(code, 0, "kotlinc must accept the runtime fixture: {stderr}");
-    assert!(
-        common::compile_in_process(
-            &source_text,
-            "SuspendInlineUse",
-            &[stdlib, coroutines],
-            Some(jdk.as_path()),
-        )
-        .is_some(),
-        "krusty must accept the same runtime fixture as kotlinc",
-    );
+    let reference_result = common::run_box(
+        &[],
+        "SuspendInlineUseKt",
+        &[output.clone(), stdlib, coroutines, jdk],
+    )
+    .expect("run kotlinc-built suspend-use fixture");
+    let krusty_result = run(&source_text);
     let _ = std::fs::remove_dir_all(reference);
+    assert_eq!(
+        reference_result, "OK",
+        "the oracle must exercise body-before-close order"
+    );
+    assert_eq!(
+        krusty_result, reference_result,
+        "box() result and event order must match kotlinc"
+    );
 }
 
 #[test]
