@@ -1,6 +1,56 @@
 use super::test_support::{checked_function_body, root_expression};
 use super::*;
 
+#[derive(Default)]
+struct StreamedBodySink(Vec<FirBody>);
+
+impl CheckedBodySink for StreamedBodySink {
+    fn accept_finalized(&mut self, _owner: BodyOwnerId, body: FirBody) {
+        self.0.push(body);
+    }
+}
+
+fn checked_streamed_bodies(source: &str) -> (ResolvedModuleIndex, Vec<FirBody>) {
+    let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("FirLocalCapture")];
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(crate::libraries::EmptySymbolSource),
+        &crate::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let (mut index, mut inline_bodies, _defaults, mut sources) = streamed.module.into_parts();
+    let info = analysis.types[0].as_ref().expect("checked source");
+    crate::resolve::publish_checked_local_signatures(
+        &analysis.files[0],
+        SourceFileId::from_raw(0),
+        &mut analysis.symbols,
+        info,
+        &mut index,
+    )
+    .expect("local signatures must publish before FIR body checking");
+    let mut session = BodyCheckSession::default();
+    let mut sink = StreamedBodySink::default();
+    for work in ordinary {
+        super::driver::check_and_dispatch_bound_body_in_session(
+            &analysis.files[0],
+            info,
+            SourceFileId::from_raw(0),
+            work,
+            &index,
+            sources.origins_mut(),
+            &mut inline_bodies,
+            &mut sink,
+            &mut session,
+        )
+        .expect("local bodies must become checked FIR");
+    }
+    (index, sink.0)
+}
+
 fn production_frontend_ok(source: &str) {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("FirLocalClass")];
     let mut diagnostics = crate::diag::DiagSink::new();
@@ -141,6 +191,45 @@ fn local_class_declaration_keeps_stable_identity_and_ordered_capture_sources() {
         &capture.source,
         FirLocalClassCaptureSource::Value(_)
     ));
+}
+
+#[test]
+fn anonymous_super_argument_carries_the_constructor_prefix_capture_in_fir() {
+    let (index, bodies) = checked_streamed_bodies(
+        "interface Callback { fun invoke(): String }\n\
+         open class Base(val fn: Callback)\n\
+         fun box(): String {\n\
+             val ok = \"OK\"\n\
+             class Local : Base(object : Callback { override fun invoke() = ok })\n\
+             return Local().fn.invoke()\n\
+         }\n",
+    );
+    let captures = bodies
+        .iter()
+        .flat_map(|body| {
+            (0..body.expression_count()).filter_map(move |raw| {
+                let FirExprKind::AnonymousObject(object) =
+                    &body.expr(FirExprId::from_raw(raw as u32))?.kind
+                else {
+                    return None;
+                };
+                object.captures.first().map(|capture| (body, capture))
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(body, capture)] = captures.as_slice() else {
+        panic!("one anonymous super-argument capture expected: {captures:?}")
+    };
+    let FirLocalClassCaptureSource::ConstructorCapture { owner, field } = &capture.source else {
+        panic!("constructor-prefix capture expected: {capture:?}")
+    };
+    let constructor = DeclarationId::from_raw(body.owner().raw());
+    let anchor = index
+        .declaration_anchor(constructor)
+        .expect("capturing body must retain its constructor declaration");
+    assert_eq!(anchor.kind, DeclarationKind::Constructor);
+    assert_eq!(anchor.owner, Some(*owner));
+    assert_eq!(*field, 0);
 }
 
 #[test]

@@ -312,3 +312,27 @@ fn property_initializer_captures_same_named_enclosing_value() {
          }\n",
     );
 }
+
+#[test]
+fn anonymous_object_in_a_super_constructor_argument_reads_the_constructor_capture() {
+    const SOURCE: &str = "interface Callback { fun invoke(): String }\n\
+         open class Base(val fn: Callback)\n\
+         fun box(): String {\n\
+         val ok = \"OK\"\n\
+         class Local : Base(object : Callback { override fun invoke() = ok })\n\
+         return Local().fn.invoke() }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonInSuperArgument", SOURCE);
+}
+
+#[test]
+fn nested_anonymous_objects_in_a_super_constructor_argument_read_the_constructor_capture() {
+    const SOURCE: &str = "interface Callback { fun invoke(): String }\n\
+         open class Base(val fn: Callback) : Callback { override fun invoke() = fn.invoke() }\n\
+         fun box(): String {\n\
+         val ok = \"OK\"\n\
+         class Local : Base(object : Base(object : Callback { override fun invoke() = ok }) {})\n\
+         return Local().fn.invoke() }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("NestedAnonInSuperArgument", SOURCE);
+}

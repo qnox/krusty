@@ -1325,6 +1325,7 @@ fn nested_anonymous_super_argument_retains_its_enclosing_instance_receiver() {
                                 (counts.0 + 1, counts.1)
                             }
                             FirLocalClassCaptureSource::ClassStorage { .. }
+                            | FirLocalClassCaptureSource::ConstructorCapture { .. }
                             | FirLocalClassCaptureSource::CapturedClassStorage { .. } => {
                                 (counts.0, counts.1 + 1)
                             }
@@ -1340,8 +1341,7 @@ fn nested_anonymous_super_argument_retains_its_enclosing_instance_receiver() {
         .fold((0usize, 0usize), |total, counts| {
             (total.0 + counts.0, total.1 + counts.1)
         });
-    assert_eq!(dispatch_captures, 1);
-    assert_eq!(forwarded_storage_captures, 1);
+    assert_eq!([dispatch_captures, forwarded_storage_captures], [1, 1]);
 
     fn captured_property_write_count(body: &FirBody, index: &ResolvedModuleIndex) -> usize {
         (0..body.expression_count())
