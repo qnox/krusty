@@ -111,11 +111,11 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let capture = self
             .capture_slots
-            .get(&(enclosing_depth, source))
+            .get(&(enclosing_depth, crate::fir::FirCaptureSource::Value(source)))
             .copied()
             .ok_or(FirLoweringFailure::MissingCapture {
                 enclosing_depth,
-                source,
+                source: crate::fir::FirCaptureSource::Value(source),
             })?;
         let holder = self.ir.add_expr(IrExpr::GetValue(capture.slot));
         if capture.shared_cell {
@@ -135,16 +135,16 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let capture = self
             .capture_slots
-            .get(&(enclosing_depth, source))
+            .get(&(enclosing_depth, crate::fir::FirCaptureSource::Value(source)))
             .copied()
             .ok_or(FirLoweringFailure::MissingCapture {
                 enclosing_depth,
-                source,
+                source: crate::fir::FirCaptureSource::Value(source),
             })?;
         if !capture.shared_cell {
             return Err(FirLoweringFailure::MissingCapture {
                 enclosing_depth,
-                source,
+                source: crate::fir::FirCaptureSource::Value(source),
             });
         }
         Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)))
@@ -690,8 +690,26 @@ impl BodyLowering<'_> {
                 let depth = callable_depth
                     .checked_add(capture.enclosing_depth)
                     .expect("capture depth overflow");
+                // A constructor-prefix capture never names a value slot: at depth 0 it is the
+                // enclosing constructor's own prefix parameter, and deeper it is this callable's
+                // captured copy of it, found by the same key as any other capture.
+                if depth == 0 {
+                    if let crate::fir::FirCaptureSource::ConstructorPrefix { owner, field } =
+                        capture.source
+                    {
+                        return self.constructor_capture_parameter(owner, field);
+                    }
+                }
                 let slot = if depth == 0 {
-                    self.value_slot(capture.source)
+                    self.value_slot(
+                        capture
+                            .source
+                            .value()
+                            .ok_or(FirLoweringFailure::MissingCapture {
+                                enclosing_depth: depth,
+                                source: capture.source,
+                            })?,
+                    )
                 } else {
                     self.capture_slots
                         .get(&(depth - 1, capture.source))
@@ -1096,7 +1114,12 @@ fn local_function_debug_parameter_names(enclosing: &FirBody, body: &FirBody) -> 
         .enumerate()
         .map(|(ordinal, capture)| {
             (capture.enclosing_depth == 0)
-                .then(|| enclosing.debug_value_name(capture.source))
+                .then(|| {
+                    capture
+                        .source
+                        .value()
+                        .and_then(|source| enclosing.debug_value_name(source))
+                })
                 .flatten()
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("$capture{ordinal}"))

@@ -88,7 +88,7 @@ use super::{
     FirAdaptedReferenceArgument, FirAnnotationConstruction, FirAnnotationDefaultValue,
     FirAnonymousObject, FirArrayElement, FirBinaryOperation, FirBody, FirBuiltinIterableKind,
     FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
-    FirCallableReferenceTarget, FirCapture, FirCatch, FirClassifierProperty, FirConstant,
+    FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirCatch, FirClassifierProperty, FirConstant,
     FirConstructorCall, FirConstructorCaptureArgument, FirConstructorTarget, FirControlTarget,
     FirControlTargetKind, FirConversion, FirConversionKind, FirConvertedValue, FirDefaultValue,
     FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr, FirExprId,
@@ -1641,7 +1641,7 @@ impl BodyFirChecker<'_> {
             self.body.add_capture(FirCapture {
                 origin: cause,
                 enclosing_depth,
-                source: binding.value,
+                source: FirCaptureSource::Value(binding.value),
                 ty: binding.ty,
                 shared_cell: true,
             });
@@ -2024,7 +2024,7 @@ impl BodyFirChecker<'_> {
                         self.body.add_capture(FirCapture {
                             origin,
                             enclosing_depth,
-                            source: source.value,
+                            source: FirCaptureSource::Value(source.value),
                             ty: source.ty,
                             shared_cell: false,
                         });
@@ -3328,7 +3328,7 @@ impl BodyFirChecker<'_> {
                     self.body.add_capture(FirCapture {
                         origin,
                         enclosing_depth,
-                        source: binding.value,
+                        source: FirCaptureSource::Value(binding.value),
                         ty: binding.ty,
                         shared_cell: true,
                     });
@@ -3642,7 +3642,7 @@ impl BodyFirChecker<'_> {
                     self.body.add_capture(FirCapture {
                         origin,
                         enclosing_depth,
-                        source: binding.value,
+                        source: FirCaptureSource::Value(binding.value),
                         ty: binding.ty,
                         shared_cell: true,
                     });

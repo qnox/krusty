@@ -7473,3 +7473,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::an_anonymous_object_in_a_lambda_forwards_the_shared_cell`,
   `::an_anonymous_object_in_a_local_class_forwards_the_shared_cell`, and
   `::an_anonymous_object_two_callables_deep_writes_through_the_shared_cell` (the write direction).
+
+- **A lambda written in a super-constructor argument takes the capture as a PARAMETER, not off
+  `this`.** `class Local(k: String) : Base({ o + k })` — the lambda's capture values are bound at
+  the construction site, inside the constructor prefix, where the instance does not exist. krusty
+  checked the lambda body with the prefix rule cleared, so `o` came back as a class-storage read
+  through a captured implicit receiver: the lambda captured the uninitialized `this` and read the
+  field off it (`VerifyError: Type uninitializedThis is not assignable to 'box$Local'`). The prefix
+  rule now follows the lambda in — and only a lambda: every other nested body (a local function, a
+  local class, an anonymous object's own members) clears it, because those do not run inside the
+  prefix. The capture it needs is carried in as one more capture parameter, so `FirCapture::source`
+  became [`FirCaptureSource`]: a value slot of the enclosing body, or the enclosing constructor's
+  synthetic prefix parameter. Nothing else about captures changed — the same forwarding, merging and
+  shared-cell upgrade machinery carries the new source outward through nested lambdas unchanged.
+  The same rule extends to the enclosing-INSTANCE capture of a local or anonymous class declared in
+  the argument, which had the identical defect one level up.
+  Tests: `tests/super_argument_capture_e2e.rs` (a captured local, an enclosing property, a lambda
+  inside a lambda, two lambdas sharing one capture, a write through a shared cell, an enclosing
+  instance reached from a nested anonymous object, and a call to an enclosing local function),
+  and `fir::body_check::driver_tests::nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix`
+  for the checked shape. Corpus: eight of the eleven red cases under
+  `closures/captureInSuperConstructorCall`, plus `super/kt4173_2.kt`.

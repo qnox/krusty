@@ -1354,11 +1354,14 @@ impl BodyLowering<'_> {
             } => {
                 let capture = self
                     .capture_slots
-                    .get(&(*enclosing_depth, *source))
+                    .get(&(
+                        *enclosing_depth,
+                        crate::fir::FirCaptureSource::Value(*source),
+                    ))
                     .copied()
                     .ok_or(FirLoweringFailure::MissingCapture {
                         enclosing_depth: *enclosing_depth,
-                        source: *source,
+                        source: crate::fir::FirCaptureSource::Value(*source),
                     })?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 if capture.shared_cell {
@@ -1740,6 +1743,18 @@ impl BodyLowering<'_> {
         owner: crate::fir::DeclarationId,
         field: u32,
     ) -> Result<ExprId, FirLoweringFailure> {
+        // Inside a callable NESTED in the constructor prefix the parameter is not in scope; the
+        // nested callable captured it, and the captured copy is this body's own parameter. The
+        // capture's enclosing depth is how far the constructor is from HERE, which the read itself
+        // does not spell — one body captures one prefix parameter once, so its source identifies it.
+        let source = crate::fir::FirCaptureSource::ConstructorPrefix { owner, field };
+        if let Some(capture) = self
+            .capture_slots
+            .iter()
+            .find_map(|((_, captured), slot)| (*captured == source).then_some(*slot))
+        {
+            return Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)));
+        }
         let declaration = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
         let valid_owner = self
             .index

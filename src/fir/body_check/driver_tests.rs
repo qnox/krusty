@@ -1260,7 +1260,7 @@ fn local_class_inside_setter_keeps_enclosing_backing_field_identity() {
 }
 
 #[test]
-fn nested_anonymous_super_argument_retains_its_enclosing_instance_receiver() {
+fn nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix() {
     let source = "open class X(val fn: () -> Unit)\n\
                   open class C(val x: X)\n\
                   class B(var value: Int) {\n\
@@ -1357,10 +1357,12 @@ fn nested_anonymous_super_argument_retains_its_enclosing_instance_receiver() {
                         dispatch_receiver: Some(receiver),
                         ..
                     } => {
-                        let Some(FirExprKind::CapturedClassStorageRead {
+                        // The lambda writing `value` sits in the anonymous `X` subclass's SUPER
+                        // ARGUMENT, so the enclosing `B` it writes through comes off that
+                        // constructor's synthetic prefix parameter — never off a `this` that does
+                        // not exist yet.
+                        let Some(FirExprKind::ConstructorCaptureRead {
                             owner,
-                            receiver,
-                            path,
                             field: 0,
                             shared_cell: false,
                         }) = body.expr(receiver.value).map(|expression| &expression.kind)
@@ -1368,24 +1370,13 @@ fn nested_anonymous_super_argument_retains_its_enclosing_instance_receiver() {
                             return 0;
                         };
                         usize::from(
-                            path.is_empty()
-                                && index.declaration_header(*owner).is_some_and(|header| {
-                                    header.flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
-                                })
-                                && index
-                                    .declaration_anchor(*owner)
-                                    .and_then(|anchor| anchor.owner)
-                                    .and_then(|owner| index.declaration_name(owner))
-                                    == Some("update")
-                                && matches!(
-                                    body.expr(*receiver).map(|expression| &expression.kind),
-                                    Some(FirExprKind::CapturedImplicitReceiver {
-                                        enclosing_depth: 0,
-                                        current: true,
-                                        depth: 0,
-                                        path,
-                                    }) if path.is_empty()
-                                ),
+                            index.declaration_header(*owner).is_some_and(|header| {
+                                header.flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
+                            }) && index
+                                .declaration_anchor(*owner)
+                                .and_then(|anchor| anchor.owner)
+                                .and_then(|owner| index.declaration_name(owner))
+                                == Some("update"),
                         )
                     }
                     FirExprKind::Lambda { body, .. } => captured_property_write_count(body, index),

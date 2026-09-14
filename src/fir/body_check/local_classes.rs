@@ -231,7 +231,7 @@ impl BodyFirChecker<'_> {
                         self.body.add_capture(FirCapture {
                             origin,
                             enclosing_depth,
-                            source: binding.value,
+                            source: FirCaptureSource::Value(binding.value),
                             ty: binding.ty,
                             shared_cell: required.shared_cell,
                         });
@@ -559,12 +559,35 @@ impl BodyFirChecker<'_> {
                 == Some(owner)
     }
 
+    /// Carry a constructor-prefix capture into the callable that reads it.
+    ///
+    /// In the constructor body itself the synthetic prefix parameter is already in scope and there
+    /// is nothing to capture. A lambda nested in the prefix has no access to it, so it takes the
+    /// value as one more capture parameter, bound at the construction site from that parameter.
+    /// Only lambda frames can lie between the two: every other nested body clears the prefix rule.
+    fn capture_constructor_prefix(&mut self, binding: ClassCaptureBinding, origin: OriginId) {
+        let Some(enclosing_depth) = self.nested_body_depth.checked_sub(1) else {
+            return;
+        };
+        self.body.add_capture(FirCapture {
+            origin,
+            enclosing_depth,
+            source: FirCaptureSource::ConstructorPrefix {
+                owner: binding.owner,
+                field: binding.field,
+            },
+            ty: binding.ty,
+            shared_cell: binding.shared_cell,
+        });
+    }
+
     pub(super) fn class_storage_read_kind(
         &mut self,
         binding: ClassCaptureBinding,
         origin: OriginId,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         if self.reads_constructor_prefix_capture(binding.owner, binding.enclosing_depth) {
+            self.capture_constructor_prefix(binding, origin);
             return Ok(FirExprKind::ConstructorCaptureRead {
                 owner: binding.owner,
                 field: binding.field,
@@ -608,6 +631,7 @@ impl BodyFirChecker<'_> {
         conversion: Option<FirConversion>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         if self.reads_constructor_prefix_capture(binding.owner, binding.enclosing_depth) {
+            self.capture_constructor_prefix(binding, origin);
             return Ok(FirExprKind::ConstructorCaptureSharedWrite {
                 owner: binding.owner,
                 field: binding.field,
@@ -678,7 +702,7 @@ impl BodyFirChecker<'_> {
                             self.body.add_capture(FirCapture {
                                 origin,
                                 enclosing_depth: depth,
-                                source: storage.value,
+                                source: FirCaptureSource::Value(storage.value),
                                 ty: storage.ty,
                                 shared_cell: false,
                             });
@@ -725,7 +749,7 @@ impl BodyFirChecker<'_> {
                             self.body.add_capture(FirCapture {
                                 origin,
                                 enclosing_depth,
-                                source: binding.value,
+                                source: FirCaptureSource::Value(binding.value),
                                 ty: binding.ty,
                                 shared_cell: false,
                             });
@@ -865,7 +889,15 @@ impl BodyFirChecker<'_> {
                         .class_receiver_binding_at(depth)
                         .filter(|binding| binding.ty == ty)
                     {
-                        if let Some((receiver, path)) =
+                        if self.reads_constructor_prefix_capture(
+                            binding.owner,
+                            binding.enclosing_depth,
+                        ) {
+                            FirLocalClassCaptureSource::ConstructorCapture {
+                                owner: binding.owner,
+                                field: binding.field,
+                            }
+                        } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
                             FirLocalClassCaptureSource::CapturedClassStorage {
@@ -920,7 +952,15 @@ impl BodyFirChecker<'_> {
                         .class_receiver_binding_at(depth)
                         .filter(|binding| binding.ty == ty)
                     {
-                        if let Some((receiver, path)) =
+                        if self.reads_constructor_prefix_capture(
+                            binding.owner,
+                            binding.enclosing_depth,
+                        ) {
+                            FirLocalClassCaptureSource::ConstructorCapture {
+                                owner: binding.owner,
+                                field: binding.field,
+                            }
+                        } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
                             FirLocalClassCaptureSource::CapturedClassStorage {

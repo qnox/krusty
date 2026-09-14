@@ -900,9 +900,35 @@ pub struct FirDefaultValue {
 pub struct FirCapture {
     pub origin: OriginId,
     pub enclosing_depth: u32,
-    pub source: LocalValueId,
+    pub source: FirCaptureSource,
     pub ty: ResolvedTy,
     pub shared_cell: bool,
+}
+
+/// Where a nested callable's capture is read from in the body that supplies it.
+///
+/// Almost every capture names a value slot of the enclosing body. The exception is a capture
+/// reached while a CONSTRUCTOR PREFIX is in scope — a superclass or sibling-constructor argument,
+/// or a constructor default. There the instance does not exist yet, so the enclosing class's
+/// capture is only reachable through the constructor's synthetic prefix parameter; reading it off
+/// the storage would load it from a `this` the JVM verifier will not let you touch, and that a
+/// target without a verifier answers with a zero.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FirCaptureSource {
+    /// A value slot of the enclosing body.
+    Value(LocalValueId),
+    /// The enclosing constructor's synthetic prefix parameter for `owner`'s capture field.
+    ConstructorPrefix { owner: DeclarationId, field: u32 },
+}
+
+impl FirCaptureSource {
+    /// The enclosing value slot, when this capture names one.
+    pub fn value(self) -> Option<LocalValueId> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::ConstructorPrefix { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2435,6 +2461,7 @@ impl FirBody {
         shared.extend(self.captures.iter().filter_map(|capture| {
             (capture.enclosing_depth == ancestor_depth && capture.shared_cell)
                 .then_some(capture.source)
+                .and_then(FirCaptureSource::value)
         }));
         let nested_depth = ancestor_depth
             .checked_add(1)
@@ -2457,7 +2484,12 @@ impl FirBody {
         shared: &std::collections::HashSet<LocalValueId>,
     ) {
         for capture in &mut self.captures {
-            if capture.enclosing_depth == ancestor_depth && shared.contains(&capture.source) {
+            if capture.enclosing_depth == ancestor_depth
+                && capture
+                    .source
+                    .value()
+                    .is_some_and(|source| shared.contains(&source))
+            {
                 capture.shared_cell = true;
             }
         }
