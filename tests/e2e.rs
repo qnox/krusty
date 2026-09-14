@@ -840,6 +840,8 @@ mod ksp_provision_e2e;
 mod labeled_expression_e2e;
 #[path = "labeled_lambda_return_e2e.rs"]
 mod labeled_lambda_return_e2e;
+#[path = "labeled_lambda_return_expected_e2e.rs"]
+mod labeled_lambda_return_expected_e2e;
 #[path = "labeled_receiver_lambda_e2e.rs"]
 mod labeled_receiver_lambda_e2e;
 #[path = "labeled_super_e2e.rs"]
@@ -1048,6 +1050,8 @@ mod nothing_nullable_e2e;
 mod nothing_nullable_join_e2e;
 #[path = "nullable_cast_e2e.rs"]
 mod nullable_cast_e2e;
+#[path = "nullable_function_parameter_lambda_e2e.rs"]
+mod nullable_function_parameter_lambda_e2e;
 #[path = "nullable_function_type_e2e.rs"]
 mod nullable_function_type_e2e;
 #[path = "nullable_primitive_box_e2e.rs"]

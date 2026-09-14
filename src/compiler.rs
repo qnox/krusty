@@ -1,5 +1,6 @@
 //! Compiler orchestration.
 
+mod diagnostic_recovery;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
@@ -8,123 +9,7 @@ use crate::ast::File;
 pub use crate::backend::{Artifact, Backend};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::{check_source_set, CheckedFile, FrontendSymbols, StreamingSourceSetAnalysis};
-
-/// Complete diagnostics for an invalid module during the normal second source pass. A failed
-/// signature prevents checked FIR publication, but it must not suppress independent diagnostics in
-/// ordinary bodies. The ordinary checker is still the sole semantic authority; this path only
-/// discards its AST-keyed result immediately and never invokes common lowering or a backend.
-fn recover_pass_two_diagnostics(
-    reparse_sources: &[crate::frontend::ReparseSource],
-    symbols: &mut crate::resolve::PassTwoSymbols,
-    module: crate::fir::FrontendModule,
-    diags: &mut DiagSink,
-) {
-    let (index, _, _, _) = module.into_parts();
-    for (raw_source, source) in reparse_sources.iter().enumerate() {
-        if source.is_java() {
-            continue;
-        }
-        let source_id = crate::fir::SourceFileId::from_raw(raw_source as u32);
-        diags.set_file(raw_source as u32);
-        let streamed_cache = crate::fir::StreamedModuleProjectionCache::default();
-        let mut declaration_cursor = crate::fir::ActiveSourceCursor::new(source_id, &index);
-        source.visit_diagnostic_units(diags, |active_file, diags| {
-            let active = match declaration_cursor.bind_next(&active_file, source_id, &index) {
-                Ok(active) => active,
-                Err(error) => {
-                    crate::trace_compiler!(
-                        "fir",
-                        "diagnostic Pass 2 could not bind declaration unit: {error:?}",
-                    );
-                    return;
-                }
-            };
-            check_active_diagnostic_unit(
-                &active_file,
-                raw_source,
-                source_id,
-                &active,
-                symbols,
-                &index,
-                &streamed_cache,
-                diags,
-            );
-        });
-    }
-    // Pass 1 may already have reported a header/signature occurrence that the authoritative body
-    // check sees again. Collapse across the complete compilation diagnostic stream, not merely the
-    // newly appended suffix, so recovery never duplicates that exact source error.
-    diags.collapse_duplicates_from(0);
-    diags.sort_source_order();
-}
-
-/// Check one invalid module's complete live declaration unit without publishing FIR or mutating
-/// stable signatures. Header-only errors and ordinary-body errors are equally observable here; all
-/// selection/binding state refers only to the parser arena owned by this callback.
-#[allow(clippy::too_many_arguments)]
-fn check_active_diagnostic_unit(
-    active_file: &File,
-    raw_source: usize,
-    source_id: crate::fir::SourceFileId,
-    active: &crate::fir::ActiveSourceDeclarations,
-    symbols: &mut crate::resolve::PassTwoSymbols,
-    index: &crate::fir::ResolvedModuleIndex,
-    streamed_cache: &crate::fir::StreamedModuleProjectionCache,
-    diags: &mut DiagSink,
-) {
-    let diagnostics_start = diags.diags.len();
-    let declarations = index
-        .source_inventory(source_id)
-        .iter()
-        .copied()
-        .filter_map(|declaration| {
-            active
-                .span(active_file, declaration)
-                .map(|span| (declaration, span))
-        })
-        .collect::<Vec<_>>();
-    let selected_roots = declarations
-        .iter()
-        .filter(|(declaration, _)| {
-            index
-                .declaration_anchor(*declaration)
-                .is_some_and(|anchor| anchor.owner.is_none())
-        })
-        .map(|(_, span)| *span)
-        .collect::<std::collections::HashSet<_>>();
-    let selected_bodies = declarations
-        .iter()
-        .map(|(_, span)| *span)
-        .collect::<std::collections::HashSet<_>>();
-    let selected_stable_bodies = declarations
-        .iter()
-        .map(|(declaration, _)| *declaration)
-        .collect::<std::collections::HashSet<_>>();
-    let anonymous_captures = crate::resolve::discover_anonymous_object_captures_in_pass_two_file(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
-        active,
-        &selected_stable_bodies,
-        symbols,
-        index,
-    );
-    drop(crate::resolve::check_selected_declarations_in_pass_two(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
-        active,
-        &selected_stable_bodies,
-        symbols,
-        index,
-        streamed_cache,
-        &anonymous_captures,
-        diags,
-    ));
-    diags.collapse_duplicates_from(diagnostics_start);
-}
+use diagnostic_recovery::recover_pass_two_diagnostics;
 
 /// Consume the production source-set analysis and require its finalized streaming Pass-1 product
 /// before any backend lowering starts.
