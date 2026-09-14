@@ -46,6 +46,7 @@ mod local_class_scope;
 mod local_method_dependencies;
 mod override_plans;
 mod postponed_diagnostics;
+mod safe_call_flow;
 mod sam_constructors;
 mod scope;
 mod source_constructors;
@@ -20952,6 +20953,8 @@ struct Local {
     /// Ephemeral identity of the runtime lexical value during one resolver check. Narrowing
     /// shadows copy it; fresh declarations allocate another. It never enters TypeInfo or FIR.
     lexical_capture_identity: Option<u32>,
+    /// Immutable origin identity implied by this safe-call result; follows lexical shadowing.
+    safe_call_origin: Option<safe_call_flow::BindingIdentity>,
 }
 
 /// The per-argument view of a call site used during overload scoring: the argument expressions,
@@ -33597,6 +33600,11 @@ impl<'a> Checker<'a> {
                 format!("krusty: conflicting local declaration '{name}'"),
             );
         }
+        // Keep the implication on the result's eventual binding, but resolve its origin before the
+        // result is declared: `val x = x?.p` refers to the OUTER `x` on the right-hand side.
+        // The bounded path accepts immutable lexical roots only. A mutable root needs edge
+        // invalidation and branch joins; declining it is conservative and cannot invent a cast.
+        let safe_call_origin = self.safe_call_origin_for_initializer(scope, init, is_var);
         let declared = ty.as_ref().map(|r| self.type_ref_ty(scope, r));
         // An UNRESOLVED annotation must fail the file, not silently bind `Error`: the local
         // would otherwise take its initializer's shape while every use site's checks are
@@ -33715,6 +33723,9 @@ impl<'a> Checker<'a> {
             self.declare_callable_reference(scope, &name, bound_ty, is_var, function_type);
         } else {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance);
+        }
+        if let Some(origin) = safe_call_origin {
+            self.attach_safe_call_origin(scope, &name, origin);
         }
         if declared.is_none() && !is_var {
             let path = NarrowPath::root_only(&name);
@@ -60485,6 +60496,7 @@ impl<'a> Checker<'a> {
                 callable_reference_type: Some(function_type),
                 delegate_storage_ty: None,
                 lexical_capture_identity,
+                safe_call_origin: None,
             }),
         );
     }
@@ -61115,6 +61127,7 @@ impl<'a> Checker<'a> {
                 callable_reference_type: matches!(ty, Ty::Fun(_)).then_some(ty),
                 delegate_storage_ty: None,
                 lexical_capture_identity,
+                safe_call_origin: None,
             }),
         );
     }
@@ -61144,6 +61157,7 @@ impl<'a> Checker<'a> {
         let callable_reference_type = previous.and_then(|local| local.callable_reference_type);
         let delegate_storage_ty = previous.and_then(|local| local.delegate_storage_ty);
         let lexical_capture_identity = previous.and_then(|local| local.lexical_capture_identity);
+        let safe_call_origin = previous.and_then(|local| local.safe_call_origin);
         let declared_ty = previous.map(|local| local.declared_ty).unwrap_or(ty);
         let write_ty = previous.and_then(|local| local.write_ty);
         let is_var = previous.map(|local| local.is_var).unwrap_or(false);
@@ -61165,6 +61179,7 @@ impl<'a> Checker<'a> {
                 callable_reference_type,
                 delegate_storage_ty,
                 lexical_capture_identity,
+                safe_call_origin,
             }),
         );
     }
@@ -65443,6 +65458,9 @@ impl<'a> Checker<'a> {
             {
                 return None;
             }
+            if local.has_unstable_delegated_read() {
+                return None;
+            }
             // A bare own-member read (`label`) is an alias for a dispatch-property read
             // (`this.label`), not a captured immutable slot. Route it through the segmented path
             // so custom/delegated/open getters receive exactly the same stability decision as the
@@ -65556,29 +65574,6 @@ impl<'a> Checker<'a> {
             declined.push((name, target));
         }
         false
-    }
-
-    /// `x != null` proves a stable path non-null. When the proof is declined only because a
-    /// capturing closure mutates the variable, the cast kotlinc will report at the next use is
-    /// recorded instead.
-    fn null_proof_or_decline(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-        site: Span,
-    ) {
-        match self.stable_path_ty(scope, path, site) {
-            Some(Ty::Nullable(inner)) => out.push((path.clone(), *inner)),
-            _ => {
-                if let Some((name, Ty::Nullable(inner))) =
-                    self.closure_mutated_decline(scope, path, site)
-                {
-                    declined.push((name, *inner));
-                }
-            }
-        }
     }
 
     /// The NULL branch of a null check: the operand is proven null, so a stable nullable path
@@ -79224,6 +79219,11 @@ impl<'a> Checker<'a> {
                     .is_some()
             }) {
                 self.apply_narrowing_unchecked(&selector_scope, &path, safe_rt);
+                // The same branch also proves the receiver's own safe-call ORIGIN non-null: a chain
+                // stored in a local (`val parent = explicit?.let { … }`) is null whenever its base
+                // is, so reaching the selector proves the base non-null too. Without it,
+                // `parent?.let { explicit.name }` reads `explicit` as still nullable.
+                self.apply_safe_call_origin_narrowing(&selector_scope, &path, self.span(receiver));
             }
             let scope = &selector_scope;
             // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken

@@ -2026,3 +2026,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   The edge now also applies when the argument-derived binding is absent, agrees, or still mentions a
   type parameter; a real, disagreeing argument binding joins with the receiver evidence.
   `tests/tparam_bounded_by_tparam_e2e.rs::get_or_else_infers_from_the_receiver_without_an_expected_type`.
+- **A safe-call result proves its receiver non-null (fix).** `x?.let { … }` evaluates to null
+  whenever `x` is, so `val y = x?.let { … }` carries an implication its own type cannot express:
+  proving `y` non-null proves `x` non-null. The direct spelling already narrowed —
+  `if (x?.foo != null) x.bar` walks the chain to its root — but the version that stores the
+  intermediate result in a `val`, which is how the shape is written whenever the result is needed
+  twice, lost it entirely.
+  The origin is attached to the immutable lexical binding by identity, so shadowing and nested
+  control-flow scopes cannot redirect or leak the fact. The implication is followed transitively
+   through stable immutable roots only.
+   `tests/safe_call_origin_narrowing_e2e.rs::a_safe_call_result_proves_its_receiver_non_null`.
