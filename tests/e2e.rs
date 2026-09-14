@@ -1458,6 +1458,8 @@ mod unsigned_ext_e2e;
 mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
+#[path = "use_inline_finally_e2e.rs"]
+mod use_inline_finally_e2e;
 #[path = "use_site_variance_e2e.rs"]
 mod use_site_variance_e2e;
 #[path = "utf16_string_constant_e2e.rs"]

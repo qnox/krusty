@@ -1,32 +1,59 @@
 //! Provider-normalized contracts for source-independent inline expansion.
 
-use super::{DefaultValue, LibraryMember};
+use super::{DefaultValue, LibraryCallable, LibraryMember};
+
+/// A value an inline body hands to one of the calls it makes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InlineBodyValue {
+    /// A parameter of the inline declaration, by ordinal. The extension receiver is parameter 0.
+    Parameter(usize),
+    /// The throwable that left the lambda invocation, and `null` on the normal exit.
+    Cause,
+}
+
+/// The source-level receiver role of one semantic call in an inline body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InlineBodyCallReceiver {
+    Dispatch(InlineBodyValue),
+    Extension(InlineBodyValue),
+}
+
+/// One semantic call the declaration makes around its lambda invocation.
+#[derive(Clone, Debug)]
+pub struct InlineBodyCall {
+    /// Metadata-normalized declaration. JVM data identifies only its physical realization. Its
+    /// stable identity is assigned to a per-classpath clone after plan-cache lookup.
+    pub callable: Box<LibraryCallable>,
+    /// Dispatch or extension receiver; `None` only for a receiver-less top-level call.
+    pub receiver: Option<InlineBodyCallReceiver>,
+    pub arguments: Vec<InlineBodyValue>,
+}
+
+/// A parameter the caller may omit, paired with the declaration's own decoded default.
+#[derive(Clone, Debug)]
+pub struct InlineBodyDefault {
+    pub parameter: usize,
+    pub value: DefaultValue,
+}
 
 /// A declaration-defined inline body whose source-independent control-flow shape must be expanded
 /// before backend coroutine lowering. Providers decode this from the exact selected declaration's
 /// compiled inline body; source spelling never participates.
 #[derive(Clone, Debug)]
 pub enum InlineBodyPlan {
-    /// Invoke one function-typed parameter with values loaded from other callable parameters and
-    /// return the invocation result.
+    /// Invoke one function-typed parameter, optionally entering a region before it and leaving the
+    /// region from `finally`.
     InvokeLambda {
         lambda_parameter: usize,
-        argument_parameters: Vec<usize>,
-        /// A callable parameter returned after the invocation (`apply` returns its receiver). `None`
-        /// means the invocation result itself is returned (`let`, `run`, `with`).
-        return_parameter: Option<usize>,
-    },
-    /// Invoke a suspending member on the extension receiver, invoke one lambda parameter, and invoke
-    /// a cleanup member on normal and exceptional exits.
-    ///
-    /// `state` is the optional argument both members take besides the receiver: `Mutex.withLock`
-    /// passes its `owner` to `lock`/`unlock`, while `Semaphore.withPermit` passes nothing to
-    /// `acquire`/`release`. `None` means both are called with the receiver alone.
-    SuspendBeforeLambdaFinally {
-        lambda_parameter: usize,
-        state: Option<InlineBodyState>,
-        enter: Box<LibraryMember>,
-        cleanup: Box<LibraryMember>,
+        arguments: Vec<InlineBodyValue>,
+        prologue: Vec<InlineBodyCall>,
+        cleanup: Vec<InlineBodyCall>,
+        /// Semantic type of the throwable local recorded by the exact catch template. `None` when
+        /// the lambda is not wrapped in such a catch.
+        cause: Option<crate::types::Ty>,
+        defaults: Vec<InlineBodyDefault>,
+        /// A declaration parameter returned instead of the invocation result (`apply`/`also`).
+        result: Option<InlineBodyValue>,
     },
     /// Iterate the extension receiver, invoke one lambda for each element, and append its result to
     /// a fresh collection. The provider owns the exact factory and append declarations; consumers
@@ -41,14 +68,6 @@ pub enum InlineBodyPlan {
         factory: Box<LibraryMember>,
         append: Box<LibraryMember>,
     },
-}
-
-/// The one argument a [`InlineBodyPlan::SuspendBeforeLambdaFinally`] body threads through its enter
-/// and cleanup members, and the value its own default supplies when the caller omits it.
-#[derive(Clone, Debug)]
-pub struct InlineBodyState {
-    pub parameter: usize,
-    pub default: DefaultValue,
 }
 
 #[derive(Clone, Debug)]

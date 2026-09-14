@@ -6,10 +6,19 @@
 use super::{JvmLibraries, CONTINUATION_PARAM_DESCRIPTOR};
 use crate::jvm::classreader::{ExcEntry, C};
 use crate::jvm::inline::{self, Insn};
-use crate::libraries::{InlineBodyPlan, InlineBodyState, LibraryCallable, LibraryMember};
+use crate::libraries::{
+    FnKind, InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan,
+    InlineBodyValue, InlineKind, LibraryCallable, LibraryMember,
+};
 use crate::types::{type_name, Ty};
 
 type MethodTarget<'a> = (&'a str, &'a str, &'a str, bool);
+
+enum InlineDependency<T> {
+    Found(T),
+    Rejected,
+    Unavailable,
+}
 
 fn inline_body_descriptor(callable: &LibraryCallable) -> Option<String> {
     if !callable.suspend {
@@ -237,6 +246,100 @@ fn exact_lambda_return_parameter(
 
 fn handler_free_lambda_body(handlers: &[ExcEntry]) -> bool {
     handlers.is_empty()
+}
+
+fn exact_plain(instruction: &Insn, op: u8) -> bool {
+    matches!(instruction, Insn::Plain { op: actual, operands } if *actual == op && operands.is_empty())
+}
+
+fn exact_marker_one(instructions: &[Insn], source_cp: &[C], name: &str) -> bool {
+    let [one, marker] = instructions else {
+        return false;
+    };
+    exact_plain(one, 0x04)
+        && inline::invoked_method(marker, source_cp).is_some_and(
+            |(owner, actual_name, descriptor, _)| {
+                owner == "kotlin/jvm/internal/InlineMarker"
+                    && actual_name == name
+                    && descriptor == "(I)V"
+            },
+        )
+}
+
+/// Match the complete `try { lambda(receiver) } catch { cause = t; throw t } finally {
+/// receiver.cleanup(cause) }` template emitted for `Closeable.use`. The cleanup is physically
+/// static, but its semantic extension kind is recovered separately from Kotlin metadata.
+fn exact_cause_finally_cleanup<'a>(
+    instructions: &'a [Insn],
+    source_cp: &'a [C],
+    offsets: &[usize],
+    handlers: &[ExcEntry],
+    receiver_slot: u16,
+    lambda_slot: u16,
+    first_local_slot: u16,
+    invoke: usize,
+) -> Option<(MethodTarget<'a>, &'a str)> {
+    let cause_slot = first_local_slot;
+    let result_slot = cause_slot.checked_add(1)?;
+    let exception_slot = result_slot.checked_add(1)?;
+    if invoke != 8 || instructions.len() != 34 || handlers.len() != 4 {
+        return None;
+    }
+    if !exact_parameter_null_check(&instructions[..3], source_cp, lambda_slot)
+        || !exact_plain(&instructions[3], 0x01)
+        || stored_reference_local(&instructions[4]) != Some(cause_slot)
+        || !exact_plain(&instructions[5], 0x00)
+        || loaded_reference_local(&instructions[6]) != Some(lambda_slot)
+        || loaded_reference_local(&instructions[7]) != Some(receiver_slot)
+        || stored_reference_local(&instructions[9]) != Some(result_slot)
+        || !exact_marker_one(&instructions[10..12], source_cp, "finallyStart")
+        || loaded_reference_local(&instructions[12]) != Some(receiver_slot)
+        || loaded_reference_local(&instructions[13]) != Some(cause_slot)
+        || !exact_marker_one(&instructions[15..17], source_cp, "finallyEnd")
+        || loaded_reference_local(&instructions[17]) != Some(result_slot)
+        || !exact_plain(&instructions[18], 0xb0)
+        || stored_reference_local(&instructions[19]) != Some(exception_slot)
+        || loaded_reference_local(&instructions[20]) != Some(exception_slot)
+        || stored_reference_local(&instructions[21]) != Some(cause_slot)
+        || loaded_reference_local(&instructions[22]) != Some(exception_slot)
+        || !exact_plain(&instructions[23], 0xbf)
+        || stored_reference_local(&instructions[24]) != Some(exception_slot)
+        || !exact_marker_one(&instructions[25..27], source_cp, "finallyStart")
+        || loaded_reference_local(&instructions[27]) != Some(receiver_slot)
+        || loaded_reference_local(&instructions[28]) != Some(cause_slot)
+        || !exact_marker_one(&instructions[30..32], source_cp, "finallyEnd")
+        || loaded_reference_local(&instructions[32]) != Some(exception_slot)
+        || !exact_plain(&instructions[33], 0xbf)
+    {
+        return None;
+    }
+    let cleanup = inline::invoked_method(&instructions[14], source_cp)?;
+    let repeated = inline::invoked_method(&instructions[29], source_cp)?;
+    if cleanup != repeated
+        || !matches!(instructions[14], Insn::Plain { op: 0xb8, .. })
+        || !matches!(instructions[29], Insn::Plain { op: 0xb8, .. })
+    {
+        return None;
+    }
+    let pc = |index: usize| u16::try_from(*offsets.get(index)?).ok();
+    let expected = [
+        (pc(5)?, pc(10)?, pc(19)?, Some("java/lang/Throwable")),
+        (pc(5)?, pc(10)?, pc(24)?, None),
+        (pc(19)?, pc(24)?, pc(24)?, None),
+        (pc(24)?, pc(25)?, pc(24)?, None),
+    ];
+    let matches_handlers =
+        handlers
+            .iter()
+            .zip(expected)
+            .all(|(handler, (start, end, target, caught))| {
+                handler.start_pc == start
+                    && handler.end_pc == end
+                    && handler.handler_pc == target
+                    && inline::caught_class(source_cp, handler.catch_type) == caught
+            });
+    let caught = inline::caught_class(source_cp, handlers.first()?.catch_type)?;
+    (matches_handlers && caught == "java/lang/Throwable").then_some((cleanup, caught))
 }
 
 fn instruction_index(offsets: &[usize], byte_offset: u16) -> Option<usize> {
@@ -695,12 +798,90 @@ impl JvmLibraries {
             if let Some(return_parameter) = return_parameter {
                 return Some(InlineBodyPlan::InvokeLambda {
                     lambda_parameter,
-                    argument_parameters: invoke_argument_slots
+                    arguments: invoke_argument_slots
                         .iter()
                         .rev()
                         .map(|slot| parameter_at(*slot))
+                        .map(|parameter| parameter.map(InlineBodyValue::Parameter))
                         .collect::<Option<Vec<_>>>()?,
-                    return_parameter,
+                    prologue: Vec::new(),
+                    cleanup: Vec::new(),
+                    cause: None,
+                    defaults: Vec::new(),
+                    result: return_parameter.map(InlineBodyValue::Parameter),
+                });
+            }
+        }
+
+        let cause_finally_shape = callable.context_count == 0
+            && callable.params.len() == 2
+            && callable.physical_params.len() == 2
+            && parameter_slots.len() == 2
+            && lambda_parameter == 1
+            && invoke_argument_slots == [parameter_slots[0]]
+            && callable
+                .generic_sig
+                .as_deref()
+                .and_then(|signature| signature.receiver)
+                .is_some()
+            && matches!(
+                callable.params.get(lambda_parameter).copied(),
+                Some(Ty::Fun(lambda))
+                    if !lambda.suspend
+                        && lambda.context_count == 0
+                        && !lambda.has_receiver
+                        && lambda.params.as_slice() == [callable.params[0]]
+            );
+        if cause_finally_shape {
+            let Some(first_local) = slot_after_parameters(&callable.physical_params) else {
+                return None;
+            };
+            if let Some((target, caught)) = exact_cause_finally_cleanup(
+                &instructions,
+                &body.source_cp,
+                &offsets,
+                &body.handlers,
+                parameter_slots[0],
+                lambda_slot,
+                first_local,
+                *invoke,
+            ) {
+                let cleanup = match self.inline_plan_static_extension(target) {
+                    InlineDependency::Found(cleanup) => cleanup,
+                    InlineDependency::Rejected => return None,
+                    InlineDependency::Unavailable => {
+                        *decode_unavailable = true;
+                        return None;
+                    }
+                };
+                if cleanup.context_count != 0
+                    || cleanup.suspend
+                    || cleanup.ret != Ty::Unit
+                    || cleanup.params.len() != 2
+                    || cleanup
+                        .generic_sig
+                        .as_deref()
+                        .and_then(|signature| signature.receiver)
+                        .is_none()
+                {
+                    return None;
+                }
+                return Some(InlineBodyPlan::InvokeLambda {
+                    lambda_parameter,
+                    arguments: vec![InlineBodyValue::Parameter(0)],
+                    prologue: Vec::new(),
+                    cleanup: vec![InlineBodyCall {
+                        callable: Box::new(cleanup),
+                        receiver: Some(InlineBodyCallReceiver::Extension(
+                            InlineBodyValue::Parameter(0),
+                        )),
+                        arguments: vec![InlineBodyValue::Cause],
+                    }],
+                    cause: Some(Ty::nullable(Ty::obj(
+                        crate::jvm::jvm_class_map::to_kotlin_internal(caught),
+                    ))),
+                    defaults: Vec::new(),
+                    result: None,
                 });
             }
         }
@@ -778,13 +959,7 @@ impl JvmLibraries {
                 Some(false) => return None,
                 Some(true) => {}
             }
-            Some((
-                state_slot,
-                InlineBodyState {
-                    parameter,
-                    default: crate::libraries::DefaultValue::Null,
-                },
-            ))
+            Some((state_slot, parameter))
         };
         let mut expected_enter = vec![continuation_slot];
         let mut expected_cleanup = Vec::new();
@@ -901,11 +1076,41 @@ impl JvmLibraries {
         }) {
             return None;
         }
-        Some(InlineBodyPlan::SuspendBeforeLambdaFinally {
+        let receiver = InlineBodyValue::Parameter(0);
+        let state_parameter = state.map(|(_, parameter)| parameter);
+        let arguments = state_parameter
+            .map(InlineBodyValue::Parameter)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let member_callable = |member: LibraryMember| {
+            let owner = member.owner?;
+            Some(
+                crate::libraries::FunctionInfo::classifier_member(FnKind::Member, owner, member)
+                    .callable,
+            )
+        };
+        Some(InlineBodyPlan::InvokeLambda {
             lambda_parameter,
-            state: state.map(|(_, state)| state),
-            enter: Box::new(enter_member),
-            cleanup: Box::new(cleanup_member),
+            arguments: Vec::new(),
+            prologue: vec![InlineBodyCall {
+                callable: Box::new(member_callable(enter_member)?),
+                receiver: Some(InlineBodyCallReceiver::Dispatch(receiver)),
+                arguments: arguments.clone(),
+            }],
+            cleanup: vec![InlineBodyCall {
+                callable: Box::new(member_callable(cleanup_member)?),
+                receiver: Some(InlineBodyCallReceiver::Dispatch(receiver)),
+                arguments,
+            }],
+            cause: None,
+            defaults: state_parameter
+                .map(|parameter| InlineBodyDefault {
+                    parameter,
+                    value: crate::libraries::DefaultValue::Null,
+                })
+                .into_iter()
+                .collect(),
+            result: None,
         })
     }
 
@@ -955,6 +1160,79 @@ impl JvmLibraries {
         Some(member)
     }
 
+    /// Normalize one physically static call that metadata declares as an extension. The descriptor
+    /// selects the declaration at this provider boundary; all semantic parameter/result facts come
+    /// from that exact Kotlin metadata declaration.
+    fn inline_plan_static_extension(
+        &self,
+        target: MethodTarget<'_>,
+    ) -> InlineDependency<LibraryCallable> {
+        let (owner, name, descriptor, interface) = target;
+        if interface {
+            return InlineDependency::Rejected;
+        }
+        let owner = type_name(owner);
+        let Some(candidate) = self.cp.facade_static(owner, name, descriptor) else {
+            return InlineDependency::Unavailable;
+        };
+        let Some((physical_params, physical_ret)) = super::parse_method_desc(descriptor) else {
+            return InlineDependency::Rejected;
+        };
+        let facts = self.cp.metadata_call_facts_name(
+            owner,
+            name,
+            &physical_params,
+            &physical_ret,
+            true,
+            &|name| self.metadata_value_class_underlying(name),
+        );
+        if facts.visibility.is_none()
+            || facts.deprecated_hidden
+            || facts.kept_params != Some(physical_params.len())
+            || facts.context_count != 0
+        {
+            return InlineDependency::Rejected;
+        }
+        let Some(signature) = facts.generic_sig else {
+            return InlineDependency::Rejected;
+        };
+        let Some(receiver) = signature.receiver else {
+            return InlineDependency::Rejected;
+        };
+        let params = facts.declared_params.unwrap_or_else(|| {
+            signature
+                .receiver
+                .into_iter()
+                .chain(signature.params.iter().copied())
+                .collect()
+        });
+        if params.len() != physical_params.len() {
+            return InlineDependency::Rejected;
+        }
+        let ret = facts.declared_ret.unwrap_or(signature.ret);
+        let mut callable = LibraryCallable {
+            inline: InlineKind::from_flags(facts.is_inline, facts.is_inline && !candidate.public),
+            suspend: facts.suspend,
+            source_receiver: (!receiver.is_ty_param()).then_some(receiver),
+            declared_ret: facts.declared_ret,
+            context_count: facts.context_count,
+            contract: facts.contract,
+            generic_sig: Some(Box::new(signature.clone())),
+            declared_params: Some(params.clone().into_boxed_slice()),
+            signature: candidate.signature,
+            ..LibraryCallable::library(
+                owner,
+                name.to_owned(),
+                params,
+                ret,
+                physical_ret,
+                descriptor.to_owned(),
+            )
+        };
+        callable.physical_params = physical_params;
+        InlineDependency::Found(callable)
+    }
+
     /// Whether the `$default` bridge's exact leading mask branch assigns `null` to `parameter`.
     /// `None` means the bridge body could not be read and must not be cached as a stable negative.
     fn inline_default_is_null(
@@ -991,6 +1269,7 @@ impl JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbol_source::SymbolNamespace;
 
     fn plain(op: u8) -> Insn {
         Insn::Plain {
@@ -1032,6 +1311,302 @@ mod tests {
                 catch_type: 0,
             },
         ]
+    }
+
+    #[test]
+    fn closeable_use_requires_the_complete_cause_finally_template() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib],
+        )));
+        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
+        let [function] = symbols.callables.functions() else {
+            panic!("kotlin.io.use must have exactly one metadata declaration")
+        };
+        let callable = &function.callable;
+        assert_eq!(
+            callable.descriptor,
+            "(Ljava/io/Closeable;Lkotlin/jvm/functions/Function1;)Ljava/lang/Object;"
+        );
+        let Some(InlineBodyPlan::InvokeLambda {
+            lambda_parameter: 1,
+            arguments,
+            prologue,
+            cleanup,
+            cause,
+            defaults,
+            result: None,
+        }) = callable.inline_body_plan.as_deref()
+        else {
+            panic!("kotlin.io.use must publish its exact inline plan")
+        };
+        assert_eq!(arguments.as_slice(), [InlineBodyValue::Parameter(0)]);
+        assert!(prologue.is_empty());
+        assert_eq!(*cause, Some(Ty::nullable(Ty::obj("kotlin/Throwable"))));
+        assert!(defaults.is_empty());
+        let [cleanup] = cleanup.as_slice() else {
+            panic!("kotlin.io.use must publish one cleanup call")
+        };
+        assert_eq!(cleanup.callable.owner, type_name("kotlin/io/CloseableKt"));
+        assert_eq!(cleanup.callable.name, "closeFinally");
+        assert_eq!(
+            cleanup.callable.descriptor,
+            "(Ljava/io/Closeable;Ljava/lang/Throwable;)V"
+        );
+        assert_eq!(cleanup.callable.params.len(), 2);
+        assert_eq!(cleanup.callable.ret, Ty::Unit);
+        assert!(!cleanup.callable.suspend);
+        assert_eq!(
+            cleanup.receiver,
+            Some(InlineBodyCallReceiver::Extension(
+                InlineBodyValue::Parameter(0),
+            ))
+        );
+        assert_eq!(cleanup.arguments.as_slice(), [InlineBodyValue::Cause]);
+        assert!(cleanup.callable.external_identity.is_some());
+        let descriptor = inline_body_descriptor(callable).expect("use body descriptor");
+        let owner = callable.owner.render();
+        let body = libraries
+            .cp
+            .method_code(&owner, "use$$forInline", &descriptor)
+            .or_else(|| libraries.cp.method_code(&owner, "use", &descriptor))
+            .expect("stdlib must expose the selected use body");
+        let instructions = inline::disassemble(&body.code).expect("valid use bytecode");
+        let offsets = inline::insn_offsets_at(&instructions, 0);
+        let parameter_slots = callable_parameter_slots(&callable.physical_params);
+        let [receiver_slot, lambda_slot] = parameter_slots.as_slice() else {
+            panic!("use must have receiver and lambda physical parameters")
+        };
+        let invoke_sites = inline::function_invoke_sites(&instructions, &body.source_cp);
+        let [invoke] = invoke_sites.as_slice() else {
+            panic!("use must contain exactly one lambda invocation")
+        };
+        let first_local = slot_after_parameters(&callable.physical_params)
+            .expect("use local layout must fit in a JVM slot");
+        assert_eq!(
+            exact_cause_finally_cleanup(
+                &instructions,
+                &body.source_cp,
+                &offsets,
+                &body.handlers,
+                *receiver_slot,
+                *lambda_slot,
+                first_local,
+                *invoke,
+            ),
+            Some((
+                (
+                    "kotlin/io/CloseableKt",
+                    "closeFinally",
+                    "(Ljava/io/Closeable;Ljava/lang/Throwable;)V",
+                    false,
+                ),
+                "java/lang/Throwable",
+            ))
+        );
+
+        let mut extra_effect = instructions.clone();
+        extra_effect[5] = plain(0x57);
+        assert!(exact_cause_finally_cleanup(
+            &extra_effect,
+            &body.source_cp,
+            &offsets,
+            &body.handlers,
+            *receiver_slot,
+            *lambda_slot,
+            first_local,
+            *invoke,
+        )
+        .is_none());
+
+        let mut wrong_handler = body.handlers.clone();
+        wrong_handler[0].end_pc = wrong_handler[0].end_pc.saturating_add(1);
+        assert!(exact_cause_finally_cleanup(
+            &instructions,
+            &body.source_cp,
+            &offsets,
+            &wrong_handler,
+            *receiver_slot,
+            *lambda_slot,
+            first_local,
+            *invoke,
+        )
+        .is_none());
+    }
+
+    fn only_callable(jars: Vec<std::path::PathBuf>, package: &str, name: &str) -> LibraryCallable {
+        let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            jars,
+        )));
+        let symbols = libraries.symbols(SymbolNamespace::Package(type_name(package)), name);
+        let [function] = symbols.callables.functions() else {
+            panic!("{package}.{name} must have exactly one metadata declaration")
+        };
+        function.callable.clone()
+    }
+
+    #[test]
+    fn provider_decodes_plain_lambda_parameter_roles_exactly() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let callable = only_callable(vec![stdlib], "kotlin", "let");
+        assert_eq!(
+            callable.descriptor,
+            "(Ljava/lang/Object;Lkotlin/jvm/functions/Function1;)Ljava/lang/Object;"
+        );
+        let Some(InlineBodyPlan::InvokeLambda {
+            lambda_parameter: 1,
+            arguments,
+            prologue,
+            cleanup,
+            cause: None,
+            defaults,
+            result: None,
+        }) = callable.inline_body_plan.as_deref()
+        else {
+            panic!("kotlin.let must publish its exact plain invocation plan")
+        };
+        assert_eq!(arguments.as_slice(), [InlineBodyValue::Parameter(0)]);
+        assert!(prologue.is_empty());
+        assert!(cleanup.is_empty());
+        assert!(defaults.is_empty());
+    }
+
+    #[test]
+    fn provider_decodes_stateful_and_stateless_suspend_regions_exactly() {
+        let (Some(stdlib), Some(coroutines)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::coroutines_jar(),
+        ) else {
+            return;
+        };
+        let with_lock = only_callable(
+            vec![stdlib.clone(), coroutines.clone()],
+            "kotlinx/coroutines/sync",
+            "withLock",
+        );
+        let Some(InlineBodyPlan::InvokeLambda {
+            lambda_parameter: 2,
+            arguments,
+            prologue,
+            cleanup,
+            cause: None,
+            defaults,
+            result: None,
+        }) = with_lock.inline_body_plan.as_deref()
+        else {
+            panic!("Mutex.withLock must publish its exact region plan")
+        };
+        assert!(arguments.is_empty());
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].parameter, 1);
+        assert_eq!(defaults[0].value, crate::libraries::DefaultValue::Null);
+        let ([enter], [leave]) = (prologue.as_slice(), cleanup.as_slice()) else {
+            panic!("Mutex.withLock must publish one enter and one cleanup call")
+        };
+        assert_eq!(enter.callable.name, "lock");
+        assert_eq!(leave.callable.name, "unlock");
+        assert!(enter.callable.suspend);
+        assert!(!leave.callable.suspend);
+        for call in [enter, leave] {
+            assert_eq!(
+                call.receiver,
+                Some(InlineBodyCallReceiver::Dispatch(
+                    InlineBodyValue::Parameter(0)
+                ))
+            );
+            assert_eq!(call.arguments.as_slice(), [InlineBodyValue::Parameter(1)]);
+            assert_eq!(call.callable.ret, Ty::Unit);
+        }
+
+        let with_permit = only_callable(
+            vec![stdlib, coroutines],
+            "kotlinx/coroutines/sync",
+            "withPermit",
+        );
+        let Some(InlineBodyPlan::InvokeLambda {
+            lambda_parameter: 1,
+            arguments,
+            prologue,
+            cleanup,
+            cause: None,
+            defaults,
+            result: None,
+        }) = with_permit.inline_body_plan.as_deref()
+        else {
+            panic!("Semaphore.withPermit must publish its exact region plan")
+        };
+        assert!(arguments.is_empty());
+        assert!(defaults.is_empty());
+        let ([enter], [leave]) = (prologue.as_slice(), cleanup.as_slice()) else {
+            panic!("Semaphore.withPermit must publish one enter and one cleanup call")
+        };
+        assert_eq!(enter.callable.name, "acquire");
+        assert_eq!(leave.callable.name, "release");
+        assert!(enter.callable.suspend);
+        assert!(!leave.callable.suspend);
+        for call in [enter, leave] {
+            assert_eq!(
+                call.receiver,
+                Some(InlineBodyCallReceiver::Dispatch(
+                    InlineBodyValue::Parameter(0)
+                ))
+            );
+            assert!(call.arguments.is_empty());
+            assert!(call.callable.params.is_empty());
+            assert_eq!(call.callable.ret, Ty::Unit);
+        }
+    }
+
+    #[test]
+    fn cached_nested_callables_are_registered_in_each_classpath() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let warm = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib.clone()],
+        )));
+        let warm_symbols = warm.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
+        let [warm_function] = warm_symbols.callables.functions() else {
+            panic!("warm classpath must decode one use declaration")
+        };
+        assert!(warm_function.callable.inline_body_plan.is_some());
+
+        let current = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib],
+        )));
+        let symbols = current.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
+        let [function] = symbols.callables.functions() else {
+            panic!("second classpath must decode one use declaration")
+        };
+        let Some(InlineBodyPlan::InvokeLambda { cleanup, .. }) =
+            function.callable.inline_body_plan.as_deref()
+        else {
+            panic!("cached use plan must remain present")
+        };
+        let [cleanup] = cleanup.as_slice() else {
+            panic!("cached use plan must retain one cleanup")
+        };
+        let identity = cleanup
+            .callable
+            .external_identity
+            .expect("cached nested call must receive a per-classpath identity");
+        let realization = current
+            .cp
+            .external_callable(identity)
+            .expect("nested identity must resolve in the consuming classpath");
+        assert_eq!(
+            realization.kind,
+            crate::jvm::classpath::ExternalCallableKind::Extension
+        );
+        assert_eq!(
+            realization.callable.owner,
+            type_name("kotlin/io/CloseableKt")
+        );
+        assert_eq!(realization.callable.name, "closeFinally");
     }
 
     #[test]
