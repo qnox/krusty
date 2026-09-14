@@ -1671,6 +1671,7 @@ pub struct MemberFacets {
     /// whole family (named-arg mapping, defaults, return agreement, member-vs-extension dispatch) filters
     /// this by [`FunctionInfo::kind`]/`receiver_rank`.
     pub overloads: Vec<FunctionInfo>,
+    pub inaccessible_extensions: Vec<FunctionInfo>,
     /// For a receiver-less [`SymRecv::TopLevel`] name: the single top-level callable selected against
     /// `args`/`type_args` (default/vararg-aware), ready for the emit seam. `None` for a value/type receiver.
     pub top_level_call: Option<LibraryCallable>,
@@ -2305,7 +2306,11 @@ impl<'a> SymbolResolver<'a> {
     /// Collect the declarations denoted by `receiver.name` exactly once. Member declarations and
     /// imported extension declarations use the same [`Callables`] shape; overload selection is a
     /// separate operation over this family.
-    pub(crate) fn receiver_callables(&self, receiver: Ty, name: &str) -> Callables {
+    fn collect_receiver_callables(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> candidate_access::ReceiverCallableInventory {
         // `Nothing` is the bottom value type, but its member scope is still Kotlin's ordinary
         // `Any` scope. This matters on unreachable/safe selector branches (`x == null; x?.equals(1)`):
         // the receiver remains `Nothing` for flow typing and extension applicability, while member
@@ -2332,6 +2337,7 @@ impl<'a> SymbolResolver<'a> {
             .filter(|property| property.kind == PropKind::Member)
             .cloned()
             .collect::<Vec<_>>();
+        let mut inaccessible_extensions = Vec::new();
         if self.fn_scope.is_some() {
             let levels = self.tagged_symbol_levels_in_scope(name);
             // `@kotlin.internal.HidesMembers` declarations are NOT part of the tower: they resolve
@@ -2344,28 +2350,15 @@ impl<'a> SymbolResolver<'a> {
             // does not fit falls through to the ordinary candidates collected below.
             for level in &levels {
                 let scoped = callables_from_symbols(&level.symbols);
-                functions.extend(
-                    ranked_extension_candidates(
-                        &self.src,
-                        receiver,
-                        scoped
-                            .functions()
-                            .iter()
-                            .filter(|function| self.non_member_callable_accessible(function)),
-                    )
-                    .into_iter()
-                    .filter(|(_, _, function)| {
-                        function
-                            .annotations
-                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                    })
-                    .map(|(rank, _, function)| {
-                        let mut function = function.clone();
-                        function.receiver_rank = rank;
-                        function.scope_rung = level.kind.callable_scope_rung();
-                        function
-                    }),
-                );
+                let mut ranked =
+                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter());
+                self.retain_accessible_extensions(&mut ranked, &mut inaccessible_extensions, true);
+                functions.extend(ranked.into_iter().map(|(rank, _, function)| {
+                    let mut function = function.clone();
+                    function.receiver_rank = rank;
+                    function.scope_rung = level.kind.callable_scope_rung();
+                    function
+                }));
             }
             let mut extension_property_level_found = false;
             for (scope_rank, level) in levels.into_iter().enumerate() {
@@ -2383,21 +2376,13 @@ impl<'a> SymbolResolver<'a> {
                 // time here would put two copies of one declaration in the same priority bucket and
                 // read as an ambiguity. A level holding ONLY annotated declarations is therefore
                 // empty for tower purposes and the walk continues past it.
-                let extensions = ranked_extension_candidates(
-                    &self.src,
-                    receiver,
-                    scoped
-                        .functions()
-                        .iter()
-                        .filter(|function| self.non_member_callable_accessible(function)),
-                )
-                .into_iter()
-                .filter(|(_, _, function)| {
-                    !function
-                        .annotations
-                        .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                })
-                .collect::<Vec<_>>();
+                let mut extensions =
+                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter());
+                self.retain_accessible_extensions(
+                    &mut extensions,
+                    &mut inaccessible_extensions,
+                    false,
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "receiver scope applicable name={name} receiver={receiver:?} extensions={:?}",
@@ -2434,14 +2419,17 @@ impl<'a> SymbolResolver<'a> {
                 properties.extend(extension_properties);
             }
         }
-        Callables::from_parts(
-            FunctionSet {
-                overloads: functions,
-            },
-            PropertySet {
-                overloads: properties,
-            },
-        )
+        candidate_access::ReceiverCallableInventory {
+            accessible: Callables::from_parts(
+                FunctionSet {
+                    overloads: functions,
+                },
+                PropertySet {
+                    overloads: properties,
+                },
+            ),
+            inaccessible_extensions,
+        }
     }
 
     /// `Any` members precede visible extensions on an error receiver.
@@ -3641,7 +3629,8 @@ impl<'a> SymbolResolver<'a> {
                 // Resolve every facet the name supports on this receiver; a name can support several (a
                 // Java zero-arg method is a property read AND a callable). Each facet is exactly the
                 // former per-use resolution, so the caller's chosen facet behaves as before.
-                let callables = self.receiver_callables(ty, name);
+                let inventory = self.receiver_callable_inventory(ty, name);
+                let callables = inventory.accessible;
                 let mut call_ambiguous = false;
                 let selected_call = select_overload_tracking_with_functions(
                     self.lib,
@@ -3765,6 +3754,7 @@ impl<'a> SymbolResolver<'a> {
                     && method_ref.is_none()
                     && property_ref.is_none()
                     && overloads.is_empty()
+                    && inventory.inaccessible_extensions.is_empty()
                     && extension_call.is_none()
                     && extension_result.is_none()
                     && extension_property.is_none()
@@ -3779,6 +3769,7 @@ impl<'a> SymbolResolver<'a> {
                     property_ref,
                     values: Vec::new(),
                     overloads,
+                    inaccessible_extensions: inventory.inaccessible_extensions,
                     top_level_call: None,
                     extension_call,
                     extension_result,
@@ -3840,6 +3831,7 @@ impl<'a> SymbolResolver<'a> {
                     property_ref: None,
                     values,
                     overloads,
+                    inaccessible_extensions: Vec::new(),
                     top_level_call,
                     extension_call: None,
                     extension_result: None,

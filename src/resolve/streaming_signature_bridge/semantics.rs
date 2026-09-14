@@ -4039,41 +4039,40 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .non_null()
                 .obj_internal()
                 .is_none_or(|classifier| !self.classifier_is_singleton(classifier));
-        let candidates = self.with_resolver(scope, |resolver| {
-            let property = resolver
-                .resolve_symbol(
+        let candidates =
+            self.with_resolver(scope, |resolver| {
+                let crate::symbol_resolver::Symbol::Member(facets) = resolver.resolve_symbol(
                     crate::symbol_resolver::SymRecv::Value(receiver.get()),
                     spelling,
                     &[],
                     &[],
-                )
-                .and_then(|symbol| match symbol {
-                    crate::symbol_resolver::Symbol::Member(facets) => facets
-                        .property_ref
-                        .clone()
-                        .or_else(|| facets.extension_property_ref()),
-                    crate::symbol_resolver::Symbol::Instance(_)
-                    | crate::symbol_resolver::Symbol::Companion(_)
-                    | crate::symbol_resolver::Symbol::Constructor(_) => None,
-                });
-            // A callable reference selects from the overload FAMILY under its contextual function
-            // shape. Asking `resolve_symbol(..., [])` for that family prematurely selects a
-            // zero-argument call and drops source members whose return is still demand-driven.
-            let candidates = resolver
-                .receiver_callables(receiver.get(), spelling)
-                .functions()
-                .iter()
-                .filter(|candidate| {
-                    matches!(
-                        candidate.kind,
-                        crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension
-                    )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            (property.is_some() || !candidates.is_empty()).then_some((property, candidates))
-        });
-        let (property, mut candidates) = match candidates {
+                )?
+                else {
+                    return None;
+                };
+                let property = facets
+                    .property_ref
+                    .clone()
+                    .or_else(|| facets.extension_property_ref());
+                // A callable reference selects from the overload FAMILY under its contextual function
+                // shape. Asking `resolve_symbol(..., [])` for that family prematurely selects a
+                // zero-argument call and drops source members whose return is still demand-driven.
+                let candidates = facets
+                    .overloads
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(
+                            candidate.kind,
+                            crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let inaccessible = facets.inaccessible_extensions.clone();
+                (property.is_some() || !candidates.is_empty() || !inaccessible.is_empty())
+                    .then_some((property, candidates, inaccessible))
+            });
+        let (property, mut candidates, inaccessible) = match candidates {
             Ok(candidates) => candidates,
             Err(_failure) if unbound => {
                 return Err(self.record_unresolved_reference(scope.owner, origin, spelling));
@@ -4140,6 +4139,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return Ok(expected);
             }
             return crate::fir::ResolvedTy::new(natural).map_err(|_| Self::failure());
+        }
+        // Visibility precedes expected callable-shape mismatch, matching kotlinc. These retained
+        // declarations are diagnostic facts only and never join the selected candidate family.
+        if candidates.is_empty() && !inaccessible.is_empty() {
+            return Err(self.record_source_diagnostic(
+                scope.owner,
+                origin,
+                format!("cannot access '{spelling}': it is private in its file"),
+            ));
         }
         if let Some(expected) = expected {
             let Ty::Fun(expected_function) = expected.get().non_null() else {

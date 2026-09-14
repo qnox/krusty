@@ -20118,6 +20118,7 @@ struct CallableRefCandidates {
     property: Option<crate::symbol_resolver::ResolvedPropertyRef>,
     method: Option<crate::libraries::LibraryMember>,
     overloads: Vec<crate::libraries::FunctionInfo>,
+    inaccessible_extensions: Vec<crate::libraries::FunctionInfo>,
     extension_property: Option<crate::symbol_resolver::ResolvedPropertyRef>,
 }
 
@@ -20138,6 +20139,7 @@ impl CallableRefCandidates {
             property: None,
             method: None,
             overloads: Vec::new(),
+            inaccessible_extensions: Vec::new(),
             extension_property: None,
         }
     }
@@ -51238,12 +51240,12 @@ impl<'a> Checker<'a> {
     fn selected_extension_ref(
         &self,
         overloads: &[crate::libraries::FunctionInfo],
+        inaccessible: &[crate::libraries::FunctionInfo],
         receiver: Ty,
         name: &str,
         expected: Option<&'static crate::types::FnSig>,
         binding: CallableReferenceBinding,
     ) -> ExtensionRefSelection {
-        let mut inaccessible = false;
         let candidates = overloads
             .iter()
             .cloned()
@@ -51291,7 +51293,6 @@ impl<'a> Checker<'a> {
                     || self.libraries.internal_accessible(function.callable.owner),
                 );
                 if !accessible {
-                    inaccessible = true;
                     return None;
                 }
                 let semantic_params = function.semantic_params();
@@ -51361,7 +51362,10 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            return if inaccessible {
+            // Kotlin diagnoses a receiver-applicable inaccessible declaration before an expected
+            // callable-shape mismatch. The quarantined family is intentionally not mapped or
+            // selected; its presence only determines this terminal diagnostic.
+            return if !inaccessible.is_empty() {
                 ExtensionRefSelection::Inaccessible
             } else {
                 ExtensionRefSelection::None
@@ -51591,6 +51595,7 @@ impl<'a> Checker<'a> {
         }
         let function = self.selected_extension_ref(
             &candidates.overloads,
+            &candidates.inaccessible_extensions,
             receiver,
             name,
             expected_function,
@@ -52607,6 +52612,7 @@ impl<'a> Checker<'a> {
                 || matches!(
                     self.selected_extension_ref(
                         &companion_candidates.overloads,
+                        &companion_candidates.inaccessible_extensions,
                         companion_ty,
                         name,
                         Some(expected),
@@ -52664,6 +52670,7 @@ impl<'a> Checker<'a> {
         if matches!(
             self.selected_extension_ref(
                 &candidates.overloads,
+                &candidates.inaccessible_extensions,
                 receiver_ty,
                 name,
                 Some(expected),
@@ -56208,6 +56215,7 @@ impl<'a> Checker<'a> {
                     property: facets.property_ref.clone(),
                     method: facets.method_ref.clone(),
                     overloads: facets.overloads.clone(),
+                    inaccessible_extensions: facets.inaccessible_extensions.clone(),
                     extension_property: facets.extension_property_ref(),
                 },
                 Some(Symbol::Instance(_))
