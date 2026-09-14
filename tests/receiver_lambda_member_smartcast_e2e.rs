@@ -9,6 +9,63 @@
 
 use super::common;
 
+fn assert_both_accept(source: &str) {
+    let classpath = [common::stdlib_jar(), common::jdk_modules()];
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &classpath);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc must accept the exact receiver-lambda fixture",
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty must accept the same source without diagnostics",
+    );
+}
+
+fn assert_exact_rejection(
+    source: &str,
+    line: usize,
+    source_line: &str,
+    reference_message: &str,
+    krusty_message: &str,
+) {
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[]);
+    assert_eq!(result.krusty_stdout, "", "unexpected krusty stdout");
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc diagnostic path");
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:{line}:60: error: {reference_message}\n{source_line}\n{}^^^^^\n",
+                " ".repeat(59),
+            )
+            .as_str(),
+        ),
+        "exact kotlinc diagnostic",
+    );
+    let krusty_path = result
+        .krusty_stderr
+        .split(':')
+        .next()
+        .expect("krusty diagnostic path");
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (
+            1,
+            format!("{krusty_path}:{line}:60: error: {krusty_message}\nkrusty: 1 error(s)\n")
+                .as_str(),
+        ),
+        "exact krusty diagnostic",
+    );
+}
+
 /// The failing shape: the member is proven non-null inside a receiver lambda of an unrelated type.
 #[test]
 fn a_member_val_smart_casts_inside_a_foreign_receiver_lambda() {
@@ -23,7 +80,11 @@ fun box(): String {\n\
 \x20   if (Holder(null).render() != \"none\") return \"FAIL: absent\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "receiver_lambda_member_smartcast");
+    assert_both_accept(MAIN);
+    common::expect_box_ok_files_with_stdlib(
+        &[("Main.kt", MAIN)],
+        "receiver_lambda_member_smartcast",
+    );
 }
 
 /// Nesting more foreign receivers between the proof and the read changes nothing — the owning rung
@@ -43,7 +104,11 @@ fun box(): String {\n\
 \x20   if (Holder(null).render() != \"none\") return \"FAIL: absent\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "nested_foreign_receiver_smartcast");
+    assert_both_accept(MAIN);
+    common::expect_box_ok_files_with_stdlib(
+        &[("Main.kt", MAIN)],
+        "nested_foreign_receiver_smartcast",
+    );
 }
 
 /// An unstable member must stay unstable on this path: a `var` re-reads its accessor, so kotlinc
@@ -57,31 +122,12 @@ class Holder(private var token: String?) {\n\
 \x20   fun outer(block: Outer.() -> String): String = Outer().block()\n\
 \x20   fun render(): String = outer { if (token != null) need(token) else \"none\" }\n\
 }\n";
-    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a `var` smart cast: {}",
-        result.reference_stderr
-    );
-    assert!(
-        result
-            .reference_stderr
-            .contains("smart cast to 'String' is impossible, because 'token' is a mutable property"),
-        "unexpected kotlinc output: {}",
-        result.reference_stderr
-    );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a `var` smart cast kotlinc rejects: {}{}",
-        result.krusty_stdout, result.krusty_stderr
-    );
-    assert!(
-        result
-            .krusty_stderr
-            .contains("argument type mismatch: actual type is 'String?', but 'String' was expected."),
-        "unexpected krusty output: {}{}",
-        result.krusty_stdout,
-        result.krusty_stderr
+    assert_exact_rejection(
+        MAIN,
+        5,
+        "    fun render(): String = outer { if (token != null) need(token) else \"none\" }",
+        "smart cast to 'String' is impossible, because 'token' is a mutable property that could be mutated concurrently.",
+        "argument type mismatch: actual type is 'String?', but 'String' was expected.",
     );
 }
 
@@ -96,15 +142,11 @@ class Holder(private val raw: String?) {\n\
 \x20   fun outer(block: Outer.() -> String): String = Outer().block()\n\
 \x20   fun render(): String = outer { if (token != null) need(token) else \"none\" }\n\
 }\n";
-    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a custom-getter smart cast: {}",
-        result.reference_stderr
-    );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a custom-getter smart cast kotlinc rejects: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    assert_exact_rejection(
+        MAIN,
+        6,
+        "    fun render(): String = outer { if (token != null) need(token) else \"none\" }",
+        "smart cast to 'String' is impossible, because 'token' is a property that has an open or custom getter.",
+        "argument type mismatch: actual type is 'String?', but 'String' was expected.",
     );
 }

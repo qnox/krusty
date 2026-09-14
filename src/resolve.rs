@@ -51,6 +51,8 @@ mod safe_call_flow;
 mod sam_constructors;
 mod scope;
 mod source_constructors;
+mod stable_path;
+mod stable_path_legacy_bridge;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
@@ -75,6 +77,7 @@ use local_class_scope::{
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
+use stable_path::StablePathRead;
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
@@ -65340,153 +65343,7 @@ impl<'a> Checker<'a> {
         path: &NarrowPath,
         site: Span,
     ) -> Option<Ty> {
-        let mut ty = if path.root == "this" {
-            scope.this_ty()?
-        } else {
-            let Some(local) = self.lookup(scope, &path.root) else {
-                // A same-file top-level `val` with its compiler-default backing-field getter is a
-                // stable value just like a local `val`. Cross-module and computed/delegated
-                // properties remain unstable because an accessor call can return a different value.
-                if !path.segments.is_empty() {
-                    return None;
-                }
-                let TopLevelPropertySelection::Selected(access) =
-                    self.select_top_level_property(scope, &path.root)
-                else {
-                    return None;
-                };
-                if access.property.context_count != 0 {
-                    return None;
-                }
-                if let Some(index) = self.resolved_index {
-                    let declaration = access.property.stable_declaration?;
-                    let anchor = index.declaration_anchor(declaration)?;
-                    if anchor.source.raw() != self.file_index {
-                        return None;
-                    }
-                    let flags = index.declaration_header(declaration)?.flags;
-                    if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-                        || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-                        || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-                        || flags.has(crate::fir::DeclarationFlags::EXTERNAL)
-                        || flags.has(crate::fir::DeclarationFlags::EXPECT)
-                    {
-                        return None;
-                    }
-                    return Some(access.property.ty);
-                }
-                let property = {
-                    let (source_file, source_decl) = access.property.source_key?;
-                    if source_file != self.file_index {
-                        return None;
-                    }
-                    let Decl::Property(property) = self.file.decl(DeclId(source_decl)) else {
-                        return None;
-                    };
-                    property
-                };
-                if property.is_var
-                    || property.getter_declared
-                    || property.delegate.is_some()
-                    || property.is_external
-                    || property.is_expect
-                {
-                    return None;
-                }
-                return Some(access.property.ty);
-            };
-            if local.is_var
-                && (!path.segments.is_empty()
-                    || !matches!(local.origin, ReceiverFnValueOrigin::Local)
-                    || self.closure_reassigned_before(&path.root, site))
-            {
-                return None;
-            }
-            if local.has_unstable_delegated_read() {
-                return None;
-            }
-            // A bare own-member read (`label`) is an alias for a dispatch-property read, not a
-            // captured immutable slot. Route it through the member-read decision so
-            // custom/delegated/open getters receive exactly the same stability answer as the
-            // qualified spelling. The receiver that owns the property is NOT always the innermost
-            // `this`: inside a lambda typed `Other.() -> R` the enclosing class's rung is still on
-            // the stack and the member is still read through it. The binding records which rung
-            // that is, so decide against that receiver rather than against whatever `this` happens
-            // to mean at the proof site. A binding naming no live rung — an enclosing-instance
-            // property reached from a nested classifier — has no receiver to read through and
-            // declines here.
-            if path.segments.is_empty() {
-                if let ReceiverFnValueOrigin::DispatchProperty {
-                    receiver_identity, ..
-                } = local.origin
-                {
-                    let receiver = self
-                        .implicit_receivers(scope)
-                        .into_iter()
-                        .find(|candidate| candidate.identity == receiver_identity)?
-                        .ty;
-                    return self.stable_member_read_ty(receiver, &path.root);
-                }
-            }
-            // A member/top-level property as the ROOT of a longer path re-reads through its
-            // accessor each time; only a plain local/`val` slot is a stable root there. (For a
-            // ROOT-ONLY top-level path, the shadowing mechanism remains conservative;
-            // dispatch properties were normalized to `this.<name>` above.)
-            if !path.segments.is_empty() && !matches!(local.origin, ReceiverFnValueOrigin::Local) {
-                return None;
-            }
-            local.ty
-        };
-        for segment in &path.segments {
-            ty = self.stable_member_read_ty(ty, segment)?;
-        }
-        Some(ty)
-    }
-
-    /// Read type of one member property through `receiver`, or `None` when reading it twice may
-    /// yield different values. A `var`, a custom getter, a delegate, an `open` property on a
-    /// non-final class and a context-parameterized property are all re-entered per read, so no
-    /// flow proof about the first read describes the second.
-    fn stable_member_read_ty(&self, receiver: Ty, name: &str) -> Option<Ty> {
-        let recv = receiver.non_null();
-        let internal = recv.obj_internal()?;
-        let class = self.resolver().classifier(internal)?;
-        if let Some(index) = self.resolved_index {
-            let source = self.fed_source();
-            let callables = crate::symbol_resolver::members_in_hierarchy(&source, recv, name);
-            let property = callables
-                .properties()
-                .iter()
-                .find(|property| property.kind == crate::libraries::PropKind::Member)?;
-            let flags = index
-                .declaration_header(property.stable_declaration?)?
-                .flags;
-            if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-                || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-                || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-                || (flags.has(crate::fir::DeclarationFlags::OPEN) && !class.is_final())
-                || property.context_count != 0
-            {
-                return None;
-            }
-            return Some(property.ty.projection_read_ty());
-        }
-        let symbols = self.module.legacy_symbols()?;
-        let (owner, property) = symbols.declared_member_prop(internal, name)?;
-        if property.setter_name.is_some()
-            || property.has_custom_getter
-            || (property.is_open && !class.is_final())
-            || !property.context_params.is_empty()
-        {
-            return None;
-        }
-        // Use the same generic-property instantiation as ordinary member reads and probes; a
-        // path proof is sound only when its declared and read-time types are identical.
-        Some(
-            symbols
-                .applied_declared_member_prop_ty(recv, owner, name, property.ty)
-                .projection_read_ty(),
-        )
+        StablePathRead::new(self).ty(scope, path, site)
     }
 
     /// The one stability failure kotlinc reports as SMARTCAST_IMPOSSIBLE: the path's root is a
