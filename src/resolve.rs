@@ -32,7 +32,6 @@ mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
 mod collection_literals;
-mod collection_transform_bridge;
 mod compound_assignments;
 mod conditional_branch;
 mod constant_evaluation;
@@ -48375,15 +48374,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                     ),
                     _ => return None,
                 };
-                let explicit_receiver = match file.expr(expression) {
-                    Expr::Call { callee, .. } => match file.expr(*callee) {
-                        Expr::Member { receiver, .. } => Some(*receiver),
-                        _ => None,
-                    },
-                    Expr::SafeCall { receiver, .. } => Some(*receiver),
-                    _ => None,
-                }
-                .map(|receiver| (receiver, info.ty(receiver)));
+                let explicit_receiver = file
+                    .explicit_call_receiver(expression)
+                    .map(|receiver| (receiver, info.ty(receiver)));
                 Some(crate::plugins::FrontendSelectedCall {
                     expression,
                     explicit_receiver,
@@ -83539,29 +83532,7 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         self.mark_context_extension_receiver_used(scope, e, &context_args);
         let selected_receiver = selected.receiver.unwrap_or(rt);
-        let receiver_expression = match self.file.expr(e) {
-            Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => Some(*receiver),
-                _ => None,
-            },
-            // A safe call is the same selection with a null guard around it, and it owns its
-            // receiver directly rather than through a `Member` callee. Checked FIR keys the
-            // protocol by that receiver either way, so reading only the `Expr::Call` shape filed a
-            // safe call's protocol under the CALL expression while the lookup used the receiver.
-            Expr::SafeCall { receiver, .. } => Some(*receiver),
-            _ => None,
-        };
-        let collection_transform_iterator_receiver = (!selected.iterator_protocol_scope.is_empty()
-            && args
-                .iter()
-                .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. })))
-        .then(|| {
-            (
-                receiver_expression,
-                selected_receiver,
-                selected.iterator_protocol_scope.clone(),
-            )
-        });
+        let receiver_expression = self.file.explicit_call_receiver(e);
         if let Some(receiver_expression) = receiver_expression {
             if selected_receiver != rt
                 && self
@@ -83658,19 +83629,44 @@ impl<'a> Checker<'a> {
             // return here from rechecked operands erased `Set<String>` back to raw `Set` whenever a
             // postponed nested producer still exposed its private type variable.
             callable.ret = selected.callable.ret;
-            if let Some(crate::libraries::InlineBodyPlan::Iteration { traversal, .. }) =
-                callable.inline_body_plan.as_deref_mut()
-            {
-                if crate::symbol_resolver::specialize_inline_iteration_traversal(
-                    self.libraries,
-                    selected_receiver,
-                    traversal,
-                )
-                .is_none()
-                {
+            let collection_types = callable.inline_body_plan.as_deref().and_then(|plan| {
+                let crate::libraries::InlineBodyPlan::CollectionTransform {
+                    lambda_parameter, ..
+                } = plan
+                else {
+                    return None;
+                };
+                let Ty::Fun(action) = callable.params.get(*lambda_parameter).copied()? else {
+                    return None;
+                };
+                Some((action.ret, callable.ret.type_args().first().copied()?))
+            });
+            if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
+                let publishable = match plan {
+                    crate::libraries::InlineBodyPlan::Iteration { traversal, .. } => {
+                        crate::symbol_resolver::specialize_inline_iteration_traversal(
+                            self.libraries,
+                            selected_receiver,
+                            traversal,
+                        )
+                    }
+                    crate::libraries::InlineBodyPlan::CollectionTransform { .. } => {
+                        collection_types.and_then(|(part, output)| {
+                            crate::symbol_resolver::specialize_inline_collection_transform(
+                                self.libraries,
+                                selected_receiver,
+                                part,
+                                output,
+                                plan,
+                            )
+                        })
+                    }
+                    crate::libraries::InlineBodyPlan::InvokeLambda { .. } => Some(()),
+                };
+                if publishable.is_none() {
                     self.diags.error(
                         self.call_callee_name_span(e),
-                        "selected inline iteration body has an unpublishable traversal declaration"
+                        "selected inline body has an unpublishable declaration dependency"
                             .to_string(),
                     );
                     return Some(Ty::Error);
@@ -83694,30 +83690,6 @@ impl<'a> Checker<'a> {
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
             self.record_resolved_extension_sam_arguments(e, args);
-            if let Some((receiver, declared_receiver, declaration_scope)) =
-                collection_transform_iterator_receiver
-            {
-                // An unqualified call selected from an implicit-receiver rung has no receiver AST
-                // expression. Key its declaration-scoped protocol by the call expression itself;
-                // checked FIR already materializes the selected implicit receiver separately and
-                // immediately embeds this protocol in the inline plan.
-                let protocol_source = receiver.unwrap_or(e);
-                if self
-                    .record_declaration_iterator_protocol(
-                        protocol_source,
-                        declared_receiver,
-                        &declaration_scope,
-                    )
-                    .is_none()
-                {
-                    self.diags.error(
-                        receiver.map_or_else(|| self.span(e), |receiver| self.span(receiver)),
-                        "krusty: selected inline iteration body has no declaration-scoped iterator protocol"
-                            .to_string(),
-                    );
-                    return Some(Ty::Error);
-                }
-            }
             return Some(ret);
         }
 

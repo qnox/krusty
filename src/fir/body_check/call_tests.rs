@@ -3821,7 +3821,7 @@ fn inline_function_value_keeps_the_selected_external_call_without_splice_plan() 
 }
 
 #[test]
-fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
+fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
     let (body, _) = checked_function_body_with_platform(
         "operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\
              emptyList<Map.Entry<K, V>>().iterator()\n\
@@ -3848,34 +3848,83 @@ fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
     });
     let Some(FirInlineBodyPlan::CollectionTransform {
         lambda_parameter,
-        flatten,
-        iterator,
+        traversal,
         factory,
+        capacity,
         append,
         accumulator,
-        append_parameter,
         ..
     }) = plan
     else {
         panic!("selected map call must publish its complete checked structural plan")
     };
     assert_eq!(*lambda_parameter, 0);
-    assert!(!flatten);
-    assert!(matches!(iterator.target, FirCallTarget::External { .. }));
-    assert_ne!(factory, append);
+    let crate::fir::FirInlineIterationTraversal::Iterator {
+        prepare,
+        has_next,
+        next,
+    } = traversal
+    else {
+        panic!("map must carry its declaration-owned iterator traversal")
+    };
+    let [entries, iterator] = prepare.as_ref() else {
+        panic!("Map.map must carry its entries and iterator calls")
+    };
+    assert_eq!(
+        entries.receiver.get(),
+        Ty::obj_args("kotlin/collections/Map", &[Ty::String, Ty::Int])
+    );
+    assert_eq!(entries.parameters.as_ref(), []);
+    assert_eq!(iterator.receiver, entries.result);
+    assert_eq!(iterator.parameters.as_ref(), []);
+    assert_eq!(has_next.receiver, iterator.result);
+    assert_eq!(has_next.parameters.as_ref(), []);
+    assert_eq!(has_next.result.get(), Ty::Boolean);
+    assert_eq!(next.receiver, iterator.result);
+    assert_eq!(next.parameters.as_ref(), []);
+    assert_eq!(
+        next.result.get(),
+        Ty::obj_args("kotlin/collections/Map$Entry", &[Ty::String, Ty::Int])
+    );
+    let crate::fir::FirInlineCollectionCapacity::Member(capacity) =
+        capacity.as_ref().expect("Map.map capacity")
+    else {
+        panic!("Map.map must use its structurally decoded member capacity")
+    };
+    let crate::fir::FirInlineCollectionAppend::Member(append) = append else {
+        panic!("Map.map must use its structurally decoded member append")
+    };
+    let identities = [
+        entries.declaration,
+        iterator.declaration,
+        has_next.declaration,
+        next.declaration,
+        *factory,
+        capacity.declaration,
+        append.declaration,
+    ];
+    assert_eq!(
+        identities
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        identities.len(),
+        "entries/iterator/hasNext/next/factory/capacity/append remain exact declarations"
+    );
     assert_eq!(
         accumulator.get(),
-        Ty::obj_args("kotlin/collections/MutableList", &[Ty::String])
+        Ty::obj_args("java/util/ArrayList", &[Ty::String])
     );
-    assert_eq!(append_parameter.get(), Ty::nullable(Ty::obj("kotlin/Any")));
+    assert_eq!(append.parameters[0].get(), Ty::String);
 }
 
 #[test]
-fn safe_suspend_function_property_in_map_keeps_the_checked_collection_plan() {
+fn suspending_flat_map_specializes_every_extension_append_parameter() {
     let (body, _) = checked_function_body_with_platform(
-        "class Holder(val callback: suspend () -> String)\n\
-         suspend fun collect(values: List<Int>, holder: Holder?): List<String> =\n\
-             values.map { holder?.callback() ?: \"none\" }\n",
+        "suspend fun expand(value: Int): List<String> = listOf(value.toString())\n\
+         suspend fun collect(values: List<Int>): List<String> =\n\
+             values.flatMap { expand(it) }\n",
         "collect",
         jvm_stdlib_semantics(),
     );
@@ -3891,9 +3940,79 @@ fn safe_suspend_function_property_in_map_keeps_the_checked_collection_plan() {
         else {
             return None;
         };
-        matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. }).then_some(())
+        matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. })
+            .then_some(plan.as_ref())
     });
-    assert_eq!(plan, Some(()));
+    let Some(FirInlineBodyPlan::CollectionTransform {
+        capacity,
+        append: crate::fir::FirInlineCollectionAppend::Extension(append),
+        accumulator,
+        ..
+    }) = plan
+    else {
+        panic!("selected flatMap call must publish its exact extension append contract")
+    };
+    assert!(capacity.is_none());
+    assert_eq!(
+        accumulator.get(),
+        Ty::obj_args("java/util/ArrayList", &[Ty::String])
+    );
+    assert_eq!(append.parameters.len(), 2);
+    assert_eq!(append.source_receiver, append.parameters[0]);
+    assert_eq!(
+        append.parameters[0].get(),
+        Ty::obj_args(
+            "kotlin/collections/MutableCollection",
+            &[Ty::in_projection(Ty::String)],
+        )
+    );
+    assert_eq!(
+        append.parameters[1].get(),
+        Ty::obj_args("kotlin/collections/Iterable", &[Ty::String])
+    );
+    assert_eq!(append.result.get(), Ty::Boolean);
+}
+
+#[test]
+fn safe_map_publishes_one_complete_receiver_specialized_collection_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "class Holder(val callback: suspend () -> String)\n\
+         suspend fun collect(values: List<Int>?, holder: Holder?): List<String>? =\n\
+             values?.map { holder?.callback() ?: \"none\" }\n",
+        "collect",
+        jvm_stdlib_semantics(),
+    );
+
+    let plans = (0..body.expression_count())
+        .filter_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let FirCallTarget::External {
+                inline_plan: Some(plan),
+                ..
+            } = &call.target
+            else {
+                return None;
+            };
+            matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. })
+                .then_some(plan.as_ref())
+        })
+        .collect::<Vec<_>>();
+    let [FirInlineBodyPlan::CollectionTransform { traversal, .. }] = plans.as_slice() else {
+        panic!("the safe map must publish exactly one collection plan: {plans:?}")
+    };
+    let crate::fir::FirInlineIterationTraversal::Iterator {
+        prepare,
+        has_next,
+        next,
+    } = traversal
+    else {
+        panic!("the safe map must retain the provider's iterator traversal")
+    };
+    assert_eq!(prepare.len(), 1);
+    assert_ne!(prepare[0].declaration, has_next.declaration);
+    assert_ne!(has_next.declaration, next.declaration);
 }
 
 #[test]

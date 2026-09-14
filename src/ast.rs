@@ -1883,6 +1883,20 @@ impl File {
     pub fn expr(&self, id: ExprId) -> &Expr {
         &self.expr_arena[id.0 as usize]
     }
+
+    /// The source receiver written on an ordinary or safe call. This is syntax ownership only:
+    /// resolution still decides what declaration the call selects and what receiver type it uses.
+    pub fn explicit_call_receiver(&self, id: ExprId) -> Option<ExprId> {
+        match self.expr(id) {
+            Expr::Call { callee, .. } => match self.expr(*callee) {
+                Expr::Member { receiver, .. } => Some(*receiver),
+                _ => None,
+            },
+            Expr::SafeCall { receiver, .. } => Some(*receiver),
+            _ => None,
+        }
+    }
+
     pub fn stmt(&self, id: StmtId) -> &Stmt {
         &self.stmt_arena[id.0 as usize]
     }

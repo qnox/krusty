@@ -352,6 +352,18 @@ pub struct MethodCode {
     /// The body's exception table (`try`/`catch`/`finally` ranges). Splicing relocates each entry's
     /// byte offsets and `catch_type` into the caller. Empty for a body with no handlers.
     pub handlers: Vec<ExcEntry>,
+    /// Debug locals from the declaration body. Provider-side structural decoders use their source
+    /// names only after bytecode flow has identified the exact semantic local role.
+    pub locals: Vec<MethodLocal>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MethodLocal {
+    pub start_pc: u16,
+    pub length: u16,
+    pub slot: u16,
+    pub name: String,
+    pub descriptor: String,
 }
 
 /// One `Code` exception-table entry: a `[start_pc, end_pc)` guarded range, its `handler_pc`, and the
@@ -426,12 +438,33 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                 // Code-attribute attributes: find `StackMapTable` (the verifier frames).
                 let nca = r.u2().ok()?;
                 let mut stackmap = None;
+                let mut locals = Vec::new();
                 for _ in 0..nca {
                     let an = utf8(r.u2().ok()?).to_string();
                     let al = r.u4().ok()? as usize;
                     let body = r.take(al).ok()?;
                     if an == "StackMapTable" {
                         stackmap = Some(body.to_vec());
+                    } else if an == "LocalVariableTable" {
+                        let mut local_reader = Reader { b: body, i: 0 };
+                        let count = local_reader.u2().ok()?;
+                        for _ in 0..count {
+                            let start_pc = local_reader.u2().ok()?;
+                            let length = local_reader.u2().ok()?;
+                            let name = utf8(local_reader.u2().ok()?).to_string();
+                            let descriptor = utf8(local_reader.u2().ok()?).to_string();
+                            let slot = local_reader.u2().ok()?;
+                            locals.push(MethodLocal {
+                                start_pc,
+                                length,
+                                slot,
+                                name,
+                                descriptor,
+                            });
+                        }
+                        if local_reader.i != body.len() {
+                            return None;
+                        }
                     }
                 }
                 return Some(MethodCode {
@@ -441,6 +474,7 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                     source_cp: cp,
                     stackmap,
                     handlers,
+                    locals,
                 });
             }
             r.take(attr_len).ok()?;

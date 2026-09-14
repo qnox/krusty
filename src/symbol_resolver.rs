@@ -47,9 +47,10 @@ pub(crate) use member_hierarchy::{
     lexical_enclosing_classifier_names, members_in_hierarchy, InheritedNestedClassifier,
 };
 pub(crate) use member_specialization::{
-    apply_property_bindings, instantiate_slot, specialize_inline_iteration_traversal,
-    specialize_signature_input_type, specialize_signature_output_type,
-    specialize_signature_receiver_type, TypePosition, UnboundSpecialization,
+    apply_property_bindings, instantiate_slot, specialize_inline_collection_transform,
+    specialize_inline_iteration_traversal, specialize_signature_input_type,
+    specialize_signature_output_type, specialize_signature_receiver_type, TypePosition,
+    UnboundSpecialization,
 };
 use member_specialization::{
     specialize_call_sig, specialize_callable, specialize_final_signature_output_type,

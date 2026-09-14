@@ -20,9 +20,9 @@ use crate::jvm::names::same_mapped_virtual_name;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
-    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineBodyPlan, InlineKind,
-    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind,
-    PropertyInfo, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
+    LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind, PropertyInfo,
+    PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
@@ -5266,12 +5266,6 @@ impl JvmLibraries {
                 if package.matches("kotlin/collections") || package.matches("kotlin/text") =>
             {
                 match name {
-                    "map" if package.matches("kotlin/collections") => {
-                        Some(crate::libraries::CompilerIntrinsic::Map)
-                    }
-                    "flatMap" if package.matches("kotlin/collections") => {
-                        Some(crate::libraries::CompilerIntrinsic::FlatMap)
-                    }
                     "isEmpty" if package.matches("kotlin/collections") => {
                         Some(crate::libraries::CompilerIntrinsic::IsEmpty)
                     }
@@ -5293,10 +5287,6 @@ impl JvmLibraries {
             _ => None,
         };
         if let Some(intrinsic) = compiler_intrinsic {
-            let declaration_package = match namespace {
-                SymbolNamespace::Package(package) => Some(package),
-                SymbolNamespace::Classifier(_) => None,
-            };
             for overload in &mut overloads {
                 let selected_declaration_kind = match intrinsic {
                     crate::libraries::CompilerIntrinsic::ArrayFactory(_)
@@ -5326,8 +5316,6 @@ impl JvmLibraries {
                     | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
                     | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_) => continue,
                     crate::libraries::CompilerIntrinsic::StartCoroutine
-                    | crate::libraries::CompilerIntrinsic::Map
-                    | crate::libraries::CompilerIntrinsic::FlatMap
                     | crate::libraries::CompilerIntrinsic::IsEmpty
                     | crate::libraries::CompilerIntrinsic::IsNotEmpty
                     | crate::libraries::CompilerIntrinsic::Count
@@ -5338,37 +5326,6 @@ impl JvmLibraries {
                 };
                 if overload.kind == selected_declaration_kind {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
-                    if matches!(
-                        intrinsic,
-                        crate::libraries::CompilerIntrinsic::Map
-                            | crate::libraries::CompilerIntrinsic::FlatMap
-                    ) {
-                        overload.callable.inline_body_plan = Some(Box::new(
-                            super::collection_inline_plan::collection_transform(
-                                intrinsic == crate::libraries::CompilerIntrinsic::FlatMap,
-                            ),
-                        ));
-                    }
-                    if matches!(
-                        intrinsic,
-                        crate::libraries::CompilerIntrinsic::Map
-                            | crate::libraries::CompilerIntrinsic::FlatMap
-                    ) {
-                        overload.iterator_protocol_scope =
-                            declaration_package.into_iter().collect();
-                    }
-                }
-            }
-        }
-        if let SymbolNamespace::Package(package) = namespace {
-            for overload in &mut overloads {
-                if overload.kind == FnKind::Extension
-                    && matches!(
-                        overload.callable.inline_body_plan.as_deref(),
-                        Some(InlineBodyPlan::CollectionTransform { .. })
-                    )
-                {
-                    overload.iterator_protocol_scope = vec![package];
                 }
             }
         }

@@ -3,6 +3,7 @@
 //! Bytecode is used only to recognize the physical control-flow and exact call targets. Semantic
 //! member signatures come from the Kotlin classifier model built from metadata.
 
+mod collection_transform;
 mod dependencies;
 mod iteration;
 mod recovery;
@@ -607,6 +608,28 @@ fn valid_finally_contract(contract: FinallyContract<'_>) -> bool {
 }
 
 impl JvmLibraries {
+    fn register_inline_iteration_traversal(
+        &self,
+        traversal: &mut crate::libraries::InlineIterationTraversal,
+    ) {
+        match traversal {
+            crate::libraries::InlineIterationTraversal::Iterator {
+                prepare,
+                has_next,
+                next,
+            } => {
+                for member in prepare.iter_mut().chain([has_next.as_mut(), next.as_mut()]) {
+                    self.register_external_inline_member(member);
+                }
+            }
+            crate::libraries::InlineIterationTraversal::Array => {}
+            crate::libraries::InlineIterationTraversal::Counted { size, get } => {
+                self.register_external_inline_member(size);
+                self.register_external_inline_member(get);
+            }
+        }
+    }
+
     /// Assign stable external identities to every declaration referenced by an inline plan before
     /// the plan crosses the provider boundary.
     pub(super) fn register_inline_body_plan_dependencies(&self, plan: &mut InlineBodyPlan) {
@@ -643,31 +666,38 @@ impl JvmLibraries {
                 if let Some(InlineIterationIndex::Checked { overflow }) = index {
                     self.register_external_callable(&mut overflow.callable, FnKind::TopLevel);
                 }
-                match traversal {
-                    crate::libraries::InlineIterationTraversal::Iterator {
-                        prepare,
-                        has_next,
-                        next,
-                    } => {
-                        for member in prepare.iter_mut().chain([has_next.as_mut(), next.as_mut()]) {
-                            self.register_external_inline_member(member);
-                        }
-                    }
-                    crate::libraries::InlineIterationTraversal::Array => {}
-                    crate::libraries::InlineIterationTraversal::Counted { size, get } => {
-                        self.register_external_inline_member(size);
-                        self.register_external_inline_member(get);
-                    }
-                }
+                self.register_inline_iteration_traversal(traversal);
             }
             InlineBodyPlan::CollectionTransform {
-                factory, append, ..
+                traversal,
+                factory,
+                capacity,
+                append,
+                ..
             } => {
+                self.register_inline_iteration_traversal(traversal);
                 let owner = factory
                     .owner
                     .expect("collection inline factory must name its classifier");
                 self.register_external_constructor(owner, factory);
-                self.register_external_inline_member(append);
+                if let Some(capacity) = capacity {
+                    match capacity {
+                        crate::libraries::InlineCollectionCapacity::Member(member) => {
+                            self.register_external_inline_member(member)
+                        }
+                        crate::libraries::InlineCollectionCapacity::Extension {
+                            callable, ..
+                        } => self.register_external_callable(callable, FnKind::Extension),
+                    }
+                }
+                match append {
+                    crate::libraries::InlineCollectionAppend::Member(member) => {
+                        self.register_external_inline_member(member)
+                    }
+                    crate::libraries::InlineCollectionAppend::Extension(callable) => {
+                        self.register_external_callable(callable, FnKind::Extension)
+                    }
+                }
             }
         }
     }
@@ -731,6 +761,16 @@ impl JvmLibraries {
         parameter_slots: &[u16],
         decode_unavailable: &mut bool,
     ) -> Option<InlineBodyPlan> {
+        match self.inline_collection_transform_body_plan(callable, body_descriptor, parameter_slots)
+        {
+            collection_transform::CollectionTransformDecode::Plan(plan) => return Some(plan),
+            collection_transform::CollectionTransformDecode::Rejected => return None,
+            collection_transform::CollectionTransformDecode::Unavailable => {
+                *decode_unavailable = true;
+                return None;
+            }
+            collection_transform::CollectionTransformDecode::NotRecognized => {}
+        }
         if let Some(plan) = self.inline_iteration_body_plan(
             callable,
             body_descriptor,
@@ -738,6 +778,9 @@ impl JvmLibraries {
             decode_unavailable,
         ) {
             return Some(plan);
+        }
+        if *decode_unavailable {
+            return None;
         }
         let owner = callable.owner.render();
         let inline_name = format!("{}$$forInline", callable.name);

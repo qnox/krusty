@@ -1205,6 +1205,8 @@ mod run_noreceiver_e2e;
 mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]
 mod safe_call_argument_list_e2e;
+#[path = "safe_call_collection_transform_e2e.rs"]
+mod safe_call_collection_transform_e2e;
 #[path = "safe_call_e2e.rs"]
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
@@ -1213,8 +1215,6 @@ mod safe_call_generic_field_e2e;
 mod safe_call_let_destructure_e2e;
 #[path = "safe_call_member_on_generic_result_e2e.rs"]
 mod safe_call_member_on_generic_result_e2e;
-#[path = "safe_call_collection_transform_e2e.rs"]
-mod safe_call_collection_transform_e2e;
 #[path = "safe_call_origin_narrowing_e2e.rs"]
 mod safe_call_origin_narrowing_e2e;
 #[path = "safe_call_prim_intrinsic_e2e.rs"]

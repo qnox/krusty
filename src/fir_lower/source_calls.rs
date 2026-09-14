@@ -442,7 +442,7 @@ impl BodyLowering<'_> {
         Some(region)
     }
 
-    /// Expand the checked structural body of an exact collection `map`/`flatMap` declaration only
+    /// Expand the checked structural body of an exact collection-transform declaration.
     /// The checker attaches this plan only when the selected argument is a source lambda whose
     /// body suspends. Common lowering consumes that decision without inspecting callable or body
     /// semantics again.
@@ -450,18 +450,14 @@ impl BodyLowering<'_> {
     pub(super) fn external_inline_collection_transform(
         &mut self,
         lambda_parameter: u32,
-        flatten: bool,
         local_names: &crate::fir::FirInlineCollectionLocalNames,
-        iterator_ty: ResolvedTy,
-        iterator: &crate::fir::FirIteratorCall,
-        has_next: &crate::fir::FirIteratorCall,
-        next: &crate::fir::FirIteratorCall,
+        traversal: &crate::fir::FirInlineIterationTraversal,
         factory: ExternalCallableId,
         factory_classifier: crate::types::TypeName,
-        append: ExternalCallableId,
+        factory_parameters: &[ResolvedTy],
+        capacity: Option<&crate::fir::FirInlineCollectionCapacity>,
+        append: &crate::fir::FirInlineCollectionAppend,
         accumulator_ty: ResolvedTy,
-        append_parameter: ResolvedTy,
-        append_result: ResolvedTy,
         receiver_ty: Option<ResolvedTy>,
         parameter_types: &[Ty],
         dispatch_receiver: Option<ExprId>,
@@ -605,10 +601,44 @@ impl BodyLowering<'_> {
         );
         statements.push(inner_declaration);
 
+        let factory_arguments = match capacity {
+            None => Vec::new(),
+            Some(crate::fir::FirInlineCollectionCapacity::Member(member)) => {
+                let receiver = self.ir.add_expr(IrExpr::GetValue(outer_slot));
+                vec![self.external_inline_iteration_member_call(member, receiver, &[])?]
+            }
+            Some(crate::fir::FirInlineCollectionCapacity::Extension { call, default }) => {
+                let [_, default_parameter] = call.parameters.as_ref() else {
+                    return None;
+                };
+                if default_parameter.get() != Ty::Int || call.result.get() != Ty::Int {
+                    return None;
+                }
+                let receiver = self.ir.add_expr(IrExpr::GetValue(outer_slot));
+                let default = self.ir.add_expr(IrExpr::Const(IrConst::Int(*default)));
+                let capacity_call = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::External {
+                        target: call.declaration,
+                        default_provider: None,
+                        params: call.parameters.iter().map(|ty| ty.get()).collect(),
+                        ret: call.result.get(),
+                        substitutions: Vec::new(),
+                        defaults: Vec::new(),
+                        extension_receiver_parameter: Some(0),
+                    },
+                    dispatch_receiver: None,
+                    args: vec![receiver, default],
+                });
+                self.ir
+                    .ext_call_source_receiver
+                    .insert(capacity_call, call.source_receiver.get());
+                vec![capacity_call]
+            }
+        };
         let factory_call = self.ir.add_expr(IrExpr::New {
             internal: factory_classifier,
-            args: Vec::new(),
-            ctor_params: Some(Vec::new()),
+            args: factory_arguments,
+            ctor_params: Some(factory_parameters.iter().map(|ty| ty.get()).collect()),
             ctor_desc: None,
             external_target: Some(factory),
             defaults: Box::new([]),
@@ -630,19 +660,31 @@ impl BodyLowering<'_> {
         );
         statements.push(accumulator_declaration);
 
-        let iterable = self.ir.add_expr(IrExpr::GetValue(inner_slot));
-        let iterator_value = self.iterator_call(iterator, iterable).ok()?;
+        let crate::fir::FirInlineIterationTraversal::Iterator {
+            prepare,
+            has_next,
+            next,
+        } = traversal
+        else {
+            return None;
+        };
+        let mut iterator_value = self.ir.add_expr(IrExpr::GetValue(inner_slot));
+        for call in prepare {
+            iterator_value =
+                self.external_inline_iteration_member_call(call, iterator_value, &[])?;
+        }
+        let iterator_ty = prepare.last()?.result.get();
         let iterator_slot = self.allocate_temporary();
         statements.push(self.ir.add_expr(IrExpr::Variable {
             index: iterator_slot,
-            ty: iterator_ty.get(),
+            ty: iterator_ty,
             init: Some(iterator_value),
             named: true,
         }));
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-        let condition = self.iterator_call(has_next, iterator_read).ok()?;
+        let condition = self.external_inline_iteration_member_call(has_next, iterator_read, &[])?;
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-        let element = self.iterator_call(next, iterator_read).ok()?;
+        let element = self.external_inline_iteration_member_call(next, iterator_read, &[])?;
         // The expansion's provider-recorded loop element and the lambda's own parameter are
         // separate locals. Both are live at a suspension in the lambda body, so preserve both
         // source/debug identities; the target decides their rendered names.
@@ -692,32 +734,66 @@ impl BodyLowering<'_> {
             named: false,
         }));
         let part = self.ir.add_expr(IrExpr::GetValue(part_slot));
-        let append_argument = if flatten {
-            part
-        } else {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: part,
-                type_operand: append_parameter.get(),
-            })
-        };
         let accumulator = self.ir.add_expr(IrExpr::GetValue(accumulator_slot));
+        let (
+            append_target,
+            dispatch_receiver,
+            append_args,
+            append_params,
+            extension_parameter,
+            append_source_receiver,
+        ) = match append {
+            crate::fir::FirInlineCollectionAppend::Member(member) => {
+                let [append_parameter] = member.parameters.as_ref() else {
+                    return None;
+                };
+                let append_argument = self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: part,
+                    type_operand: append_parameter.get(),
+                });
+                (
+                    member.declaration,
+                    Some(accumulator),
+                    vec![append_argument],
+                    vec![append_parameter.get()],
+                    None,
+                    accumulator_ty.get(),
+                )
+            }
+            crate::fir::FirInlineCollectionAppend::Extension(call) => {
+                let [accumulator_parameter, part_parameter] = call.parameters.as_ref() else {
+                    return None;
+                };
+                (
+                    call.declaration,
+                    None,
+                    vec![accumulator, part],
+                    vec![accumulator_parameter.get(), part_parameter.get()],
+                    Some(0),
+                    call.source_receiver.get(),
+                )
+            }
+        };
         let append_call = self.ir.add_expr(IrExpr::Call {
             callee: Callee::External {
-                target: append,
+                target: append_target,
                 default_provider: None,
-                params: vec![append_parameter.get()],
-                ret: append_result.get(),
+                params: append_params,
+                ret: match append {
+                    crate::fir::FirInlineCollectionAppend::Member(member) => member.result.get(),
+                    crate::fir::FirInlineCollectionAppend::Extension(call) => call.result.get(),
+                },
                 substitutions: Vec::new(),
                 defaults: Vec::new(),
-                extension_receiver_parameter: None,
+                extension_receiver_parameter: extension_parameter,
             },
-            dispatch_receiver: Some(accumulator),
-            args: vec![append_argument],
+            dispatch_receiver,
+            args: append_args,
         });
         self.ir
             .ext_call_source_receiver
-            .insert(append_call, accumulator_ty.get());
+            .insert(append_call, append_source_receiver);
         body_statements.push(append_call);
         let mut loop_statements = Vec::with_capacity(body_statements.len() + 2);
         loop_statements.push(element_iv_declaration);
