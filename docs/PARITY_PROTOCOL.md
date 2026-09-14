@@ -2184,3 +2184,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_java_functional_interface_constructor_labels_its_lambda`,
   `a_labeled_return_through_a_sam_constructor_carries_its_value`,
   `an_unknown_label_is_still_rejected`.
+- **A safe call to an inline collection transform keeps its iteration plan (fix).** `map`/`flatMap`
+  are expanded structurally: resolution records the declaration-scoped iterator protocol for the
+  call, and checked FIR embeds it in the call's inline plan. Both sides key that protocol by the
+  RECEIVER expression, but resolution read the receiver out of an `Expr::Call`'s `Member` callee
+  only — and a safe call is its own AST node that owns its receiver directly. `xs?.map { … }`
+  therefore filed the protocol under the CALL expression while the checker looked under `xs`; the
+  lookup missed, and since a transform with a lambda argument is a hard failure once its protocol is
+  absent, the whole FILE died with
+  `internal error: checked FIR construction failed … MissingStableCallTarget`.
+  `?.forEach` was unaffected — its plan comes from the declaration body, not from this protocol —
+  which is what kept the gap narrow enough to miss.
+  `tests/safe_call_collection_transform_e2e.rs::a_safe_call_to_a_collection_transform_compiles`,
+  `a_suspension_inside_a_safe_call_transform_runs`, `the_other_receiver_spellings_still_transform`.
