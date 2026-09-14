@@ -601,10 +601,11 @@ fn selected_delegate_call(
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
                     suspend: callable.suspend,
                     can_inline: callable.inline.can_inline(),
-                    inline_plan: super::calls::fir_inline_body_plan(
+                    inline_plan: super::inline_body_plan::publish(
                         callable.inline_body_plan.as_deref(),
                         Some(0),
-                    ),
+                    )
+                    .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
                     extension_receiver_parameter: None,
                 },
                 parameters,
@@ -664,10 +665,11 @@ fn selected_delegate_call(
                     declared_result: declared_ret.map(resolved).transpose()?,
                     suspend: *suspend,
                     can_inline: inline.can_inline(),
-                    inline_plan: super::calls::fir_inline_body_plan(
+                    inline_plan: super::inline_body_plan::publish(
                         inline_body_plan.as_deref(),
                         None,
-                    ),
+                    )
+                    .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
                     extension_receiver_parameter: Some(
                         u32::try_from(extension_parameter)
                             .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,

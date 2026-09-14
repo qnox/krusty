@@ -20992,138 +20992,25 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let parameters =
             self.extension_plan_arguments(call, receiver, args, callable.params.len())?;
-        match plan {
-            crate::libraries::InlineBodyPlan::InvokeLambda {
-                lambda_parameter,
-                argument_parameters,
-                return_parameter,
-            } => {
-                let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
-                let arguments = argument_parameters
-                    .iter()
-                    .map(|parameter| parameters.get(*parameter).copied().flatten())
-                    .collect::<Option<Vec<_>>>()?;
-                let label = self.lambda_label(lambda, source_label);
-                let returned = return_parameter
-                    .and_then(|parameter| parameters.get(parameter).copied().flatten());
-                self.lower_invoke_lambda_plan(lambda, &arguments, label, returned)
-            }
-            crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-                lambda_parameter,
-                state_parameter,
-                state_default,
-                enter,
-                cleanup,
-            } => {
-                if !self.cur_fn_suspend {
-                    return self.bail("selected inline body plan requires a suspend function");
-                }
-                let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
-                let Expr::Lambda { body, .. } = self.afile.expr(lambda).clone() else {
-                    return self.bail("selected inline body plan requires a lambda literal");
-                };
-                let Ty::Fun(lambda_signature) = self.info.ty(lambda) else {
-                    return self.bail("selected inline body plan has no lambda signature");
-                };
-                if !lambda_signature.params.is_empty()
-                    || lambda_signature.context_count != 0
-                    || lambda_info(self.info, lambda).receiver.is_some()
-                {
-                    return self.bail("selected inline body plan requires a zero-argument lambda");
-                }
-                let receiver_ty = self.info.ty(receiver);
-                let receiver_value = self.expr(receiver)?;
-                let receiver_slot = self.fresh_value();
-                let receiver_var = self.emit_named_variable(
-                    receiver_slot,
-                    ty_to_ir(receiver_ty),
-                    Some(receiver_value),
-                );
-                let state_ty = *callable.params.get(*state_parameter)?;
-                let state_value = if let Some(expression) =
-                    parameters.get(*state_parameter).copied().flatten()
-                {
-                    self.lower_arg(expression, &ty_to_ir(state_ty))?
-                } else {
-                    match state_default {
-                        crate::libraries::DefaultValue::Null => self.emit_const(IrConst::Null),
-                        _ => return self.bail("selected inline body plan has unsupported default"),
-                    }
-                };
-                let state_slot = self.fresh_value();
-                let state_var =
-                    self.emit_variable(state_slot, ty_to_ir(state_ty), Some(state_value));
-                let enter_receiver = self.emit_get_value(receiver_slot);
-                let enter_state = self.emit_get_value(state_slot);
-                let enter_owner = enter.owner?;
-                let enter_call = self.emit_virtual_call(
-                    enter_owner,
-                    enter.name.clone(),
-                    enter.descriptor.clone(),
-                    enter.is_interface(),
-                    enter_receiver,
-                    vec![enter_state],
-                );
-                self.ir
-                    .suspend_calls
-                    .insert(enter_call, ty_to_ir(enter.ret));
-
-                let result_ty = self.info.ty(call);
-                let result_slot = self.fresh_value();
-                let result_default = self.emit_zero_value(result_ty);
-                let result_var =
-                    self.emit_variable(result_slot, ty_to_ir(result_ty), Some(result_default));
-                let break_label = format!("$inline_plan${}", self.fresh_value());
-                let lambda_label = self.lambda_label(lambda, source_label);
-                let function_tail = self.fn_body_tail == Some(call) && result_ty == self.cur_ret_ty;
-                self.inline_lambda_ret.push((
-                    lambda_label,
-                    result_slot,
-                    break_label.clone(),
-                    result_ty,
-                    function_tail,
-                ));
-                let depth = self.scope.len();
-                let body_value = self.expr(body);
-                self.inline_lambda_ret.pop();
-                self.scope.truncate(depth);
-                let body_value = body_value?;
-                let mut body_statements = Vec::new();
-                if self.info.ty(body) == Ty::Nothing {
-                    body_statements.push(body_value);
-                } else {
-                    body_statements.push(self.emit_set_value(result_slot, body_value));
-                }
-                let break_statement = self.emit_break(Some(break_label.clone()));
-                body_statements.push(break_statement);
-                let loop_body = self.emit_block(body_statements, None);
-                let condition = self.emit_const(IrConst::Boolean(true));
-                let body_loop =
-                    self.emit_while(condition, loop_body, None, false, Some(break_label));
-                let cleanup_receiver = self.emit_get_value(receiver_slot);
-                let cleanup_state = self.emit_get_value(state_slot);
-                let cleanup_owner = cleanup.owner?;
-                let cleanup_call = self.emit_virtual_call(
-                    cleanup_owner,
-                    cleanup.name.clone(),
-                    cleanup.descriptor.clone(),
-                    cleanup.is_interface(),
-                    cleanup_receiver,
-                    vec![cleanup_state],
-                );
-                let try_body = self.emit_block(vec![body_loop], None);
-                let finally = self.emit_block(vec![cleanup_call], None);
-                let guarded = self.emit_try(try_body, Vec::new(), Some(finally), Ty::Unit);
-                let result = self.emit_get_value(result_slot);
-                Some(self.emit_block(
-                    vec![receiver_var, state_var, enter_call, result_var, guarded],
-                    Some(result),
-                ))
-            }
-            // The production checked-FIR path consumes this provider plan. The legacy lowerer has
-            // its pre-existing suspend-only collection expansion earlier in expression lowering.
-            crate::libraries::InlineBodyPlan::CollectionTransform { .. } => None,
-        }
+        let crate::libraries::InlineBodyPlan::InvokeLambda {
+            lambda_parameter,
+            argument_parameters,
+            return_parameter,
+        } = plan
+        else {
+            // Structural suspend/collection plans are checked-FIR contracts. The legacy AST
+            // lowerer must neither duplicate their expansion nor fall back to an ordinary call.
+            return None;
+        };
+        let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
+        let arguments = argument_parameters
+            .iter()
+            .map(|parameter| parameters.get(*parameter).copied().flatten())
+            .collect::<Option<Vec<_>>>()?;
+        let label = self.lambda_label(lambda, source_label);
+        let returned =
+            return_parameter.and_then(|parameter| parameters.get(parameter).copied().flatten());
+        self.lower_invoke_lambda_plan(lambda, &arguments, label, returned)
     }
 
     fn lower_for_each(

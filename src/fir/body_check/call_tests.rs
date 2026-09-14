@@ -3772,6 +3772,55 @@ fn foreach_with_callable_reference_keeps_the_selected_external_call_without_spli
 }
 
 #[test]
+fn ordinary_map_literal_keeps_the_selected_external_call_without_splice_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun read(values: List<Int>): List<Int> = values.map { it + 1 }\n",
+        "read",
+        jvm_stdlib_semantics(),
+    );
+
+    let map = (0..body.expression_count()).find_map(|raw| {
+        let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+            return None;
+        };
+        let FirCallTarget::External { inline_plan, .. } = &call.target else {
+            return None;
+        };
+        call.arguments
+            .iter()
+            .any(|argument| {
+                matches!(
+                    argument,
+                    FirCallArgument::Expression { value, .. }
+                        if matches!(
+                            body.expr(*value).map(|expression| &expression.kind),
+                            Some(FirExprKind::Lambda { .. })
+                        )
+                )
+            })
+            .then_some(inline_plan)
+    });
+    assert!(matches!(map, Some(None)));
+}
+
+#[test]
+fn inline_function_value_keeps_the_selected_external_call_without_splice_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun read(block: (String) -> Int): Int = \"value\".let(block)\n",
+        "read",
+        jvm_stdlib_semantics(),
+    );
+    let root = body.expr(root_expression(&body)).expect("root call");
+    let FirExprKind::Call(call) = &root.kind else {
+        panic!("let must remain a checked call")
+    };
+    let FirCallTarget::External { inline_plan, .. } = &call.target else {
+        panic!("stdlib let must retain its selected external identity")
+    };
+    assert!(inline_plan.is_none());
+}
+
+#[test]
 fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
     let (body, _) = checked_function_body_with_platform(
         "operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\
@@ -3822,6 +3871,32 @@ fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
 }
 
 #[test]
+fn safe_suspend_function_property_in_map_keeps_the_checked_collection_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "class Holder(val callback: suspend () -> String)\n\
+         suspend fun collect(values: List<Int>, holder: Holder?): List<String> =\n\
+             values.map { holder?.callback() ?: \"none\" }\n",
+        "collect",
+        jvm_stdlib_semantics(),
+    );
+
+    let plan = (0..body.expression_count()).find_map(|raw| {
+        let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+            return None;
+        };
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
+            return None;
+        };
+        matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. }).then_some(())
+    });
+    assert_eq!(plan, Some(()));
+}
+
+#[test]
 fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
     let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
     let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
@@ -3854,21 +3929,52 @@ fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
     });
     let Some(FirInlineBodyPlan::SuspendBeforeLambdaFinally {
         lambda_parameter,
-        state_parameter,
-        state_default,
+        state,
         enter,
         cleanup,
     }) = plan
     else {
         panic!("withLock must publish its selected structural plan in checked FIR")
     };
-    assert_eq!((*lambda_parameter, *state_parameter), (1, 0));
-    assert_eq!(*state_default, FirInlineDefaultValue::Null);
+    let state = state
+        .as_ref()
+        .expect("withLock threads its `owner` through lock/unlock");
+    assert_eq!((*lambda_parameter, state.parameter), (1, 0));
+    assert_eq!(state.default, FirInlineDefaultValue::Null);
     assert_eq!(enter.parameters.len(), 1);
     assert_eq!(cleanup.parameters.len(), 1);
+    assert_eq!(enter.result.get(), Ty::Unit);
+    assert_eq!(cleanup.result.get(), Ty::Unit);
     assert!(enter.suspend);
     assert!(!cleanup.suspend);
     assert_ne!(enter.declaration, cleanup.declaration);
+}
+
+#[test]
+fn present_inline_plan_conversion_failure_is_not_absence() {
+    let member = crate::libraries::LibraryMember::new(
+        "enter".to_string(),
+        Vec::new(),
+        Ty::Unit,
+        "()V".to_string(),
+    );
+    let plan = crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
+        lambda_parameter: 0,
+        state: None,
+        enter: Box::new(member.clone()),
+        cleanup: Box::new(member),
+    };
+
+    assert_eq!(
+        super::inline_body_plan::publish(None, None),
+        Ok(None),
+        "only a genuinely absent provider plan maps to absent checked FIR",
+    );
+    assert_eq!(
+        super::inline_body_plan::publish(Some(&plan), None),
+        Err(super::inline_body_plan::MappingFailure::UnsupportedPlan),
+        "a present plan without stable member identities is a publication error",
+    );
 }
 
 #[test]
