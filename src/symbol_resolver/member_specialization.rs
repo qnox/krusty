@@ -276,6 +276,18 @@ fn specialize_fixed_member_receiver(
         .into_iter()
         .find_map(|(candidate, applied, _)| (candidate == owner).then_some(applied))?;
     let bindings = super::classifier_bindings(&classifier, applied_owner);
+    let declaration_formals = classifier
+        .type_params()
+        .iter()
+        .chain(
+            member
+                .generic_sig
+                .as_ref()
+                .into_iter()
+                .flat_map(|signature| &signature.formals),
+        )
+        .cloned()
+        .collect::<Vec<_>>();
     let mut specialized = member.clone();
     // `params`/`ret` are the erased callable realization for classpath members. Kotlin metadata's
     // generic signature is the semantic declaration and retains the owning classifier's type
@@ -293,12 +305,15 @@ fn specialize_fixed_member_receiver(
         .map(|parameter| specialize_signature_input_type(source, *parameter, &bindings))
         .collect();
     specialized.ret = specialize_signature_output_type(source, declared_ret, &bindings);
-    (!specialized
-        .params
+    member_slots_are_applied(&specialized.params, specialized.ret, &declaration_formals)
+        .then_some(specialized)
+}
+
+fn member_slots_are_applied(params: &[Ty], ret: Ty, declaration_formals: &[String]) -> bool {
+    !params
         .iter()
-        .any(|parameter| parameter.mentions_ty_param())
-        && !specialized.ret.mentions_ty_param())
-    .then_some(specialized)
+        .any(|parameter| crate::types::ty_mentions_param(*parameter, declaration_formals))
+        && !crate::types::ty_mentions_param(ret, declaration_formals)
 }
 
 /// Specialize the exact member chain decoded for an iteration body. The declaration identities are
@@ -391,7 +406,7 @@ pub(super) fn specialize_call_sig(
 
 #[cfg(test)]
 mod projected_member_view_tests {
-    use super::{specialize_member_type, GSigBinds, TypePosition};
+    use super::{member_slots_are_applied, specialize_member_type, GSigBinds, TypePosition};
     use crate::libraries::LibraryType;
     use crate::symbol_source::SymbolSource;
     use crate::types::{type_name, Ty, TypeName};
@@ -452,5 +467,19 @@ mod projected_member_view_tests {
             specialize_member_type(&Source, nested, &out, TypePosition::Out),
             Ty::obj_args("sample/Invariant", &[Ty::out_projection(Ty::String)])
         );
+    }
+
+    #[test]
+    fn applied_member_slots_preserve_an_enclosing_declaration_identity() {
+        let provider_formals = ["T".to_owned()];
+        let provider_t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let source_e = Ty::ty_param("\0tp:source:emit:E", Ty::nullable(Ty::obj("kotlin/Any")));
+
+        assert!(member_slots_are_applied(&[], source_e, &provider_formals));
+        assert!(!member_slots_are_applied(
+            &[],
+            provider_t,
+            &provider_formals
+        ));
     }
 }
