@@ -336,3 +336,54 @@ fn nested_anonymous_objects_in_a_super_constructor_argument_read_the_constructor
     assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
     run_ok("NestedAnonInSuperArgument", SOURCE);
 }
+
+#[test]
+fn an_anonymous_object_in_a_local_function_forwards_the_shared_cell() {
+    const SOURCE: &str = "interface C { fun i(): String }\n\
+         fun box(): String {\n\
+         var ok = \"fail\"\n\
+         fun mk(): C = object : C { override fun i() = ok }\n\
+         val c = mk()\n\
+         ok = \"OK\"\n\
+         return c.i() }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonSharedCellInLocalFn", SOURCE);
+}
+
+#[test]
+fn an_anonymous_object_in_a_lambda_forwards_the_shared_cell() {
+    const SOURCE: &str = "interface C { fun i(): String }\n\
+         fun box(): String {\n\
+         var ok = \"fail\"\n\
+         val mk = { object : C { override fun i() = ok } }\n\
+         val c = mk()\n\
+         ok = \"OK\"\n\
+         return c.i() }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonSharedCellInLambda", SOURCE);
+}
+
+#[test]
+fn an_anonymous_object_in_a_local_class_forwards_the_shared_cell() {
+    const SOURCE: &str = "interface C { fun i(): String }\n\
+         fun box(): String {\n\
+         var ok = \"fail\"\n\
+         class L { val fn: C = object : C { override fun i() = ok } }\n\
+         val l = L()\n\
+         ok = \"OK\"\n\
+         return l.fn.i() }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonSharedCellInLocalClass", SOURCE);
+}
+
+#[test]
+fn an_anonymous_object_two_callables_deep_writes_through_the_shared_cell() {
+    const SOURCE: &str = "interface C { fun set(value: String) }\n\
+         fun box(): String {\n\
+         var ok = \"fail\"\n\
+         fun mk(): C = object : C { override fun set(value: String) { ok = value } }\n\
+         mk().set(\"OK\")\n\
+         return ok }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonSharedCellWriteThrough", SOURCE);
+}

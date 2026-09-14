@@ -20915,6 +20915,7 @@ struct ValueBindingDeclaration {
     origin: ReceiverFnValueOrigin,
     error_provenance: ErrorProvenance,
     is_context_parameter: bool,
+    shared_storage_cell: bool,
 }
 
 impl ValueBindingDeclaration {
@@ -20923,6 +20924,7 @@ impl ValueBindingDeclaration {
             origin,
             error_provenance,
             is_context_parameter: false,
+            shared_storage_cell: false,
         }
     }
 
@@ -20931,6 +20933,15 @@ impl ValueBindingDeclaration {
             origin: ReceiverFnValueOrigin::Local,
             error_provenance: ErrorProvenance::None,
             is_context_parameter: true,
+            shared_storage_cell: false,
+        }
+    }
+
+    /// The same binding, marked as a capture field realized by one shared mutable cell.
+    fn in_shared_cell(self, shared_storage_cell: bool) -> Self {
+        Self {
+            shared_storage_cell,
+            ..self
         }
     }
 }
@@ -20957,6 +20968,11 @@ struct Local {
     /// A local delegated property reads and writes through this immutable storage object. Capturing
     /// a mutable delegated property captures this value, not a mutable plain local.
     delegate_storage_ty: Option<Ty>,
+    /// This binding is a local/anonymous classifier's CAPTURE FIELD already realized as one shared
+    /// mutable cell. A nested classifier capturing it must forward that cell, not a copy of the
+    /// element: the write that made the capture shared lives in an enclosing callable, so the
+    /// reassignment sets a checker of this body consults are empty here and say nothing about it.
+    shared_storage_cell: bool,
     /// Ephemeral identity of the runtime lexical value during one resolver check. Narrowing
     /// shadows copy it; fresh declarations allocate another. It never enters TypeInfo or FIR.
     lexical_capture_identity: Option<u32>,
@@ -27585,9 +27601,13 @@ impl<'a> Checker<'a> {
                         } else {
                             narrows.get(name).copied().unwrap_or(local.ty)
                         },
+                        // A capture field that is ALREADY a shared cell stays one. The write
+                        // that made it shared happened in an enclosing callable, so neither
+                        // reassignment set below knows about it from here.
                         shared_cell: local.delegate_storage_ty.is_none()
                             && local.is_var
-                            && (self.fn_reassigned.contains(name)
+                            && (local.shared_storage_cell
+                                || self.fn_reassigned.contains(name)
                                 || anonymous_descendant_writes_name(
                                     self.file,
                                     declaration,
@@ -33451,7 +33471,8 @@ impl<'a> Checker<'a> {
                             ty: local.ty,
                             shared_cell: local.delegate_storage_ty.is_none()
                                 && local.is_var
-                                && self.fn_reassigned.contains(&captured),
+                                && (local.shared_storage_cell
+                                    || self.fn_reassigned.contains(&captured)),
                             storage_ty: local.delegate_storage_ty,
                             name: captured,
                             source: AnonymousObjectCaptureSource::LexicalValue,
@@ -50543,7 +50564,9 @@ impl<'a> Checker<'a> {
                 },
                 shared_cell: local.delegate_storage_ty.is_none()
                     && local.is_var
-                    && (self.fn_reassigned.contains(&name) || class_reassigned.contains(&name)),
+                    && (local.shared_storage_cell
+                        || self.fn_reassigned.contains(&name)
+                        || class_reassigned.contains(&name)),
                 storage_ty: local.delegate_storage_ty,
                 name,
                 source: AnonymousObjectCaptureSource::LexicalValue,
@@ -60397,6 +60420,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter: false,
                 callable_reference_type: Some(function_type),
                 delegate_storage_ty: None,
+                shared_storage_cell: false,
                 lexical_capture_identity,
                 safe_call_origin: None,
             }),
@@ -60526,7 +60550,7 @@ impl<'a> Checker<'a> {
         is_var: bool,
     ) {
         if let Some(field) = property.class_storage {
-            self.declare_class_storage(scope, &property.name, property.ty, is_var, field);
+            self.declare_class_storage(scope, &property.name, property.ty, is_var, field, false);
             return;
         }
         let error_provenance = if property.ty == Ty::Error
@@ -60569,6 +60593,7 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_var: bool,
         field: u32,
+        shared_cell: bool,
     ) {
         self.declare_with_origin(
             scope,
@@ -60578,7 +60603,8 @@ impl<'a> Checker<'a> {
             ValueBindingDeclaration::ordinary(
                 ReceiverFnValueOrigin::ClassStorage(field),
                 ErrorProvenance::None,
-            ),
+            )
+            .in_shared_cell(shared_cell),
         );
     }
 
@@ -60793,6 +60819,7 @@ impl<'a> Checker<'a> {
             capture.ty,
             capture.shared_cell,
             u32::try_from(field).expect("too many local-class captures"),
+            capture.shared_cell,
         );
     }
 
@@ -60819,6 +60846,7 @@ impl<'a> Checker<'a> {
                     capture.ty,
                     capture.shared_cell,
                     field as u32,
+                    capture.shared_cell,
                 );
             }
         }
@@ -61000,6 +61028,7 @@ impl<'a> Checker<'a> {
             origin,
             error_provenance,
             is_context_parameter,
+            shared_storage_cell,
         } = declaration;
         // A NEW binding under an existing name invalidates the property-path narrowings rooted at
         // the old one (`if (a.p == null) return; val a = …` — the proof was about the OLD `a`).
@@ -61028,6 +61057,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter,
                 callable_reference_type: matches!(ty, Ty::Fun(_)).then_some(ty),
                 delegate_storage_ty: None,
+                shared_storage_cell,
                 lexical_capture_identity,
                 safe_call_origin: None,
             }),
@@ -61080,6 +61110,7 @@ impl<'a> Checker<'a> {
                 is_context_parameter,
                 callable_reference_type,
                 delegate_storage_ty,
+                shared_storage_cell: previous.is_some_and(|local| local.shared_storage_cell),
                 lexical_capture_identity,
                 safe_call_origin,
             }),
@@ -71979,6 +72010,7 @@ impl<'a> Checker<'a> {
                             capture.ty,
                             capture.shared_cell,
                             field as u32,
+                            capture.shared_cell,
                         );
                     }
                 }
