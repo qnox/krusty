@@ -178,7 +178,8 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             *body = map(*body);
         }),
         IrExpr::Return(value) => map_option(value, &mut map),
-        IrExpr::TypeOp { arg, .. }
+        IrExpr::BottomValue { producer: arg, .. }
+        | IrExpr::TypeOp { arg, .. }
         | IrExpr::NotNullAssert { operand: arg, .. }
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }

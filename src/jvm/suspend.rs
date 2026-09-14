@@ -26,6 +26,7 @@
 //! a conditional sub-expression like elvis/`&&`, an extension suspend fn, or a member suspend fn with its
 //! own parameters — its continuation would also have to capture them) skip the file.
 
+mod bottom_completion;
 mod debug_metadata;
 mod get_or_create;
 mod statement_normalization;
@@ -38,6 +39,7 @@ use crate::ir::{
 use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
+use bottom_completion::{suspension_completion, unwrap_suspend_cast, SuspensionCompletion};
 use debug_metadata::capture_suspension_lines;
 use get_or_create::build_get_or_create;
 use statement_normalization::{
@@ -68,9 +70,10 @@ enum ValueBranchWrap {
     /// the wrapper around the value while exposing the suspension to the state-machine normalizer.
     ValueClassBox(Callee),
 }
-/// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
-/// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_suspension`.
-type Suspension = (Option<(u32, Ty)>, ExprId);
+/// A direct suspension at a statement: `(optional bound local + type, the call ExprId, completion)`.
+/// The call is reused and receives the continuation; completion preserves the two independent facts
+/// owned by a peeled [`IrExpr::BottomValue`] in the statement's exact use context.
+type Suspension = (Option<(u32, Ty)>, ExprId, SuspensionCompletion);
 #[derive(Clone, Default)]
 struct SuspensionScope {
     values: Vec<(u32, Ty)>,
@@ -387,17 +390,6 @@ pub fn lower_suspend(
             // Tail-call forward: thread the function's own `$completion` (value-index `p_old`) into the
             // callee and return its `Object` result directly. No state machine, no continuation class —
             // exactly kotlinc's tail-call optimization.
-            // A logical `Nothing` result does not make this physical call diverge: it may first return
-            // `COROUTINE_SUSPENDED`, and a later failure is delivered through the continuation. Prevent
-            // the ordinary emitter's real-`Nothing` guard from throwing before either value can be
-            // forwarded; the caller's resume state owns the semantic bottom boundary.
-            if ir
-                .logical_types
-                .get(&call)
-                .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing)
-            {
-                ir.logical_types.remove(&call);
-            }
             let cont = ir.add_expr(IrExpr::GetValue(p_old));
             append_continuation(ir, call, cont);
             // Checked expression bodies carry one source-oriented grouping block around the actual
@@ -2412,6 +2404,17 @@ fn hoist_expr(
             };
             e
         }
+        IrExpr::BottomValue {
+            producer,
+            completion,
+        } => {
+            let producer = hoist_expr(ir, producer, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::BottomValue {
+                producer,
+                completion,
+            };
+            e
+        }
         IrExpr::NotNullAssert { operand, message } => {
             let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, message };
@@ -2983,6 +2986,7 @@ fn hoisted_value_ty(
         IrExpr::New { internal, .. } => Some(Ty::Obj(*internal, &[])),
         // `operand!!` yields its operand's value unchanged (the assert only throws), matching
         // `value_ty`'s treatment in the emitter.
+        IrExpr::BottomValue { .. } => Some(Ty::Nothing),
         IrExpr::NotNullAssert { operand, .. } => {
             hoisted_value_ty(ir, *operand, orig_rets, value_types)
         }
@@ -3145,43 +3149,6 @@ fn value_class_suspension_result(
         .or_else(|| ir.value_class_suspend_calls.get(&e).copied())
 }
 
-/// Peel a single `TypeOp::Cast`/`ImplicitCoercion` off `e` when its arg is a suspend call, returning
-/// the underlying call; otherwise return `e` unchanged. A generic suspend member call
-/// (`suspend fun findAll(): List<T>`) has its erased `Object` result cast to the declared type at the
-/// call site — the coroutine flattener binds the raw call and re-applies the cast via `bind_from_r`,
-/// so the wrapper must be seen through to recognize the suspension.
-///
-/// `ref_only` restricts the peel to a reference `Cast` (a redundant checkcast on the erased `Object`):
-/// a tail-forward returns the callee's `Object` result verbatim with NO re-coercion, so an
-/// `ImplicitCoercion` that BOXES a primitive result must be kept (dropping it would `areturn` an
-/// unboxed value where a reference is required → VerifyError). The flattener path re-applies the
-/// coercion via `bind_from_r`, so it peels both.
-fn unwrap_suspend_cast(
-    ir: &IrFile,
-    e: ExprId,
-    suspend_set: &HashSet<u32>,
-    ref_only: bool,
-) -> ExprId {
-    let ops: &[IrTypeOp] = if ref_only {
-        &[IrTypeOp::Cast]
-    } else {
-        &[IrTypeOp::Cast, IrTypeOp::ImplicitCoercion]
-    };
-    let original = e;
-    let mut peeled = e;
-    while let IrExpr::TypeOp { op, arg, .. } = ir.exprs[peeled as usize] {
-        if !ops.contains(&op) {
-            break;
-        }
-        peeled = arg;
-    }
-    if is_suspension_point(ir, peeled, suspend_set) {
-        peeled
-    } else {
-        original
-    }
-}
-
 fn when_has_non_direct_suspending_branch(
     ir: &IrFile,
     expression: ExprId,
@@ -3197,7 +3164,7 @@ fn when_has_non_direct_suspending_branch(
         expr_calls_suspend(ir, *branch, suspend_set)
             && !is_suspension_point(
                 ir,
-                unwrap_suspend_cast(ir, *branch, suspend_set, false),
+                unwrap_suspend_cast(ir, *branch, suspend_set, false).point,
                 suspend_set,
             )
     })
@@ -3288,7 +3255,7 @@ fn tail_forward_call(
     let tail = tail_expression(ir, b, set, unit_ret, orig_rets)?;
     // A generic suspend call's erased result is cast to the declared type at the call site; a
     // tail-forward returns the callee's Object result verbatim (no checkcast), so peel the wrapper.
-    let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true);
+    let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true).point;
     is_suspension_point(ir, tail, set).then_some(tail)
 }
 
@@ -4877,7 +4844,13 @@ impl Flat<'_> {
     /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
     /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
     /// resume re-enters at `resume`).
-    fn emit_suspension(&mut self, out: &mut Vec<ExprId>, point: ExprId, resume: usize) -> bool {
+    fn emit_suspension(
+        &mut self,
+        out: &mut Vec<ExprId>,
+        point: ExprId,
+        resume: usize,
+        completion: SuspensionCompletion,
+    ) {
         crate::trace_compiler!(
             "suspend",
             "emit_suspension {point}:{:?}",
@@ -4889,7 +4862,7 @@ impl Flat<'_> {
                 "emit_suspension BAIL: no scope snapshot for suspension point {point}"
             );
             self.failed = true;
-            return false;
+            return;
         };
         if !self.bind_operand_temps(out, point, &list) {
             crate::trace_compiler!(
@@ -4897,18 +4870,14 @@ impl Flat<'_> {
                 "emit_suspension BAIL: unre-bindable operands at suspension point {point}"
             );
             self.failed = true;
-            return false;
+            return;
         }
         // A suspend call whose source result is `Nothing` can still return
         // `COROUTINE_SUSPENDED`. The ordinary emitter-level bottom guard must therefore not run on
-        // the physical call itself (it would throw before the marker comparison). Preserve the fact
-        // for the resume state, then clear it from this rewritten CPS call.
-        let bottom = self
-            .ir
-            .logical_types
-            .get(&point)
-            .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing);
-        if bottom {
+        // the physical call itself (it would throw before the marker comparison). The caller has
+        // already selected the resume completion from the checked BottomValue wrapper in its exact
+        // use context; clear the raw call's logical bottom fact independently of that selection.
+        if completion.semantic_bottom {
             self.ir.logical_types.remove(&point);
         }
         self.spill_scope(out, &list);
@@ -4962,7 +4931,6 @@ impl Flat<'_> {
         out.push(when);
         let vg = self.gv(vv);
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
-        bottom
     }
 
     fn terminate_bottom_resume(&mut self, out: &mut Vec<ExprId>) {
@@ -5134,19 +5102,30 @@ impl Flat<'_> {
                 // `val x: T = susp()` where the generic call result is wrapped in a `Cast`/coercion to
                 // `T` — the binding's `bind_from_r` already casts the resumed result to the variable's
                 // declared `ty`, so the wrapper is redundant; bind the raw suspend call underneath it.
-                let call =
+                let suspension =
                     unwrap_suspend_cast(self.ir, *init, self.suspend, /* ref_only */ false);
-                is_suspension_point(self.ir, call, self.suspend)
-                    .then(|| (Some((*index, ty.clone())), call))
+                is_suspension_point(self.ir, suspension.point, self.suspend).then(|| {
+                    (
+                        Some((*index, ty.clone())),
+                        suspension.point,
+                        suspension_completion(suspension, false),
+                    )
+                })
             }
             _ => {
                 // A provider boundary may wrap a physical suspend call in an implicit coercion to
                 // its checked semantic result (notably a bare `Unit` call). Bind/forward the raw call
                 // just as the variable-initializer path above does; appending a continuation to the
                 // wrapper itself is a no-op and leaves a `$default` descriptor one operand short.
-                let call =
+                let suspension =
                     unwrap_suspend_cast(self.ir, stmt, self.suspend, /* ref_only */ false);
-                is_suspension_point(self.ir, call, self.suspend).then_some((None, call))
+                is_suspension_point(self.ir, suspension.point, self.suspend).then(|| {
+                    (
+                        None,
+                        suspension.point,
+                        suspension_completion(suspension, true),
+                    )
+                })
             }
         }
     }
@@ -5175,7 +5154,7 @@ impl Flat<'_> {
         let any_susp = branches.iter().any(|(_, v)| {
             is_suspension_point(
                 self.ir,
-                unwrap_suspend_cast(self.ir, *v, self.suspend, /* ref_only */ false),
+                unwrap_suspend_cast(self.ir, *v, self.suspend, /* ref_only */ false).point,
                 self.suspend,
             )
         });
@@ -5209,7 +5188,7 @@ impl Flat<'_> {
                 self.ir.exprs[*v as usize],
                 IrExpr::When { .. } | IrExpr::Block { .. }
             );
-            if !is_suspension_point(self.ir, uv, self.suspend)
+            if !is_suspension_point(self.ir, uv.point, self.suspend)
                 && !direct_jump
                 && !nested_control
                 && (expr_calls_suspend(self.ir, *v, self.suspend)
@@ -5240,21 +5219,22 @@ impl Flat<'_> {
             };
             // A cast/coercion-wrapped direct suspension binds the RAW call — `bind_from_r` already
             // unboxes the resumed `Object` to the declared ty (see `stmt_cond_suspension`).
-            let uvalue =
+            let suspension =
                 unwrap_suspend_cast(self.ir, *value, self.suspend, /* ref_only */ false);
             if let Some((label, is_break)) = jump {
                 // A loop-jump branch: transfer to the loop's cont/break state; bind nothing (it diverges).
                 if !self.emit_loop_jump(&mut bb, *value, label.as_deref(), is_break) {
                     self.goto(&mut bb, merge);
                 }
-            } else if is_suspension_point(self.ir, uvalue, self.suspend) {
+            } else if is_suspension_point(self.ir, suspension.point, self.suspend) {
                 let br_resume = self.new_state();
-                let bottom = self.emit_suspension(&mut bb, uvalue, br_resume);
+                let completion = suspension_completion(suspension, false);
+                self.emit_suspension(&mut bb, suspension.point, br_resume, completion);
                 let mut rs: Vec<ExprId> = Vec::new();
-                if bottom {
+                if completion.resume_diverges {
                     self.terminate_bottom_resume(&mut rs);
                 } else {
-                    self.bind_from_r(&mut rs, local, ty, br_resume, uvalue);
+                    self.bind_from_r(&mut rs, local, ty, br_resume, suspension.point);
                     self.goto(&mut rs, merge);
                 }
                 self.states[br_resume] = rs;
@@ -5467,18 +5447,18 @@ impl Flat<'_> {
                     return;
                 }
             }
-            if let Some((bind, call)) = self.stmt_suspension(stmt) {
+            if let Some((bind, call, completion)) = self.stmt_suspension(stmt) {
                 let resume = self.new_state();
-                let bottom = self.emit_suspension(&mut out, call, resume);
+                self.emit_suspension(&mut out, call, resume, completion);
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
-                if bottom {
+                if completion.resume_diverges {
                     self.terminate_bottom_resume(&mut rs);
                 } else if let Some((local, ty)) = bind {
                     self.bind_from_r(&mut rs, local, &ty, resume, call);
                 }
                 self.states[resume] = rs;
-                if !bottom {
+                if !completion.resume_diverges {
                     self.flatten(&stmts[i + 1..], resume, after);
                 }
                 return;
@@ -6026,20 +6006,7 @@ fn expr_has_return(ir: &IrFile, e: ExprId) -> bool {
 /// Whether statement `s` always transfers control away (never falls through): a `return`/`throw`, or a
 /// block/`when` all of whose exits do. Used to suppress a dead fall-through transition after it.
 fn stmt_diverges(ir: &IrFile, s: ExprId) -> bool {
-    if ir
-        .logical_types
-        .get(&s)
-        .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing)
-    {
-        return true;
-    }
-    ir.expr_diverges_by(s, &|expression, value| {
-        matches!(value, IrExpr::Call { .. } | IrExpr::MethodCall { .. })
-            && ir
-                .logical_types
-                .get(&expression)
-                .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing)
-    })
+    ir.expr_discarding_diverges_by(s, &|_, _| false)
 }
 
 /// Collect the value-indices read (`GetValue`) anywhere in `e`'s subtree.

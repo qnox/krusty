@@ -3522,10 +3522,11 @@ impl CodeBuilder {
         self.cur_stack
     }
 
-    /// Append a pre-assembled, pool-relocated, **branchless** inline body (from `inline::splice_branchless`)
-    /// at the call site. The arguments are already on the stack (`arg_words` slots); the body's prologue
-    /// stores them into locals `base..top_local`, runs, and leaves `ret_words` slots. `body_stack` is the
-    /// body's own peak operand height. No StackMapTable frame is recorded (the bytes contain no branch).
+    pub(crate) fn can_fall_through(&self) -> bool {
+        !self.dead
+    }
+
+    /// Append a pool-relocated inline body whose arguments are already on the stack.
     pub fn splice_inline(
         &mut self,
         bytes: &[u8],
@@ -3534,13 +3535,11 @@ impl CodeBuilder {
         top_local: u16,
         arg_words: i32,
         ret_words: i32,
+        falls_through: bool,
     ) {
-        let baseline = self.cur_stack - arg_words; // stack height once the prologue consumes the args
-                                                   // A splice inside a dropped region goes with it. Its relocated frames are bound INSIDE the
-                                                   // body, never at its first byte, so emitting it while dead would leave an unreachable region
-                                                   // whose entry has no frame ("Expecting a stack map frame"); and its prologue consumes
-                                                   // arguments that the dropped code never pushed. `bind_at` already left its labels unbound, so
-                                                   // the frames and handlers registered for it are dropped too. Height bookkeeping still runs.
+        let baseline = self.cur_stack - arg_words;
+        // A dead splice has unbound inner frames/handlers and no pushed arguments to consume;
+        // only its height bookkeeping survives for the enclosing emitter.
         if self.dead {
             self.cur_stack = baseline + ret_words;
             return;
@@ -3559,6 +3558,7 @@ impl CodeBuilder {
         if self.cur_stack > self.max_stack as i32 {
             self.max_stack = self.cur_stack as u16;
         }
+        self.dead |= !falls_through;
     }
 
     /// Force the current operand-stack height (e.g. an exception handler is entered with the caught

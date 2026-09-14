@@ -584,6 +584,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         | IrExpr::EnclosingInstance { .. }
         | IrExpr::GetField { .. }
         | IrExpr::LateinitInitialized { .. }
+        | IrExpr::BottomValue { .. }
         | IrExpr::SetField { .. }
         | IrExpr::GetStatic(_)
         | IrExpr::SetStatic { .. }
