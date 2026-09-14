@@ -4935,6 +4935,11 @@ impl Classpath {
         let tree = self.package_tree();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        // Owner, name and descriptor together ARE a JVM method's identity, so the same method
+        // reached through two classpath entries is one candidate, not an overload set of two. A
+        // build classpath routinely reaches one jar more than once; reporting the duplicate made
+        // every consumer that requires an unambiguous single match reject it instead.
+        let mut emitted = std::collections::HashSet::new();
         for &pkg in packages {
             if !seen.insert(pkg) {
                 continue;
@@ -4948,7 +4953,13 @@ impl Classpath {
                 }
                 let members = self.jar_pkg_members_name(jar_id, pkg);
                 if let Some(indices) = members.by_source.get(name) {
-                    out.extend(members.render_indices(indices));
+                    out.extend(members.render_indices(indices).into_iter().filter(|candidate| {
+                        emitted.insert((
+                            candidate.owner,
+                            candidate.name.clone(),
+                            candidate.descriptor.clone(),
+                        ))
+                    }));
                 }
             }
         }

@@ -2151,3 +2151,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   this way.
   `src/compiler/streaming_tests.rs::unattributed_signature_failure_reports_one_deterministic_internal_error`
   and `src/compiler/streaming_tests.rs::attributed_signature_failure_is_not_duplicated_by_recovery`.
+- **One JVM method reached twice on the classpath is one candidate (fix).** `owner + name +
+  descriptor` IS a method's identity, so the same method reached through two classpath entries is one
+  candidate — but the package scan reported it once per entry. Every consumer that requires an
+  unambiguous single match then rejected it. The visible casualty was the indexed-iteration plan:
+  resolving `forEachIndexed`'s `checkIndexOverflow` guard to `throwIndexOverflow` saw "more than one"
+  and declined, so `forEachIndexed` published NO inline plan, its lambda was never expanded at IR
+  level, a suspension inside it never received the caller's continuation, and the backend bailed the
+  whole FILE with `call arity mismatch`. `forEach` was unaffected — a plain iteration plan resolves
+  no overflow dependency. A real build classpath reaches one jar through several entries routinely,
+  which is why the suite — which builds a single-entry classpath — could not see this at all; the
+  test now duplicates the entry deliberately.
+  `tests/indexed_iteration_suspend_e2e.rs::the_driver_accepts_a_suspension_inside_for_each_indexed`,
+  `the_indexed_loop_keeps_its_positions_and_continue`,
+  `plain_iteration_and_non_suspending_indexing_still_work`.
