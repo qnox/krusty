@@ -1529,3 +1529,5 @@ mod wrapped_param_type_e2e;
 
 #[path = "reified_unit_splice_e2e.rs"]
 mod reified_unit_splice_e2e;
+#[path = "reified_value_class_splice_e2e.rs"]
+mod reified_value_class_splice_e2e;
