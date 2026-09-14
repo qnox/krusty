@@ -24557,33 +24557,40 @@ impl<'a> Checker<'a> {
     /// companion value.
     fn implicit_singleton_value(&self, ty: Ty, current: bool) -> Option<SingletonValue> {
         // The NEAREST receiver is normally a real `this` in the frame, which lowering reads from
-        // its slot; naming a singleton there would be a longer way to the same value. A
-        // constructor-delegation argument is the exception: the receiver installed nearest for it
-        // is the TARGET's companion tower, and it is backed by no `this` slot at all, because the
-        // instance being constructed does not exist yet. Lowering has nothing to read, so the
-        // singleton has to be named — otherwise `constructor() : this(foo())` reaching a companion
-        // `foo` loads the half-built instance as the receiver, which is exactly what the JVM
-        // verifier rejects as `uninitializedThis`.
-        if current && !self.is_static_this(ty) {
-            return None;
+        // its slot; naming a singleton there would be a longer way to the same value. The
+        // exception is a receiver that stands in for a `this` that does not exist — an enclosing
+        // object, or the target's companion, installed for a constructor header or a delegation
+        // argument. That one is backed by no slot at all, so lowering has nothing to read: without
+        // the singleton, `constructor() : this(foo())` reaching a companion `foo` loads the
+        // half-built instance, which the JVM verifier rejects as `uninitializedThis`.
+        if current {
+            return self.static_this_singleton(ty);
         }
         let classifier = ty.non_null().obj_internal()?;
         self.classifier_singleton_value(classifier)
             .filter(|singleton| singleton.classifier == classifier)
     }
 
-    /// Is this receiver the object or companion standing in for `this` where there is no instance?
+    /// The singleton a receiver denotes when it stands in for a `this` that does not exist.
     ///
-    /// The same two facts the explicit `this` spelling consults, asked of an implicitly selected
-    /// receiver, so the two spellings cannot disagree about what a receiver denotes.
-    fn is_static_this(&self, ty: Ty) -> bool {
+    /// These are the two handles retained when such a receiver is installed for a constructor
+    /// header or delegation argument — the enclosing object, and the target's companion. The
+    /// identity comes from the handle rather than being re-derived from the type, so an implicitly
+    /// selected receiver and the explicit `this` spelling, which consults the same two facts,
+    /// cannot disagree about what the receiver denotes.
+    fn static_this_singleton(&self, ty: Ty) -> Option<SingletonValue> {
         self.static_singleton_this
             .as_ref()
-            .is_some_and(|instance| ty == Ty::obj_name(instance.classifier))
-            || self
-                .static_companion_this
-                .as_ref()
-                .is_some_and(|instance| ty == Ty::obj_name(instance.companion))
+            .filter(|instance| ty == Ty::obj_name(instance.classifier))
+            .cloned()
+            .or_else(|| {
+                self.static_companion_this
+                    .as_ref()
+                    .filter(|instance| ty == Ty::obj_name(instance.companion))
+                    .map(|instance| SingletonValue {
+                        classifier: instance.companion,
+                    })
+            })
     }
 
     /// The value a resolved classifier identity denotes in expression position. `None` means it is

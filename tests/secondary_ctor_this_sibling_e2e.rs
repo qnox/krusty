@@ -246,4 +246,13 @@ fn a_constructor_argument_reaches_the_companion_not_the_instance() {
          \x20   return \"OK\"\n\
          }\n";
     assert_eq!(run(SRC).as_deref(), Some("OK"));
+    // The receiver a delegation argument denotes is a claim about what kotlinc emits, so run the
+    // same program under the reference compiler where it is provisioned; CI provisions it.
+    if let Some(out) = common::kotlinc_library(SRC) {
+        assert_eq!(
+            common::run_box(&[], "LibKt", &[out, common::stdlib_jar()]).as_deref(),
+            Some("OK"),
+            "reference compiler"
+        );
+    }
 }
