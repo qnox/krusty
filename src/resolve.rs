@@ -64640,6 +64640,29 @@ impl<'a> Checker<'a> {
             if self.lookup(scope, &root).is_some() {
                 crate::trace_compiler!("smartcast", "root narrowing shadows lexical value {root}");
                 self.declare_narrowing_shadow(scope, &root, ty);
+            } else if scope
+                .this_ty()
+                .is_some_and(|this| self.lookup_prop_name(this.non_null(), &root).is_some())
+            {
+                // A bare name that is a property of the CURRENT receiver — an extension function
+                // reading its own receiver's property — has no lexical binding to shadow, and the
+                // READ resolves through that receiver as `this.<name>`. Filing the proof under the
+                // bare spelling alone put it under a key the read never asks for, so the narrowing
+                // was recorded and then never found. Record the receiver-qualified path the read
+                // uses; the bare path stays for spellings that consult it directly.
+                self.record_path_narrowing(
+                    scope,
+                    NarrowPath {
+                        root: "this".to_string(),
+                        segments: vec![root.clone()],
+                    },
+                    ty,
+                );
+                self.record_path_narrowing(scope, path.clone(), ty);
+                crate::trace_compiler!(
+                    "smartcast",
+                    "root narrowing records receiver property this.{root}"
+                );
             } else {
                 // A stable top-level `val` has no lexical value binding to shadow. Retain its exact
                 // access path and let the selected property read consume the proven type.
