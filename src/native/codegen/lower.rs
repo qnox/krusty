@@ -37,7 +37,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrTypeOp,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp,
 };
 use crate::jvm::classpath::Classpath;
 use crate::types::Ty;
@@ -194,6 +194,7 @@ pub fn lower_file(
     lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     lowering.declare_property_references()?;
+    lowering.declare_local_property_references()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
@@ -1144,6 +1145,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Checked(IrCheckedOperation::PropertyReference { .. }) => {
                 self.property_reference(id)
             }
+            IrExpr::LocalPropertyReference { .. } => self.local_property_reference(id),
             IrExpr::Checked(IrCheckedOperation::RangeConstruction {
                 operation,
                 start,
@@ -1356,6 +1358,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // the node carries none, the interface every one of them wears answers the two
             // questions asked of this — that it is a reference, and that its members are the
             // reference machinery's.
+            // A local delegated property's metadata wears the interface Kotlin gives it, which is
+            // what sends its `name` through the reference machinery.
+            IrExpr::LocalPropertyReference { .. } => Ty::obj("kotlin/reflect/KProperty"),
             IrExpr::Checked(IrCheckedOperation::PropertyReference { mutable, .. }) => self
                 .file
                 .ir

@@ -118,6 +118,88 @@ impl<'a> FileLowering<'a> {
         Ok(())
     }
 
+    /// Declare a type for every LOCAL delegated property's `KProperty` metadata.
+    ///
+    /// A local delegated property has no storage and no accessors to reach: the metadata exists so
+    /// that `getValue(thisRef, property)` can ask the property its name, and that is the whole of
+    /// what it answers. `get` and `set` are the runtime's loud failure rather than a body, because
+    /// no type a program can name here declares them — a local property reference is a
+    /// `KProperty<*>`, and Kotlin gives it no receiver to read through.
+    ///
+    /// One type per NAME, for the same reason a property reference is one type per property: two
+    /// references to the same local property are the same declaration and compare equal.
+    pub(super) fn declare_local_property_references(&mut self) -> Result<(), Unsupported> {
+        let mut emitted: HashMap<Box<str>, ReferenceItems> = HashMap::new();
+        for index in 0..self.ir.exprs.len() {
+            let IrExpr::LocalPropertyReference { name, .. } = &self.ir.exprs[index] else {
+                continue;
+            };
+            let name = name.clone();
+            let items = match emitted.get(&name) {
+                Some(items) => *items,
+                None => {
+                    let items = self.define_local_reference(emitted.len(), &name)?;
+                    emitted.insert(name, items);
+                    items
+                }
+            };
+            self.references.insert(index as u32, items);
+        }
+        Ok(())
+    }
+
+    fn define_local_reference(
+        &mut self,
+        ordinal: usize,
+        property: &str,
+    ) -> Result<ReferenceItems, Unsupported> {
+        let base = format!("kt_local_prop_{ordinal}");
+        let instance_size = model::HEADER_SIZE.next_multiple_of(8);
+        let name = self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+        let equals =
+            self.declare_local_function(&format!("{base}_equals"), &[any(), any()], Ty::Boolean)?;
+        let unreachable = self.import("kt_abstract_method_called", &[], Ty::Unit)?;
+
+        let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
+        let mut vtable = self.any_vtable()?;
+        vtable[0] = equals;
+        vtable.push(unreachable);
+        vtable.push(unreachable);
+        vtable.push(name);
+        let any_type = self.import_data("kt_type_any")?;
+        self.define_type_descriptor(
+            descriptor,
+            &base,
+            "kotlin.reflect.KProperty",
+            instance_size,
+            &[],
+            &vtable,
+            any_type,
+            &[],
+        )?;
+        self.define_reference_equals(equals, &base, descriptor, None)?;
+        self.define_reference_name(name, &base, property)?;
+
+        let instance = self.declare_local_data(&format!("{base}_instance"), false)?;
+        let mut description = DataDescription::new();
+        description.define(vec![0; model::HEADER_SIZE as usize].into_boxed_slice());
+        description.set_align(8);
+        let global = self
+            .module
+            .declare_data_in_data(descriptor, &mut description);
+        description.write_data_addr(0, global, 0);
+        self.module
+            .define_data(instance, &description)
+            .map_err(|error| format!("defining `{base}_instance` ({error})"))?;
+
+        Ok(ReferenceItems {
+            descriptor,
+            instance_size,
+            receiver_offset: None,
+            singleton: Some(instance),
+        })
+    }
+
     /// Resolve the checked property a site names to what this generator can read and write.
     fn reference_of(
         &self,
@@ -230,7 +312,7 @@ impl<'a> FileLowering<'a> {
         if let Some(setter) = setter {
             self.define_reference_set(setter, &base, &site, receiver_offset)?;
         }
-        self.define_reference_name(name, &base, &site)?;
+        self.define_reference_name(name, &base, &site.name)?;
 
         let singleton = match site.bound {
             Some(_) => None,
@@ -414,10 +496,10 @@ impl<'a> FileLowering<'a> {
         &mut self,
         id: FuncId,
         base: &str,
-        site: &Site,
+        property: &str,
     ) -> Result<(), Unsupported> {
         let signature = self.signature_of(&[any()], any())?;
-        let text = site.name.clone().into_bytes();
+        let text = property.as_bytes().to_vec();
         self.emit_function(
             id,
             signature,
@@ -446,6 +528,20 @@ fn receiver(body: &mut BodyLowering<'_, '_, '_>, params: &[Value], offset: Optio
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// The `KProperty` metadata of a local delegated property: one object, for its name.
+    pub(super) fn local_property_reference(
+        &mut self,
+        id: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(items) = self.file.references.get(&id) else {
+            return Err("`LocalPropertyReference`".to_string());
+        };
+        let instance = items
+            .singleton
+            .expect("a local property reference has one instance");
+        Ok(Some(self.data_address(instance)))
+    }
+
     /// `::foo`, `C::p`, `x::p` — the reference object itself.
     pub(super) fn property_reference(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
         let Some(items) = self.file.references.get(&id) else {

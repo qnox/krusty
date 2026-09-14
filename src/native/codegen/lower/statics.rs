@@ -38,6 +38,21 @@ impl<'a> FileLowering<'a> {
         }
     }
 
+    /// Can this property's initializer tell program start from the moment its owner is touched?
+    ///
+    /// Two cannot. A `const val`'s initializer is a compile-time constant. A delegated property's
+    /// `KProperty` metadata is a property REFERENCE, which is one emitted object per property with
+    /// no state of its own and nothing to allocate — the same value however early it is asked for.
+    /// Running either at program start is indistinguishable from running it with the owner, so the
+    /// placement fact the owner carries has nothing to say about them.
+    fn order_independent(&self, declaration: &IrStatic) -> bool {
+        declaration.is_const
+            || matches!(
+                self.ir.expr(declaration.init),
+                IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
+            )
+    }
+
     /// Declare a slot per top-level property. Declared before any body is compiled, because a
     /// function may read a property declared after it.
     pub(super) fn declare_statics(&mut self) -> Result<(), Unsupported> {
@@ -46,16 +61,14 @@ impl<'a> FileLowering<'a> {
             // field of the OUTER class there. There is no facade here for a slot to be placed
             // differently from, so the owner says nothing about the slot; what it could say
             // something about is WHEN the initializer runs, since a companion's runs with the
-            // companion rather than at program start. A `const val` settles that: its initializer
-            // is a compile-time constant, so running it at program start is indistinguishable.
-            // Anything else owned by a class still declines rather than guess at the order.
-            if let Some(owner) = declaration.owner {
-                if !declaration.is_const {
-                    return Err(format!(
-                        "a non-`const` property stored on `{}`",
-                        owner.render()
-                    ));
-                }
+            // companion rather than at program start. An initializer that cannot OBSERVE the
+            // difference settles it; anything else owned by a class still declines rather than
+            // guess at the order.
+            if declaration.owner.is_some() && !self.order_independent(declaration) {
+                return Err(format!(
+                    "a non-`const` property stored on `{}`",
+                    declaration.owner.expect("checked above").render()
+                ));
             }
             check_carried(declaration.ty)?;
             if carrier(declaration.ty) == Carrier::Void {

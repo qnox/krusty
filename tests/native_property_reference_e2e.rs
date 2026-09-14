@@ -156,3 +156,84 @@ fn two_bound_references_compare_by_declaration_and_receiver() {
         "OK",
     );
 }
+
+#[test]
+fn a_delegated_member_property_reads_and_writes_through_its_delegate() {
+    // The `KProperty` the delegate is handed is a property reference with no receiver bound, so
+    // the metadata a delegated property needs is the same object `C::p` is.
+    expect_native_box(
+        "import kotlin.reflect.KProperty\n\
+         class Delegate {\n\
+         \x20   var inner = 1\n\
+         \x20   operator fun getValue(t: Any?, p: KProperty<*>): Int = inner\n\
+         \x20   operator fun setValue(t: Any?, p: KProperty<*>, i: Int) { inner = i }\n\
+         }\n\
+         class A { var prop: Int by Delegate() }\n\
+         fun box(): String {\n\
+         \x20   val a = A()\n\
+         \x20   if (a.prop != 1) return \"fail get\"\n\
+         \x20   a.prop = 2\n\
+         \x20   return if (a.prop == 2) \"OK\" else \"fail set\"\n\
+         }\n",
+        "DelegatedMemberProperty",
+        "OK",
+    );
+}
+
+#[test]
+fn a_delegate_reads_the_property_name_it_is_handed() {
+    expect_native_box(
+        "import kotlin.reflect.KProperty\n\
+         class Named {\n\
+         \x20   operator fun getValue(t: Any?, p: KProperty<*>): String = p.name\n\
+         }\n\
+         class A { val first: String by Named() }\n\
+         fun box(): String {\n\
+         \x20   val answer = A().first\n\
+         \x20   return if (answer == \"first\") \"OK\" else \"fail: $answer\"\n\
+         }\n",
+        "DelegatedPropertyName",
+        "OK",
+    );
+}
+
+#[test]
+fn a_delegated_local_property_carries_its_own_name() {
+    // A LOCAL delegated property has no storage and no accessors: its metadata exists so the
+    // delegate can ask the property its name, and that is the whole of what it answers.
+    expect_native_box(
+        "import kotlin.reflect.KProperty\n\
+         class Named {\n\
+         \x20   operator fun getValue(t: Any?, p: KProperty<*>): String = p.name\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val OK: String by Named()\n\
+         \x20   return OK\n\
+         }\n",
+        "DelegatedLocalProperty",
+        "OK",
+    );
+}
+
+#[test]
+fn two_delegated_properties_are_handed_their_own_metadata() {
+    // One type per property, so two delegated properties of one class must not share an object —
+    // the name each delegate reads is the only thing telling them apart.
+    expect_native_box(
+        "import kotlin.reflect.KProperty\n\
+         class Named {\n\
+         \x20   operator fun getValue(t: Any?, p: KProperty<*>): String = p.name\n\
+         }\n\
+         class A {\n\
+         \x20   val first: String by Named()\n\
+         \x20   val second: String by Named()\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val a = A()\n\
+         \x20   val joined = a.first + a.second\n\
+         \x20   return if (joined == \"firstsecond\") \"OK\" else \"fail: $joined\"\n\
+         }\n",
+        "DelegatedPropertyMetadataIdentity",
+        "OK",
+    );
+}

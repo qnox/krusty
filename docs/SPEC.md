@@ -1928,6 +1928,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `KCallable.name` answers the property's Kotlin name; `get` answers a reference, so a primitive
   property boxes on the way out and is unboxed back at the call site.
   Tests: `tests/native_property_reference_e2e.rs`.
+
+- **A delegated property's `KProperty` metadata is a property reference, and a LOCAL one answers
+  only its name.** `val x: Int by D()` hands the delegate an object so `getValue(thisRef, property)`
+  can ask the property about itself; for a member property that object is exactly the reference
+  `C::x` is, and krusty's native target emits one and the same type for both. A LOCAL delegated
+  property has no storage and no accessors to reach, and Kotlin gives its metadata no receiver to
+  read through, so `get` and `set` on it are the runtime's loud failure rather than a body — no type
+  a program can name there declares them.
+  The metadata a member's delegation needs is a static the class owns, and on the JVM an owner says
+  WHEN the initializer runs. Here it says nothing, because this initializer cannot tell: a property
+  reference with no bound receiver is one object per property with no state and nothing to allocate,
+  the same value however early it is asked for — which is the same reason a `const val`'s owner says
+  nothing. Any other class-owned initializer still declines rather than guess at the order.
+  Tests: `tests/native_property_reference_e2e.rs`.
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that

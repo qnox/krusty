@@ -1439,6 +1439,18 @@ before:**
    A reference to a DEPENDENCY property, to an extension property, or to one with context
    parameters still declines by name: each needs a receiver shape this object does not carry.
 
+   **Delegated properties rode in on that, for 2361 pass — the largest single step yet.** The object
+   a delegate is handed so it can ask `getValue(thisRef, property)` about the property is exactly
+   the reference `C::x` is, so a member's delegation needed nothing new. What it needed was for the
+   class-owned static holding that metadata to be allowed at all: an owner is a placement fact that
+   on the JVM says WHEN the initializer runs, and here it says nothing about THIS initializer,
+   because a property reference with no bound receiver is one object per property with no state and
+   nothing to allocate — the same value however early it is asked for, which is the same reason a
+   `const val`'s owner says nothing. Any other class-owned initializer still declines.
+   A LOCAL delegated property took one small addition: it has no storage and no accessors, and
+   Kotlin gives its metadata no receiver to read through, so its type answers `name` and puts the
+   runtime's abstract trap in the two slots no type a program can name there declares.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows
