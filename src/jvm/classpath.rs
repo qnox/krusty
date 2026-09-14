@@ -10,6 +10,8 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod candidate_union;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -4828,38 +4830,7 @@ impl Classpath {
         jvm_name: &str,
         packages: &[TypeName],
     ) -> Vec<ExtCandidate> {
-        let tree = self.package_tree();
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &pkg in packages {
-            if !seen.insert(pkg) {
-                continue;
-            }
-            let Some(node) = tree.node_for_name(pkg) else {
-                continue;
-            };
-            for &jar_id in &node.jars {
-                if self.entries.get(jar_id).is_none() {
-                    continue;
-                }
-                let members = self.jar_pkg_members_name(jar_id, pkg);
-                if let Some(indices) = members.by_jvm.get(jvm_name) {
-                    for &idx in indices {
-                        let Some(c) = members.candidates.get(idx) else {
-                            continue;
-                        };
-                        if descriptor_parts(&c.descriptor)
-                            .and_then(|(fp, _)| fp)
-                            .as_deref()
-                            == Some(recv_desc)
-                        {
-                            out.push(c.render(&members.owner_names));
-                        }
-                    }
-                }
-            }
-        }
-        out
+        candidate_union::extensions_in_scope(self, recv_desc, jvm_name, packages)
     }
 
     /// The scoped, lazy analogue of [`Self::find_extension_owners`]: the facades that declare a static
@@ -4932,27 +4903,7 @@ impl Classpath {
     /// package it consults only the jars that declare it (the tree), composing their per-(jar, package)
     /// `PkgMembers`; NOT a whole-classpath scan. A package is consulted at most once.
     pub fn functions_in_scope(&self, name: &str, packages: &[TypeName]) -> Vec<ExtCandidate> {
-        let tree = self.package_tree();
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &pkg in packages {
-            if !seen.insert(pkg) {
-                continue;
-            }
-            let Some(node) = tree.node_for_name(pkg) else {
-                continue;
-            };
-            for &jar_id in &node.jars {
-                if self.entries.get(jar_id).is_none() {
-                    continue;
-                }
-                let members = self.jar_pkg_members_name(jar_id, pkg);
-                if let Some(indices) = members.by_source.get(name) {
-                    out.extend(members.render_indices(indices));
-                }
-            }
-        }
-        out
+        candidate_union::functions_in_scope(self, name, packages)
     }
 
     /// The spec's top-level memo lookup: the already-composed [`ResolvedSymbols`](crate::libraries::ResolvedSymbols)
