@@ -8117,6 +8117,18 @@ and behavior is checked by RUNNING the emitted program.
   (the second pins the transitive case: an anonymous object inside an anonymous object inside the
   argument). Corpus: `closures/captureInSuperConstructorCall/localCapturedInAnonymousObjectInLocalClass.kt`
   and `…2.kt`.
+- **A checked `Nothing` value carries its completion contract into common IR.** Non-null `Nothing`
+  is semantically divergent, but a target can still have to realize a physical fallthrough path.
+  On the JVM, a declared `Nothing` call has a `java.lang.Void` result slot, while `null!!` retains
+  its asserted reference after `Intrinsics.checkNotNull`; both values must be discarded before the
+  path ends with `KotlinNothingValueException`. Without that completion, a primitive sibling such
+  as `if (c) true else null!!` reaches the merge with a reference where the verifier requires an
+  integer. Both checked-FIR lowering and the legacy AST bridge attach the same `BottomValue`
+  contract. Common IR records only semantic completion; the JVM emitter derives the physical stack
+  effect from the actual invocation/assertion it emits, then discards that result mechanically.
+  Tests: `tests/nothing_call_branch_e2e.rs` covers Boolean, every primitive width, `when`, the
+  reference control, exact kotlinc bytecode parity, and declared/inferred external calls. Unit
+  contracts beside both lowerers verify that neither pipeline can omit the common-IR marker.
 - **`++p` on a property reads it twice; `p++` reads it once — in statement position too.** Kotlin
   defines `++p` as `p = p.inc()` followed by the VALUE of `p`, which for a property is a fresh read
   through its getter, while `p++` binds the old value to a temporary. For a custom getter the

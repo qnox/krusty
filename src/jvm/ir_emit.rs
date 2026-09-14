@@ -21,6 +21,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod bottom_values;
 mod enum_metadata;
 mod field_write;
 mod interface_compatibility;
@@ -6471,7 +6472,7 @@ fn emit_class(
             }
             if let Some(init_body) = c.init_body.filter(|_| !static_storage(ir, c)) {
                 e.emit_constructor_init_body(c, init_body, &mut ctor, &mut ctor_lines);
-                init_diverges = e.diverges(init_body);
+                init_diverges = e.discarding_diverges(init_body);
             }
             max_slot = e.next_slot;
         }
@@ -11585,7 +11586,7 @@ fn emit_method_inner_with_holder(
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
     // the verifier rejects it. Skip it exactly when the body can't fall through.
-    if ret == Ty::Unit && !e.diverges(body) {
+    if ret == Ty::Unit && !e.discarding_diverges(body) {
         // kotlinc maps the implicit `return` to the body's closing-`}` line. `fn_close_lines` has
         // entries only for PARSED declarations, so a synthesized body (no entry) keeps its
         // decl-line fallback table.
@@ -13069,7 +13070,7 @@ fn emit_facade_default_stub(
     // value ids 0..n bound to the parameters, exactly this frame's layout.
     if let Some(body) = f.body.filter(|&body| body_has_reified_markers(ir, body)) {
         e.emit(body, &mut code);
-        if ret == Ty::Unit && !e.diverges(body) {
+        if ret == Ty::Unit && !e.discarding_diverges(body) {
             code.ret_void();
         }
     } else {
@@ -13765,6 +13766,7 @@ impl<'a> Emitter<'a> {
             // Pure branchless host + lambda: append the bytes, no frames; works at any stack height.
             // The host's stack must cover the host body PLUS the deepest spliced lambda body (a safe upper
             // bound on the real peak) — else a deep lambda body overflows the host's operand stack.
+            let ret_words = if probe.falls_through { ret_words } else { 0 };
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
@@ -13772,6 +13774,7 @@ impl<'a> Emitter<'a> {
                 top_local,
                 arg_words,
                 ret_words,
+                probe.falls_through,
             );
             return true;
         }
@@ -13831,6 +13834,7 @@ impl<'a> Emitter<'a> {
         // exception table via labels bound at the absolute spliced offsets.
         bind_inline_handlers(code, &bs.handlers);
         code.set_needs_stackmap();
+        let ret_words = if bs.falls_through { ret_words } else { 0 };
         // Host stack must cover the host body PLUS the deepest spliced lambda body (safe upper bound).
         code.splice_inline(
             &bs.bytes,
@@ -13839,6 +13843,7 @@ impl<'a> Emitter<'a> {
             top_local,
             arg_words,
             ret_words,
+            bs.falls_through,
         );
         if bs.join_required {
             let join = code.new_label();
@@ -14078,8 +14083,7 @@ impl<'a> Emitter<'a> {
             // Branchless: append the bytes, no frames. A DIVERGING body (ends in `athrow`, e.g.
             // `error(msg)`) leaves NOTHING on the stack — its post-splice height is the baseline.
             self.emit_call_descriptor_operands(call_expression, args, &physical_params, code);
-            let diverges = probe.bytes.last() == Some(&0xbf);
-            let ret_words = if diverges { 0 } else { ret_words };
+            let ret_words = if probe.falls_through { ret_words } else { 0 };
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
@@ -14087,6 +14091,7 @@ impl<'a> Emitter<'a> {
                 top_local,
                 arg_words,
                 ret_words,
+                probe.falls_through,
             );
             return true;
         }
@@ -14119,6 +14124,7 @@ impl<'a> Emitter<'a> {
         }
         bind_inline_handlers(code, &bs.handlers);
         code.set_needs_stackmap();
+        let ret_words = if bs.falls_through { ret_words } else { 0 };
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
@@ -14126,6 +14132,7 @@ impl<'a> Emitter<'a> {
             top_local,
             arg_words,
             ret_words,
+            bs.falls_through,
         );
         // Join frame: the redirected returns land at the continuation right after the spliced body.
         let join = code.new_label();
@@ -14540,31 +14547,22 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_discarding_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
-        // A generic result fixed to `Nothing` still crosses its erased callable boundary as an
-        // `Object`. In statement position kotlinc discards that physical word and permits the path
-        // to fall through; it does not treat the use-site substitution as a declaration-level
-        // `Nothing` contract. Common lowering preserves both facts as
-        // `ImplicitCoercion(Object -> Nothing)`, so consume the operand representation here instead
-        // of asking the zero-width semantic target how many words to pop.
-        if let IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg,
-            type_operand,
+        if let IrExpr::BottomValue {
+            producer,
+            completion,
         } = node
         {
-            if !type_operand.is_nullable() && type_operand.non_null() == Ty::Nothing {
-                let physical = self.value_ty(*arg);
-                self.emit_value(*arg, code);
-                discard(physical, code);
-                return;
-            }
-        }
-        self.emit_value_node(e, node, code);
-        // A `Nothing`-returning call leaves a physical `Void` and must terminate the path (it would
-        // otherwise fall through with a stray value); the throw replaces the discard.
-        if self.terminate_if_nothing_call(e, node, code) {
+            let baseline = code.stack_height();
+            self.emit_value(*producer, code);
+            bottom_values::finish(
+                self.cw,
+                code,
+                baseline,
+                completion.diverges_when_discarded(),
+            );
             return;
         }
+        self.emit_value_node(e, node, code);
         // A successfully spliced bottom-typed expression has already transferred control (for
         // example, an inline lambda's non-local `return`). It leaves no value to discard. The
         // semantic type is retained on the IR expression even when the selected callable's physical
@@ -14578,7 +14576,6 @@ impl<'a> Emitter<'a> {
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
-        self.terminate_if_nothing_call(e, &node, code);
     }
 
     /// Emit `e` and then narrow it to the CONSUMPTION type `expected` — the `checkcast` kotlinc inserts
@@ -15552,145 +15549,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// A `Nothing`-returning REAL-invoke call (`exit(): Nothing`) physically leaves a `java/lang/Void`
-    /// on the stack and falls through — unlike `throw`/`return`, which terminate. kotlinc makes the path
-    /// truly diverge: discard the `Void`, then `throw KotlinNothingValueException()`. Mirror that so a
-    /// `Nothing` call used in a branch (`if (c) … else exit()`, a diverging `catch`) terminates instead of
-    /// leaking a `Void` into the merge/handler frame. Inline-spliced `Nothing` calls (`error(...)`) already
-    /// end in `athrow` and are excluded. Returns whether the terminating throw was emitted.
-    fn terminate_if_nothing_call(
-        &mut self,
-        expression: u32,
-        node: &IrExpr,
-        code: &mut CodeBuilder,
-    ) -> bool {
-        // A substituted generic result is wrapped in a representation coercion. In VALUE position
-        // Kotlin must still make the bottom-typed path terminate (`fun f(): Nothing = generic()`),
-        // while statement emission above deliberately only discards it. Peel only transparent
-        // value wrappers; argument-spill blocks retain their terminal value in the same way.
-        let (call_expression, call_node) = self.bottom_call_leaf(expression, node);
-        let declared_nothing = self.is_real_nothing_call(call_node);
-        let inferred_nothing = self.is_real_call(call_node)
-            && self
-                .ir
-                .logical_types
-                .get(&expression)
-                .or_else(|| self.ir.logical_types.get(&call_expression))
-                .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing);
-        if !declared_nothing && !inferred_nothing {
-            return false;
-        }
-        // The invoke was emitted with ZERO result words — `slot_words(Nothing)` is 0 because a
-        // `Nothing` call yields no VALUE — yet it physically leaves one `Void` word. Re-declare that
-        // word before discarding it: otherwise the tracked height sits one below the real stack from
-        // the invoke onwards, `max_stack` is undercounted by whatever this path pushes on top
-        // (`println(boom())` needs the `PrintStream` receiver underneath), and the JVM rejects the
-        // method with "Operand stack overflow".
-        if declared_nothing {
-            code.set_stack((code.stack_height().max(0) + 1) as u16);
-        }
-        code.pop();
-        let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
-        code.new_obj(cls);
-        code.dup();
-        let ctor = self
-            .cw
-            .methodref("kotlin/KotlinNothingValueException", "<init>", "()V");
-        code.invokespecial(ctor, 0, 0);
-        code.athrow();
-        true
-    }
-
-    fn bottom_call_leaf<'b>(
-        &'b self,
-        mut expression: u32,
-        mut node: &'b IrExpr,
-    ) -> (u32, &'b IrExpr) {
-        loop {
-            let next = match node {
-                IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg,
-                    type_operand,
-                } if !type_operand.is_nullable() && type_operand.non_null() == Ty::Nothing => {
-                    Some(*arg)
-                }
-                IrExpr::Block {
-                    value: Some(value), ..
-                } => Some(*value),
-                _ => None,
-            };
-            let Some(next) = next else {
-                return (expression, node);
-            };
-            expression = next;
-            node = self.ir.expr(expression);
-        }
-    }
-
-    /// A call that physically returns (real `invoke`, leaving a `java/lang/Void`) yet is typed `Nothing`.
-    /// Excludes inline-spliced (`error`/`require`) and intrinsic callees, which already end
-    /// the path in `athrow` and leave nothing to discard.
-    fn is_real_nothing_call(&self, node: &IrExpr) -> bool {
-        match node {
-            IrExpr::MethodCall { class, index, .. } => {
-                let fid = self.ir.classes[*class as usize].methods[*index as usize];
-                ret_is_nothing(&self.ir.functions[fid as usize].ret)
-            }
-            IrExpr::Call { callee, .. } => {
-                if let Some(function) = callee.source_function() {
-                    ret_is_nothing(&self.ir.functions[function as usize].ret)
-                } else {
-                    match callee {
-                        Callee::CrossFile { ret, .. }
-                        | Callee::Module { ret, .. }
-                        | Callee::Super { ret, .. }
-                        | Callee::External { ret, .. } => ret_is_nothing(ret),
-                        Callee::Special { descriptor, .. } => {
-                            descriptor.ends_with(")Ljava/lang/Void;")
-                        }
-                        Callee::Virtual {
-                            descriptor, params, ..
-                        } => match params {
-                            Some((_, ret)) => ret_is_nothing(ret),
-                            None => descriptor.ends_with(")Ljava/lang/Void;"),
-                        },
-                        Callee::Static {
-                            descriptor, inline, ..
-                        } => !inline.can_inline() && descriptor.ends_with(")Ljava/lang/Void;"),
-                        Callee::Intrinsic { .. } => false,
-                        _ => unreachable!("source-function callees were handled above"),
-                    }
-                }
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether this node emitted a real invocation that physically returns one reference word.
-    /// Inline/intrinsic calls realize their own control flow and must not receive a synthetic throw.
-    fn is_real_call(&self, node: &IrExpr) -> bool {
-        match node {
-            IrExpr::MethodCall { .. } => true,
-            IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(_)
-                | Callee::LocalDefault(_)
-                | Callee::LocalWithDefaults { .. }
-                | Callee::ClassStatic { .. }
-                | Callee::ClassStaticDefault { .. }
-                | Callee::ClassStaticWithDefaults { .. }
-                | Callee::CrossFile { .. }
-                | Callee::Module { .. }
-                | Callee::ModuleWithDefaults { .. } => true,
-                Callee::External { .. } => false,
-                Callee::Special { .. } | Callee::Super { .. } | Callee::Virtual { .. } => true,
-                Callee::Static { inline, .. } => !inline.can_inline(),
-                Callee::Intrinsic { .. } => false,
-            },
-            _ => false,
-        }
-    }
-
     /// Where a non-virtual call to an interface member must go under `-jvm-default=disable`.
     ///
     /// `super.f()` and a call to a private interface member both push the receiver first and then
@@ -15714,6 +15572,11 @@ impl<'a> Emitter<'a> {
 
     fn emit_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
         match node {
+            IrExpr::BottomValue { producer, .. } => {
+                let baseline = code.stack_height();
+                self.emit_value(*producer, code);
+                bottom_values::finish(self.cw, code, baseline, true);
+            }
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
             IrExpr::Break { label } => {
@@ -16255,7 +16118,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(stub_owner, &stub_name, &stub_desc)
                     };
-                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                    code.invokestatic(m, aw, physical_call_result_words(ret));
                     return;
                 }
                 let call_args: Vec<u32> = args.iter().map(|a| a.unwrap()).collect();
@@ -16312,28 +16175,28 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.cw.methodref(&owner, &bridge_name, &bridge_desc)
                         };
-                        code.invokestatic(method, aw + 1, slot_words(ret) as i32);
+                        code.invokestatic(method, aw + 1, physical_call_result_words(ret));
                     } else if let Some((holder, holder_desc)) = is_iface
                         .then(|| self.holder_call(&owner, &desc, true))
                         .flatten()
                     {
                         let m = self.cw.methodref(&holder, &name, &holder_desc);
-                        code.invokestatic(m, aw + 1, slot_words(ret) as i32);
+                        code.invokestatic(m, aw + 1, physical_call_result_words(ret));
                     } else {
                         let m = if is_iface {
                             self.cw.interface_methodref(&owner, &name, &desc)
                         } else {
                             self.cw.methodref(&owner, &name, &desc)
                         };
-                        code.invokespecial(m, aw, slot_words(ret) as i32);
+                        code.invokespecial(m, aw, physical_call_result_words(ret));
                     }
                 } else if is_iface {
                     // Dispatch through an interface — `invokeinterface I.m`.
                     let m = self.cw.interface_methodref(&owner, &name, &desc);
-                    code.invokeinterface(m, aw, slot_words(ret) as i32);
+                    code.invokeinterface(m, aw, physical_call_result_words(ret));
                 } else {
                     let m = self.cw.methodref(&owner, &name, &desc);
-                    code.invokevirtual(m, aw, slot_words(ret) as i32);
+                    code.invokevirtual(m, aw, physical_call_result_words(ret));
                 }
             }
             IrExpr::Call {
@@ -16384,7 +16247,7 @@ impl<'a> Emitter<'a> {
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
-                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                    code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::ClassStatic { owner, function } => {
                     let f = &self.ir.functions[*function as usize];
@@ -16415,7 +16278,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(&owner, &f.name, &descriptor)
                     };
-                    code.invokestatic(method, argument_words, slot_words(ret) as i32);
+                    code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
                 Callee::ClassStaticDefault { owner, function } => {
                     let f = &self.ir.functions[*function as usize];
@@ -16430,7 +16293,7 @@ impl<'a> Emitter<'a> {
                     let method =
                         self.cw
                             .methodref(&owner, &format!("{}$default", f.name), &descriptor);
-                    code.invokestatic(method, argument_words, slot_words(ret) as i32);
+                    code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
                 Callee::LocalDefault(fid) => {
                     // The `foo$default(realparams, mask..., Object marker)` synthetic on the self facade
@@ -16447,7 +16310,7 @@ impl<'a> Emitter<'a> {
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
-                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                    code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::Intrinsic { operation, .. } => match operation {
                     crate::ir::IrIntrinsic::Assert { mode } => {
@@ -16744,7 +16607,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(target_owner, &name, &desc)
                     };
-                    code.invokestatic(m, aw, slot_words(ret) as i32);
+                    code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::Module { .. }
                 | Callee::ModuleWithDefaults { .. }
@@ -16958,10 +16821,10 @@ impl<'a> Emitter<'a> {
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
                         if interface {
                             let m = self.cw.interface_methodref(&owner, &name, &descriptor);
-                            code.invokeinterface(m, aw, slot_words(ret) as i32);
+                            code.invokeinterface(m, aw, physical_call_result_words(ret));
                         } else {
                             let m = self.cw.methodref(&owner, &name, &descriptor);
-                            code.invokevirtual(m, aw, slot_words(ret) as i32);
+                            code.invokevirtual(m, aw, physical_call_result_words(ret));
                         }
                         return;
                     }
@@ -18565,6 +18428,7 @@ impl<'a> Emitter<'a> {
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => {
                 self.records_frame(*arg)
             }
+            IrExpr::BottomValue { producer, .. } => self.records_frame(*producer),
             IrExpr::NotNullAssert { operand, .. } => self.records_frame(*operand),
             // A `lateinit` read emits an `ifnonnull` merge frame, so a parent must spill other operands
             // first (else the frame at the join would omit them).
@@ -19951,37 +19815,15 @@ impl<'a> Emitter<'a> {
 
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
-        if self
-            .ir
-            .logical_types
-            .get(&e)
-            .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing)
-        {
-            return true;
-        }
-        self.ir.expr_diverges_by(e, &|expression, value| {
-            matches!(value, IrExpr::Call { .. } | IrExpr::MethodCall { .. })
-                && self.value_ty(expression) == Ty::Nothing
-        })
+        self.ir
+            .expr_diverges_by(e, &|_, value| matches!(value, IrExpr::BottomValue { .. }))
     }
 
     /// Whether statement-form emission of `e` transfers control. A generic call whose inferred
     /// result is `Nothing` is physically an erased value call and falls through after its result is
     /// discarded; only value-form emission synthesizes `KotlinNothingValueException`.
     fn discarding_diverges(&self, e: u32) -> bool {
-        if let IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg,
-            type_operand,
-        } = self.ir.expr(e)
-        {
-            if !type_operand.is_nullable() && type_operand.non_null() == Ty::Nothing {
-                return self
-                    .ir
-                    .expr_diverges_by(*arg, &|_, value| self.is_real_nothing_call(value));
-            }
-        }
-        self.diverges(e)
+        self.ir.expr_discarding_diverges_by(e, &|_, _| false)
     }
 
     /// The element `Ty` of an array-typed IR expression.
@@ -20221,6 +20063,7 @@ impl<'a> Emitter<'a> {
                     Ty::Boolean
                 }
             }
+            IrExpr::BottomValue { .. } => Ty::Nothing,
             IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
             IrExpr::TypeOp {
                 op, type_operand, ..
@@ -20537,6 +20380,17 @@ fn prim_newarray_atype(elem: Ty) -> u8 {
 /// so the nullability is checked on the IR type before it is erased by `ir_ty_to_jvm`.
 fn ret_is_nothing(ret: &Ty) -> bool {
     !ret.is_nullable() && norm_nothing(ir_ty_to_jvm(ret)) == Ty::Nothing
+}
+
+/// Exact JVM stack effect of a call result described by a semantic IR return. `Nothing` has no
+/// language value, but its method descriptor returns `java/lang/Void` and therefore contributes one
+/// physical word until the enclosing bottom-completion wrapper discards it.
+fn physical_call_result_words(ret: Ty) -> i32 {
+    if ret_is_nothing(&ret) {
+        1
+    } else {
+        slot_words(ret) as i32
+    }
 }
 
 /// The JVM `Ty` a call to a function with IR return `ret` leaves on the stack: the `Ty::Nothing` bottom

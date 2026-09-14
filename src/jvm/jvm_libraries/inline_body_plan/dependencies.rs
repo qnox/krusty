@@ -3,6 +3,33 @@
 use super::*;
 
 impl JvmLibraries {
+    /// Match an exact physical constructor target to one metadata-normalized constructor
+    /// declaration. Value-class `constructor-impl` remains merely the JVM realization attached to
+    /// that declaration; consumers receive the semantic constructor identity.
+    pub(super) fn inline_plan_constructor(
+        &self,
+        target: MethodTarget<'_>,
+    ) -> Option<(crate::types::TypeName, LibraryMember)> {
+        let (physical_owner_text, name, descriptor, interface) = target;
+        if interface {
+            return None;
+        }
+        let physical_owner = type_name(physical_owner_text);
+        let owner = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(physical_owner)
+            .unwrap_or(physical_owner);
+        let classifier = self.build_library_type(owner)?;
+        let mut matches = classifier.constructors.iter().filter(|constructor| {
+            constructor.physical_name.as_deref().unwrap_or("<init>") == name
+                && physical_descriptor(constructor) == descriptor
+        });
+        let mut constructor = matches.next()?.clone();
+        if matches.next().is_some() {
+            return None;
+        }
+        constructor.owner = Some(owner);
+        Some((owner, constructor))
+    }
+
     /// Match an invoked physical target to exactly one metadata-normalized Kotlin member. JVM
     /// descriptors identify the realization only; they never supply semantic parameter/result types.
     pub(super) fn inline_plan_member(&self, target: MethodTarget<'_>) -> Option<LibraryMember> {

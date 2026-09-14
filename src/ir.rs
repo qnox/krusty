@@ -31,6 +31,10 @@ pub enum IrNodeOrigin {
     },
 }
 
+mod bottom_values;
+pub(crate) use bottom_values::complete_bottom_value;
+pub use bottom_values::IrBottomValueCompletion;
+
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
 /// identity, not a library name: backends implement it without recovering signature facts from text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -699,6 +703,13 @@ pub struct IrAnnotationConstruction {
 #[derive(Clone, Debug)]
 pub enum IrExpr {
     Const(IrConst),
+    /// A checked expression whose semantic type is the non-null bottom type, while its producer has
+    /// a target-level value-returning path. Backends consume `completion` after emitting `producer`;
+    /// they must not reconstruct bottom semantics from the producer's syntax or logical-type tables.
+    BottomValue {
+        producer: ExprId,
+        completion: IrBottomValueCompletion,
+    },
     /// A frontend-selected semantic operation. Backend realization consumes the stable declaration
     /// identity; it must not repeat lookup, overload selection, or argument mapping.
     Checked(IrCheckedOperation),
@@ -3334,58 +3345,6 @@ impl IrFile {
 
     pub(crate) fn class_source_qualified_name(&self, class: ClassId) -> Option<KtString> {
         self.class_source_qualified_names.get(&class).cloned()
-    }
-
-    pub(crate) fn expr_diverges_by(
-        &self,
-        expression: ExprId,
-        leaf: &impl Fn(ExprId, &IrExpr) -> bool,
-    ) -> bool {
-        match self.expr(expression) {
-            IrExpr::Return(_)
-            | IrExpr::Throw { .. }
-            | IrExpr::Break { .. }
-            | IrExpr::Continue { .. } => true,
-            // A lowering block may retain a syntactic value after a preceding statement has already
-            // transferred control (`{ throw e; unreachableValue }`). Either the statement tail or
-            // the value can therefore make the block divergent.
-            IrExpr::Block { stmts, value } => {
-                stmts
-                    .last()
-                    .is_some_and(|stmt| self.expr_diverges_by(*stmt, leaf))
-                    || value.is_some_and(|value| self.expr_diverges_by(value, leaf))
-            }
-            // Checked coercions do not restore fallthrough around a divergent operand.
-            IrExpr::TypeOp { arg, .. } => self.expr_diverges_by(*arg, leaf),
-            // Mutation operations evaluate their operands before the write. If either evaluation
-            // transfers control, the store itself cannot fall through and no backend may append
-            // the physical write or a trailing return after it.
-            IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => {
-                self.expr_diverges_by(*value, leaf)
-            }
-            IrExpr::SetField {
-                receiver, value, ..
-            } => self.expr_diverges_by(*receiver, leaf) || self.expr_diverges_by(*value, leaf),
-            IrExpr::When { branches } => {
-                branches.iter().any(|(condition, _)| condition.is_none())
-                    && branches
-                        .iter()
-                        .all(|(_, body)| self.expr_diverges_by(*body, leaf))
-            }
-            IrExpr::Try {
-                body,
-                catches,
-                finally,
-                ..
-            } => {
-                finally.is_some_and(|finally| self.expr_diverges_by(finally, leaf))
-                    || (self.expr_diverges_by(*body, leaf)
-                        && catches
-                            .iter()
-                            .all(|catch| self.expr_diverges_by(catch.body, leaf)))
-            }
-            _ => leaf(expression, self.expr(expression)),
-        }
     }
 
     pub fn with_package(package: Option<String>) -> Self {
