@@ -488,7 +488,7 @@ macro_rules! cache_stat {
     ($field:ident, $hit:expr) => {{
         #[cfg(feature = "trace")]
         {
-            cache_stats().$field.record($hit);
+            $crate::jvm::classpath::cache_stats().$field.record($hit);
         }
         #[cfg(not(feature = "trace"))]
         {
