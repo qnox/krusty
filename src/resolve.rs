@@ -31047,12 +31047,19 @@ impl<'a> Checker<'a> {
                                 // route through the common argument seam: it distinguishes a truly
                                 // open constructor variable from a lexical one and propagates the
                                 // latter through nested lambda results.
+                                // A lambda argument carries the callee's own name as its implicit
+                                // label, which is what a `return@Runnable` inside a SAM constructor
+                                // denotes. Dropping it here left that return with nothing to name,
+                                // and because this is the FIRST check of the body its verdict is
+                                // the one that stands.
                                 let checked = self.check_argument_expected(
                                     scope,
                                     a,
                                     Ty::Fun(signature),
                                     has_receiver,
-                                    None,
+                                    self.call_implicit_lambda_label(call)
+                                        .map(str::to_string)
+                                        .as_deref(),
                                 );
                                 if collect_postponed {
                                     let inferred = self
