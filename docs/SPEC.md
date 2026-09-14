@@ -1955,6 +1955,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and not about this object.
   Tests: `tests/native_property_reference_e2e.rs`.
 
+- **A `Nothing`-typed producer that returns is a checked bottom value, and the completion mode is
+  what says so.** `Nothing` promises there is no value, and most producers keep the promise by never
+  coming back; two do not. A call whose generic result is SUBSTITUTED to `Nothing` really produces
+  something — the substitution is erased at the call — and kotlinc carries on with it. A call that
+  genuinely answers `Nothing` has no continuation, so a path reaching past one is a callee that
+  lied. Common lowering tells the two apart once, from the producer rather than its spelling, and
+  krusty's native target realizes that decision in BOTH positions rather than re-deciding by
+  position: a substituted result is handed to whatever asked and discarded in statement position,
+  and a genuine one ends the path with a runtime failure. The JVM throws
+  `KotlinNothingValueException` there; there are no exceptions on this target yet, and no program
+  that could catch one compiles here.
+  Tests: `tests/native_bottom_value_e2e.rs`.
+
+- **An unbroken `while (true)` is not left.** Nothing branches to the exit of a loop whose condition
+  is never false and which no `break` leaves, so the exit is taken out of the graph rather than left
+  unreachable in it, and the statement after the loop — including the end of a function written this
+  way — is not a position. This is how a `Nothing`-returning function is written, and Kotlin reads
+  it the same way, which is why it types such a body `Nothing` and lets the function declare it.
+  Tests: `tests/native_bottom_value_e2e.rs`
+  (`a_loop_that_is_never_false_is_left_only_by_a_break`).
+
+- **A `tailrec` the rewrite did not finish is declined, not emitted.** The modifier is a promise
+  about the STACK: the source chose a recursion depth because the loop rewrite will remove the
+  recursion, so a backend that emits an ordinary call does not answer slowly, it crashes. Whether
+  the rewrite was ATTEMPTED is a property of the declaration (a receiver to re-bind, context
+  parameters); whether it FINISHED is a property of the lowered body, because a self-call in a
+  position the rewrite does not descend into — inside a loop, under a `try` — survives in a
+  function loop-rewritten everywhere else. Common lowering now records both, and krusty's native
+  target declines what is left recursive: how deep a native stack goes is the machine's business,
+  and a gate must not depend on it.
+  Tests: `tests/native_tailrec_e2e.rs`.
+
 - **A reference names a property, not a slot.** A top-level property with source-written accessors,
   or a delegated one, has no slot for a reference to read: its value is computed or lives in the
   delegate. The reference reaches it the only way anything does — through the accessor pair the

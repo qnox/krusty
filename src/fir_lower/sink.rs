@@ -1298,6 +1298,13 @@ impl<'a> CommonIrBodySink<'a> {
             .map_err(FirFileLoweringFailure::Body)?
         };
         self.ir.functions[function as usize].body = Some(body);
+        // The gate above says whether the rewrite was attempted; this says whether it finished.
+        // A self-call in a position the rewrite does not descend into survives in a function that
+        // was loop-rewritten everywhere else, and a backend told nothing about it emits an
+        // ordinary call — which is the stack overflow the modifier was written to prevent.
+        if loopable && super::tailrec::recurses_into_itself(self.ir, body, function) {
+            self.ir.unlooped_tailrec.insert(function);
+        }
 
         self.attach_callable_defaults(
             callable,

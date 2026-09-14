@@ -238,6 +238,7 @@ KRef kt_safe_cast(KRef object, const KType *type);
 KRef kt_not_null(KRef value);
 
 void kt_abstract_method_called(void);
+void kt_nothing_value_returned(void);
 /* A member access on `null`: the placeholder for NullPointerException. */
 void kt_null_receiver(void);
 

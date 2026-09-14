@@ -1745,6 +1745,33 @@ pub fn expect_native_box(src: &str, stem: &str, expected: &str) {
     }
 }
 
+/// Require the native backend to DECLINE `src`, naming `reason` in what it says.
+///
+/// The mirror of [`expect_native_box`], for a construct the generator must refuse rather than
+/// emit. A decline is only ever a skip elsewhere, so nothing else can tell a construct that is
+/// deliberately refused from one that quietly started being accepted — and for a refusal whose
+/// point is that emitting the program would be WRONG, that difference is the whole test.
+#[allow(dead_code)]
+pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
+    let Some(target) = krusty::native::NativeTarget::host() else {
+        return;
+    };
+    if !krusty::native::can_link(target) {
+        return;
+    }
+    match native_box_outcome(src, stem, target) {
+        NativeBox::Unavailable => {}
+        NativeBox::Declined(said) => assert!(
+            said.contains(reason),
+            "{stem}: declined for {said:?}, which does not name {reason:?}"
+        ),
+        NativeBox::Answered(answer) => {
+            panic!("{stem}: the native backend emitted this program, answering {answer:?}")
+        }
+        NativeBox::Failed(said) => panic!("{stem}: the native backend ran it — {said}"),
+    }
+}
+
 enum NativeBox {
     /// What `box()` returned. The JVM's answer for the same program is the oracle.
     Answered(String),

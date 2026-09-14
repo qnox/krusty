@@ -930,6 +930,14 @@ void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n
 
 void kt_null_receiver(void) { KT_FAIL("krusty: member access on a null receiver\n"); }
 
+/* A callable whose Kotlin type is `Nothing` returned instead of diverging, and the path that reads
+   its value has no value to read. The JVM throws `KotlinNothingValueException` here; there are no
+   exceptions on this target yet, so the failure is the loud one — and no program that could catch
+   it compiles here anyway. */
+void kt_nothing_value_returned(void) {
+    KT_FAIL("krusty: a `Nothing`-typed callable returned a value\n");
+}
+
 /* ---- arithmetic ---------------------------------------------------------------------------- */
 
 static void kt_divide_by_zero(void) { KT_FAIL("krusty: / by zero\n"); }

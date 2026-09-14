@@ -1485,6 +1485,22 @@ before:**
    and the only thing extensions add is that their accessor leads with a receiver. Saying that
    instead — one flag, no new mechanism — took 47 declined files to 30.
 
+   **Then master's own bottom-value contract, for 2427.** Common lowering had just gained a node
+   for the one thing `Nothing` does not cover — a producer whose Kotlin type says there is no value
+   and which returns anyway — and the native backend, knowing nothing about it, declined 28 files
+   that had been passing. Realizing it took reading the contract rather than the position: the node
+   already carries WHICH of the two cases it is, decided once from the producer, so the backend
+   hands a substituted generic result to whatever asked and ends the path for a genuinely divergent
+   one, instead of asking again at each use site whether a value is wanted.
+   Two neighbours came with it. An unbroken `while (true)` now takes its exit out of the graph
+   rather than leaving it unreachable in it, which is what makes a `Nothing`-returning function
+   writable at all — and that in turn let three corpus files through that had been declining, which
+   promptly segfaulted: a `tailrec` whose recursion the rewrite had not actually removed. The
+   rewrite is fixed in its own change (#920); what belongs here is that common lowering now says
+   whether it FINISHED and not only whether it was attempted, because a self-call left in a
+   loop-rewritten function is a stack overflow at exactly the depth the modifier was written to
+   make safe. The generator declines those rather than emitting them.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

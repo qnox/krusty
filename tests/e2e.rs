@@ -974,6 +974,8 @@ mod named_ctor_args_e2e;
 mod named_super_arg_e2e;
 #[path = "narrowed_this_member_call_e2e.rs"]
 mod narrowed_this_member_call_e2e;
+#[path = "native_bottom_value_e2e.rs"]
+mod native_bottom_value_e2e;
 #[path = "native_classes_e2e.rs"]
 mod native_classes_e2e;
 #[path = "native_codegen_e2e.rs"]
@@ -994,6 +996,8 @@ mod native_ranges_e2e;
 mod native_receiver_property_e2e;
 #[path = "native_strings_e2e.rs"]
 mod native_strings_e2e;
+#[path = "native_tailrec_e2e.rs"]
+mod native_tailrec_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]

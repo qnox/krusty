@@ -528,6 +528,9 @@ struct LoopFrame {
     label: Option<String>,
     break_block: Block,
     continue_block: Block,
+    /// Whether a `break` inside the body took the exit. A loop whose condition is never false and
+    /// whose exit nothing jumps to is not left, which is what makes `while (true) { }` a `Nothing`.
+    broken: bool,
 }
 
 struct BodyLowering<'a, 'b, 'c> {
@@ -578,6 +581,27 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.terminated = true;
         let dead = self.builder.create_block();
         self.builder.switch_to_block(dead);
+    }
+
+    /// A checked bottom value: a producer whose Kotlin type is `Nothing` but which still has a
+    /// physical fallthrough, which the target has to say something about.
+    ///
+    /// Common lowering decided WHAT once, by reading the producer rather than its spelling, and
+    /// this realizes that decision in both positions rather than re-deciding by position. A call
+    /// that genuinely answers `Nothing` has no honest continuation, so a path that reaches past it
+    /// is a callee that lied and fails loudly. A generic result SUBSTITUTED to `Nothing` is a
+    /// different thing wearing the same type: the call really did produce a value, kotlinc erases
+    /// the result and lets execution carry on, and the value it carries on with is that one — so
+    /// it is handed to whatever asked, and to nothing at all in statement position.
+    fn bottom_value(&mut self, producer: u32, diverge: bool) -> Result<Option<Value>, Unsupported> {
+        let value = self.expression(producer)?;
+        if self.terminated || !diverge {
+            return Ok(value);
+        }
+        self.runtime_call("kt_nothing_value_returned", &[], Ty::Unit, &[])?;
+        self.builder.ins().trap(TrapCode::unwrap_user(3));
+        self.terminate();
+        Ok(None)
     }
 
     /// Enter `block` as a reachable position.
@@ -702,8 +726,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 post_test,
                 label,
             } => self.loop_statement(cond, body, update, post_test, label)?,
+            IrExpr::BottomValue {
+                producer,
+                completion,
+            } => {
+                self.bottom_value(producer, completion.diverges_when_discarded())?;
+            }
             IrExpr::Break { label } => {
-                let target = self.loop_frame(label.as_deref(), "break")?.break_block;
+                let frame = self.loop_frame(label.as_deref(), "break")?;
+                frame.broken = true;
+                let target = frame.break_block;
                 self.builder.ins().jump(target, &[]);
                 self.terminate();
             }
@@ -758,14 +790,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The loop a `break`/`continue` names: the labeled one, or the innermost.
-    fn loop_frame(&self, label: Option<&str>, keyword: &str) -> Result<&LoopFrame, Unsupported> {
+    fn loop_frame(
+        &mut self,
+        label: Option<&str>,
+        keyword: &str,
+    ) -> Result<&mut LoopFrame, Unsupported> {
         let frame = match label {
             Some(label) => self
                 .loops
-                .iter()
+                .iter_mut()
                 .rev()
                 .find(|frame| frame.label.as_deref() == Some(label)),
-            None => self.loops.last(),
+            None => self.loops.last_mut(),
         };
         frame.ok_or_else(|| format!("a `{keyword}` outside the loop it names"))
     }
@@ -785,26 +821,39 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let body_block = self.builder.create_block();
         let exit = self.builder.create_block();
         let update_block = update.map(|_| self.builder.create_block());
+        // A condition that is never false takes the exit OUT of the graph rather than leaving it
+        // unreachable in it: nothing branches there, so a loop no `break` leaves keeps the exit
+        // pristine and it is dropped. Kotlin reads `while (true)` the same way, which is why a
+        // body written like this types as `Nothing` and a function may declare it.
+        let always = matches!(
+            self.file.ir.expr(cond),
+            IrExpr::Const(IrConst::Boolean(true))
+        );
 
         self.builder
             .ins()
             .jump(if post_test { body_block } else { header }, &[]);
 
         self.continue_in(header);
-        let condition = self.expression(cond)?;
-        if !self.terminated {
-            let Some(condition) = condition else {
-                return Err("a loop condition of no value".to_string());
-            };
-            self.builder
-                .ins()
-                .brif(condition, body_block, &[], exit, &[]);
+        if always {
+            self.builder.ins().jump(body_block, &[]);
+        } else {
+            let condition = self.expression(cond)?;
+            if !self.terminated {
+                let Some(condition) = condition else {
+                    return Err("a loop condition of no value".to_string());
+                };
+                self.builder
+                    .ins()
+                    .brif(condition, body_block, &[], exit, &[]);
+            }
         }
 
         self.loops.push(LoopFrame {
             label,
             break_block: exit,
             continue_block: update_block.unwrap_or(header),
+            broken: false,
         });
         self.continue_in(body_block);
         self.statement(body)?;
@@ -819,8 +868,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.builder.ins().jump(header, &[]);
             }
         }
-        self.loops.pop();
+        let broken = self.loops.pop().is_some_and(|frame| frame.broken);
 
+        // Nothing branches to the exit of a loop that is never false and never broken, so there is
+        // no position after it to continue in.
+        if always && !broken {
+            self.terminate();
+            return Ok(());
+        }
         self.continue_in(exit);
         Ok(())
     }
@@ -1023,6 +1078,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
             IrExpr::StringConcat(parts) => self.concat(&parts),
+            IrExpr::BottomValue {
+                producer,
+                completion,
+            } => self.bottom_value(producer, completion.diverges_when_discarded()),
             IrExpr::NotNullAssert { operand, .. } => {
                 // `x!!` yields `x` or fails. The check is the runtime's so the failure reads the
                 // same whatever produced the null, and so the generator emits no control flow for

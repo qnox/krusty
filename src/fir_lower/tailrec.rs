@@ -55,6 +55,36 @@ pub(super) fn finish_tailrec_body(
     ))
 }
 
+/// Whether a self-call survives in `body`.
+///
+/// This is the one thing a backend needs to know about a `tailrec` the rewrite could not finish.
+/// The `loopable` gate above answers whether the rewrite was ATTEMPTED; it cannot answer whether
+/// it reached every self-call, because a call in a position the rewrite does not descend into —
+/// inside a loop, under a `try` — stays a call in a function that was loop-rewritten everywhere
+/// else. Such a function recurses to exactly the depth the source wrote `tailrec` to avoid, so a
+/// backend that cannot make it constant-stack on its own has to hear about it here rather than
+/// discover it as a stack overflow at run time.
+pub(super) fn recurses_into_itself(ir: &IrFile, body: ExprId, function: FunId) -> bool {
+    let mut pending = vec![body];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Call {
+            callee: Callee::Local(target),
+            ..
+        } = ir.expr(expression)
+        {
+            if *target == function {
+                return true;
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
 fn tail_value(
     ir: &mut IrFile,
     expression: ExprId,
