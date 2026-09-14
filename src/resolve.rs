@@ -54558,12 +54558,7 @@ impl<'a> Checker<'a> {
                 && left.iter().zip(right).all(|(&left, &right)| {
                     let (left, right) = (erased_parameter(left), erased_parameter(right));
                     left == right
-                        || crate::assignable::is_assignable(
-                            &specificity_context,
-                            self,
-                            left,
-                            right,
-                        )
+                        || crate::assignable::is_assignable(&specificity_context, self, left, right)
                 })
         };
         // A non-generic candidate outranks a generic one — but that is Kotlin's TIEBREAKER, applied
@@ -54571,6 +54566,27 @@ impl<'a> Checker<'a> {
         // for a `Class<Resp>` argument is decided by the parameters, and dropping the generic
         // candidate first selected `of(Type)`, whose `Arg<?>` result discards the element type.
         // Keep a generic candidate that no concrete one matches on every parameter.
+        // An EXTENSION's declared receiver is one of the positions specificity compares. Leaving it
+        // out makes `fun <T> T.pick() where T : Comparable<T>, T : Named` and `fun Any.pick()` look
+        // incomparable — both take no value parameter — and the tiebreaker would then drop the
+        // generic one even though its receiver is strictly the more specific. Comparing the receiver
+        // alongside the parameters is what lets the same rule serve both that case and two
+        // same-receiver overloads that differ only in a lambda's shape.
+        let specificity_shape = |candidate: &SelectedCallable, params: &[Ty]| {
+            // An EXTENSION's declared receiver is one of the positions specificity compares, and it
+            // already leads `declared_params` (`source_receiver` is set only for the candidates whose
+            // receiver needed no instantiation, so it cannot be the source here). Leaving the
+            // receiver out makes `fun <T> T.pick() where T : Comparable<T>, T : Named` and
+            // `fun Any.pick()` look incomparable — both take no value parameter — and the tiebreaker
+            // then drops the generic one even though its receiver is strictly the more specific.
+            match selecting_extension
+                .then(|| candidate.callable.declared_params.as_deref())
+                .flatten()
+            {
+                Some(declared) => declared.to_vec(),
+                None => params.to_vec(),
+            }
+        };
         let concrete_parameter_shapes = applicable
             .iter()
             .filter(|(rank, generic, _, missing_context, _, candidate, _, _)| {
@@ -54579,20 +54595,23 @@ impl<'a> Checker<'a> {
                     && (!has_context || !missing_context)
                     && candidate.receiver_rank == nearest_receiver
             })
-            .map(|(_, _, _, _, _, _, _, params)| params.clone())
+            .map(|(_, _, _, _, _, candidate, _, params)| specificity_shape(candidate, params))
             .collect::<Vec<_>>();
         // Keep a generic candidate only when it is STRICTLY more specific than every concrete one.
         // Merely being incomparable is not enough: `assertDoesNotThrow(Executable)` and
         // `<T> assertDoesNotThrow(ThrowingSupplier<T>)` take unrelated SAM interfaces, and Kotlin's
         // tiebreaker picks the non-generic one there.
-        let strictly_more_specific_than_every_concrete = |params: &[Ty]| {
-            !concrete_parameter_shapes.is_empty()
-                && concrete_parameter_shapes.iter().all(|concrete| {
-                    at_least_as_specific(params, concrete) && !at_least_as_specific(concrete, params)
-                })
-        };
-        let prefer_concrete = !selecting_extension
-            && applicable
+        let strictly_more_specific_than_every_concrete =
+            |candidate: &SelectedCallable, params: &[Ty]| {
+                let shape = specificity_shape(candidate, params);
+                !concrete_parameter_shapes.is_empty()
+                    && concrete_parameter_shapes.iter().all(|concrete| {
+                        at_least_as_specific(&shape, concrete)
+                            && !at_least_as_specific(concrete, &shape)
+                    })
+            };
+        let prefer_concrete =
+            applicable
                 .iter()
                 .any(|(rank, generic, _, missing_context, _, candidate, _, _)| {
                     *rank == best
@@ -54602,14 +54621,16 @@ impl<'a> Checker<'a> {
                 });
         let mut maximal = applicable
             .into_iter()
-            .filter(|(rank, generic, _, missing_context, _, candidate, _, params)| {
-                *rank == best
-                    && (!has_context || !missing_context)
-                    && candidate.receiver_rank == nearest_receiver
-                    && (!prefer_concrete
-                        || !generic
-                        || strictly_more_specific_than_every_concrete(params))
-            })
+            .filter(
+                |(rank, generic, _, missing_context, _, candidate, _, params)| {
+                    *rank == best
+                        && (!has_context || !missing_context)
+                        && candidate.receiver_rank == nearest_receiver
+                        && (!prefer_concrete
+                            || !generic
+                            || strictly_more_specific_than_every_concrete(candidate, params))
+                },
+            )
             .collect::<Vec<_>>();
         if maximal.len() > 1 {
             let dominated = maximal

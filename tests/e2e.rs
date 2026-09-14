@@ -1141,6 +1141,9 @@ mod reference_adaptation_e2e;
 mod reference_in_range_e2e;
 #[path = "reference_range_expression_e2e.rs"]
 mod reference_range_expression_e2e;
+
+#[path = "extension_receiver_specificity_e2e.rs"]
+mod extension_receiver_specificity_e2e;
 #[path = "reified_anonymous_object_e2e.rs"]
 mod reified_anonymous_object_e2e;
 #[path = "reified_class_literal_member_inference_e2e.rs"]

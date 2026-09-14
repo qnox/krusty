@@ -1963,3 +1963,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   against `<T> assertDoesNotThrow(ThrowingSupplier<T>)` takes unrelated SAM interfaces, and the
   tiebreaker still picks the non-generic one.
   `tests/overload_declaration_specificity_e2e.rs::a_generic_candidate_wins_when_its_parameter_is_more_specific`.
+- **Overload specificity compares an extension's declared RECEIVER (fix).** Kotlin's tiebreaker
+  prefers a non-generic candidate once neither is more specific by types, and that comparison read
+  value parameters alone. Two extensions on the SAME receiver differing only in a lambda's shape —
+  `fun Node.act(path: String, body: Ctx.() -> Unit)` beside a `@JvmName`'d
+  `fun <R : Any> Node.act(path: String, body: Ctx.(R) -> Unit)`, the shape a library takes when it
+  adds a typed overload — therefore read as incomparable and the call was reported ambiguous.
+  The receiver had been excluded because it is load-bearing the other way: `fun <T> T.pick()
+  where T : Comparable<T>, T : Named` and `fun Any.pick()` take no value parameter at all, so only
+  the receiver distinguishes them, and dropping the generic one there selects the wrong function.
+  Comparing the receiver ALONGSIDE the parameters serves both, and retires the blanket
+  "skip this tiebreaker for extensions" guard that stood in for it.
+  The receiver is read from `declared_params`, which already leads with it; `source_receiver` is
+  populated only for candidates whose receiver needed no instantiation, so it cannot be the source.
+  `tests/extension_receiver_specificity_e2e.rs::a_typed_overload_beside_a_plain_one_is_not_ambiguous`,
+  `a_bounded_generic_receiver_outranks_any`.

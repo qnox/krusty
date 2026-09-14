@@ -101,7 +101,7 @@ fn a_concrete_candidate_still_wins_an_equally_specific_pair() {
          \x20 public static <T> String pick(Class<T> type) { return \"generic\"; }\n\
          \x20 public static String pick(Class<?> type) { return \"concrete\"; }\n\
          }\n"
-            .to_string(),
+        .to_string(),
     )];
     let Some((library, _)) = common::javac_compile(&java, &[]) else {
         eprintln!("skipping: javac unavailable");
@@ -144,7 +144,7 @@ fn an_incomparable_generic_candidate_still_loses_to_the_concrete_one() {
          \x20 public static String run(Executable e) { return \"plain\"; }\n\
          \x20 public static <T> T run(ThrowingSupplier<T> s) { return null; }\n\
          }\n"
-            .to_string(),
+        .to_string(),
     )];
     let Some((library, _)) = common::javac_compile(&java, &[]) else {
         eprintln!("skipping: javac unavailable");
