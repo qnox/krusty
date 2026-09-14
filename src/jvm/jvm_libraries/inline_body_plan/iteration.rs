@@ -1329,6 +1329,54 @@ mod tests {
     }
 
     #[test]
+    fn text_iteration_plans_survive_jdk_member_enrichment() {
+        let version = crate::toolchain::kotlin_version();
+        if !matches!(version.as_str(), "2.4.0" | "2.4.10") {
+            return;
+        }
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib, jdk],
+        )));
+        assert_plan(
+            &libraries,
+            "kotlin/text",
+            "forEach",
+            "(Ljava/lang/CharSequence;Lkotlin/jvm/functions/Function1;)V",
+            ExpectedIndex::Plain,
+            ExpectedTraversal::Counted,
+        );
+        assert_plan(
+            &libraries,
+            "kotlin/text",
+            "forEachIndexed",
+            "(Ljava/lang/CharSequence;Lkotlin/jvm/functions/Function2;)V",
+            ExpectedIndex::Unchecked,
+            ExpectedTraversal::Counted,
+        );
+        let callable = callable(
+            &libraries,
+            "kotlin/text",
+            "forEach",
+            "(Ljava/lang/CharSequence;Lkotlin/jvm/functions/Function1;)V",
+        );
+        let Some(InlineBodyPlan::Iteration {
+            traversal: InlineIterationTraversal::Counted { get, .. },
+            ..
+        }) = callable.inline_body_plan.as_deref()
+        else {
+            panic!("CharSequence.forEach must retain its counted traversal")
+        };
+        assert_eq!(get.name, "get");
+        assert_eq!(get.physical_name.as_deref(), Some("charAt"));
+    }
+
+    #[test]
     fn plain_iterator_recognizer_uses_body_shape_and_rejects_a_wrong_erased_cast() {
         let version = crate::toolchain::kotlin_version();
         if !matches!(version.as_str(), "2.4.0" | "2.4.10") {

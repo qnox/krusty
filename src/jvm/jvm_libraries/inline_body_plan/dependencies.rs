@@ -45,6 +45,10 @@ impl JvmLibraries {
             return None;
         }
         member.owner = Some(owner);
+        // The body supplied the exact physical target. Preserve its spelling when metadata exposes
+        // a different Kotlin name (`CharSequence.get` is `charAt` on the JVM); otherwise stable
+        // registration would retain the semantic name as though it were the emitted method.
+        member.physical_name = (member.name != name).then(|| name.to_owned());
         member.descriptor = if member.suspend() {
             super::super::strip_continuation_param(descriptor)
         } else {
