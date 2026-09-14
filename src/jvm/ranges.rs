@@ -153,6 +153,7 @@ pub(super) fn realize(
             | IrExpr::Checked(IrCheckedOperation::RangeConstruction { .. })
             | IrExpr::CallableReference(_)
             | IrExpr::Const(_)
+            | IrExpr::BottomValue { .. }
             | IrExpr::ClassConst { .. }
             | IrExpr::KClassLiteral { .. }
             | IrExpr::LocalPropertyReference { .. }

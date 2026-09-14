@@ -134,7 +134,8 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             f(*b);
         }),
         IrExpr::Return(v) => v.iter().for_each(|&v| f(v)),
-        IrExpr::TypeOp { arg, .. }
+        IrExpr::BottomValue { producer: arg, .. }
+        | IrExpr::TypeOp { arg, .. }
         | IrExpr::NotNullAssert { operand: arg, .. }
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
