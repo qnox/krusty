@@ -2046,3 +2046,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   FILE, so one `forEachIndexed` cost a module every class it would have emitted.
   `tests/foreach_indexed_inline_e2e.rs::for_each_indexed_hosts_a_suspension_in_its_lambda`,
   `for_each_indexed_counts_from_zero_over_every_element`.
+- **Read an inline body over an abstract stack (fix).** krusty expands a RECOGNIZED classpath inline
+  body at IR level, which is what lets a suspension inside the lambda join the CALLER's state
+  machine. The recogniser read each call's operands by scanning BACKWARDS for local loads, so it
+  could only name values that pass through a local. `runCatching` hands its lambda's result straight
+  to the wrapper that builds a `Result` and never stores it, so that body decoded to nothing at all.
+  The decode now simulates the body forwards over an abstract stack, naming every operand as a
+  parameter, the invocation's result, an earlier call's result, the caught throwable, or nothing the
+  plan can express. The previous local-only decode falls out as the case where every operand happens
+  to be a parameter, so `let`/`apply`/`withLock`/`withPermit`/`use` decode exactly as before. A
+  handler that YIELDS a value is a recovering arm; one that rethrows is a `finally` or the store that
+  records the cause — one distinction replaces two separate detections.
+  Two things a body can do that the plan deliberately refuses. A body that boxes around its
+  invocation (`inline fun applyIt(x: Int, f: (Int) -> Int) = f(x)` calls `Integer.valueOf` then
+  `intValue`) is describing REPRESENTATION, not semantics, and keeps the bytecode splice it already
+  had. And an arm's yielded local carries the DECLARATION's result type, not the call descriptor's:
+  a value class erases to its underlying type in the descriptor, so `Result`'s constructor reads back
+  as `Any` and the expansion would hand an unboxed value where the class was expected.
+  `tests/run_catching_inline_e2e.rs::run_catching_hosts_a_suspension_in_its_lambda`,
+  `run_catching_captures_a_throwing_suspension_as_a_failure`.

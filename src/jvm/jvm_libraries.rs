@@ -3848,9 +3848,21 @@ impl JvmLibraries {
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
             match plan {
                 InlineBodyPlan::InvokeLambda {
-                    prologue, cleanup, ..
+                    prologue,
+                    normal,
+                    recover,
+                    cleanup,
+                    ..
                 } => {
-                    for call in prologue.iter_mut().chain(cleanup) {
+                    // Every arm's calls need an identity: a plan whose calls carry none is dropped
+                    // whole when it is converted to checked FIR.
+                    let arms = std::iter::once(&mut normal.calls)
+                        .chain(recover.iter_mut().map(|arm| &mut arm.calls));
+                    for call in prologue
+                        .iter_mut()
+                        .chain(arms.flat_map(|calls| calls.iter_mut()))
+                        .chain(cleanup.iter_mut())
+                    {
                         // A call the body makes on a receiver is a member; one it makes without a
                         // receiver is a top-level function. The plan already carries that split, so
                         // the identity is interned under the kind that actually describes it.

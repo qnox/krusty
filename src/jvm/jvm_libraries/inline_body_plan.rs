@@ -12,10 +12,12 @@
 //! the recogniser publishes is a provider fact (opaque member handles, parameter ordinals); no
 //! target ABI detail escapes it.
 
+mod abstract_body;
+
 use super::{
     parse_method_desc, strip_continuation_param, JvmLibraries, CONTINUATION_PARAM_DESCRIPTOR,
 };
-use crate::jvm::inline::{BranchTarget, Insn};
+use crate::jvm::inline::Insn;
 use crate::libraries::{
     DefaultValue, InlineBodyCall, InlineBodyDefault, InlineBodyPlan, InlineBodyValue,
     LibraryCallable, LibraryMember,
@@ -47,20 +49,45 @@ fn callable_parameter_slots(parameters: &[Ty]) -> Vec<u16> {
         .collect()
 }
 
-/// One non-intrinsic call decoded out of an inline body: its instruction index, its opcode, and the
-/// method it targets.
-struct DecodedCall<'a> {
-    index: usize,
-    opcode: u8,
-    target: (&'a str, &'a str, &'a str, bool),
+/// Translate one simulated operand into a plan value. `base` is how many calls of the simulated
+/// block precede the list this value will live in, so an index into the block's calls becomes an
+/// index into that list. A value produced BEFORE the list cannot be named from inside it.
+fn plan_value(value: abstract_body::Value, base: usize) -> Option<InlineBodyValue> {
+    Some(match value {
+        abstract_body::Value::Parameter(parameter) => InlineBodyValue::Parameter(parameter),
+        abstract_body::Value::Cause => InlineBodyValue::Cause,
+        abstract_body::Value::Invocation => InlineBodyValue::Invocation,
+        abstract_body::Value::Call(index) => InlineBodyValue::Call(index.checked_sub(base)?),
+        abstract_body::Value::Opaque => return None,
+    })
 }
 
-impl DecodedCall<'_> {
-    /// `invokestatic` is what distinguishes a top-level function from a call on a receiver. The
-    /// distinction is the opcode's, not a guess from the owner's name.
-    fn is_static(&self) -> bool {
-        self.opcode == 0xb8
-    }
+/// The local a body uses to remember the throwable that left its invocation: a non-parameter local
+/// initialized to `null` before the invocation and written again afterwards, which is the
+/// `catch (t: Throwable) { cause = t; throw t }` kotlinc writes around a cleanup that needs to
+/// suppress its own failure onto the body's exception.
+fn cause_slot(
+    instructions: &[Insn],
+    source_cp: &[crate::jvm::classreader::C],
+    parameter_slots: &[u16],
+) -> Option<u16> {
+    let invoke = *crate::jvm::inline::function_invoke_sites(instructions, source_cp).first()?;
+    instructions[..invoke.min(instructions.len())]
+        .windows(2)
+        .filter(|window| matches!(window[0], Insn::Plain { op: 0x01, .. }))
+        .filter_map(|window| crate::jvm::inline::stored_local(&window[1]))
+        .find(|slot| {
+            !parameter_slots.contains(slot)
+                && instructions[invoke.min(instructions.len())..]
+                    .iter()
+                    .any(|instruction| crate::jvm::inline::stored_local(instruction) == Some(*slot))
+        })
+}
+
+/// A body whose only rethrowing handler is the cause recorder still has a `finally`-free shape, so
+/// a recovery may coexist with it. This keeps the two exits from being conflated.
+fn rethrows_is_only_recorder(rethrows: bool) -> bool {
+    !rethrows
 }
 
 /// The declaration a decoded call names, as an opaque provider handle. A trailing continuation
@@ -82,58 +109,6 @@ fn inline_plan_member(target: (&str, &str, &str, bool)) -> Option<LibraryMember>
     member.set_is_interface(interface);
     member.set_suspend(suspend);
     Some(member)
-}
-
-/// Whether the body runs straight through: no arms, no loops.
-///
-/// A plan claims "these calls run, then the lambda, then these calls" — which only a body without
-/// branching of its own can honour. `CharSequence.ifEmpty` reads its receiver's length and then
-/// invokes its lambda from ONE arm of an `if`; expanded as an unconditional prologue plus an
-/// unconditional invocation it would run both arms and lose the condition entirely.
-///
-/// Unconditional FORWARD jumps are not arms, and these bodies do contain them: one past the
-/// catch-all copy of a `finally`, and one to the very next instruction around an inline marker. A
-/// backward jump is a loop, which this shape cannot describe.
-fn is_unconditional_body(instructions: &[Insn]) -> bool {
-    instructions
-        .iter()
-        .enumerate()
-        .all(|(index, instruction)| match instruction {
-            Insn::Plain { .. } => true,
-            Insn::Branch {
-                op: 0xa7,
-                target: BranchTarget::Internal(target),
-            }
-            | Insn::BranchW {
-                op: 0xc8,
-                target: BranchTarget::Internal(target),
-            } => *target > index,
-            Insn::Branch { .. }
-            | Insn::BranchW { .. }
-            | Insn::TableSwitch { .. }
-            | Insn::LookupSwitch { .. } => false,
-        })
-}
-
-/// The locals a call's operands are loaded from, in left-to-right order: the dispatch receiver (for
-/// anything but `invokestatic`) followed by one local per declared parameter.
-///
-/// JVM operands are pushed left to right, so this walks BACKWARD and reverses. Intervening
-/// instructions are skipped rather than terminating the walk — kotlinc emits `InlineMarker.mark` and
-/// `InlineMarker.finallyStart` between a call's operands and the call itself — which is why the
-/// count comes from the target's own descriptor instead of scanning to the first non-load.
-fn call_operand_slots(instructions: &[Insn], call: &DecodedCall<'_>) -> Option<Vec<u16>> {
-    let count = parse_method_desc(call.target.2)?.0.len() + usize::from(!call.is_static());
-    let mut slots = instructions[..call.index]
-        .iter()
-        .rev()
-        .filter_map(crate::jvm::inline::loaded_local)
-        .take(count)
-        .collect::<Vec<_>>();
-    (slots.len() == count).then(|| {
-        slots.reverse();
-        slots
-    })
 }
 
 impl JvmLibraries {
@@ -158,144 +133,134 @@ impl JvmLibraries {
             return None;
         };
         let instructions = crate::jvm::inline::disassemble(&body.code)?;
-        let parameter_at = |slot: u16| {
-            parameter_slots
-                .iter()
-                .position(|candidate| *candidate == slot)
+        let shape = abstract_body::BodyShape {
+            instructions: &instructions,
+            source_cp: &body.source_cp,
+            parameter_slots,
+            cause_slot: cause_slot(&instructions, &body.source_cp, parameter_slots),
         };
-        let invoke_sites =
-            crate::jvm::inline::function_invoke_sites(&instructions, &body.source_cp);
-        let [invoke] = invoke_sites.as_slice() else {
-            return None;
-        };
-        let invoke = *invoke;
-        let invoke_loads = instructions[..invoke]
+        let entry = abstract_body::simulate(&shape, 0, Vec::new())?;
+        let invocation = entry.invocation.as_ref()?;
+        let (prologue_calls, exit_calls) = entry.calls.split_at(invocation.after);
+
+        // Each handler block is simulated once, entered with the caught throwable on the stack
+        // exactly as the JVM leaves it. A block that yields a value RECOVERS; one that rethrows is
+        // either the `finally` copy or the store that records the cause.
+        let mut recover_block = None;
+        let mut cleanup_len = 0;
+        let mut rethrows = false;
+        let mut seen = std::collections::HashSet::new();
+        let offsets = crate::jvm::inline::insn_offsets_at(&instructions, 0);
+        for handler in body
+            .handlers
             .iter()
-            .rev()
-            .map_while(crate::jvm::inline::loaded_local)
-            .collect::<Vec<_>>();
-        // JVM invocation operands are loaded receiver-first. Walking backward therefore sees
-        // arguments first and the function object last.
-        let (&lambda_slot, invoke_argument_slots) = invoke_loads.split_last()?;
-        let lambda_parameter = parameter_at(lambda_slot)?;
-        if !is_unconditional_body(&instructions) {
+            .filter(|handler| seen.insert(handler.handler_pc))
+        {
+            let index = offsets
+                .iter()
+                .position(|offset| *offset == handler.handler_pc as usize)?;
+            let block = abstract_body::simulate(&shape, index, vec![abstract_body::Value::Cause])?;
+            if block.invocation.is_some() {
+                return None;
+            }
+            match block.returned {
+                Some(_) => {
+                    // Two different recoveries would be two plans; one body has one.
+                    if recover_block.is_some() {
+                        return None;
+                    }
+                    recover_block = Some(block);
+                }
+                None => {
+                    rethrows = true;
+                    // The `finally` copy repeats the tail of the normal exit verbatim.
+                    if !block.calls.is_empty() {
+                        if !exit_calls.ends_with(&block.calls) {
+                            return None;
+                        }
+                        cleanup_len = cleanup_len.max(block.calls.len());
+                    }
+                }
+            }
+        }
+        // A body cannot both recover and run a `finally` tail: the two describe different exits and
+        // nothing in the stdlib mixes them, so refusing keeps the expansion honest.
+        if recover_block.is_some() && (cleanup_len != 0 || !rethrows_is_only_recorder(rethrows)) {
             return None;
         }
-        let arguments = invoke_argument_slots
-            .iter()
-            .rev()
-            .map(|slot| parameter_at(*slot).map(InlineBodyValue::Parameter))
-            .collect::<Option<Vec<_>>>()?;
+        let (normal_calls, cleanup_calls) = exit_calls.split_at(exit_calls.len() - cleanup_len);
 
-        let calls = instructions
+        // A body that boxes or unboxes around its invocation is describing REPRESENTATION, not
+        // semantics: `inline fun applyIt(x: Int, f: (Int) -> Int) = f(x)` calls `Integer.valueOf`
+        // before the invocation and `intValue` after it. Naming those as plan calls would make the
+        // expansion hand a boxed value where a primitive is expected, so a body carrying one is not
+        // expressible here and keeps the bytecode splice it already had.
+        if entry
+            .calls
             .iter()
-            .enumerate()
-            .filter_map(|(index, instruction)| {
-                let target = crate::jvm::inline::invoked_method(instruction, &body.source_cp)?;
-                let Insn::Plain { op, .. } = instruction else {
-                    return None;
-                };
-                (!target.0.starts_with("kotlin/jvm/internal/")
-                    && !target.0.starts_with("kotlin/jvm/functions/"))
-                .then_some(DecodedCall {
-                    index,
-                    opcode: *op,
-                    target,
-                })
-            })
-            .collect::<Vec<_>>();
-        let (prologue_calls, exit_calls) =
-            calls.split_at(calls.partition_point(|call| call.index < invoke));
-        // kotlinc emits the whole `finally` block TWICE — once on the normal exit and once in the
-        // catch-all handler. A tail that is not exactly one sequence repeated is some other shape.
-        let (cleanup_calls, repeated) = exit_calls.split_at(exit_calls.len() / 2);
-        if exit_calls.len() % 2 != 0
-            || cleanup_calls
-                .iter()
-                .zip(repeated)
-                .any(|(call, again)| call.target != again.target)
+            .chain(recover_block.iter().flat_map(|block| block.calls.iter()))
+            .any(|call| crate::jvm::jvm_class_map::wrapper_to_kotlin_prim(call.target.0).is_some())
         {
             return None;
         }
-
-        // The body records the throwable that left the lambda when it initializes a non-parameter
-        // local to `null` before the invocation and stores into it again afterwards — which is the
-        // `catch (t: Throwable) { cause = t; throw t }` kotlinc writes around a cleanup that needs
-        // to suppress its own failure onto the body's exception.
-        let cause_slot = instructions[..invoke]
-            .windows(2)
-            .filter(|window| matches!(window[0], Insn::Plain { op: 0x01, .. }))
-            .filter_map(|window| crate::jvm::inline::stored_local(&window[1]))
-            .find(|slot| {
-                parameter_at(*slot).is_none()
-                    && instructions[invoke..].iter().any(|instruction| {
-                        crate::jvm::inline::stored_local(instruction) == Some(*slot)
+        let member = |call: &abstract_body::SimulatedCall<'_>| inline_plan_member(call.target);
+        let decode = |calls: &[abstract_body::SimulatedCall<'_>], base: usize| {
+            calls
+                .iter()
+                .map(|call| {
+                    let member = member(call)?;
+                    let (dispatch, arguments) = match call.is_static {
+                        true => (None, call.operands.as_slice()),
+                        false => {
+                            let (receiver, rest) = call.operands.split_first()?;
+                            (Some(plan_value(*receiver, base)?), rest)
+                        }
+                    };
+                    // A suspend callee's trailing continuation comes from the caller's own state
+                    // machine, so it is not one of the plan's semantic arguments.
+                    let arguments = &arguments[..arguments.len() - usize::from(member.suspend())];
+                    Some(InlineBodyCall {
+                        member: Box::new(member),
+                        dispatch,
+                        arguments: arguments
+                            .iter()
+                            .map(|value| plan_value(*value, base))
+                            .collect::<Option<Vec<_>>>()?,
                     })
-            });
-        // A recorded cause is only faithful if the body really catches every throwable; a narrower
-        // handler would leave the expansion claiming a `catch (t: Throwable)` it does not have.
-        let records_cause = cause_slot.is_some_and(|_| {
-            body.handlers.iter().any(|handler| {
-                crate::jvm::inline::caught_class(&body.source_cp, handler.catch_type)
-                    == Some("java/lang/Throwable")
-            })
-        });
-        let value_at = |slot: u16| match parameter_at(slot) {
-            Some(parameter) => Some(InlineBodyValue::Parameter(parameter)),
-            None if records_cause && Some(slot) == cause_slot => Some(InlineBodyValue::Cause),
+                })
+                .collect::<Option<Vec<_>>>()
+        };
+        let prologue = decode(prologue_calls, 0)?;
+        let normal = crate::libraries::InlineBodyArm {
+            calls: decode(normal_calls, invocation.after)?,
+            value: plan_value(entry.returned?, invocation.after)?,
+        };
+        let cleanup = decode(cleanup_calls, invocation.after + normal.calls.len())?;
+        let recover = match recover_block {
             None => None,
+            Some(block) => Some(crate::libraries::InlineBodyArm {
+                calls: decode(&block.calls, 0)?,
+                value: plan_value(block.returned?, 0)?,
+            }),
         };
-        let decode_call = |call: &DecodedCall<'_>| {
-            let slots = call_operand_slots(&instructions, call)?;
-            let (dispatch, argument_slots) = match call.is_static() {
-                true => (None, slots.as_slice()),
-                false => {
-                    let (receiver, rest) = slots.split_first()?;
-                    (Some(value_at(*receiver)?), rest)
-                }
-            };
-            let member = inline_plan_member(call.target)?;
-            // A suspend callee's trailing continuation is supplied by the caller's own state
-            // machine, so it is not one of the plan's semantic arguments.
-            let argument_slots =
-                &argument_slots[..argument_slots.len() - usize::from(member.suspend())];
-            Some(InlineBodyCall {
-                member: Box::new(member),
-                dispatch,
-                arguments: argument_slots
-                    .iter()
-                    .map(|slot| value_at(*slot))
-                    .collect::<Option<Vec<_>>>()?,
-            })
-        };
-        let prologue = prologue_calls
+        let arguments = invocation
+            .arguments
             .iter()
-            .map(decode_call)
+            .map(|value| plan_value(*value, 0))
             .collect::<Option<Vec<_>>>()?;
-        let cleanup = cleanup_calls
-            .iter()
-            .map(decode_call)
-            .collect::<Option<Vec<_>>>()?;
-
-        // `apply`/`also` end on a parameter rather than the invocation result.
-        let result = instructions
-            .iter()
-            .rev()
-            .nth(1)
-            .and_then(crate::jvm::inline::loaded_local)
-            .and_then(parameter_at)
-            .map(InlineBodyValue::Parameter);
 
         // A parameter the surrounding calls read must survive being omitted at the call site, which
         // it can only do when the declaration's own `$default` bridge supplies a value.
         let mut defaults = Vec::new();
         for parameter in prologue
             .iter()
+            .chain(&normal.calls)
             .chain(&cleanup)
+            .chain(recover.iter().flat_map(|arm| arm.calls.iter()))
             .flat_map(|call| call.dispatch.iter().chain(&call.arguments))
             .filter_map(|value| match value {
                 InlineBodyValue::Parameter(parameter) => Some(*parameter),
-                InlineBodyValue::Cause => None,
+                _ => None,
             })
         {
             if defaults
@@ -318,13 +283,14 @@ impl JvmLibraries {
         }
 
         Some(InlineBodyPlan::InvokeLambda {
-            lambda_parameter,
+            lambda_parameter: invocation.lambda_parameter,
             arguments,
             prologue,
+            normal,
+            recover,
             cleanup,
-            records_cause,
+            records_cause: shape.cause_slot.is_some() && rethrows,
             defaults,
-            result,
         })
     }
 
@@ -422,10 +388,17 @@ mod tests {
         lambda_parameter: usize,
         arguments: Vec<InlineBodyValue>,
         prologue: Vec<DecodedCall>,
+        normal: DecodedArm,
+        recover: Option<DecodedArm>,
         cleanup: Vec<DecodedCall>,
         records_cause: bool,
         defaults: Vec<(usize, String)>,
-        result: Option<InlineBodyValue>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct DecodedArm {
+        calls: Vec<DecodedCall>,
+        value: InlineBodyValue,
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -453,6 +426,13 @@ mod tests {
         }
     }
 
+    fn decoded_arm(arm: &crate::libraries::InlineBodyArm) -> DecodedArm {
+        DecodedArm {
+            calls: arm.calls.iter().map(decoded_call).collect(),
+            value: arm.value,
+        }
+    }
+
     /// Every inline plan decoded for the declarations named `name` in `package`, in the order the
     /// provider publishes them. A declaration with no plan contributes `None`, so a shape that stops
     /// decoding shows up as a diff rather than as a silently skipped candidate.
@@ -477,22 +457,24 @@ mod tests {
                         lambda_parameter,
                         arguments,
                         prologue,
+                        normal,
+                        recover,
                         cleanup,
                         records_cause,
                         defaults,
-                        result,
                     } => Some(DecodedPlan {
                         descriptor: callable.descriptor.clone(),
                         lambda_parameter: *lambda_parameter,
                         arguments: arguments.clone(),
                         prologue: prologue.iter().map(decoded_call).collect(),
+                        normal: decoded_arm(normal),
+                        recover: recover.as_ref().map(decoded_arm),
                         cleanup: cleanup.iter().map(decoded_call).collect(),
                         records_cause: *records_cause,
                         defaults: defaults
                             .iter()
                             .map(|default| (default.parameter, format!("{:?}", default.value)))
                             .collect(),
-                        result: *result,
                     }),
                 }
             })
@@ -515,10 +497,14 @@ mod tests {
                 lambda_parameter: 1,
                 arguments: vec![InlineBodyValue::Parameter(0)],
                 prologue: Vec::new(),
+                normal: DecodedArm {
+                    calls: Vec::new(),
+                    value: InlineBodyValue::Invocation,
+                },
+                recover: None,
                 cleanup: Vec::new(),
                 records_cause: false,
                 defaults: Vec::new(),
-                result: None,
             })]
         );
     }
@@ -562,9 +548,13 @@ mod tests {
                     dispatch: Some(InlineBodyValue::Parameter(0)),
                     arguments: vec![InlineBodyValue::Parameter(1)],
                 }],
+                normal: DecodedArm {
+                    calls: Vec::new(),
+                    value: InlineBodyValue::Invocation,
+                },
+                recover: None,
                 records_cause: false,
                 defaults: vec![(1, "Null".to_owned())],
-                result: None,
             })]
         );
     }
@@ -610,10 +600,94 @@ mod tests {
                     dispatch: Some(InlineBodyValue::Parameter(0)),
                     arguments: Vec::new(),
                 }],
+                normal: DecodedArm {
+                    calls: Vec::new(),
+                    value: InlineBodyValue::Invocation,
+                },
+                recover: None,
                 records_cause: false,
                 defaults: Vec::new(),
-                result: None,
             })]
+        );
+    }
+
+    /// `runCatching` is the body a backward LOCAL scan cannot read: it hands the invocation's result
+    /// straight to the wrapper that builds a `Result` and never stores it. Its exceptional exit
+    /// produces a value instead of rethrowing, which is what makes it a recovering arm rather than a
+    /// `finally`.
+    #[test]
+    fn run_catching_decodes_a_recovering_arm_over_the_stack() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let wrap = |arguments: Vec<InlineBodyValue>| DecodedCall {
+            owner: "kotlin/Result".to_owned(),
+            name: "constructor-impl".to_owned(),
+            descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".to_owned(),
+            suspend: false,
+            dispatch: None,
+            arguments,
+        };
+        assert_eq!(
+            decoded_plans(vec![stdlib], "kotlin", "runCatching"),
+            [
+                Some(DecodedPlan {
+                    descriptor: "(Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;".to_owned(),
+                    lambda_parameter: 0,
+                    arguments: Vec::new(),
+                    prologue: Vec::new(),
+                    normal: DecodedArm {
+                        calls: vec![wrap(vec![InlineBodyValue::Invocation])],
+                        value: InlineBodyValue::Call(0),
+                    },
+                    recover: Some(DecodedArm {
+                        calls: vec![
+                            DecodedCall {
+                                owner: "kotlin/ResultKt".to_owned(),
+                                name: "createFailure".to_owned(),
+                                descriptor: "(Ljava/lang/Throwable;)Ljava/lang/Object;".to_owned(),
+                                suspend: false,
+                                dispatch: None,
+                                arguments: vec![InlineBodyValue::Cause],
+                            },
+                            wrap(vec![InlineBodyValue::Call(0)]),
+                        ],
+                        value: InlineBodyValue::Call(1),
+                    }),
+                    cleanup: Vec::new(),
+                    records_cause: false,
+                    defaults: Vec::new(),
+                }),
+                Some(DecodedPlan {
+                    descriptor: "(Ljava/lang/Object;Lkotlin/jvm/functions/Function1;)\
+                                 Ljava/lang/Object;"
+                        .to_owned(),
+                    lambda_parameter: 1,
+                    arguments: vec![InlineBodyValue::Parameter(0)],
+                    prologue: Vec::new(),
+                    normal: DecodedArm {
+                        calls: vec![wrap(vec![InlineBodyValue::Invocation])],
+                        value: InlineBodyValue::Call(0),
+                    },
+                    recover: Some(DecodedArm {
+                        calls: vec![
+                            DecodedCall {
+                                owner: "kotlin/ResultKt".to_owned(),
+                                name: "createFailure".to_owned(),
+                                descriptor: "(Ljava/lang/Throwable;)Ljava/lang/Object;".to_owned(),
+                                suspend: false,
+                                dispatch: None,
+                                arguments: vec![InlineBodyValue::Cause],
+                            },
+                            wrap(vec![InlineBodyValue::Call(0)]),
+                        ],
+                        value: InlineBodyValue::Call(1),
+                    }),
+                    cleanup: Vec::new(),
+                    records_cause: false,
+                    defaults: Vec::new(),
+                }),
+            ]
         );
     }
 
@@ -658,9 +732,13 @@ mod tests {
                     dispatch: None,
                     arguments: vec![InlineBodyValue::Parameter(0), InlineBodyValue::Cause],
                 }],
+                normal: DecodedArm {
+                    calls: Vec::new(),
+                    value: InlineBodyValue::Invocation,
+                },
+                recover: None,
                 records_cause: true,
                 defaults: Vec::new(),
-                result: None,
             })]
         );
     }

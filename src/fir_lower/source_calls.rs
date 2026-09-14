@@ -47,6 +47,18 @@ pub(super) enum SelectedDefaultMode {
     Materialize,
 }
 
+/// What an inline plan's values resolve against while its arms are emitted.
+struct InlineArmContext {
+    receiver: Option<ExprId>,
+    receiver_ty: Option<ResolvedTy>,
+    /// The local holding the throwable a cleanup reads, when the plan records one.
+    cause: Option<(u32, Ty)>,
+    /// The local holding the lambda invocation's result, once it has been bound.
+    invocation: Option<(u32, Ty)>,
+    /// One entry per call emitted in the current list, `None` for a `Unit` result nothing can name.
+    results: Vec<Option<(u32, Ty)>>,
+}
+
 pub(super) struct SelectedOperandRequest<'a> {
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) parameter_types: &'a [Ty],
@@ -463,10 +475,11 @@ impl BodyLowering<'_> {
             lambda_parameter,
             invocation_arguments,
             prologue,
+            normal,
+            recover,
             cleanup,
             records_cause,
             plan_defaults,
-            returned_value,
         ) = match plan {
             crate::fir::FirInlineBodyPlan::ForEach {
                 lambda_parameter,
@@ -530,18 +543,20 @@ impl BodyLowering<'_> {
                 lambda_parameter,
                 arguments,
                 prologue,
+                normal,
+                recover,
                 cleanup,
                 records_cause,
                 defaults,
-                result: returned,
             } => (
                 *lambda_parameter,
                 arguments,
                 prologue,
+                normal,
+                recover.as_ref(),
                 cleanup,
                 *records_cause,
                 defaults,
-                *returned,
             ),
         };
         let lambda_parameter = lambda_parameter as usize;
@@ -597,25 +612,25 @@ impl BodyLowering<'_> {
                 Some((slot, cause_ty))
             }
         };
-        let plan_value = |lowering: &mut Self, value: crate::fir::FirInlineValue| match value {
-            crate::fir::FirInlineValue::Receiver => Some((receiver?, receiver_ty?.get())),
-            crate::fir::FirInlineValue::Parameter(parameter) => Some((
-                *args.get(parameter as usize)?,
-                *parameter_types.get(parameter as usize)?,
-            )),
-            crate::fir::FirInlineValue::Cause => {
-                let (slot, ty) = cause?;
-                Some((lowering.ir.add_expr(IrExpr::GetValue(slot)), ty))
-            }
+        let mut context = InlineArmContext {
+            receiver,
+            receiver_ty,
+            cause,
+            invocation: None,
+            results: Vec::new(),
         };
-        for call in prologue {
-            let call = self.external_inline_plan_call(call, plan_value)?;
-            statements.push(call);
-        }
+        self.emit_inline_plan_calls(
+            prologue,
+            &mut statements,
+            &args,
+            parameter_types,
+            &mut context,
+            None,
+        )?;
 
         let invocation_operands = invocation_arguments
             .iter()
-            .map(|operand| plan_value(self, *operand))
+            .map(|operand| self.inline_plan_value(*operand, &args, parameter_types, &context))
             .collect::<Option<Vec<_>>>()?;
         let inline_body = self.materialize_external_inline_lambda(
             &mut statements,
@@ -624,47 +639,212 @@ impl BodyLowering<'_> {
             &invocation_operands,
         )?;
 
-        let value = if cleanup.is_empty() {
-            inline_body
-        } else {
-            self.guard_inline_body(inline_body, cleanup, cause, result.get(), plan_value)?
-        };
-        if let Some(returned_value) = returned_value {
-            statements.push(value);
-            let (returned, _) = plan_value(self, returned_value)?;
-            return Some(self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(returned),
-            }));
-        }
-        Some(if statements.is_empty() {
+        // Everything after the invocation may read its result, so it travels through a local. That
+        // is also what the declaration's own compiled body does whenever it has an exit to run.
+        let result_ty = result.get();
+        let invocation_ty = self.inline_invocation_type(normal, result_ty);
+        let (normal_statements, value) = self.emit_inline_arm(
+            normal,
+            inline_body,
+            invocation_ty,
+            result_ty,
+            &args,
+            parameter_types,
+            &mut context,
+        )?;
+        let guarded = if cleanup.is_empty() && recover.is_none() {
+            statements.extend(normal_statements);
             value
+        } else {
+            self.guard_inline_arms(
+                normal_statements,
+                value,
+                recover,
+                cleanup,
+                result_ty,
+                &args,
+                parameter_types,
+                &mut context,
+            )?
+        };
+        Some(if statements.is_empty() {
+            guarded
         } else {
             self.ir.add_expr(IrExpr::Block {
                 stmts: statements,
-                value: Some(value),
+                value: Some(guarded),
             })
         })
     }
 
-    /// Wrap one already-spliced inline body in the `try` its plan's cleanup describes:
+    /// The type the lambda invocation's result carries. When the arm yields it unchanged that is the
+    /// declaration's own result; when calls transform it, the first of them declares what it takes.
+    fn inline_invocation_type(&self, arm: &crate::fir::FirInlineArm, result_ty: Ty) -> Ty {
+        match arm.value {
+            crate::fir::FirInlineValue::Invocation => result_ty,
+            _ => arm
+                .calls
+                .first()
+                .and_then(|call| {
+                    let position = call
+                        .arguments
+                        .iter()
+                        .position(|value| *value == crate::fir::FirInlineValue::Invocation)?;
+                    Some(call.parameters.get(position)?.get())
+                })
+                .unwrap_or(result_ty),
+        }
+    }
+
+    /// Emit one arm: the calls it makes after the invocation, then the value it yields. The
+    /// invocation's result is bound first so the arm can name it.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_inline_arm(
+        &mut self,
+        arm: &crate::fir::FirInlineArm,
+        produced: ExprId,
+        produced_ty: Ty,
+        yielded_ty: Ty,
+        args: &[ExprId],
+        parameter_types: &[Ty],
+        context: &mut InlineArmContext,
+    ) -> Option<(Vec<ExprId>, ExprId)> {
+        // Bind the invocation to a local only when the arm actually names it. `also` never does —
+        // it discards a `Unit` result and yields its receiver — so binding it would give that local
+        // the declaration's result type while it holds `Unit`.
+        let names_invocation = arm.value == crate::fir::FirInlineValue::Invocation
+            || arm.calls.iter().any(|call| {
+                call.dispatch == Some(crate::fir::FirInlineValue::Invocation)
+                    || call
+                        .arguments
+                        .contains(&crate::fir::FirInlineValue::Invocation)
+            });
+        let mut statements = Vec::new();
+        context.invocation = None;
+        // An arm that yields the invocation unchanged and does nothing else IS the invocation, so
+        // it travels no local at all. `let`, `run`, `with` and every other unguarded shape take this
+        // path, and giving them a temporary would renumber locals the surrounding splice depends on.
+        if arm.calls.is_empty() && arm.value == crate::fir::FirInlineValue::Invocation {
+            return Some((statements, produced));
+        }
+        if names_invocation {
+            let slot = self.allocate_temporary();
+            statements.push(self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty: produced_ty,
+                init: Some(produced),
+                named: false,
+            }));
+            context.invocation = Some((slot, produced_ty));
+        } else {
+            statements.push(produced);
+        }
+        context.results.clear();
+        // A call's DESCRIPTOR return is its erased one, which for a value-class constructor is the
+        // underlying type rather than the class. The value the arm yields is the declaration's own
+        // result, so that is the type its local carries — otherwise the boxing pass reads the
+        // erased form and the expansion hands back an unboxed value where the class was expected.
+        let yielded = match arm.value {
+            crate::fir::FirInlineValue::Call(index) => Some(index as usize),
+            _ => None,
+        };
+        self.emit_inline_plan_calls(
+            &arm.calls,
+            &mut statements,
+            args,
+            parameter_types,
+            context,
+            yielded.map(|index| (index, yielded_ty)),
+        )?;
+        let (value, _) = self.inline_plan_value(arm.value, args, parameter_types, context)?;
+        Some((statements, value))
+    }
+
+    /// Emit each call of a list, binding every non-`Unit` result to a local so a later call in the
+    /// same list can name it.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_inline_plan_calls(
+        &mut self,
+        calls: &[crate::fir::FirInlineCall],
+        statements: &mut Vec<ExprId>,
+        args: &[ExprId],
+        parameter_types: &[Ty],
+        context: &mut InlineArmContext,
+        yielded: Option<(usize, Ty)>,
+    ) -> Option<()> {
+        for (position, call) in calls.iter().enumerate() {
+            let expression =
+                self.external_inline_plan_call(call, args, parameter_types, context)?;
+            let ty = match yielded {
+                Some((index, yielded_ty)) if index == position => yielded_ty,
+                _ => call.result.get(),
+            };
+            if ty == Ty::Unit {
+                statements.push(expression);
+                context.results.push(None);
+                continue;
+            }
+            let slot = self.allocate_temporary();
+            statements.push(self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty,
+                init: Some(expression),
+                named: false,
+            }));
+            context.results.push(Some((slot, ty)));
+        }
+        Some(())
+    }
+
+    /// Resolve one plan value against what has been emitted so far.
+    fn inline_plan_value(
+        &mut self,
+        value: crate::fir::FirInlineValue,
+        args: &[ExprId],
+        parameter_types: &[Ty],
+        context: &InlineArmContext,
+    ) -> Option<(ExprId, Ty)> {
+        let (slot, ty) = match value {
+            crate::fir::FirInlineValue::Receiver => {
+                return Some((context.receiver?, context.receiver_ty?.get()))
+            }
+            crate::fir::FirInlineValue::Parameter(parameter) => {
+                return Some((
+                    *args.get(parameter as usize)?,
+                    *parameter_types.get(parameter as usize)?,
+                ))
+            }
+            crate::fir::FirInlineValue::Cause => context.cause?,
+            crate::fir::FirInlineValue::Invocation => context.invocation?,
+            crate::fir::FirInlineValue::Call(index) => (*context.results.get(index as usize)?)?,
+        };
+        Some((self.ir.add_expr(IrExpr::GetValue(slot)), ty))
+    }
+
+    /// Wrap the normal arm in the `try` its plan describes, with the recovering arm as a `catch` and
+    /// the cleanup as a `finally`:
     ///
     /// ```text
-    /// try { result = body }
-    /// catch (t: Throwable) { cause = t; throw t }   // only when the plan records a cause
+    /// try { result = <normal arm> }
+    /// catch (t: Throwable) { result = <recovering arm> }   // `runCatching`
+    /// catch (t: Throwable) { cause = t; throw t }          // when the plan records a cause
     /// finally { cleanup… }
     /// result
     /// ```
     ///
     /// The result travels through a local because the `finally` runs between producing the value and
     /// consuming it, exactly as the declaration's own compiled body does.
-    fn guard_inline_body(
+    #[allow(clippy::too_many_arguments)]
+    fn guard_inline_arms(
         &mut self,
-        body: ExprId,
+        normal_statements: Vec<ExprId>,
+        normal_value: ExprId,
+        recover: Option<&crate::fir::FirInlineArm>,
         cleanup: &[crate::fir::FirInlineCall],
-        cause: Option<(u32, Ty)>,
         result_ty: Ty,
-        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)> + Copy,
+        args: &[ExprId],
+        parameter_types: &[Ty],
+        context: &mut InlineArmContext,
     ) -> Option<ExprId> {
         let result_slot = self.allocate_temporary();
         let initial = self
@@ -676,48 +856,95 @@ impl BodyLowering<'_> {
             init: Some(initial),
             named: false,
         });
-        let store_result = self.ir.add_expr(IrExpr::SetValue {
+        let mut try_statements = normal_statements;
+        try_statements.push(self.ir.add_expr(IrExpr::SetValue {
             var: result_slot,
-            value: body,
-        });
+            value: normal_value,
+        }));
         let try_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![store_result],
+            stmts: try_statements,
             value: None,
         });
-        let catches = match cause {
-            None => Vec::new(),
-            Some((cause_slot, cause_ty)) => {
-                let caught = self.allocate_temporary();
-                let caught_value = self.ir.add_expr(IrExpr::GetValue(caught));
-                let record = self.ir.add_expr(IrExpr::SetValue {
-                    var: cause_slot,
-                    value: caught_value,
-                });
-                let rethrown = self.ir.add_expr(IrExpr::GetValue(caught));
-                let rethrow = self.ir.add_expr(IrExpr::Throw { operand: rethrown });
-                vec![crate::ir::IrCatch {
-                    var: caught,
-                    name: None,
-                    exc_internal: cause_ty.non_null().obj_internal()?,
-                    body: self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![record, rethrow],
-                        value: None,
-                    }),
-                }]
-            }
-        };
-        let cleanup_calls = cleanup
-            .iter()
-            .map(|call| self.external_inline_plan_call(call, plan_value))
-            .collect::<Option<Vec<_>>>()?;
-        let finally = self.ir.add_expr(IrExpr::Block {
-            stmts: cleanup_calls,
-            value: None,
+
+        let mut catches = Vec::new();
+        if let Some(recover) = recover {
+            let caught = self.allocate_temporary();
+            let caught_ty = recover
+                .calls
+                .iter()
+                .zip(recover.calls.iter().map(|call| call.arguments.as_ref()))
+                .find_map(|(call, arguments)| {
+                    let position = arguments
+                        .iter()
+                        .position(|value| *value == crate::fir::FirInlineValue::Cause)?;
+                    Some(call.parameters.get(position)?.get())
+                })?;
+            let saved_cause = context.cause.replace((caught, caught_ty));
+            let caught_value = self.ir.add_expr(IrExpr::GetValue(caught));
+            let (mut statements, value) = self.emit_inline_arm(
+                recover,
+                caught_value,
+                caught_ty,
+                result_ty,
+                args,
+                parameter_types,
+                context,
+            )?;
+            context.cause = saved_cause;
+            statements.push(self.ir.add_expr(IrExpr::SetValue {
+                var: result_slot,
+                value,
+            }));
+            catches.push(crate::ir::IrCatch {
+                var: caught,
+                name: None,
+                exc_internal: caught_ty.non_null().obj_internal()?,
+                body: self.ir.add_expr(IrExpr::Block {
+                    stmts: statements,
+                    value: None,
+                }),
+            });
+        }
+        if let Some((cause_slot, cause_ty)) = context.cause {
+            let caught = self.allocate_temporary();
+            let caught_value = self.ir.add_expr(IrExpr::GetValue(caught));
+            let record = self.ir.add_expr(IrExpr::SetValue {
+                var: cause_slot,
+                value: caught_value,
+            });
+            let rethrown = self.ir.add_expr(IrExpr::GetValue(caught));
+            let rethrow = self.ir.add_expr(IrExpr::Throw { operand: rethrown });
+            catches.push(crate::ir::IrCatch {
+                var: caught,
+                name: None,
+                exc_internal: cause_ty.non_null().obj_internal()?,
+                body: self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![record, rethrow],
+                    value: None,
+                }),
+            });
+        }
+
+        context.results.clear();
+        let mut cleanup_statements = Vec::new();
+        self.emit_inline_plan_calls(
+            cleanup,
+            &mut cleanup_statements,
+            args,
+            parameter_types,
+            context,
+            None,
+        )?;
+        let finally = (!cleanup_statements.is_empty()).then(|| {
+            self.ir.add_expr(IrExpr::Block {
+                stmts: cleanup_statements,
+                value: None,
+            })
         });
         let guarded = self.ir.add_expr(IrExpr::Try {
             body: try_body,
             catches,
-            finally: Some(finally),
+            finally,
             result: Ty::Unit,
         });
         let value = self.ir.add_expr(IrExpr::GetValue(result_slot));
@@ -733,18 +960,25 @@ impl BodyLowering<'_> {
     fn external_inline_plan_call(
         &mut self,
         call: &crate::fir::FirInlineCall,
-        plan_value: impl Fn(&mut Self, crate::fir::FirInlineValue) -> Option<(ExprId, Ty)>,
+        args: &[ExprId],
+        parameter_types: &[Ty],
+        context: &InlineArmContext,
     ) -> Option<ExprId> {
         let dispatch = match call.dispatch {
             None => None,
-            Some(value) => Some(plan_value(self, value)?),
+            Some(value) => Some(self.inline_plan_value(value, args, parameter_types, context)?),
         };
-        let args = call
+        let call_args = call
             .arguments
             .iter()
-            .map(|value| Some(plan_value(self, *value)?.0))
+            .map(|value| {
+                Some(
+                    self.inline_plan_value(*value, args, parameter_types, context)?
+                        .0,
+                )
+            })
             .collect::<Option<Vec<_>>>()?;
-        if call.parameters.len() != args.len() {
+        if call.parameters.len() != call_args.len() {
             return None;
         }
         let call_expression = self.ir.add_expr(IrExpr::Call {
@@ -762,7 +996,7 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter: None,
             },
             dispatch_receiver: dispatch.map(|(receiver, _)| receiver),
-            args,
+            args: call_args,
         });
         if let Some((_, receiver_ty)) = dispatch {
             self.ir

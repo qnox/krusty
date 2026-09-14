@@ -8540,10 +8540,14 @@ mod fq_tests {
             lambda_parameter: 0,
             arguments: Vec::new(),
             prologue: Vec::new(),
+            normal: crate::libraries::InlineBodyArm {
+                calls: Vec::new(),
+                value: crate::libraries::InlineBodyValue::Invocation,
+            },
+            recover: None,
             cleanup: Vec::new(),
             records_cause: false,
             defaults: Vec::new(),
-            result: None,
         };
         let cp = Classpath::new(vec![]);
         cp.memoize_inline_plan(owner, "run", "()V", &[0], None, Some(Box::new(plan)));

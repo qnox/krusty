@@ -11,6 +11,17 @@ pub enum FirInlineValue {
     Parameter(u32),
     /// The throwable that left the lambda invocation, and `null` on the normal exit.
     Cause,
+    /// The result of invoking the function-typed parameter.
+    Invocation,
+    /// The result of an earlier call in the SAME list.
+    Call(u32),
+}
+
+/// One exit from the guarded invocation: the calls it makes and the value it yields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineArm {
+    pub calls: Box<[FirInlineCall]>,
+    pub value: FirInlineValue,
 }
 
 /// One call a checked inline plan makes around its lambda invocation. The declaration is an opaque
@@ -47,10 +58,14 @@ pub enum FirInlineBodyPlan {
         lambda_parameter: u32,
         arguments: Box<[FirInlineValue]>,
         prologue: Box<[FirInlineCall]>,
+        /// The normal exit: what runs after the invocation, and the value the body yields.
+        normal: FirInlineArm,
+        /// The exit taken when a throwable leaves the invocation and the body produces a value from
+        /// it rather than rethrowing.
+        recover: Option<FirInlineArm>,
         cleanup: Box<[FirInlineCall]>,
         records_cause: bool,
         defaults: Box<[FirInlineDefault]>,
-        result: Option<FirInlineValue>,
     },
     /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
     /// All three convention calls were selected by the checker at the call site; lowering only

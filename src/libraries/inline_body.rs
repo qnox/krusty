@@ -10,6 +10,19 @@ pub enum InlineBodyValue {
     /// The throwable that left the lambda invocation, and `null` on the normal exit. Only a plan
     /// whose body records one produces this.
     Cause,
+    /// The result of invoking the function-typed parameter.
+    Invocation,
+    /// The result of an earlier call in the SAME list — the enclosing arm's `calls`, or the plan's
+    /// `prologue` for a value read inside it.
+    Call(usize),
+}
+
+/// One exit from the guarded invocation: the calls it makes and the value it yields.
+#[derive(Clone, Debug)]
+pub struct InlineBodyArm {
+    /// Calls the arm makes, in order. [`InlineBodyValue::Call`] indexes this list.
+    pub calls: Vec<InlineBodyCall>,
+    pub value: InlineBodyValue,
 }
 
 /// One call an inline body makes around its lambda invocation.
@@ -45,6 +58,12 @@ pub enum InlineBodyPlan {
         arguments: Vec<InlineBodyValue>,
         /// Calls made before the invocation, in body order.
         prologue: Vec<InlineBodyCall>,
+        /// The normal exit: what runs after the invocation, and the value the body yields.
+        /// `let` yields the invocation itself, `apply` a parameter, `runCatching` a call's result.
+        normal: InlineBodyArm,
+        /// The exit taken when a throwable leaves the invocation and the body produces a value from
+        /// it rather than rethrowing. `runCatching` populates this; a `finally` does not.
+        recover: Option<InlineBodyArm>,
         /// Calls made on BOTH exits from the invocation, in body order. A non-empty cleanup means
         /// the invocation is guarded by a `try`/`finally`.
         cleanup: Vec<InlineBodyCall>,
@@ -54,8 +73,6 @@ pub enum InlineBodyPlan {
         /// Parameters the caller may omit. Any other omitted argument means the call site is not
         /// this expansion.
         defaults: Vec<InlineBodyDefault>,
-        /// A value returned in place of the invocation result (`apply` returns its receiver).
-        result: Option<InlineBodyValue>,
     },
     /// Iterate the extension receiver, invoke one lambda for each element, and append its result to
     /// a fresh collection. The provider owns the exact factory and append declarations; consumers
@@ -91,19 +108,24 @@ impl InlineBodyPlan {
             lambda_parameter,
             arguments,
             prologue,
+            normal,
+            recover,
             cleanup,
-            result,
             ..
         } = self
         else {
             return None;
         };
-        if !prologue.is_empty() || !cleanup.is_empty() {
+        if !prologue.is_empty()
+            || !cleanup.is_empty()
+            || recover.is_some()
+            || !normal.calls.is_empty()
+        {
             return None;
         }
         let parameter = |value: &InlineBodyValue| match value {
             InlineBodyValue::Parameter(parameter) => Some(*parameter),
-            InlineBodyValue::Cause => None,
+            InlineBodyValue::Cause | InlineBodyValue::Invocation | InlineBodyValue::Call(_) => None,
         };
         Some((
             *lambda_parameter,
@@ -111,9 +133,9 @@ impl InlineBodyPlan {
                 .iter()
                 .map(parameter)
                 .collect::<Option<Vec<_>>>()?,
-            match result {
-                None => None,
-                Some(result) => Some(parameter(result)?),
+            match normal.value {
+                InlineBodyValue::Invocation => None,
+                other => Some(parameter(&other)?),
             },
         ))
     }

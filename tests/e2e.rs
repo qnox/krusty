@@ -1456,6 +1456,9 @@ mod use_inline_finally_e2e;
 
 #[path = "foreach_indexed_inline_e2e.rs"]
 mod foreach_indexed_inline_e2e;
+
+#[path = "run_catching_inline_e2e.rs"]
+mod run_catching_inline_e2e;
 #[path = "use_site_variance_e2e.rs"]
 mod use_site_variance_e2e;
 #[path = "utf16_string_constant_e2e.rs"]

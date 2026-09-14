@@ -3831,10 +3831,11 @@ fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         lambda_parameter,
         arguments,
         prologue,
+        normal,
+        recover,
         cleanup,
         records_cause,
         defaults,
-        result,
     }) = plan
     else {
         panic!("withLock must publish its selected structural plan in checked FIR")
@@ -3843,8 +3844,15 @@ fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         panic!("withLock enters its region once and leaves it once")
     };
     assert_eq!(
-        (*lambda_parameter, arguments.len(), *records_cause, *result),
-        (1, 0, false, None)
+        (
+            *lambda_parameter,
+            arguments.len(),
+            *records_cause,
+            normal.calls.len(),
+            normal.value,
+            recover.is_some(),
+        ),
+        (1, 0, false, 0, FirInlineValue::Invocation, false)
     );
     assert_eq!(
         defaults.as_ref(),

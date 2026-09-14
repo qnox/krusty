@@ -50,28 +50,32 @@ pub(super) fn fir_inline_body_plan(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
 ) -> Option<Box<crate::fir::FirInlineBodyPlan>> {
-    let map_value = |value: crate::libraries::InlineBodyValue| match value {
-        crate::libraries::InlineBodyValue::Cause => crate::fir::FirInlineValue::Cause,
-        crate::libraries::InlineBodyValue::Parameter(parameter) => {
-            if receiver_parameter == Some(parameter) {
-                return crate::fir::FirInlineValue::Receiver;
-            }
-            let parameter = parameter
-                .checked_sub(usize::from(
-                    receiver_parameter.is_some_and(|receiver| parameter > receiver),
-                ))
-                .expect("inline receiver remapping underflow");
-            crate::fir::FirInlineValue::Parameter(
-                u32::try_from(parameter)
-                    .expect("inline plan parameter ordinal exceeds packed FIR range"),
-            )
+    let map_value = |parameter: usize| {
+        if receiver_parameter == Some(parameter) {
+            return crate::fir::FirInlineValue::Receiver;
         }
+        let parameter = parameter
+            .checked_sub(usize::from(
+                receiver_parameter.is_some_and(|receiver| parameter > receiver),
+            ))
+            .expect("inline receiver remapping underflow");
+        crate::fir::FirInlineValue::Parameter(
+            u32::try_from(parameter)
+                .expect("inline plan parameter ordinal exceeds packed FIR range"),
+        )
     };
-    let map_parameter =
-        |parameter| match map_value(crate::libraries::InlineBodyValue::Parameter(parameter)) {
-            crate::fir::FirInlineValue::Parameter(parameter) => Some(parameter),
-            crate::fir::FirInlineValue::Receiver | crate::fir::FirInlineValue::Cause => None,
-        };
+    let map_parameter = |parameter| match map_value(parameter) {
+        crate::fir::FirInlineValue::Parameter(parameter) => Some(parameter),
+        _ => None,
+    };
+    let value = |value: crate::libraries::InlineBodyValue| match value {
+        crate::libraries::InlineBodyValue::Cause => crate::fir::FirInlineValue::Cause,
+        crate::libraries::InlineBodyValue::Invocation => crate::fir::FirInlineValue::Invocation,
+        crate::libraries::InlineBodyValue::Call(index) => crate::fir::FirInlineValue::Call(
+            u32::try_from(index).expect("inline plan call ordinal exceeds packed FIR range"),
+        ),
+        crate::libraries::InlineBodyValue::Parameter(parameter) => map_value(parameter),
+    };
     let call = |call: &crate::libraries::InlineBodyCall| {
         Some(crate::fir::FirInlineCall {
             declaration: call.member.external_identity?,
@@ -86,8 +90,19 @@ pub(super) fn fir_inline_body_plan(
                 .into_boxed_slice(),
             result: ResolvedTy::new(call.member.ret).ok()?,
             suspend: call.member.suspend(),
-            dispatch: call.dispatch.map(map_value),
-            arguments: call.arguments.iter().copied().map(map_value).collect(),
+            dispatch: call.dispatch.map(value),
+            arguments: call.arguments.iter().copied().map(value).collect(),
+        })
+    };
+    let arm = |source: &crate::libraries::InlineBodyArm| {
+        Some(crate::fir::FirInlineArm {
+            calls: source
+                .calls
+                .iter()
+                .map(call)
+                .collect::<Option<Vec<_>>>()?
+                .into_boxed_slice(),
+            value: value(source.value),
         })
     };
     Some(Box::new(match plan? {
@@ -95,18 +110,24 @@ pub(super) fn fir_inline_body_plan(
             lambda_parameter,
             arguments,
             prologue,
+            normal,
+            recover,
             cleanup,
             records_cause,
             defaults,
-            result,
         } => crate::fir::FirInlineBodyPlan::InvokeLambda {
             lambda_parameter: map_parameter(*lambda_parameter)?,
-            arguments: arguments.iter().copied().map(map_value).collect(),
+            arguments: arguments.iter().copied().map(value).collect(),
             prologue: prologue
                 .iter()
                 .map(call)
                 .collect::<Option<Vec<_>>>()?
                 .into(),
+            normal: arm(normal)?,
+            recover: match recover {
+                None => None,
+                Some(recover) => Some(arm(recover)?),
+            },
             cleanup: cleanup.iter().map(call).collect::<Option<Vec<_>>>()?.into(),
             records_cause: *records_cause,
             defaults: defaults
@@ -124,7 +145,6 @@ pub(super) fn fir_inline_body_plan(
                 })
                 .collect::<Option<Vec<_>>>()?
                 .into(),
-            result: result.map(map_value),
         },
         // This plan also needs the call-site-selected iterator protocol and applied element type.
         // `selected_extension_call` publishes the complete checked variant below.

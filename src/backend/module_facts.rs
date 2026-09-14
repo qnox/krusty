@@ -849,10 +849,15 @@ fn visit_default_realization(realization: &DefaultCallRealization, visit: &mut i
 
 fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
     if let InlineBodyPlan::InvokeLambda {
-        prologue, cleanup, ..
+        prologue,
+        normal,
+        recover,
+        cleanup,
+        ..
     } = plan
     {
-        for call in prologue.iter().chain(cleanup) {
+        let arms = std::iter::once(&normal.calls).chain(recover.iter().map(|arm| &arm.calls));
+        for call in prologue.iter().chain(arms.flatten()).chain(cleanup.iter()) {
             visit_member(&call.member, visit);
         }
     }
@@ -913,10 +918,14 @@ mod tests {
             lambda_parameter: 0,
             arguments: Vec::new(),
             prologue: Vec::new(),
+            normal: crate::libraries::InlineBodyArm {
+                calls: Vec::new(),
+                value: crate::libraries::InlineBodyValue::Invocation,
+            },
+            recover: None,
             cleanup: Vec::new(),
             records_cause: false,
             defaults: Vec::new(),
-            result: None,
         }));
         shape.members.push(member);
 
