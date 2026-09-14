@@ -54170,9 +54170,8 @@ impl<'a> Checker<'a> {
                 .collect::<Option<Vec<_>>>()?;
             // Preserve the declaration-side parameter shapes aligned to SOURCE arguments. Generic
             // inference can make `<T> f(T)` and `<T> f(() -> T)` both specialize to the same lambda
-            // type, but Kotlin still chooses the structurally functional declaration. Named and
-            // vararg calls need this exact source-to-declaration mapping; reconstructing it later
-            // from positional parameter order would make specificity depend on argument spelling.
+            // type, but Kotlin still chooses the structurally functional declaration. Named/vararg
+            // calls need this exact mapping; positional reconstruction would depend on spelling.
             let declaration_specificity_params = argument_parameters
                 .iter()
                 .copied()

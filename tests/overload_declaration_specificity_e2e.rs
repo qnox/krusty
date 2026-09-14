@@ -110,16 +110,17 @@ fn a_concrete_candidate_still_wins_an_equally_specific_pair() {
     common::expect_box_ok_with_stdlib(SRC, "ConcreteGenericTiebreak");
 }
 
-/// A spread argument ranks the declaration's array parameter, while an element-form argument ranks
-/// its element. Reconstructing both as elements makes the generic declaration win both calls.
+/// Kotlin ranks the element call by the declaration's element type and the spread call by its array
+/// type. The bounded generic declaration is more specific in both forms, including through the
+/// array's covariance.
 #[test]
-fn a_spread_vararg_keeps_its_array_shape_for_the_generic_tiebreaker() {
+fn a_spread_vararg_keeps_its_array_shape() {
     const SRC: &str = "@kotlin.jvm.JvmName(\"genericPick\")\n\
-        fun <T> pick(vararg values: T): String = \"generic\"\n\
+        fun <T : CharSequence> pick(vararg values: T): String = \"generic\"\n\
         fun pick(vararg values: Any): String = \"concrete\"\n\
         fun box(): String {\n\
             if (pick(\"x\") != \"generic\") return \"element chose concrete\"\n\
-            if (pick(*arrayOf(\"x\")) != \"concrete\") return \"spread chose generic\"\n\
+            if (pick(*arrayOf(\"x\")) != \"generic\") return \"spread chose concrete\"\n\
             return \"OK\"\n\
         }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);

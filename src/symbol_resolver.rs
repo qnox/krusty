@@ -1142,10 +1142,9 @@ fn unique_most_specific_with_conflicts<T>(
         .iter()
         .map(|(parameters, _)| parameters.as_slice())
         .collect::<Vec<_>>();
-    let [selected] =
-        declaration_specificity::most_specific_indices(&parameter_shapes, at_least_as_specific)
-            .as_slice()
-    else {
+    let most_specific =
+        declaration_specificity::most_specific_indices(&parameter_shapes, at_least_as_specific);
+    let [selected] = most_specific.as_slice() else {
         return CandidateSelection::Ambiguous;
     };
     CandidateSelection::Selected(applicable.swap_remove(*selected).1)
