@@ -83551,6 +83551,11 @@ impl<'a> Checker<'a> {
                 Expr::Member { receiver, .. } => Some(*receiver),
                 _ => None,
             },
+            // A safe call is the same selection with a null guard around it, and it owns its
+            // receiver directly rather than through a `Member` callee. Checked FIR keys the
+            // protocol by that receiver either way, so reading only the `Expr::Call` shape filed a
+            // safe call's protocol under the CALL expression while the lookup used the receiver.
+            Expr::SafeCall { receiver, .. } => Some(*receiver),
             _ => None,
         };
         let collection_transform_iterator_receiver = (!selected.iterator_protocol_scope.is_empty()
