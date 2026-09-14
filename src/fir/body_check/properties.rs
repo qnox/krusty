@@ -1448,17 +1448,15 @@ impl BodyFirChecker<'_> {
         let origin = cause;
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let read = self.body.add_expr(FirExpr {
+        let receiver_ty = self.resolved_type(span, resolution.receiver_ty)?;
+        let read = self.selected_property_read(
             origin,
-            ty: self.resolved_type(span, resolution.receiver_ty)?,
-            kind: FirExprKind::PropertyRead {
-                target: read_target.clone(),
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments: context_arguments.clone(),
-                substitutions: Box::new([]),
-            },
-        });
+            receiver_ty,
+            &read_target,
+            dispatch_receiver,
+            extension_receiver,
+            &context_arguments,
+        );
         let convention = if dec { "dec" } else { "inc" };
         let updated_kind = if self
             .info
@@ -1486,7 +1484,7 @@ impl BodyFirChecker<'_> {
             target: write_target,
             dispatch_receiver,
             extension_receiver,
-            context_arguments,
+            context_arguments: context_arguments.clone(),
             value: updated,
             conversion: None,
             substitutions: Box::new([]),
@@ -1509,21 +1507,47 @@ impl BodyFirChecker<'_> {
             origin,
             kind: FirStatementKind::Expression(write),
         })]);
-        let reread = self.body.add_expr(FirExpr {
+        let reread = self.selected_property_read(
             origin,
-            ty: updated_ty,
-            kind: FirExprKind::PropertyRead {
-                target: read_target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments: Box::new([]),
-                substitutions: Box::new([]),
-            },
-        });
+            updated_ty,
+            &read_target,
+            dispatch_receiver,
+            extension_receiver,
+            &context_arguments,
+        );
         Ok(Some(FirExprKind::Block {
             statements,
             result: Some(reread),
         }))
+    }
+
+    /// One read of the SELECTED property access.
+    ///
+    /// A prefix increment reads twice, and the second read is the same selection as the first: the
+    /// same getter, the same receivers, the same context arguments. Spelling it out a second time
+    /// invites exactly one class of bug — a part of the selection silently left off, which for a
+    /// context-parameter property means emitting its getter again with the operands missing — so
+    /// both reads are built here instead.
+    fn selected_property_read(
+        &mut self,
+        origin: OriginId,
+        ty: ResolvedTy,
+        target: &FirPropertyTarget,
+        dispatch_receiver: Option<FirReceiver>,
+        extension_receiver: Option<FirReceiver>,
+        context_arguments: &[FirReceiver],
+    ) -> FirExprId {
+        self.body.add_expr(FirExpr {
+            origin,
+            ty,
+            kind: FirExprKind::PropertyRead {
+                target: target.clone(),
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments: context_arguments.into(),
+                substitutions: Box::new([]),
+            },
+        })
     }
 
     /// `p++` / `++p` in VALUE position where `p` is a property (a member reached through an implicit
@@ -1735,17 +1759,14 @@ impl BodyFirChecker<'_> {
             })?;
         let read_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let updated_ty = self.resolved_type(span, resolution.updated_ty)?;
-        let read = self.body.add_expr(FirExpr {
-            origin: cause,
-            ty: read_ty,
-            kind: FirExprKind::PropertyRead {
-                target: read_target.clone(),
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments: context_arguments.clone(),
-                substitutions: Box::new([]),
-            },
-        });
+        let read = self.selected_property_read(
+            cause,
+            read_ty,
+            &read_target,
+            dispatch_receiver,
+            extension_receiver,
+            &context_arguments,
+        );
         let convention = if decrement { "dec" } else { "inc" };
         let increment = |checker: &mut Self, operand| -> Result<FirExprId, BodyCheckFailure> {
             let kind = if checker.selected_operator(expression, convention) {
@@ -1815,7 +1836,7 @@ impl BodyFirChecker<'_> {
                 target: write_target,
                 dispatch_receiver,
                 extension_receiver,
-                context_arguments,
+                context_arguments: context_arguments.clone(),
                 value,
                 conversion: None,
                 substitutions: Box::new([]),
@@ -1832,18 +1853,16 @@ impl BodyFirChecker<'_> {
                 ty: result_ty,
                 kind: FirExprKind::ValueRead(temporary),
             }),
-            // Prefix re-reads the property after the write, exactly as kotlinc does.
-            None => self.body.add_expr(FirExpr {
-                origin: cause,
-                ty: result_ty,
-                kind: FirExprKind::PropertyRead {
-                    target: read_target,
-                    dispatch_receiver,
-                    extension_receiver,
-                    context_arguments: Box::new([]),
-                    substitutions: Box::new([]),
-                },
-            }),
+            // Prefix re-reads the property after the write, exactly as kotlinc does — the same
+            // selected access as the first read, context arguments included.
+            None => self.selected_property_read(
+                cause,
+                result_ty,
+                &read_target,
+                dispatch_receiver,
+                extension_receiver,
+                &context_arguments,
+            ),
         };
         Ok(Some(FirExprKind::Block {
             statements: statements.into_boxed_slice(),

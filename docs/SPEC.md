@@ -7419,3 +7419,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (the second pins the transitive case: an anonymous object inside an anonymous object inside the
   argument). Corpus: `closures/captureInSuperConstructorCall/localCapturedInAnonymousObjectInLocalClass.kt`
   and `…2.kt`.
+- **`++p` on a property reads it twice; `p++` reads it once — in statement position too.** Kotlin
+  defines `++p` as `p = p.inc()` followed by the VALUE of `p`, which for a property is a fresh read
+  through its getter, while `p++` binds the old value to a temporary. For a custom getter the
+  difference is observable as a call count, and kotlinc emits the prefix re-read even where the
+  value is discarded. krusty's value position already had the rule; statement position dropped it on
+  the reasoning that a discarded value leaves no prefix/postfix distinction to preserve — but the
+  distinction is not in the value, it is in the number of accessor calls. The AST had kept `prefix`
+  on `Stmt::IncDec` for exactly this and nothing downstream read it.
+  The re-read is the SAME selected access as the first read: same getter, same receivers, same
+  context arguments. Spelling it a second time invites leaving part of the selection off, which is
+  what happened — the second read of a context-parameter property was built with an empty
+  context-argument list, so its getter call came out one operand short and the backend bailed. Both
+  reads (and the pre-existing value-position pair, which had the same hole) now come from one
+  builder, `selected_property_read`.
+  Tests: `tests/property_accessor_increment_e2e.rs::a_prefix_increment_reads_the_property_again_and_a_postfix_one_does_not`
+  and `::a_prefix_increment_of_a_context_property_re_reads_with_its_context_argument`, both run under
+  kotlinc as well when the reference compiler is provisioned. Corpus:
+  `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`, `statics/incInClassObject.kt`.
