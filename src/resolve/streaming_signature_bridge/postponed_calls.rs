@@ -114,14 +114,6 @@ pub(super) fn collect_type_parameters(
 }
 
 impl ProductionSignatureSemantics<'_> {
-    pub(super) fn candidate_participates_in_signature_selection(
-        candidate: &crate::libraries::FunctionInfo,
-    ) -> bool {
-        candidate.visibility == crate::types::Visibility::Public
-            || candidate.flags.inline.must_inline()
-            || candidate.stable_declaration.is_some()
-    }
-
     pub(super) fn common_postponed_parameters(
         &self,
         resolver: &crate::symbol_resolver::SymbolResolver<'_>,
@@ -298,7 +290,6 @@ impl ProductionSignatureSemantics<'_> {
         };
         let mapped = candidates
             .iter()
-            .filter(|candidate| Self::candidate_participates_in_signature_selection(candidate))
             .filter_map(|candidate| {
                 let slots = Self::candidate_call_slots(
                     candidate,

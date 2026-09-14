@@ -1295,8 +1295,8 @@ impl BodyFirChecker<'_> {
 
     /// `c++` / `c--` where `c` is a MEMBER property reached through an implicit receiver. The
     /// checker recorded the write target in `StmtLowering::ImplicitPropertyWrite`; this reads that
-    /// property, applies the increment, and writes it back. Statement position discards the result,
-    /// so no prefix/postfix distinction survives into FIR.
+    /// property, applies the increment, and writes it back. Statement position discards the value,
+    /// but prefix form still preserves its observable second getter invocation.
     ///
     /// `None` when the statement is not an implicit-property increment, so the caller keeps its own
     /// diagnosis rather than reporting a property failure for a genuinely unknown local.
@@ -1304,6 +1304,7 @@ impl BodyFirChecker<'_> {
         &mut self,
         statement: StmtId,
         dec: bool,
+        prefix: bool,
     ) -> Result<Option<FirExprKind>, BodyCheckFailure> {
         let selected = self.info.stmt_lowers.get(&statement).cloned();
         let span = self.file.stmt_spans.get(statement.0 as usize).copied();
@@ -1318,6 +1319,7 @@ impl BodyFirChecker<'_> {
                 return self.property_inc_dec_write(
                     statement,
                     dec,
+                    prefix,
                     span,
                     cause,
                     access.property.stable_declaration,
@@ -1396,6 +1398,7 @@ impl BodyFirChecker<'_> {
         self.property_inc_dec_write(
             statement,
             dec,
+            prefix,
             span,
             cause,
             declaration,
@@ -1414,6 +1417,7 @@ impl BodyFirChecker<'_> {
         &mut self,
         statement: StmtId,
         dec: bool,
+        prefix: bool,
         span: Option<Span>,
         cause: OriginId,
         declaration: Option<DeclarationId>,
@@ -1444,17 +1448,17 @@ impl BodyFirChecker<'_> {
         let origin = cause;
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let read = self.body.add_expr(FirExpr {
+        let receiver_ty = self.resolved_type(span, resolution.receiver_ty)?;
+        let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
+        let read = self.selected_property_read(
             origin,
-            ty: self.resolved_type(span, resolution.receiver_ty)?,
-            kind: FirExprKind::PropertyRead {
-                target: read_target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments: context_arguments.clone(),
-                substitutions: Box::new([]),
-            },
-        });
+            receiver_ty,
+            &read_target,
+            dispatch_receiver,
+            extension_receiver,
+            &context_arguments,
+            &substitutions,
+        );
         let convention = if dec { "dec" } else { "inc" };
         let updated_kind = if self
             .info
@@ -1478,15 +1482,76 @@ impl BodyFirChecker<'_> {
             ty: updated_ty,
             kind: updated_kind,
         });
-        Ok(Some(FirExprKind::PropertyWrite {
+        let write = FirExprKind::PropertyWrite {
             target: write_target,
             dispatch_receiver,
             extension_receiver,
-            context_arguments,
+            context_arguments: context_arguments.clone(),
             value: updated,
             conversion: None,
-            substitutions: Box::new([]),
+            substitutions: substitutions.clone(),
+        };
+        if !prefix {
+            return Ok(Some(write));
+        }
+        // `++p` is `p = p.inc()` and THEN the value of `p`, which for a property is a fresh read
+        // through its getter. The value is discarded in statement position, but the read is not
+        // discardable: a custom getter is a call, and how many times it runs is observable
+        // (`codegen/box/intrinsics/prefixIncDec.kt`, `codegen/box/statics/incInObject.kt`). The
+        // postfix form above keeps the OLD value and so reads once, which is why only this arm
+        // reads again.
+        let write = self.body.add_expr(FirExpr {
+            origin,
+            ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+            kind: write,
+        });
+        let statements = Box::new([self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(write),
+        })]);
+        let reread = self.selected_property_read(
+            origin,
+            updated_ty,
+            &read_target,
+            dispatch_receiver,
+            extension_receiver,
+            &context_arguments,
+            &substitutions,
+        );
+        Ok(Some(FirExprKind::Block {
+            statements,
+            result: Some(reread),
         }))
+    }
+
+    /// One read of the SELECTED property access.
+    ///
+    /// A prefix increment reads twice, and the second read is the same selection as the first: the
+    /// same getter, receivers, context arguments, and declaration substitutions. Spelling it out a
+    /// second time invites exactly one class of bug — a part of the selection silently left off,
+    /// which for a context-parameter property means emitting its getter again with the operands
+    /// missing — so both reads are built here instead.
+    fn selected_property_read(
+        &mut self,
+        origin: OriginId,
+        ty: ResolvedTy,
+        target: &FirPropertyTarget,
+        dispatch_receiver: Option<FirReceiver>,
+        extension_receiver: Option<FirReceiver>,
+        context_arguments: &[FirReceiver],
+        substitutions: &[FirTypeSubstitution],
+    ) -> FirExprId {
+        self.body.add_expr(FirExpr {
+            origin,
+            ty,
+            kind: FirExprKind::PropertyRead {
+                target: target.clone(),
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments: context_arguments.into(),
+                substitutions: substitutions.into(),
+            },
+        })
     }
 
     /// `p++` / `++p` in VALUE position where `p` is a property (a member reached through an implicit
@@ -1698,17 +1763,16 @@ impl BodyFirChecker<'_> {
             })?;
         let read_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let updated_ty = self.resolved_type(span, resolution.updated_ty)?;
-        let read = self.body.add_expr(FirExpr {
-            origin: cause,
-            ty: read_ty,
-            kind: FirExprKind::PropertyRead {
-                target: read_target.clone(),
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments: context_arguments.clone(),
-                substitutions: Box::new([]),
-            },
-        });
+        let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
+        let read = self.selected_property_read(
+            cause,
+            read_ty,
+            &read_target,
+            dispatch_receiver,
+            extension_receiver,
+            &context_arguments,
+            &substitutions,
+        );
         let convention = if decrement { "dec" } else { "inc" };
         let increment = |checker: &mut Self, operand| -> Result<FirExprId, BodyCheckFailure> {
             let kind = if checker.selected_operator(expression, convention) {
@@ -1778,10 +1842,10 @@ impl BodyFirChecker<'_> {
                 target: write_target,
                 dispatch_receiver,
                 extension_receiver,
-                context_arguments,
+                context_arguments: context_arguments.clone(),
                 value,
                 conversion: None,
-                substitutions: Box::new([]),
+                substitutions: substitutions.clone(),
             },
         });
         statements.push(self.body.add_statement(FirStatement {
@@ -1795,18 +1859,17 @@ impl BodyFirChecker<'_> {
                 ty: result_ty,
                 kind: FirExprKind::ValueRead(temporary),
             }),
-            // Prefix re-reads the property after the write, exactly as kotlinc does.
-            None => self.body.add_expr(FirExpr {
-                origin: cause,
-                ty: result_ty,
-                kind: FirExprKind::PropertyRead {
-                    target: read_target,
-                    dispatch_receiver,
-                    extension_receiver,
-                    context_arguments: Box::new([]),
-                    substitutions: Box::new([]),
-                },
-            }),
+            // Prefix re-reads the property after the write, exactly as kotlinc does — the same
+            // selected access as the first read, context arguments included.
+            None => self.selected_property_read(
+                cause,
+                result_ty,
+                &read_target,
+                dispatch_receiver,
+                extension_receiver,
+                &context_arguments,
+                &substitutions,
+            ),
         };
         Ok(Some(FirExprKind::Block {
             statements: statements.into_boxed_slice(),

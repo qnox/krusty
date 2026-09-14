@@ -1883,15 +1883,14 @@ pub struct FunctionInfo {
     pub default_values: Vec<Option<DefaultValue>>,
     /// Number of leading context parameters in the logical parameter list.
     pub context_count: usize,
-    /// Source declaration key for a callable from the current compilation module. Classpath callables
-    /// leave this unset.
+    /// Declaring file in the current module, retained before parser declaration ids are assigned.
+    /// Dependency and platform callables leave this unset.
+    pub source_file: Option<u32>,
+    /// Source declaration key for a current-module callable; classpath callables leave this unset.
     pub source_key: Option<(u32, u32)>,
-    /// Stable declaration identity for a callable from the current compilation. This is independent
-    /// of parser arenas and is the identity checked FIR retains.
+    /// Parser-independent current-module identity retained by checked FIR.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// Exact AST-backed member declaration selected from the current compilation. This is distinct
-    /// from [`Self::source_key`], whose second component is a top-level declaration arena id; a member
-    /// is owned by its classifier and is identified by its stable signature start.
+    /// Exact AST-backed member coordinate; top-level declarations use [`Self::source_key`] instead.
     pub source_member: Option<SourceMember>,
     /// Language-defined callable contributed by the classifier itself rather than by its companion
     /// value. It travels on the same candidate structure so the checker can combine both facets and
@@ -2116,6 +2115,7 @@ impl FunctionInfo {
             call_sig: CallSig::default(),
             default_values: Vec::new(),
             context_count: 0,
+            source_file: None,
             source_key: None,
             stable_declaration: None,
             source_member: None,

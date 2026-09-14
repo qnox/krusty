@@ -3498,7 +3498,9 @@ impl BodyFirChecker<'_> {
                 };
                 FirStatementKind::Expression(expression)
             }
-            Stmt::IncDec { name, dec, .. } => {
+            Stmt::IncDec {
+                name, dec, prefix, ..
+            } => {
                 if let Some((depth, delegate)) = self.delegated_binding(name) {
                     let write =
                         self.delegated_inc_dec_statement(statement, *dec, depth, delegate, origin)?;
@@ -3518,10 +3520,8 @@ impl BodyFirChecker<'_> {
                 } else {
                     None
                 };
-                // `c++` where `c` is a MEMBER property of the enclosing classifier is neither a local
-                // nor a capture; the checker resolved it through the implicit receiver and recorded
-                // the write target. In STATEMENT position the updated value is discarded, so this is
-                // exactly read → operator → write with no prefix/postfix distinction to preserve.
+                // A member property reached through an implicit receiver has no local/capture slot.
+                // Although discarded, `++c` re-reads it; a custom getter makes that observable.
                 if target.is_none() && captured.is_none() && class_storage.is_none() {
                     // `field++` inside a property accessor. The checker records the backing-field
                     // write; read and write both address the enclosing property's storage directly,
@@ -3601,7 +3601,7 @@ impl BodyFirChecker<'_> {
                             kind: FirStatementKind::Expression(write),
                         }));
                     }
-                    if let Some(kind) = self.implicit_property_inc_dec(statement, *dec)? {
+                    if let Some(kind) = self.implicit_property_inc_dec(statement, *dec, *prefix)? {
                         let write = self.body.add_expr(FirExpr {
                             origin,
                             ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
