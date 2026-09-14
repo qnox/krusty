@@ -2226,3 +2226,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/receiver_property_path_smartcast_e2e.rs::a_receiver_property_path_narrows_for_a_dereference`,
   `a_receiver_property_path_narrows_for_an_argument`, `a_parameter_rooted_path_still_narrows`,
   `a_mutable_property_in_the_path_is_still_refused`, `a_custom_getter_in_the_path_is_still_refused`.
+- **A package-qualified call shapes its lambda argument (fix).** `Json { prettyPrint = true }` binds
+  the lambda's receiver from the selected callable's parameter; spelled with its package —
+  `kotlinx.serialization.json.Json { … }` — the receiver never reached the lambda and every member
+  read inside it failed. It is not only the receiver: a qualified call shaped NO lambda argument, so
+  an ordinary value lambda's parameters arrived as `Any` too. The qualified path types its arguments
+  BEFORE a candidate is known, which judges a lambda with no expected shape; the bare-name path holds
+  that probe's diagnostics aside, rechecks each lambda once a callable is selected, and discards the
+  superseded probe. The qualified path did none of the three. All three are needed and each alone
+  changes nothing: capture without discard commits the diagnostics later anyway, and rechecking
+  without capture leaves the probe's errors standing. A call that never resolves still commits them,
+  so an unknown member inside the lambda is still rejected.
+  `tests/qualified_call_receiver_lambda_e2e.rs::a_package_qualified_call_binds_its_lambda_receiver`,
+  `a_cross_package_qualified_call_binds_its_lambda_receiver`,
+  `the_other_call_spellings_still_shape_their_lambdas`,
+  `an_unknown_member_in_the_lambda_is_still_rejected`.
