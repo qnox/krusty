@@ -3,11 +3,11 @@
 mod array_factories;
 mod inline_body;
 
-pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use inline_body::{InlineBodyPlan, InlineBodyState, InlineCollectionLocalNames};
-
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
+pub(crate) use array_factories::kotlin_array_factory_kind;
+pub use inline_body::{InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault};
+pub use inline_body::{InlineBodyPlan, InlineBodyValue, InlineCollectionLocalNames};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 

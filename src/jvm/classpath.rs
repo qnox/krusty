@@ -488,7 +488,7 @@ macro_rules! cache_stat {
     ($field:ident, $hit:expr) => {{
         #[cfg(feature = "trace")]
         {
-            cache_stats().$field.record($hit);
+            $crate::jvm::classpath::cache_stats().$field.record($hit);
         }
         #[cfg(not(feature = "trace"))]
         {
@@ -496,6 +496,10 @@ macro_rules! cache_stat {
         }
     }};
 }
+
+mod inline_plan_cache;
+
+use inline_plan_cache::{global_plan_cache, PlanCache, PlanKey};
 
 /// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance
 /// caches are short-lived, so only a process-global tally shows whole-run efficiency).
@@ -1002,42 +1006,6 @@ fn global_entry_class_bytes_cache(key: &EntryKey) -> ClassBytesCache {
     CACHE
         .get_or_init(EntryCache::new)
         .get_or_build(key, Default::default)
-}
-
-/// Process-global memoized inline-body plans, keyed by the COMPLETE archive/jimage classpath
-/// composition. Unlike a method body, a decoded plan is not an entry-local fact: a multifile
-/// facade's body lookup may walk into a part class selected from another classpath entry. Sharing by
-/// the facade's owning entry alone would therefore leak a plan between compositions that shadow the
-/// part differently. Compositions containing a mutable directory get no global slot and retain only
-/// the per-instance LRU.
-/// The full input set a plan decode reads: owner + source name + body descriptor locate the
-/// bytecode, but the SAME method surfaces through several provider channels (plain, suspend
-/// facade, extension) whose semantic roles, `physical_params` slot layouts, and `$default` targets
-/// differ — and the decoded plan's parameter INDEXES and defaults depend on all three. Two channels
-/// must therefore never share a plan unless every decoder input agrees.
-type PlanKey = (
-    TypeName,
-    String,
-    String,
-    Vec<u16>,
-    usize,
-    Option<Ty>,
-    Vec<Ty>,
-    Option<(TypeName, String, String)>,
-);
-type PlanMap = HashMap<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>;
-type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMap>>;
-fn global_plan_cache(key: &[EntryKey]) -> PlanCache {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<EntryKey>, PlanCache>>> =
-        std::sync::OnceLock::new();
-    let mut cache = CACHE
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    cache
-        .entry(key.to_vec())
-        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
-        .clone()
 }
 
 /// Process-global cache of parsed `.kotlin_builtins` fragments, one [`EntryCache`] slot per entry.
@@ -4422,94 +4390,6 @@ impl Classpath {
         code
     }
 
-    /// The memoized inline-body plan for `(owner, name, body_descriptor)`, or `None` on a cold miss
-    /// (the caller decodes the plan and stores it with [`Self::memoize_inline_plan`]). `Some(None)`
-    /// is a REMEMBERED "this callable has no expandable plan" — the dominant answer, and exactly the
-    /// one that must not be recomputed per candidate. Gated on a complete catalog like the body
-    /// cache: an incomplete catalog cannot promise the bytecode this instance reads is stable.
-    pub(crate) fn cached_inline_plan(
-        &self,
-        owner: TypeName,
-        name: &str,
-        body_descriptor: &str,
-        parameter_slots: &[u16],
-        context_count: usize,
-        source_receiver: Option<Ty>,
-        semantic_parameters: &[Ty],
-        default_target: Option<(TypeName, &str, &str)>,
-    ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
-        if !self.plan_is_cacheable() {
-            cache_stat!(inline_plans, false);
-            return None;
-        }
-        let key = (
-            owner,
-            name.to_string(),
-            body_descriptor.to_string(),
-            parameter_slots.to_vec(),
-            context_count,
-            source_receiver,
-            semantic_parameters.to_vec(),
-            default_target
-                .map(|(owner, name, descriptor)| (owner, name.to_string(), descriptor.to_string())),
-        );
-        if let Some(hit) = self.inline_plans.borrow_mut().get(&key) {
-            cache_stat!(inline_plans, true);
-            return Some(hit.clone());
-        }
-        // L1 miss → the process-global map for this exact immutable classpath composition.
-        if let Some(global) = self.shared_inline_plans.as_ref() {
-            if let Some(hit) = global.read().unwrap().get(&key).cloned() {
-                self.inline_plans.borrow_mut().insert(key, hit.clone());
-                cache_stat!(inline_plans, true);
-                return Some(hit);
-            }
-        }
-        cache_stat!(inline_plans, false);
-        None
-    }
-
-    /// Store one decoded inline-body plan (or its absence) for [`Self::cached_inline_plan`].
-    pub(crate) fn memoize_inline_plan(
-        &self,
-        owner: TypeName,
-        name: &str,
-        body_descriptor: &str,
-        parameter_slots: &[u16],
-        context_count: usize,
-        source_receiver: Option<Ty>,
-        semantic_parameters: &[Ty],
-        default_target: Option<(TypeName, &str, &str)>,
-        plan: Option<Box<crate::libraries::InlineBodyPlan>>,
-    ) {
-        if !self.plan_is_cacheable() {
-            return;
-        }
-        let key = (
-            owner,
-            name.to_string(),
-            body_descriptor.to_string(),
-            parameter_slots.to_vec(),
-            context_count,
-            source_receiver,
-            semantic_parameters.to_vec(),
-            default_target
-                .map(|(owner, name, descriptor)| (owner, name.to_string(), descriptor.to_string())),
-        );
-        if let Some(global) = self.shared_inline_plans.as_ref() {
-            global.write().unwrap().insert(key.clone(), plan.clone());
-        }
-        self.inline_plans.borrow_mut().insert(key, plan);
-    }
-
-    /// Whether a plan may be remembered at all. Any overlay can replace a multifile part reached
-    /// from `owner`, so caching while an overlay is active—even when the owner itself is untouched—
-    /// could leak one request's composed bytecode facts into the next. An incomplete catalog likewise
-    /// cannot promise stable lookup composition.
-    fn plan_is_cacheable(&self) -> bool {
-        self.catalog_complete() && self.stub_overlay.borrow().is_empty()
-    }
-
     /// One class's own body read (no facade super-chain walk), served from the process-global
     /// per-entry body cache (see [`global_entry_body_cache`]) keyed by the OWNING entry — the first
     /// classpath entry that contains the class, the same shadowing decision `class_bytes` makes.
@@ -4685,7 +4565,7 @@ impl Classpath {
             }
         };
         let named: Vec<ExtCandidate> = self
-            .facade_statics(root)
+            .facade_statics(type_name(root))
             .iter()
             .filter(|c| c.name == jvm_name)
             .cloned()
@@ -4734,7 +4614,7 @@ impl Classpath {
     /// so unlike overload-oriented [`Self::facade_method`] this lookup performs no ranking.
     pub fn facade_static(
         &self,
-        root: &str,
+        root: TypeName,
         jvm_name: &str,
         descriptor: &str,
     ) -> Option<ExtCandidate> {
@@ -4749,11 +4629,10 @@ impl Classpath {
     /// [`Self::pkg_members`] in one pass. Each `ClassInfo` is served from the L1/L2 cache. Memoized per
     /// root behind `Rc`: `facade_method` re-walks the same facade for every extension emit-handle lookup,
     /// and rebuilding the candidate vec re-interned every owner name and re-split every descriptor.
-    fn facade_statics(&self, root: &str) -> std::rc::Rc<Vec<ExtCandidate>> {
-        let root_id = type_name(root);
+    fn facade_statics(&self, root: TypeName) -> std::rc::Rc<Vec<ExtCandidate>> {
         let catalog_complete = self.catalog_complete();
         if catalog_complete {
-            if let Some(hit) = self.facade_statics_memo.borrow_mut().get(&root_id) {
+            if let Some(hit) = self.facade_statics_memo.borrow_mut().get(&root) {
                 return hit.clone();
             }
         }
@@ -4761,24 +4640,24 @@ impl Classpath {
         if catalog_complete {
             self.facade_statics_memo
                 .borrow_mut()
-                .insert(root_id, rc.clone());
+                .insert(root, rc.clone());
         }
         rc
     }
 
-    fn build_facade_statics(&self, root: &str) -> Vec<ExtCandidate> {
+    fn build_facade_statics(&self, root: TypeName) -> Vec<ExtCandidate> {
         let mut out = Vec::new();
-        let Some(root_ci) = self.find(root) else {
+        let Some(root_ci) = self.find_name(root) else {
             return out;
         };
         let root_public = root_ci.is_public();
-        let mut cur = Some(root.to_string());
+        let mut cur = Some(root);
         let mut visited = std::collections::HashSet::new();
         while let Some(cn) = cur {
-            if !visited.insert(cn.clone()) {
+            if !visited.insert(cn) {
                 break;
             }
-            let Some(ci) = self.find(&cn) else { break };
+            let Some(ci) = self.find_name(cn) else { break };
             for m in &ci.methods {
                 if !m.is_static() || m.name.starts_with('<') {
                     continue;
@@ -4794,7 +4673,7 @@ impl Classpath {
                     // A public inherited static is callable through the public multifile facade. A
                     // non-public inline implementation can only be spliced from the class that actually
                     // declares its bytecode, so retain the current superclass/part as its owner.
-                    owner: type_name(if public { root } else { &cn }),
+                    owner: if public { root } else { cn },
                     name: m.name.clone(),
                     descriptor: m.descriptor.clone(),
                     ret_desc,
@@ -4802,7 +4681,7 @@ impl Classpath {
                     public,
                 });
             }
-            cur = ci.super_class();
+            cur = ci.super_class;
         }
         out
     }
@@ -4848,7 +4727,7 @@ impl Classpath {
             for facade in &roots {
                 let facade = facade.as_str();
                 let metas = self.meta_functions(facade);
-                for cand in self.facade_statics(facade).iter() {
+                for cand in self.facade_statics(type_name(facade)).iter() {
                     // `facade_statics` walks a multifile superclass chain. Several roots can
                     // therefore reach the SAME physical method (`StandardKt`, its declaring
                     // `StandardKt__StandardKt` part, and a later part all reach the one private
@@ -8502,7 +8381,11 @@ mod fq_tests {
         // Property accessors are physically declared on a multifile part, but are callable through
         // the public facade. Exact metadata handles must therefore use the same facade-chain catalog.
         let arrays = "kotlin/collections/ArraysKt";
-        let indices = cp.facade_static(arrays, "getIndices", "([I)Lkotlin/ranges/IntRange;");
+        let indices = cp.facade_static(
+            type_name(arrays),
+            "getIndices",
+            "([I)Lkotlin/ranges/IntRange;",
+        );
         assert_eq!(
             indices.map(|candidate| candidate.owner.render()),
             Some(arrays.to_string())
@@ -8562,8 +8445,12 @@ mod fq_tests {
         let owner = type_name("p/Widget");
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
             lambda_parameter: 0,
-            argument_parameters: Vec::new(),
-            return_parameter: None,
+            arguments: Vec::new(),
+            prologue: Vec::new(),
+            cleanup: Vec::new(),
+            cause: None,
+            defaults: Vec::new(),
+            result: None,
         };
         let cp = Classpath::new(vec![]);
         cp.memoize_inline_plan(

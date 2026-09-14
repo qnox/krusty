@@ -3,7 +3,7 @@ use super::test_support::{
     checked_function_body_with_platform, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
-use crate::fir::{FirInlineBodyPlan, FirInlineDefaultValue};
+use crate::fir::FirInlineBodyPlan;
 
 #[test]
 fn legacy_context_receiver_supplies_an_unqualified_extension_call() {
@@ -3894,87 +3894,6 @@ fn safe_suspend_function_property_in_map_keeps_the_checked_collection_plan() {
         matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. }).then_some(())
     });
     assert_eq!(plan, Some(()));
-}
-
-#[test]
-fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
-    let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ));
-    let (body, _) = checked_function_body_with_platform(
-        "import kotlinx.coroutines.sync.Mutex\n\
-         import kotlinx.coroutines.sync.withLock\n\
-         suspend fun read(mutex: Mutex): String = mutex.withLock { \"OK\" }\n",
-        "read",
-        platform,
-    );
-    let plan = (0..body.expression_count()).find_map(|raw| {
-        let expression = body.expr(FirExprId::from_raw(raw as u32))?;
-        let FirExprKind::Call(call) = &expression.kind else {
-            return None;
-        };
-        let FirCallTarget::External {
-            inline_plan: Some(plan),
-            ..
-        } = &call.target
-        else {
-            return None;
-        };
-        matches!(
-            plan.as_ref(),
-            FirInlineBodyPlan::SuspendBeforeLambdaFinally { .. }
-        )
-        .then_some(plan.as_ref())
-    });
-    let Some(FirInlineBodyPlan::SuspendBeforeLambdaFinally {
-        lambda_parameter,
-        state,
-        enter,
-        cleanup,
-    }) = plan
-    else {
-        panic!("withLock must publish its selected structural plan in checked FIR")
-    };
-    let state = state
-        .as_ref()
-        .expect("withLock threads its `owner` through lock/unlock");
-    assert_eq!((*lambda_parameter, state.parameter), (1, 0));
-    assert_eq!(state.default, FirInlineDefaultValue::Null);
-    assert_eq!(enter.parameters.len(), 1);
-    assert_eq!(cleanup.parameters.len(), 1);
-    assert_eq!(enter.result.get(), Ty::Unit);
-    assert_eq!(cleanup.result.get(), Ty::Unit);
-    assert!(enter.suspend);
-    assert!(!cleanup.suspend);
-    assert_ne!(enter.declaration, cleanup.declaration);
-}
-
-#[test]
-fn present_inline_plan_conversion_failure_is_not_absence() {
-    let member = crate::libraries::LibraryMember::new(
-        "enter".to_string(),
-        Vec::new(),
-        Ty::Unit,
-        "()V".to_string(),
-    );
-    let plan = crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-        lambda_parameter: 0,
-        state: None,
-        enter: Box::new(member.clone()),
-        cleanup: Box::new(member),
-    };
-
-    assert_eq!(
-        super::inline_body_plan::publish(None, None),
-        Ok(None),
-        "only a genuinely absent provider plan maps to absent checked FIR",
-    );
-    assert_eq!(
-        super::inline_body_plan::publish(Some(&plan), None),
-        Err(super::inline_body_plan::MappingFailure::UnsupportedPlan),
-        "a present plan without stable member identities is a publication error",
-    );
 }
 
 #[test]

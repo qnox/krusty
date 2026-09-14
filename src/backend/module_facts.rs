@@ -848,9 +848,13 @@ fn visit_default_realization(realization: &DefaultCallRealization, visit: &mut i
 }
 
 fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
-    if let InlineBodyPlan::SuspendBeforeLambdaFinally { enter, cleanup, .. } = plan {
-        visit_member(enter, visit);
-        visit_member(cleanup, visit);
+    if let InlineBodyPlan::InvokeLambda {
+        prologue, cleanup, ..
+    } = plan
+    {
+        for call in prologue.iter().chain(cleanup) {
+            visit_callable(&call.callable, &mut *visit);
+        }
     }
 }
 
@@ -907,8 +911,12 @@ mod tests {
         });
         member.inline_body_plan = Some(Box::new(InlineBodyPlan::InvokeLambda {
             lambda_parameter: 0,
-            argument_parameters: Vec::new(),
-            return_parameter: None,
+            arguments: Vec::new(),
+            prologue: Vec::new(),
+            cleanup: Vec::new(),
+            cause: None,
+            defaults: Vec::new(),
+            result: None,
         }));
         shape.members.push(member);
 

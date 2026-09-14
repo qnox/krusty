@@ -137,6 +137,13 @@ fn class_name(cp: &[C], i: u16) -> Option<&str> {
     }
 }
 
+/// The class named by an exception-table entry, or `None` for a catch-all handler.
+pub fn caught_class(cp: &[C], catch_type: u16) -> Option<&str> {
+    (catch_type != 0)
+        .then(|| class_name(cp, catch_type))
+        .flatten()
+}
+
 fn name_and_type(cp: &[C], i: u16) -> Option<(&str, &str)> {
     match cp.get(i as usize)? {
         C::NameAndType(n, d) => Some((utf8(cp, *n)?, utf8(cp, *d)?)),

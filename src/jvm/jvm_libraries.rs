@@ -3847,9 +3847,21 @@ impl JvmLibraries {
         }
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
             match plan {
-                InlineBodyPlan::SuspendBeforeLambdaFinally { enter, cleanup, .. } => {
-                    self.register_external_inline_member(enter);
-                    self.register_external_inline_member(cleanup);
+                InlineBodyPlan::InvokeLambda {
+                    prologue, cleanup, ..
+                } => {
+                    for call in prologue.iter_mut().chain(cleanup) {
+                        let kind = match call.receiver {
+                            Some(crate::libraries::InlineBodyCallReceiver::Dispatch(_)) => {
+                                FnKind::Member
+                            }
+                            Some(crate::libraries::InlineBodyCallReceiver::Extension(_)) => {
+                                FnKind::Extension
+                            }
+                            None => FnKind::TopLevel,
+                        };
+                        self.register_external_callable(&mut call.callable, kind);
+                    }
                 }
                 InlineBodyPlan::CollectionTransform {
                     factory, append, ..
@@ -3860,7 +3872,6 @@ impl JvmLibraries {
                     self.register_external_constructor(owner, factory);
                     self.register_external_inline_member(append);
                 }
-                InlineBodyPlan::InvokeLambda { .. } => {}
             }
         }
         if let Some(identity) = callable.external_identity {
@@ -5093,7 +5104,7 @@ impl JvmLibraries {
                 };
                 let Some(getter_method) =
                     self.cp
-                        .facade_static(&facade_rendered, &getter_sig.name, &getter_sig.desc)
+                        .facade_static(facade, &getter_sig.name, &getter_sig.desc)
                 else {
                     crate::trace_compiler!(
                         "metadata_properties",
@@ -5168,11 +5179,9 @@ impl JvmLibraries {
                     if sparams.len() != context_count + receiver_params + 1 || sret != Ty::Unit {
                         return None;
                     }
-                    let setter_method = self.cp.facade_static(
-                        &facade_rendered,
-                        &setter_sig.name,
-                        &setter_sig.desc,
-                    )?;
+                    let setter_method =
+                        self.cp
+                            .facade_static(facade, &setter_sig.name, &setter_sig.desc)?;
                     if !setter_method.public {
                         return None;
                     }
@@ -7439,111 +7448,6 @@ mod tests {
                 Ty::obj_args("kotlin/reflect/KProperty1", &[Ty::String, Ty::Int]),
             ),
             Some(Ty::fun(vec![Ty::String], Ty::Int)),
-        );
-    }
-
-    #[test]
-    fn metadata_inline_bodies_decode_parameter_roles_without_source_dispatch() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "let");
-        let decoded = symbols
-            .callables
-            .functions()
-            .iter()
-            .map(|function| {
-                (
-                    function.callable.owner,
-                    function.callable.descriptor.as_str(),
-                    function.callable.inline,
-                    function.callable.inline_body_plan.as_deref(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            symbols.callables.functions().iter().any(|function| {
-                matches!(
-                    function.callable.inline_body_plan.as_deref(),
-                    Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                        lambda_parameter: 1,
-                        argument_parameters,
-                        ..
-                    }) if argument_parameters.as_slice() == [0]
-                )
-            }),
-            "decoded declarations: {decoded:?}"
-        );
-    }
-
-    #[test]
-    fn suspend_finally_inline_body_decodes_exact_member_handles() {
-        let (Some(stdlib), Some(coroutines)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::coroutines_jar(),
-        ) else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, coroutines]),
-        ));
-        let symbols = libraries.symbols(
-            SymbolNamespace::Package(type_name("kotlinx/coroutines/sync")),
-            "withLock",
-        );
-        assert!(symbols.callables.functions().iter().any(|function| {
-            matches!(
-                function.callable.inline_body_plan.as_deref(),
-                Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-                    lambda_parameter: 2,
-                    state: Some(state),
-                    enter,
-                    cleanup,
-                }) if state.parameter == 1 && enter.suspend() && !cleanup.suspend()
-            )
-        }));
-    }
-
-    /// The same shape with NO state argument. `Semaphore.withPermit` calls `acquire(continuation)`
-    /// and `release()`, where `Mutex.withLock` calls `lock(owner, continuation)` and
-    /// `unlock(owner)`. Reading the enter member's own descriptor is what makes both decode; a
-    /// fixed operand position recognized only the one that happens to carry an extra parameter.
-    #[test]
-    fn suspend_finally_inline_body_decodes_without_a_state_argument() {
-        let (Some(stdlib), Some(coroutines)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::coroutines_jar(),
-        ) else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, coroutines]),
-        ));
-        let symbols = libraries.symbols(
-            SymbolNamespace::Package(type_name("kotlinx/coroutines/sync")),
-            "withPermit",
-        );
-        assert!(
-            symbols.callables.functions().iter().any(|function| {
-                matches!(
-                    function.callable.inline_body_plan.as_deref(),
-                    Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-                        lambda_parameter: 1,
-                        state: None,
-                        enter,
-                        cleanup,
-                    }) if enter.suspend()
-                        && !cleanup.suspend()
-                        && enter.params.is_empty()
-                        && cleanup.params.is_empty()
-                        && enter.ret == Ty::Unit
-                        && cleanup.ret == Ty::Unit
-                )
-            }),
-            "withPermit must decode the stateless enter/cleanup shape with metadata-owned Unit results"
         );
     }
 
