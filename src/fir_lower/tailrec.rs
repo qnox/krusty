@@ -23,6 +23,13 @@ pub(super) fn finish_tailrec_body(
     let tail = roots
         .pop()
         .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
+    // A `return` is a tail position wherever it stands, not only at the end of the body: nothing
+    // of this function runs after one. A `tailrec` whose recursion goes through a `return` in an
+    // earlier statement -- `if (x > 0) return f(x - 1)` before the body's last line -- was left
+    // recursing, so the function overflowed exactly the stack `tailrec` was written to spare.
+    for root in &mut roots {
+        *root = returning_tails(ir, *root, function, parameter_count, result, origin)?;
+    }
     let tail = tail_value(ir, tail, function, parameter_count, result, origin)?;
     roots.push(tail);
     let loop_body = generated(
@@ -53,6 +60,72 @@ pub(super) fn finish_tailrec_body(
         },
         origin,
     ))
+}
+
+/// Rewrite the self-calls that a `return` puts in tail position anywhere inside `expression`.
+///
+/// Only the shapes that can carry a `return` with nothing of this function after it are descended:
+/// a block's statements and a `when`'s branches. A `return` inside a loop or a `try` is left as the
+/// ordinary call it is -- the first would jump out of its own loop into the rewritten one, and the
+/// second has a `finally` still to run. Those keep the ordinary call they already had, which is
+/// what they had before this rewrite existed.
+/// Rewrite the `return`-borne tail calls in every statement a block carries BEFORE its last, which
+/// its caller handles as the block's own tail position.
+fn rewrite_leading(
+    ir: &mut IrFile,
+    stmts: &mut [ExprId],
+    function: FunId,
+    parameter_count: usize,
+    result: Ty,
+    origin: OriginId,
+) -> Result<(), FirLoweringFailure> {
+    for statement in stmts {
+        *statement = returning_tails(ir, *statement, function, parameter_count, result, origin)?;
+    }
+    Ok(())
+}
+
+fn returning_tails(
+    ir: &mut IrFile,
+    expression: ExprId,
+    function: FunId,
+    parameter_count: usize,
+    result: Ty,
+    origin: OriginId,
+) -> Result<ExprId, FirLoweringFailure> {
+    match ir.expr(expression).clone() {
+        IrExpr::Return(Some(_)) => {
+            tail_value(ir, expression, function, parameter_count, result, origin)
+        }
+        IrExpr::Block { stmts, value } => {
+            let stmts = stmts
+                .into_iter()
+                .map(|statement| {
+                    returning_tails(ir, statement, function, parameter_count, result, origin)
+                })
+                .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
+            // The block's value is descended too. It is the last statement of a `Unit` block —
+            // where a nested `if` ends up — and where it really is a value, nothing here changes
+            // it: a `return` is the only node this rewrites, and a `return` answers no one.
+            let value = value
+                .map(|value| returning_tails(ir, value, function, parameter_count, result, origin))
+                .transpose()?;
+            Ok(generated(ir, IrExpr::Block { stmts, value }, origin))
+        }
+        IrExpr::When { branches } => {
+            let branches = branches
+                .into_iter()
+                .map(|(condition, branch)| {
+                    Ok((
+                        condition,
+                        returning_tails(ir, branch, function, parameter_count, result, origin)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
+            Ok(generated(ir, IrExpr::When { branches }, origin))
+        }
+        _ => Ok(expression),
+    }
 }
 
 fn tail_value(
@@ -106,6 +179,7 @@ fn tail_value(
             // tail position. This is the shape produced by a Unit-returning `if`/`when` whose
             // recursive call occupies one arm.
             if let Some(tail) = stmts.pop() {
+                rewrite_leading(ir, &mut stmts, function, parameter_count, result, origin)?;
                 stmts.push(tail_value(
                     ir,
                     tail,
@@ -121,6 +195,7 @@ fn tail_value(
         }
         IrExpr::Block { mut stmts, value } => {
             if let Some(value) = value {
+                rewrite_leading(ir, &mut stmts, function, parameter_count, result, origin)?;
                 stmts.push(tail_value(
                     ir,
                     value,
@@ -132,7 +207,9 @@ fn tail_value(
             } else if let Some(tail) = stmts.pop() {
                 // A block-bodied function carries its explicit `return` (or Unit tail statement)
                 // as the final statement rather than as the block value. It is still the sole tail
-                // position of this block.
+                // position of this block. The statements before it are tail positions only
+                // where they `return`.
+                rewrite_leading(ir, &mut stmts, function, parameter_count, result, origin)?;
                 stmts.push(tail_value(
                     ir,
                     tail,

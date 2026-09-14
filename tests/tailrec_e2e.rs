@@ -54,3 +54,77 @@ fun box(): String {\n\
     let out = run(SRC);
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn tailrec_through_a_return_that_is_not_the_last_statement() {
+    // A `return` is a tail position wherever it stands: nothing of the function runs after one. In
+    // each of these the recursive `return` sits BEFORE the body's final statement, and the loop has
+    // to reach it there — 1,000,000-deep, so a call left in place is a StackOverflow rather than a
+    // slightly slower answer.
+    const SRC: &str = "tailrec fun early(n: Int): Int {\n\
+    if (n > 0) return early(n - 1)\n\
+    return 0\n\
+}\n\
+tailrec fun mixed(n: Int): Int {\n\
+    if (n == 10) return 1 + mixed(n - 1)\n\
+    if (n > 0) return mixed(n - 1)\n\
+    return 0\n\
+}\n\
+tailrec fun nested(n: Int, acc: Int): Int {\n\
+    if (n > 0) {\n\
+        val next = acc + 1\n\
+        if (next > 0) return nested(n - 1, next)\n\
+    }\n\
+    return acc\n\
+}\n\
+tailrec fun chosen(n: Int): Int {\n\
+    when {\n\
+        n > 0 -> return chosen(n - 1)\n\
+        else -> {}\n\
+    }\n\
+    return n\n\
+}\n\
+fun box(): String {\n\
+    if (early(1000000) != 0) return \"fail early\"\n\
+    if (mixed(1000000) != 1) return \"fail mixed\"\n\
+    if (nested(1000000, 0) != 1000000) return \"fail nested\"\n\
+    if (chosen(1000000) != 0) return \"fail when\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC);
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn a_call_that_only_looks_like_a_tail_call_still_recurses() {
+    // The rewrite must not take a call that has work after it. Each of these would answer wrongly
+    // as a loop step: the sum forgets its addition, the guarded one skips its cleanup, and the
+    // non-self call is not this function at all. Small depths, because they really do recurse.
+    const SRC: &str = "var trail = \"\"\n\
+tailrec fun sum(n: Int): Int {\n\
+    if (n == 0) return 0\n\
+    return n + sum(n - 1)\n\
+}\n\
+tailrec fun marked(n: Int): Int {\n\
+    if (n > 0) {\n\
+        val inner = marked(n - 1)\n\
+        trail += \"x\"\n\
+        return inner\n\
+    }\n\
+    return 0\n\
+}\n\
+fun helper(n: Int): Int = n\n\
+tailrec fun other(n: Int): Int {\n\
+    if (n > 0) return helper(n)\n\
+    return 0\n\
+}\n\
+fun box(): String {\n\
+    if (sum(10) != 55) return \"fail sum: \" + sum(10)\n\
+    if (marked(3) != 0) return \"fail marked\"\n\
+    if (trail != \"xxx\") return \"fail trail: \" + trail\n\
+    if (other(5) != 5) return \"fail other\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC);
+    assert_eq!(out, "OK");
+}
