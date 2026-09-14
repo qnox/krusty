@@ -16788,8 +16788,9 @@ impl<'a> Emitter<'a> {
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
                     // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run
-                    // as emitted; only a call carrying a reified substitution is splice-only.
-                    if inline.can_inline() && (!name.ends_with("$default") || !reified.is_empty()) {
+                    // as emitted. Only a metadata-normalized splice-only declaration may bypass it.
+                    if inline.can_inline() && (!name.ends_with("$default") || inline.must_inline())
+                    {
                         let spliced = if let Some(&recv) = dispatch_receiver.as_ref() {
                             let recv_desc = type_descriptor(self.value_ty(recv));
                             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
@@ -16827,12 +16828,10 @@ impl<'a> Emitter<'a> {
                         if spliced {
                             return;
                         }
-                        // A `@InlineOnly` (`must_inline`) callee has no callable body — a failed splice
-                        // must bail. So must a REIFIED inline (non-empty reified substitution): its
-                        // compiled body carries a `reifiedOperationMarker` and throws
-                        // `throwUndefinedForReified` when invoked directly, so a direct-call fallback is a
-                        // miscompile, not a legal call. Bail (skip the file) instead.
-                        if inline.must_inline() || !reified.is_empty() {
+                        // The selected declaration already owns fallback legality. `MustInline`
+                        // includes both inaccessible `@InlineOnly` bodies and metadata-declared
+                        // reified functions; a substitution map is only a specialization operand.
+                        if inline.must_inline() {
                             crate::trace_compiler!(
                                 "emit",
                                 "inline splice failed for {owner}.{name}{descriptor}"

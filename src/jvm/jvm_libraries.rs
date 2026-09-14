@@ -4,6 +4,9 @@
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 mod inline_body_plan;
+mod inline_capability;
+
+use inline_capability::{metadata_inline, property_accessor_inline};
 
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
@@ -25,13 +28,6 @@ use crate::runtime::{
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{existing_type_name, type_name, Ty, TypeName, TypeNameList};
-
-/// A semantically visible Kotlin property whose exact classfile accessor is non-public is an inline
-/// body container, not a callable fallback. Normalize that declaration capability identically for
-/// package, classifier, and object-import views of the same property.
-fn property_accessor_inline(bytecode_public: bool) -> InlineKind {
-    InlineKind::from_flags(!bytecode_public, !bytecode_public)
-}
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -779,7 +775,7 @@ impl JvmLibraries {
                     *parameter = *declared;
                 }
             }
-            let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
+            let inline_kind = metadata_inline(inline, meta.has_reified_type_params, c.public);
             let generic_sig_for_callable = meta.generic_sig.clone().or_else(|| {
                 self.callable_generic_sig(
                     c.owner,
@@ -1046,9 +1042,10 @@ impl JvmLibraries {
             let Some(bytecode_public) = bytecode_public(&function.jvm_name, desc) else {
                 continue;
             };
-            let function_inline = InlineKind::from_flags(
+            let function_inline = metadata_inline(
                 function.is_inline(),
-                function.is_inline() && !bytecode_public,
+                function.has_reified_type_params(),
+                bytecode_public,
             );
             let Some((params, physical_ret)) = parse_method_desc(desc) else {
                 continue;
@@ -1915,9 +1912,10 @@ impl JvmLibraries {
                     member.set_ret_nullable(declaration.ret_nullable());
                     member.set_suspend(declaration.is_suspend());
                     member.context_count = declaration.context_count();
-                    member.inline = InlineKind::from_flags(
+                    member.inline = metadata_inline(
                         declaration.is_inline(),
-                        declaration.is_inline() && !m.is_public(),
+                        declaration.has_reified_type_params(),
+                        m.is_public(),
                     );
                     member.reified = declaration.has_reified_type_params();
                     member.annotations = declaration.annotations.clone();
@@ -4999,9 +4997,11 @@ impl JvmLibraries {
                     None => None,
                     _ => Some(receiver),
                 };
-                // `@InlineOnly` (`inline` + bytecode-non-public) MUST be spliced; a plain `inline` MAY be.
-                let inline =
-                    InlineKind::from_flags(mf.is_inline(), mf.is_inline() && !bytecode_public);
+                let inline = metadata_inline(
+                    mf.is_inline(),
+                    mf.has_reified_type_params(),
+                    bytecode_public,
+                );
                 let declared_ret = (!mf.ret_nullable() && !mf.is_suspend())
                     .then(|| {
                         generic_sig
