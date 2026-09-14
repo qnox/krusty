@@ -2095,3 +2095,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   already carries this fact to its cloned call; the value-class clone now does too.
   `tests/reified_value_class_splice_e2e.rs::a_reified_nullable_value_class_result_still_splices`,
   `a_reified_non_null_value_class_result_still_splices`.
+- **A lambda literal fits a NULLABLE function-typed parameter (fix).** Overload applicability asks
+  whether a parameter hosts a lambda literal directly or needs a SAM conversion, and it asked that of
+  the parameter's declared type rather than its SHAPE. A nullable function type is not a functional
+  interface, so `((Int) -> Int)?` took the SAM branch, matched nothing, and the candidate was
+  dropped — leaving the call unselected. Every sibling shape test on that path already reads the
+  parameter through `non_null`.
+  When such a call is the initializer of an INFERRED declaration the failure was SILENT: signature
+  evaluation failed, the module fell into diagnostic recovery, and recovery had no expression to
+  blame because the body itself is well typed. Whole modules compiled to nothing while reporting
+  success. The discriminators: a declared result type, a non-nullable parameter, or a plain function
+  instead of a constructor all worked.
+  `tests/nullable_function_parameter_lambda_e2e.rs::a_lambda_literal_fits_a_nullable_function_parameter`,
+  `a_defaulted_nullable_function_parameter_still_selects`, `a_nullable_sam_parameter_still_converts`,
+  `a_nullable_non_function_parameter_still_rejects_a_lambda`.
