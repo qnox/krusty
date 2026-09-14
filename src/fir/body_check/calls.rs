@@ -789,6 +789,7 @@ impl BodyFirChecker<'_> {
             extension.callable.compiler_intrinsic,
             Some(
                 crate::libraries::CompilerIntrinsic::ForEach
+                    | crate::libraries::CompilerIntrinsic::ForEachIndexed
                     | crate::libraries::CompilerIntrinsic::Map
                     | crate::libraries::CompilerIntrinsic::FlatMap
             )
@@ -811,17 +812,19 @@ impl BodyFirChecker<'_> {
                     Box::new(self.iterator_protocol_call(span, origin, &protocol.has_next)?);
                 let next = Box::new(self.iterator_protocol_call(span, origin, &protocol.next)?);
                 let plan = match extension.callable.compiler_intrinsic {
-                    Some(crate::libraries::CompilerIntrinsic::ForEach) => {
-                        FirInlineBodyPlan::ForEach {
-                            lambda_parameter: u32::try_from(context_count).map_err(|_| {
-                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                            })?,
-                            iterator_ty,
-                            iterator,
-                            has_next,
-                            next,
-                        }
-                    }
+                    Some(
+                        intrinsic @ (crate::libraries::CompilerIntrinsic::ForEach
+                        | crate::libraries::CompilerIntrinsic::ForEachIndexed),
+                    ) => FirInlineBodyPlan::ForEach {
+                        lambda_parameter: u32::try_from(context_count).map_err(|_| {
+                            self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                        })?,
+                        indexed: intrinsic == crate::libraries::CompilerIntrinsic::ForEachIndexed,
+                        iterator_ty,
+                        iterator,
+                        has_next,
+                        next,
+                    },
                     Some(
                         intrinsic @ (crate::libraries::CompilerIntrinsic::Map
                         | crate::libraries::CompilerIntrinsic::FlatMap),

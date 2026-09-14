@@ -2031,3 +2031,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   FILE, so one `use` cost a module every class it would have emitted.
   `tests/use_inline_finally_e2e.rs::use_hosts_a_suspension_in_its_lambda`,
   `use_suppresses_a_close_failure_onto_the_body_exception`.
+- **`forEachIndexed` expands like `forEach`, with a counter (fix).** krusty expands a recognized
+  inline iteration at IR level, which is what lets a suspension inside the lambda join the CALLER's
+  state machine. `CompilerIntrinsic::ForEachIndexed` was already decoded by the provider, typed by
+  the resolver (`(Int, T) -> Unit`) and expanded by the legacy lowerer, but the checked-FIR path —
+  the production one — published a structural plan for `forEach` alone.
+  `forEachIndexed` is `forEach` plus a zero-based counter and nothing else, so the plan carries one
+  flag rather than a second loop shape. The counter is a loop-carried local declared before the
+  iterator, and its increment belongs in the loop's UPDATE, not at the end of the body: a
+  `return@forEachIndexed` lowers to a `continue`, which jumps to the update, and an increment written
+  after the body would be skipped by it — numbering every later element one short.
+  Without a plan the call keeps its lambda as a real function object, a suspend call inside it never
+  receives a continuation, and emission fails with "call arity mismatch" — which bails the whole
+  FILE, so one `forEachIndexed` cost a module every class it would have emitted.
+  `tests/foreach_indexed_inline_e2e.rs::for_each_indexed_hosts_a_suspension_in_its_lambda`,
+  `for_each_indexed_counts_from_zero_over_every_element`.
