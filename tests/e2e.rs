@@ -1022,6 +1022,8 @@ mod nothing_nullable_e2e;
 mod nothing_nullable_join_e2e;
 #[path = "nullable_cast_e2e.rs"]
 mod nullable_cast_e2e;
+#[path = "nullable_function_parameter_lambda_e2e.rs"]
+mod nullable_function_parameter_lambda_e2e;
 #[path = "nullable_function_type_e2e.rs"]
 mod nullable_function_type_e2e;
 #[path = "nullable_primitive_box_e2e.rs"]

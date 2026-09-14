@@ -2128,3 +2128,26 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `the_proof_survives_several_nested_foreign_receivers`,
   `a_mutable_member_still_declines_inside_a_foreign_receiver_lambda`,
   `a_custom_getter_still_declines_inside_a_foreign_receiver_lambda`.
+- **A lambda literal fits a NULLABLE function-typed parameter (fix).** Overload applicability asks
+  whether a parameter hosts a lambda literal directly or needs a SAM conversion, and it asked that of
+  the parameter's declared type rather than its SHAPE. A nullable function type is not a functional
+  interface, so `((Int) -> Int)?` took the SAM branch, matched nothing, and the candidate was
+  dropped — leaving the call unselected. Every sibling shape test on that path already reads the
+  parameter through `non_null`.
+  When such a call is the initializer of an INFERRED declaration the failure was SILENT: signature
+  evaluation failed, the module fell into diagnostic recovery, and recovery had no expression to
+  blame because the body itself is well typed. Whole modules compiled to nothing while reporting
+  success. The discriminators: a declared result type, a non-nullable parameter, or a plain function
+  instead of a constructor all worked.
+  `tests/nullable_function_parameter_lambda_e2e.rs::a_lambda_literal_fits_a_nullable_function_parameter`,
+  `a_defaulted_nullable_function_parameter_still_selects`, `a_nullable_sam_parameter_still_converts`,
+  `a_nullable_non_function_parameter_still_rejects_a_lambda`.
+- **A signature failure recovery cannot attribute is reported (fix).** A Pass-1 signature failure
+  puts the module into diagnostic recovery, whose job is to attribute the failure to the source that
+  caused it. When it attributed nothing the empty artifact list was returned with an empty diagnostic
+  sink, so the driver printed a successful run that wrote no class file at all — a module that failed
+  to compile was indistinguishable from one that compiled, both to a person reading the output and to
+  any harness counting diagnostics. Measured on a private corpus, eight whole modules were passing
+  this way.
+  `src/compiler/streaming_tests.rs::unattributed_signature_failure_reports_one_deterministic_internal_error`
+  and `src/compiler/streaming_tests.rs::attributed_signature_failure_is_not_duplicated_by_recovery`.

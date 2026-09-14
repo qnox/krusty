@@ -1402,7 +1402,7 @@ fn best_callable_member_overload<'a>(
             return true;
         }
         if arg.is_lambda_literal() {
-            if param.fun_arity().is_some() {
+            if param.non_null().fun_arity().is_some() {
                 arg_fits_source(lib, src, param, &arg.ty())
             } else {
                 sam_arg_matches(lib, src, *param, arg.ty())
