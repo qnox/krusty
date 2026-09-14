@@ -3772,6 +3772,55 @@ fn foreach_with_callable_reference_keeps_the_selected_external_call_without_spli
 }
 
 #[test]
+fn ordinary_map_literal_keeps_the_selected_external_call_without_splice_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun read(values: List<Int>): List<Int> = values.map { it + 1 }\n",
+        "read",
+        jvm_stdlib_semantics(),
+    );
+
+    let map = (0..body.expression_count()).find_map(|raw| {
+        let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+            return None;
+        };
+        let FirCallTarget::External { inline_plan, .. } = &call.target else {
+            return None;
+        };
+        call.arguments
+            .iter()
+            .any(|argument| {
+                matches!(
+                    argument,
+                    FirCallArgument::Expression { value, .. }
+                        if matches!(
+                            body.expr(*value).map(|expression| &expression.kind),
+                            Some(FirExprKind::Lambda { .. })
+                        )
+                )
+            })
+            .then_some(inline_plan)
+    });
+    assert!(matches!(map, Some(None)));
+}
+
+#[test]
+fn inline_function_value_keeps_the_selected_external_call_without_splice_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun read(block: (String) -> Int): Int = \"value\".let(block)\n",
+        "read",
+        jvm_stdlib_semantics(),
+    );
+    let root = body.expr(root_expression(&body)).expect("root call");
+    let FirExprKind::Call(call) = &root.kind else {
+        panic!("let must remain a checked call")
+    };
+    let FirCallTarget::External { inline_plan, .. } = &call.target else {
+        panic!("stdlib let must retain its selected external identity")
+    };
+    assert!(inline_plan.is_none());
+}
+
+#[test]
 fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
     let (body, _) = checked_function_body_with_platform(
         "operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\
@@ -3819,6 +3868,32 @@ fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
         Ty::obj_args("kotlin/collections/MutableList", &[Ty::String])
     );
     assert_eq!(append_parameter.get(), Ty::nullable(Ty::obj("kotlin/Any")));
+}
+
+#[test]
+fn safe_suspend_function_property_in_map_keeps_the_checked_collection_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "class Holder(val callback: suspend () -> String)\n\
+         suspend fun collect(values: List<Int>, holder: Holder?): List<String> =\n\
+             values.map { holder?.callback() ?: \"none\" }\n",
+        "collect",
+        jvm_stdlib_semantics(),
+    );
+
+    let plan = (0..body.expression_count()).find_map(|raw| {
+        let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+            return None;
+        };
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
+            return None;
+        };
+        matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. }).then_some(())
+    });
+    assert_eq!(plan, Some(()));
 }
 
 #[test]

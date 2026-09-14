@@ -76,6 +76,21 @@ fn loaded_int_local(instruction: &Insn) -> Option<u16> {
     }
 }
 
+fn stored_int_local(instruction: &Insn) -> Option<u16> {
+    let Insn::Plain { op, operands } = instruction else {
+        return None;
+    };
+    match *op {
+        0x3b..=0x3e => Some(u16::from(*op - 0x3b)),
+        0x36 => operands.first().copied().map(u16::from),
+        0xc4 if operands.first() == Some(&0x36) => operands
+            .get(1)
+            .zip(operands.get(2))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low)),
+        _ => None,
+    }
+}
+
 fn stored_reference_local(instruction: &Insn) -> Option<u16> {
     let Insn::Plain { op, operands } = instruction else {
         return None;
@@ -252,11 +267,34 @@ fn enter_result_starts_body(instructions: &[Insn], source_cp: &[C]) -> bool {
     })
 }
 
-fn exact_inline_local_prefix(instructions: &[Insn], scratch_slot: u16) -> bool {
-    let [Insn::Plain { op: 0x03, .. }, store] = instructions else {
+fn exact_inline_entry_prefix(instructions: &[Insn], scratch_slot: u16) -> bool {
+    let [Insn::Plain {
+        op: 0x03,
+        operands: zero_operands,
+    }, store, Insn::Plain {
+        op: 0x00,
+        operands: first_nop_operands,
+    }, Insn::Plain {
+        op: 0x00,
+        operands: second_nop_operands,
+    }, branch] = instructions
+    else {
         return false;
     };
-    inline::stored_local(store) == Some(scratch_slot)
+    zero_operands.is_empty()
+        && first_nop_operands.is_empty()
+        && second_nop_operands.is_empty()
+        && stored_int_local(store) == Some(scratch_slot)
+        && matches!(
+            branch,
+            Insn::Branch {
+                op: 0xa7,
+                target: inline::BranchTarget::Internal(target),
+            } | Insn::BranchW {
+                op: 0xc8,
+                target: inline::BranchTarget::Internal(target),
+            } if *target == instructions.len()
+        )
 }
 
 fn exact_loaded_operands(instructions: &[Insn], operands: &[u16]) -> bool {
@@ -277,8 +315,26 @@ fn exact_enter_operands(instructions: &[Insn], source_cp: &[C], operands: &[u16]
             .is_some_and(|marker| is_inline_marker_pair(marker, source_cp, "mark"))
 }
 
-fn exact_control_flow(instructions: &[Insn], normal_branch: usize, normal_return: usize) -> bool {
+fn exact_control_flow(
+    instructions: &[Insn],
+    entry_branch: usize,
+    enter_start: usize,
+    normal_branch: usize,
+    normal_return: usize,
+) -> bool {
     normal_return < instructions.len()
+        && matches!(
+        instructions.get(entry_branch),
+        Some(
+            Insn::Branch {
+                op: 0xa7,
+                target: inline::BranchTarget::Internal(target),
+            } | Insn::BranchW {
+                op: 0xc8,
+                target: inline::BranchTarget::Internal(target),
+            }
+        ) if *target == enter_start
+        )
         && matches!(
         instructions.get(normal_branch),
         Some(
@@ -302,7 +358,10 @@ fn exact_control_flow(instructions: &[Insn], normal_branch: usize, normal_return
                 | Insn::BranchW {
                     op: 0xc8,
                     target: inline::BranchTarget::Internal(target),
-                } => index == normal_branch && *target == normal_return,
+                } => {
+                    (index == entry_branch && *target == enter_start)
+                        || (index == normal_branch && *target == normal_return)
+                }
                 Insn::Branch { .. }
                 | Insn::BranchW { .. }
                 | Insn::TableSwitch { .. }
@@ -758,19 +817,28 @@ impl JvmLibraries {
                     else {
                         return false;
                     };
+                    let Some(entry_branch) = enter_first_producer.checked_sub(1) else {
+                        return false;
+                    };
                     cleanup_boundaries_are_immediate(
                         *invoke,
                         normal_cleanup_start,
                         handler,
                         exceptional_cleanup_start,
-                    ) && exact_inline_local_prefix(prefix, scratch_slot)
+                    ) && exact_inline_entry_prefix(prefix, scratch_slot)
                         && exact_enter_operands(enter_producers, &body.source_cp, &enter_operands)
                         && exact_loaded_operands(normal_cleanup_producers, &normal_cleanup_operands)
                         && exact_loaded_operands(
                             repeated_cleanup_producers,
                             &repeated_cleanup_operands,
                         )
-                        && exact_control_flow(&instructions, normal_branch, normal_return)
+                        && exact_control_flow(
+                            &instructions,
+                            entry_branch,
+                            enter_first_producer,
+                            normal_branch,
+                            normal_return,
+                        )
                         && has_only_template_effects(&instructions)
                 },
             ),
@@ -978,16 +1046,17 @@ mod tests {
 
     #[test]
     fn extra_branch_or_switch_is_rejected() {
+        let entry = Insn::Branch {
+            op: 0xa7,
+            target: inline::BranchTarget::Internal(1),
+        };
         let normal = Insn::Branch {
             op: 0xa7,
             target: inline::BranchTarget::Internal(3),
         };
         assert!(exact_control_flow(
             &[
-                Insn::Plain {
-                    op: 0x00,
-                    operands: Vec::new(),
-                },
+                entry.clone(),
                 Insn::Plain {
                     op: 0x00,
                     operands: Vec::new(),
@@ -998,22 +1067,30 @@ mod tests {
                     operands: Vec::new(),
                 },
             ],
+            0,
+            1,
             2,
             3,
         ));
         assert!(!exact_control_flow(
             &[
-                normal.clone(),
+                entry.clone(),
                 Insn::Branch {
                     op: 0x99,
                     target: inline::BranchTarget::Internal(0),
                 },
+                normal.clone(),
+                plain(0x00),
             ],
             0,
+            1,
+            2,
             3,
         ));
         assert!(!exact_control_flow(
             &[
+                entry,
+                plain(0x00),
                 normal,
                 Insn::TableSwitch {
                     default: 0,
@@ -1022,8 +1099,40 @@ mod tests {
                 },
             ],
             0,
+            1,
+            2,
             3,
         ));
+    }
+
+    #[test]
+    fn inline_entry_prefix_requires_the_exact_integer_scratch_shape() {
+        let valid = vec![
+            plain(0x03),
+            plain(0x3b),
+            plain(0x00),
+            plain(0x00),
+            Insn::Branch {
+                op: 0xa7,
+                target: inline::BranchTarget::Internal(5),
+            },
+        ];
+        assert!(exact_inline_entry_prefix(&valid, 0));
+
+        for store in [plain(0x4b), plain(0x3f), plain(0x3c)] {
+            let mut malformed = valid.clone();
+            malformed[1] = store;
+            assert!(!exact_inline_entry_prefix(&malformed, 0));
+        }
+        let mut missing_nop = valid.clone();
+        missing_nop.remove(2);
+        assert!(!exact_inline_entry_prefix(&missing_nop, 0));
+        let mut wrong_target = valid;
+        wrong_target[4] = Insn::Branch {
+            op: 0xa7,
+            target: inline::BranchTarget::Internal(4),
+        };
+        assert!(!exact_inline_entry_prefix(&wrong_target, 0));
     }
 
     #[test]

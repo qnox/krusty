@@ -856,8 +856,9 @@ impl BodyLowering<'_> {
     }
 
     /// Expand the checked structural body of an exact collection `map`/`flatMap` declaration only
-    /// when its inline lambda contains a suspension. Ordinary calls retain the library invocation;
-    /// a suspending body must join the enclosing function before target coroutine lowering.
+    /// The checker attaches this plan only when the selected argument is a source lambda whose
+    /// body suspends. Common lowering consumes that decision without inspecting callable or body
+    /// semantics again.
     #[allow(clippy::too_many_arguments)]
     fn external_inline_collection_transform(
         &mut self,
@@ -920,7 +921,7 @@ impl BodyLowering<'_> {
             } => (impl_fn, captures, inline_body, arity as usize),
             _ => return None,
         };
-        if arity != 1 || !self.operand_suspends(inline_body) {
+        if arity != 1 {
             return None;
         }
 

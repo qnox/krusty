@@ -93,3 +93,63 @@ pub(super) fn publish(
         }
     })))
 }
+
+/// Commit applicability while both the complete checked call and a literal's checked body are
+/// available. `None` after this operation is an ordinary selected dependency call, not a lowering
+/// fallback. A present plan is therefore an unconditional obligation for common lowering.
+pub(super) fn finalize(
+    body: &crate::fir::FirBody,
+    call: &mut crate::fir::FirCall,
+) -> Result<(), MappingFailure> {
+    let crate::fir::FirCallTarget::External { inline_plan, .. } = &mut call.target else {
+        return Ok(());
+    };
+    let Some(plan) = inline_plan.as_deref() else {
+        return Ok(());
+    };
+    let lambda_parameter = match plan {
+        crate::fir::FirInlineBodyPlan::InvokeLambda {
+            lambda_parameter, ..
+        }
+        | crate::fir::FirInlineBodyPlan::ForEach {
+            lambda_parameter, ..
+        }
+        | crate::fir::FirInlineBodyPlan::CollectionTransform {
+            lambda_parameter, ..
+        }
+        | crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
+            lambda_parameter, ..
+        } => *lambda_parameter,
+    };
+    let collection_transform = matches!(
+        plan,
+        crate::fir::FirInlineBodyPlan::CollectionTransform { .. }
+    );
+    let mut selected_value = None;
+    for argument in &call.arguments {
+        match argument {
+            crate::fir::FirCallArgument::Expression {
+                parameter, value, ..
+            } if *parameter == lambda_parameter && selected_value.is_none() => {
+                selected_value = Some(*value);
+            }
+            crate::fir::FirCallArgument::Expression { parameter, .. }
+            | crate::fir::FirCallArgument::Default { parameter, .. }
+            | crate::fir::FirCallArgument::Vararg { parameter, .. }
+                if *parameter == lambda_parameter =>
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            _ => {}
+        }
+    }
+    let value = selected_value.ok_or(MappingFailure::UnsupportedPlan)?;
+    let literal_body = body.expr(value).and_then(|argument| match &argument.kind {
+        crate::fir::FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
+        _ => None,
+    });
+    if !literal_body.is_some_and(|body| !collection_transform || body.direct_suspension) {
+        *inline_plan = None;
+    }
+    Ok(())
+}
