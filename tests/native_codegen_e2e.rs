@@ -1833,3 +1833,78 @@ fn an_adapted_callable_reference_runs() {
         "k!\nk\n1\n15\n"
     );
 }
+
+#[test]
+fn a_class_declared_inside_a_function_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A local class is a class: the checked lowering lifts it to the file with its captures turned
+    // into leading constructor parameters, so by the time the generator sees it there is nothing
+    // local left. That is what removing the decline showed — the model and the constructor path
+    // already handled it, and the decline was a claim about a difficulty that was not there.
+    assert_eq!(
+        run(
+            "fun make(base: Int): Int {\n             \x20   class Adder(val extra: Int) { fun sum() = base + extra }\n             \x20   return Adder(2).sum()\n             }\n             fun main() {\n             \x20   class Counter(val n: Int) { fun twice() = n * 2 }\n             \x20   class Box<T>(val v: T) { fun get(): T = v }\n             \x20   println(Counter(21).twice())\n             \x20   println(Box(42).get())\n             \x20   println(make(40))\n             }\n"
+        ),
+        "42\n42\n42\n"
+    );
+}
+
+#[test]
+fn an_object_expression_implements_its_supertypes() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `object : T { … }` is a class with one instance, built where it is written. Its constructor
+    // is NOT its class's first declaration, so the checked lowering cannot recognize it as primary
+    // and names it by its parameter list the way it names a secondary — which is why construction
+    // now falls back to the primary when the list is the primary's own.
+    assert_eq!(
+        run(
+            "interface A { fun a(): Int }\n             interface B { fun b(): Int }\n             abstract class Base(val n: Int) { abstract fun twice(): Int }\n             interface P { fun p(): Int }\n             class Holder(val n: Int) { fun make(): P = object : P { override fun p() = n } }\n             fun supplier(n: Int): P = object : P { override fun p() = n + 1 }\n             fun main() {\n             \x20   val both = object : A, B {\n             \x20       override fun a() = 20\n             \x20       override fun b() = 22\n             \x20   }\n             \x20   println(both.a() + both.b())\n             \x20   val based = object : Base(21) { override fun twice() = n * 2 }\n             \x20   println(based.twice())\n             \x20   println(Holder(42).make().p())\n             \x20   println(supplier(41).p())\n             \x20   val counter = object {\n             \x20       var seen = 0\n             \x20       fun next(): Int { seen += 1; return seen }\n             \x20   }\n             \x20   counter.next()\n             \x20   println(counter.next() + 40)\n             }\n"
+        ),
+        "42\n42\n42\n42\n42\n"
+    );
+}
+
+#[test]
+fn a_local_class_shares_the_mutable_locals_it_captures() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `var a` that a local or anonymous class writes is ONE variable, not two: the class does not
+    // get a copy, it gets the cell the enclosing function moved the variable into. The checked
+    // lowering does the moving and marks which field carries the cell; `native::captures` is what
+    // says that field holds a reference, and without it the write lands in a copy and the enclosing
+    // function reads the value it started with.
+    assert_eq!(
+        run(
+            "fun box(): String {\n             \x20   var counted = 1\n             \x20   object { init { counted = 2 } }\n             \x20   var named = \"a\"\n             \x20   val setter = object { fun set() { named = \"b\" } }\n             \x20   setter.set()\n             \x20   var total = 0\n             \x20   class Bump { fun go() { total += 5 } }\n             \x20   Bump().go()\n             \x20   Bump().go()\n             \x20   return \"\" + counted + named + total\n             }\n             fun main() { println(box()) }\n"
+        ),
+        "2b10\n"
+    );
+}
+
+#[test]
+fn a_local_classs_properties_keep_their_own_identities() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A local class's body properties are numbered from the body, while the legacy source
+    // coordinate numbers the constructor's `val` parameters first. Counting one against the other
+    // bound every read of a property to the NEXT one — `a` read `b` — so `val b = a + 1` saw
+    // nothing and `p.a` answered with `b`. Both backends were wrong in the same way, which is why
+    // this reads the same values through krusty's JVM backend too (see the dual run in
+    // `tests/common`).
+    assert_eq!(
+        run(
+            "fun box(): String {\n             \x20   class P(val n: Int) {\n             \x20       val a = n * 2\n             \x20       val b = a + 1\n             \x20       val c = b + 1\n             \x20   }\n             \x20   val p = P(3)\n             \x20   return \"\" + p.n + \" \" + p.a + \" \" + p.b + \" \" + p.c\n             }\n             fun main() { println(box()) }\n"
+        ),
+        "3 6 7 8\n"
+    );
+}

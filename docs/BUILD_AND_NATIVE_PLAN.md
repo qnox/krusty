@@ -1254,6 +1254,30 @@ before:**
    the checked lowering builds an adapter function for each, and an adapter is an ordinary
    function. That is three declines this session that were guesses about work someone else had
    already done, which is why probing one before building for it has become the first step.
+   Local and anonymous classes made four: the decline came out, and local classes — plain, capturing
+   an enclosing local, and generic — ran unchanged, because the checked lowering lifts them to the
+   file with their captures as leading constructor parameters. Only object expressions needed
+   anything, and not what the decline said: an anonymous object's constructor is not its class's
+   first declaration, so the lowering cannot recognize it as the primary one and names it by its
+   parameter list the way it names a secondary. Construction now falls back to the primary when the
+   list is the primary's own.
+   Two defects came with them, and neither was the generator's kind. The first was: a mutable local
+   a local or anonymous class captures is SHARED, and the field carrying it holds the cell the
+   enclosing function allocated, not a copy of the value. Common IR marks that coordinate and keeps
+   the element's type so no backend's holder leaks into the frontend; `native::captures` makes the
+   choice for this one (a plain reference), and until it did, `var a = 1; object { init { a = 2 } }`
+   left `a` at 1.
+   The second was the frontend's, and both backends had it: a local class's body properties are
+   numbered from the body, while the legacy source coordinate numbers the constructor's `val`
+   parameters first. Reading one numbering as the other bound every property reference to the NEXT
+   declaration — in `class P(val n: Int) { val a = n * 2; val b = a + 1 }`, `a` named `b` — so `b`
+   read an unwritten field and `p.a` answered with `b`. It only bites when the two counts can
+   collide, which is why it survived until local classes started running: with no constructor `val`
+   the numbers agree, and with two the miscount runs off the end and falls back to the right answer.
+   Resolving the declaration by its own SOURCE RANGE cannot drift between the conventions. The lane
+   stands at **1968 pass**, with eight further corpus cases listed as known failures — anonymous
+   objects passing captures to a superclass constructor, an `inner` class of a local class reaching
+   two enclosing instances — each one krusty's JVM backend rejects or answers identically.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

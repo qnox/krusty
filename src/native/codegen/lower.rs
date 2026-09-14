@@ -1246,9 +1246,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
                 self.file.ir.functions[fid as usize].ret
             }
-            IrExpr::GetField { class, index, .. } => {
-                self.file.ir.classes[*class as usize].fields[*index as usize].ty
-            }
+            IrExpr::GetField { class, index, .. } => super::super::captures::physical_ty(
+                self.file.ir,
+                *class,
+                *index,
+                self.file.ir.classes[*class as usize].fields[*index as usize].ty,
+            ),
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,

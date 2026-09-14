@@ -17,6 +17,7 @@
 //!
 //! Every construct the code generator has not been taught declines with a diagnostic naming it.
 
+mod captures;
 mod classes;
 mod codegen;
 pub mod gc;

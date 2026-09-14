@@ -1659,6 +1659,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   uses a `kotlin/jvm/internal/Ref$XxxRef` holder. An inlined scope function (`let`/`also`/`run`/`apply`)
   needs no shared cell because its body is inlined, and a closure that writes a *field* (capturing
   `this`) is still skipped.
+  A LOCAL or ANONYMOUS CLASS shares the same cell the same way, through a field rather than a
+  lambda capture: `var a = 1; object { init { a = 2 } }` leaves `a` at 2, because the field carries
+  the cell the enclosing function allocated and not a copy of the value. Common IR keeps that
+  field's SEMANTIC element type and marks the coordinate in `IrFile::shared_class_capture_fields`,
+  so no backend's holder representation reaches the frontend: the JVM realizes it as `Ref$XxxRef`
+  (`jvm::shared_captures`) and the native backend as a plain reference to the cell
+  (`native::captures`), each at the marked coordinate and nowhere else
+  (`tests/native_codegen_e2e.rs::a_local_class_shares_the_mutable_locals_it_captures`).
 - Classes with **no primary constructor** (`class A { constructor(…) { … } }`): every constructor is a
   secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
   runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a

@@ -10,6 +10,7 @@
 //! code and the descriptor read from it, the collector and the program cannot disagree about where
 //! a reference is.
 
+use super::super::super::captures;
 use super::*;
 use crate::types::TypeName;
 use cranelift_codegen::ir::MemFlagsData;
@@ -151,7 +152,10 @@ impl<'a> FileLowering<'a> {
                     self.ir.classes[class as usize]
                         .ctor_args
                         .iter()
-                        .map(|argument| argument.ty),
+                        .enumerate()
+                        .map(|(index, argument)| {
+                            captures::physical_ty(self.ir, class, index as u32, argument.ty)
+                        }),
                 )
                 .collect();
             for argument in &params[1..] {
@@ -237,7 +241,12 @@ impl<'a> FileLowering<'a> {
             else {
                 unreachable!("filtered to accessors");
             };
-            let ty = self.ir.classes[*class as usize].fields[*field as usize].ty;
+            let ty = captures::physical_ty(
+                self.ir,
+                *class,
+                *field,
+                self.ir.classes[*class as usize].fields[*field as usize].ty,
+            );
             let base = self.class_base(*class).to_string();
             let id = if matches!(slot, Slot::FieldGetter { .. }) {
                 self.declare_local_function(&format!("kt_{base}__get_f{field}"), &[any()], ty)?
@@ -583,7 +592,12 @@ impl<'a> FileLowering<'a> {
             unreachable!("only field accessors are synthesized");
         };
         let offset = self.model.layout(*class).fields[*field as usize].offset as i32;
-        let ty = self.ir.classes[*class as usize].fields[*field as usize].ty;
+        let ty = captures::physical_ty(
+            self.ir,
+            *class,
+            *field,
+            self.ir.classes[*class as usize].fields[*field as usize].ty,
+        );
         let clif = carrier(ty).clif().expect("fields are never `Unit`");
         let name = format!(
             "{}.{}",
@@ -731,7 +745,15 @@ impl<'a> FileLowering<'a> {
             .constructor
             .expect("a primary constructor is defined only where one was declared");
         let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
-        slots.extend(declaration.ctor_args.iter().map(|argument| argument.ty));
+        slots.extend(
+            declaration
+                .ctor_args
+                .iter()
+                .enumerate()
+                .map(|(index, argument)| {
+                    captures::physical_ty(self.ir, class, index as u32, argument.ty)
+                }),
+        );
         let signature = self.signature_of(&slots, Ty::Unit)?;
 
         let parent = match layout.superclass {
@@ -746,7 +768,10 @@ impl<'a> FileLowering<'a> {
                 let params: Vec<Ty> = parent_declaration
                     .ctor_args
                     .iter()
-                    .map(|argument| argument.ty)
+                    .enumerate()
+                    .map(|(index, argument)| {
+                        captures::physical_ty(self.ir, parent, index as u32, argument.ty)
+                    })
                     .collect();
                 let parent_constructor =
                     self.classes[parent as usize].constructor.ok_or_else(|| {
@@ -831,9 +856,16 @@ impl<'a> FileLowering<'a> {
                     }
                     let field = argument.field_index.unwrap_or(next_field);
                     next_field = field + 1;
-                    let field_type = declaration.fields[field as usize].ty;
+                    let field_type = captures::physical_ty(
+                        body.file.ir,
+                        class,
+                        field,
+                        declaration.fields[field as usize].ty,
+                    );
+                    let argument_type =
+                        captures::physical_ty(body.file.ir, class, index as u32, argument.ty);
                     let Some(value) =
-                        body.convert(params[index + 1], Some(argument.ty), field_type)?
+                        body.convert(params[index + 1], Some(argument_type), field_type)?
                     else {
                         return Err("a `Unit` field".to_string());
                     };
@@ -1021,7 +1053,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };
-        let ty = self.file.ir.classes[class as usize].fields[index as usize].ty;
+        let ty = captures::physical_ty(
+            self.file.ir,
+            class,
+            index,
+            self.file.ir.classes[class as usize].fields[index as usize].ty,
+        );
         let offset = self.file.model.layout(class).fields[index as usize].offset as i32;
         let clif = carrier(ty).clif().expect("fields are never `Unit`");
         Ok(Some(self.builder.ins().load(
@@ -1042,7 +1079,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(object) = self.receiver(receiver)? else {
             return Ok(());
         };
-        let ty = self.file.ir.classes[class as usize].fields[index as usize].ty;
+        let ty = captures::physical_ty(
+            self.file.ir,
+            class,
+            index,
+            self.file.ir.classes[class as usize].fields[index as usize].ty,
+        );
         let offset = self.file.model.layout(class).fields[index as usize].offset as i32;
         let value = self.coerce(value, ty)?;
         if self.terminated {
@@ -1074,37 +1116,61 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if declaration.is_abstract || declaration.is_sealed {
             return Err(format!("construction of the abstract class `{name}`"));
         }
-        // `ctor_params` names a SECONDARY constructor by its parameter list; absent, the call is
-        // to the primary one.
+        // Matching uses the DECLARED list, because that is what the construction node names;
+        // filling the frame uses the physical one, because that is what the constructor declares.
+        let primary_declared: Vec<Ty> = declaration
+            .ctor_args
+            .iter()
+            .map(|argument| argument.ty)
+            .collect();
+        let primary_params: Vec<Ty> = declaration
+            .ctor_args
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                captures::physical_ty(self.file.ir, class, index as u32, argument.ty)
+            })
+            .collect();
+        // `ctor_params` names a constructor by its parameter list, and is absent only when the
+        // lowering already knows the call goes to the primary one. It is present for a secondary,
+        // and also for a primary the lowering could not recognize as such — an anonymous object's,
+        // whose constructor is not its class's first declaration. So match the secondaries first,
+        // and fall back to the primary when the list is its own.
         let (constructor, params) = match selected {
             Some(selected) => {
                 let ordinal = declaration
                     .secondary_ctors
                     .iter()
-                    .position(|candidate| candidate.params == selected)
-                    .ok_or_else(|| {
-                        format!("a call to an unknown secondary constructor (`{name}`)")
-                    })?;
-                let secondary = &declaration.secondary_ctors[ordinal];
-                if !secondary.prefix_params.is_empty() {
-                    return Err(format!(
-                        "a secondary constructor with compiler-supplied parameters (`{name}`)"
-                    ));
+                    .position(|candidate| candidate.params == selected);
+                match ordinal {
+                    Some(ordinal) => {
+                        let secondary = &declaration.secondary_ctors[ordinal];
+                        if !secondary.prefix_params.is_empty() {
+                            return Err(format!(
+                                "a secondary constructor with compiler-supplied parameters (`{name}`)"
+                            ));
+                        }
+                        (
+                            self.file.classes[class as usize].secondaries[ordinal],
+                            secondary.params.clone(),
+                        )
+                    }
+                    None if primary_declared == selected => (
+                        self.file.classes[class as usize]
+                            .constructor
+                            .ok_or_else(|| {
+                                format!("a call to a primary constructor `{name}` lacks")
+                            })?,
+                        primary_params,
+                    ),
+                    None => return Err(format!("a call to an unknown constructor (`{name}`)")),
                 }
-                (
-                    self.file.classes[class as usize].secondaries[ordinal],
-                    secondary.params.clone(),
-                )
             }
             None => (
                 self.file.classes[class as usize]
                     .constructor
                     .ok_or_else(|| format!("a call to a primary constructor `{name}` lacks"))?,
-                declaration
-                    .ctor_args
-                    .iter()
-                    .map(|argument| argument.ty)
-                    .collect(),
+                primary_params,
             ),
         };
         if args.len() != params.len() {

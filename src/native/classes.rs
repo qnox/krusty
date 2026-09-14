@@ -231,11 +231,6 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
         "a constructor default argument"
     } else if class.is_annotation || class.annotation_impl_of.is_some() {
         "an annotation class"
-    } else if class.is_anonymous_object
-        || class.enclosing_function.is_some()
-        || class.is_local_class
-    {
-        "a local or anonymous class"
     } else if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
     } else if class.ctor_args.iter().any(|argument| argument.is_vararg) {
@@ -644,8 +639,10 @@ fn layout_class(
         |parent| parent.reference_offsets.clone(),
     );
     let mut fields = Vec::with_capacity(class.fields.len());
-    for field in &class.fields {
-        let kind = c_kind(field.ty);
+    for (index, field) in class.fields.iter().enumerate() {
+        // A field carrying a mutable local this class captured holds the shared cell, not a copy
+        // of the value the source declared — so it is a reference whatever the declaration says.
+        let kind = c_kind(super::captures::physical_ty(ir, id, index as u32, field.ty));
         if kind == CKind::Void {
             return Err(format!(
                 "a `Unit`-typed field (`{}.{}`)",
