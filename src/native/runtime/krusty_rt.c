@@ -163,6 +163,16 @@ KT_TYPE(kt_type_float, "kotlin.Float", sizeof(KObject), 0, NULL)
 KT_TYPE(kt_type_double, "kotlin.Double", sizeof(KObject), 0, NULL)
 KT_TYPE(kt_type_unit, "kotlin.Unit", sizeof(KObject), 0, NULL)
 
+/* Kotlin's four unsigned integers. Each is a value class over a signed primitive, and the generated
+   code carries it as the machine integer it wraps — the right machine shape, and the wrong one to
+   ask questions of, since `4294967295u` is that `Int`'s bits and not its value. A descriptor of its
+   own is what keeps `1u as? Int` false and makes a boxed one render its value; the bits live in the
+   signed field of the matching width, and only the descriptor says how to read them. */
+KT_TYPE(kt_type_ubyte, "kotlin.UByte", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_ushort, "kotlin.UShort", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_uint, "kotlin.UInt", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_ulong, "kotlin.ULong", sizeof(KObject), 0, NULL)
+
 #undef KT_TYPE
 
 static KRef kt_new(const KType *type) { return (KRef)kt_gc_allocate(type, sizeof(KObject)); }
@@ -244,6 +254,8 @@ kt_char kt_string_get(KRef self, kt_int index) {
     return 0;
 }
 
+static kt_int kt_render_ulong(uint64_t value, char *buffer);
+
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */
 static kt_int kt_render_long(kt_long value, char *buffer) {
     char digits[20];
@@ -322,6 +334,20 @@ static const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
         *byte_length = type == &kt_type_double
                            ? kt_render_double(value->as.double_value, kt_bytes_of(buffer))
                            : kt_render_float(value->as.float_value, kt_bytes_of(buffer));
+        *storage = (KRef)buffer;
+        return kt_bytes_of(buffer);
+    }
+    /* The four unsigned types share their storage with the signed one of the same width, so only
+       the descriptor says how to read the bits — and reading them the other way is exactly the
+       `4294967295u` printing `-1` this separation exists to prevent. */
+    if (type == &kt_type_ubyte || type == &kt_type_ushort || type == &kt_type_uint
+        || type == &kt_type_ulong) {
+        uint64_t unsigned_value = type == &kt_type_ubyte    ? (uint8_t)value->as.byte_value
+                                  : type == &kt_type_ushort ? (uint16_t)value->as.short_value
+                                  : type == &kt_type_uint   ? (uint32_t)value->as.int_value
+                                                            : (uint64_t)value->as.long_value;
+        KByteArray *buffer = kt_bytes_new(24);
+        *byte_length = kt_render_ulong(unsigned_value, kt_bytes_of(buffer));
         *storage = (KRef)buffer;
         return kt_bytes_of(buffer);
     }
@@ -730,16 +756,19 @@ static kt_boolean kt_builtin_equals(KRef self, KRef other) {
     if (type == &kt_type_char) {
         return self->as.char_value == other->as.char_value;
     }
-    if (type == &kt_type_byte) {
+    /* An unsigned value is stored in the signed field of its width, and the descriptors were
+       already required to match above — so equality is the same bit comparison, and reading the
+       bits as a value rather than as a sign cannot change its answer. */
+    if (type == &kt_type_byte || type == &kt_type_ubyte) {
         return self->as.byte_value == other->as.byte_value;
     }
-    if (type == &kt_type_short) {
+    if (type == &kt_type_short || type == &kt_type_ushort) {
         return self->as.short_value == other->as.short_value;
     }
-    if (type == &kt_type_int) {
+    if (type == &kt_type_int || type == &kt_type_uint) {
         return self->as.int_value == other->as.int_value;
     }
-    if (type == &kt_type_long) {
+    if (type == &kt_type_long || type == &kt_type_ulong) {
         return self->as.long_value == other->as.long_value;
     }
     /* Boxed floating-point values compare by BITS, which is what `equals` means in Kotlin and not
@@ -809,16 +838,19 @@ static kt_int kt_builtin_hash_code(KRef self) {
     if (type == &kt_type_char) {
         return (kt_int)self->as.char_value;
     }
-    if (type == &kt_type_byte) {
+    /* Kotlin defines each unsigned `hashCode` as the wrapped signed value's, so the grouping is
+       the specification and not a shortcut: `(-1).hashCode()` and `4294967295u.hashCode()` are
+       the same number. */
+    if (type == &kt_type_byte || type == &kt_type_ubyte) {
         return (kt_int)self->as.byte_value;
     }
-    if (type == &kt_type_short) {
+    if (type == &kt_type_short || type == &kt_type_ushort) {
         return (kt_int)self->as.short_value;
     }
-    if (type == &kt_type_int) {
+    if (type == &kt_type_int || type == &kt_type_uint) {
         return self->as.int_value;
     }
-    if (type == &kt_type_long) {
+    if (type == &kt_type_long || type == &kt_type_ulong) {
         uint64_t bits = (uint64_t)self->as.long_value;
         return (kt_int)(uint32_t)(bits ^ (bits >> 32));
     }
@@ -945,6 +977,123 @@ kt_long kt_rem_long(kt_long a, kt_long b) {
 
 /* Kotlin masks the shift count, so `1 shl 32` is `1`, not undefined. A right shift of a negative
    value is implementation-defined in C, so the arithmetic shift is spelled out instead of assumed. */
+/* ---- unsigned integers ----------------------------------------------------------------------- */
+
+/* The wrapped bits are stored in the signed field of the matching width; only the descriptor says
+   how to read them. A small-value cache would be legitimate here too, but Kotlin promises nothing
+   about the identity of a boxed unsigned value, so there is nothing to preserve by adding one. */
+KRef kt_box_ubyte(kt_byte value) {
+    KRef object = kt_new(&kt_type_ubyte);
+    object->as.byte_value = value;
+    return object;
+}
+
+KRef kt_box_ushort(kt_short value) {
+    KRef object = kt_new(&kt_type_ushort);
+    object->as.short_value = value;
+    return object;
+}
+
+KRef kt_box_uint(kt_int value) {
+    KRef object = kt_new(&kt_type_uint);
+    object->as.int_value = value;
+    return object;
+}
+
+KRef kt_box_ulong(kt_long value) {
+    KRef object = kt_new(&kt_type_ulong);
+    object->as.long_value = value;
+    return object;
+}
+
+kt_byte kt_unbox_ubyte(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+    }
+    return value->as.byte_value;
+}
+
+kt_short kt_unbox_ushort(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+    }
+    return value->as.short_value;
+}
+
+kt_int kt_unbox_uint(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+    }
+    return value->as.int_value;
+}
+
+kt_long kt_unbox_ulong(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+    }
+    return value->as.long_value;
+}
+
+/* Render an unsigned 64-bit value into `buffer` (at least 20 bytes); returns the length written.
+   Separate from `kt_render_long` because the signed one negates into unsigned space to reach the
+   digits, which is exactly the step that must not happen here. */
+static kt_int kt_render_ulong(uint64_t value, char *buffer) {
+    char digits[20];
+    kt_int count = 0;
+    do {
+        digits[count++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    } while (value != 0);
+    kt_int length = 0;
+    while (count > 0) {
+        buffer[length++] = digits[--count];
+    }
+    return length;
+}
+
+/* `toString` on each of the four. The narrow two are stored sign-extended in a `byte`/`short`, so
+   the mask is what recovers the value from the bits. */
+static KRef kt_unsigned_to_string(uint64_t value) {
+    KByteArray *buffer = kt_bytes_new(24);
+    kt_int length = kt_render_ulong(value, kt_bytes_of(buffer));
+    return kt_string_of((KRef)buffer, kt_bytes_of(buffer), length);
+}
+
+KRef kt_ubyte_to_string(kt_byte value) { return kt_unsigned_to_string((uint8_t)value); }
+KRef kt_ushort_to_string(kt_short value) { return kt_unsigned_to_string((uint16_t)value); }
+KRef kt_uint_to_string(kt_int value) { return kt_unsigned_to_string((uint32_t)value); }
+KRef kt_ulong_to_string(kt_long value) { return kt_unsigned_to_string((uint64_t)value); }
+
+/* Division and remainder. Only division by zero is undefined for unsigned operands — there is no
+   `MIN_VALUE / -1` to wrap — so this is the signed helpers minus that case. */
+kt_int kt_div_uint(kt_int a, kt_int b) {
+    if (b == 0) {
+        kt_divide_by_zero();
+    }
+    return (kt_int)((uint32_t)a / (uint32_t)b);
+}
+
+kt_int kt_rem_uint(kt_int a, kt_int b) {
+    if (b == 0) {
+        kt_divide_by_zero();
+    }
+    return (kt_int)((uint32_t)a % (uint32_t)b);
+}
+
+kt_long kt_div_ulong(kt_long a, kt_long b) {
+    if (b == 0) {
+        kt_divide_by_zero();
+    }
+    return (kt_long)((uint64_t)a / (uint64_t)b);
+}
+
+kt_long kt_rem_ulong(kt_long a, kt_long b) {
+    if (b == 0) {
+        kt_divide_by_zero();
+    }
+    return (kt_long)((uint64_t)a % (uint64_t)b);
+}
+
 kt_int kt_shl_int(kt_int a, kt_int bits) { return (kt_int)((uint32_t)a << (bits & 31)); }
 
 kt_int kt_shr_int(kt_int a, kt_int bits) {
@@ -1054,6 +1203,12 @@ KT_CONSOLE(char, kt_char, kt_box_char)
 KT_CONSOLE(boolean, kt_boolean, kt_box_boolean)
 KT_CONSOLE(float, kt_float, kt_box_float)
 KT_CONSOLE(double, kt_double, kt_box_double)
+/* The unsigned four box through their OWN descriptor, which is what `kt_render` reads to print the
+   value rather than the signed number sharing its bits. */
+KT_CONSOLE(ubyte, kt_byte, kt_box_ubyte)
+KT_CONSOLE(ushort, kt_short, kt_box_ushort)
+KT_CONSOLE(uint, kt_int, kt_box_uint)
+KT_CONSOLE(ulong, kt_long, kt_box_ulong)
 
 #undef KT_CONSOLE
 

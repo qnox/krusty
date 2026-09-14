@@ -64,13 +64,14 @@ impl<'a> FileLowering<'a> {
             // companion rather than at program start. An initializer that cannot OBSERVE the
             // difference settles it; anything else owned by a class still declines rather than
             // guess at the order.
-            if declaration.owner.is_some() && !self.order_independent(declaration) {
-                return Err(format!(
-                    "a non-`const` property stored on `{}`",
-                    declaration.owner.expect("checked above").render()
-                ));
+            if let Some(owner) = declaration.owner {
+                if !self.order_independent(declaration) {
+                    return Err(format!(
+                        "a non-`const` property stored on `{}`",
+                        owner.render()
+                    ));
+                }
             }
-            check_carried(declaration.ty)?;
             if carrier(declaration.ty) == Carrier::Void {
                 return Err(format!(
                     "a `Unit`-typed top-level property (`{}`)",

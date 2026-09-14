@@ -1459,6 +1459,22 @@ before:**
    what says which it is, rather than the `extension_receiver` flag on the node, which is a fact
    about the accessor's parameter list and not about this object.
 
+   **The unsigned integers came next, for 2394.** They had been declined whole since the first
+   scalars landed, and the reason is worth keeping: common lowering erases each of the four value
+   classes to the signed machine integer it wraps, so carrying one as that integer is right about
+   every bit and wrong about every question — `4294967295u` and `-1` are the same 32 bits, and a
+   backend that cannot tell them apart answers `1u as? Int` with `1`. What made them answerable was
+   `ir.logical_types`: the checked type still sits beside each expression after the erasure, so the
+   generator can read the bits the way the program meant them. Most of the work then turned out to
+   be deciding, member by member, whether the machine already agrees — `plus` and the bitwise
+   operators do, because two's complement makes the result the same bits; `compareTo`, `div`, `rem`
+   and `shr` do not, and each takes the unsigned instruction; `toString` leaves the machine
+   entirely. The two narrow widths needed one thing more: they arrive already widened into an `Int`,
+   so `UShort.MAX_VALUE` reaches the generator as `Const(Int(-1))` and has to be reduced back to the
+   width its checked type claims before anything reads it. Four runtime descriptors beside the
+   signed ones finish the separation, which is what the JVM's cross-check caught first: a boxed
+   `UInt` that the runtime's structural equality did not recognize compared unequal to itself.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

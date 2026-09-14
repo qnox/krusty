@@ -22,6 +22,7 @@ mod ranges;
 mod references;
 mod scope;
 mod statics;
+mod unsigned;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -92,17 +93,6 @@ impl Carrier {
     }
 }
 
-/// Types the generator carries at all. The unsigned integers are declined: Kotlin defines them as
-/// value classes over the signed primitives, and carrying `UInt` as the `Int` it wraps would make
-/// `1u as? Int` succeed and `4294967295u.toString()` print `-1` — silently wrong, which is the one
-/// thing this backend never is.
-fn check_carried(ty: Ty) -> Result<(), Unsupported> {
-    if ty.non_null().is_unsigned() {
-        return Err(format!("an unsigned integer type (`{ty:?}`)"));
-    }
-    Ok(())
-}
-
 /// A nullable primitive is a reference: `Int?` has to represent `null`, so it boxes, exactly as it
 /// does on the JVM and as the C runtime already expects.
 fn carrier(ty: Ty) -> Carrier {
@@ -116,6 +106,16 @@ fn carrier(ty: Ty) -> Carrier {
         Ty::Long => Carrier::Scalar(types::I64, true),
         Ty::Float => Carrier::Scalar(types::F32, true),
         Ty::Double => Carrier::Scalar(types::F64, true),
+        // Kotlin's unsigned integers are value classes, and common lowering erases each to the
+        // signed machine integer it wraps — the right machine shape, and the wrong one to reason
+        // about: `4294967295u` is that `Int`'s bits and not its value. The carrier keeps both
+        // facts, so every widening zero-extends and every comparison and division asks the unsigned
+        // question. What a carrier cannot keep is the TYPE, which is why a boxed one gets a
+        // descriptor of its own: `1u as? Int` must fail, and a boxed `UInt` must render unsigned.
+        Ty::UByte => Carrier::Scalar(types::I8, false),
+        Ty::UShort => Carrier::Scalar(types::I16, false),
+        Ty::UInt => Carrier::Scalar(types::I32, false),
+        Ty::ULong => Carrier::Scalar(types::I64, false),
         _ => Carrier::Ref,
     }
 }
@@ -262,9 +262,6 @@ struct FileLowering<'a> {
 impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
-        for param in params.iter().chain(std::iter::once(&ret)) {
-            check_carried(*param)?;
-        }
         for param in params {
             match carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),
@@ -549,7 +546,6 @@ struct BodyLowering<'a, 'b, 'c> {
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
-        check_carried(ty)?;
         let Some(clif) = carrier(ty).clif() else {
             return Err("a `Unit`-typed local".to_string());
         };
@@ -950,17 +946,45 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// Lower an expression; `None` is Kotlin `Unit`.
+    ///
+    /// The checked SEMANTIC type sits beside every expression in common IR, and this is the one
+    /// point every carried value passes through — so the two things that need saying about a type
+    /// rather than about a node are said here, and cover every route in rather than the routes
+    /// thought of one at a time.
     fn expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
-        // `type_of` reads the PHYSICAL shape an expression lowers to, and a value class has the
-        // shape of what it wraps — so an unsigned value reaching a position that only wants a
-        // reference (`"".plus(UInt.MAX_VALUE)`, whose parameter is `Any?`) looked like an ordinary
-        // `Int` and went through as the signed number it wraps: `4294967295u` printing `-1`. The
-        // checked SEMANTIC type is already in common IR beside the expression; consult it here, at
-        // the one point every carried value passes through, so the decline covers every route in
-        // rather than the routes thought of one at a time.
-        if let Some(ty) = self.file.ir.logical_types.get(&id).copied() {
-            check_carried(ty)?;
+        let logical = self.file.ir.logical_types.get(&id).copied();
+        let value = self.lowered_expression(id)?;
+        let (Some(value), Some(logical)) = (value, logical) else {
+            return Ok(value);
+        };
+        // A `UByte` or `UShort` arrives already widened into an `Int` — the erasure's doing — with
+        // the checked type saying how narrow it really is. Narrowing it back here is what keeps the
+        // value and its type agreeing from this point on, and reading a `UShort` out of an `Int` is
+        // exactly what makes `UShort.MAX_VALUE` print `-1`.
+        //
+        // Only where the value is a SCALAR. A boxed one is a pointer, which is an `I64` like a
+        // `Long` and would be truncated by the very narrowing that fixes the unboxed case: `val any:
+        // Any = 7u` carries a reference whose checked type is still `UInt`.
+        if !logical.is_unsigned() || !self.carried_as_scalar(id) {
+            return Ok(Some(value));
         }
+        let Some(narrow) = carrier(logical).clif() else {
+            return Ok(Some(value));
+        };
+        let actual = self.builder.func.dfg.value_type(value);
+        if actual.is_int() && narrow.is_int() && actual.bits() > narrow.bits() {
+            return Ok(Some(self.builder.ins().ireduce(narrow, value)));
+        }
+        Ok(Some(value))
+    }
+
+    /// Does this expression's machine shape hold the value itself rather than a pointer to it?
+    fn carried_as_scalar(&self, id: u32) -> bool {
+        self.physical_type_of(id)
+            .is_some_and(|ty| matches!(carrier(ty), Carrier::Scalar(..)))
+    }
+
+    fn lowered_expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
         match self.file.ir.expr(id).clone() {
             IrExpr::Const(constant) => self.constant(&constant).map(Some),
             IrExpr::UnitInstance => Ok(None),
@@ -1222,7 +1246,35 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// The Kotlin type of an expression, as far as the lowering needs it: enough to decide the
     /// carrier. `None` means undetermined, and callers that cannot proceed decline.
+    /// The type an expression's value has: how wide it is, and how to read the bits in it.
+    ///
+    /// The node shapes answer the first — a value class has the shape of what it wraps, which is
+    /// what common lowering erased it to. The checked type beside the expression answers the second,
+    /// and for an UNSIGNED value the difference is not cosmetic: a `UInt` boxed as the `Int` sharing
+    /// its bits prints `-1879048193` for `0x8fffffffU`, and one compared as that `Int` answers
+    /// `0uL >= ULong.MAX_VALUE` true.
     fn type_of(&self, id: u32) -> Option<Ty> {
+        let physical = self.physical_type_of(id)?;
+        let logical = self.file.ir.logical_types.get(&id).copied();
+        // The checked type wins whenever it is unsigned, the value is a SCALAR rather than a
+        // pointer to one, and it is no WIDER than that scalar: `expression` has narrowed the value
+        // to it, so the two agree. Wider would be a claim about bits that are not there, and a
+        // pointer is not the value at all — `val any: Any = 7u` is still checked as `UInt`.
+        let bits = |ty: Ty| carrier(ty).clif().map(|clif| clif.bits());
+        match logical {
+            Some(logical)
+                if logical.is_unsigned()
+                    && matches!(carrier(physical), Carrier::Scalar(..))
+                    && bits(logical) <= bits(physical) =>
+            {
+                Some(logical)
+            }
+            _ => Some(physical),
+        }
+    }
+
+    /// The machine shape an expression lowers to, read from the node itself.
+    fn physical_type_of(&self, id: u32) -> Option<Ty> {
         Some(match self.file.ir.expr(id) {
             IrExpr::Const(constant) => match constant {
                 IrConst::Boolean(_) => Ty::Boolean,
@@ -1417,10 +1469,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         source: Option<Ty>,
         target: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        check_carried(target)?;
-        if let Some(source) = source {
-            check_carried(source)?;
-        }
+        let target_ty = target;
         let target = carrier(target);
         match (source.map(carrier), target) {
             (None, target) => {
@@ -1454,7 +1503,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 )
             }
             (Some(Carrier::Ref), Carrier::Scalar(_, _)) => {
-                let ty = target_ty_of(target).expect("scalar carrier");
+                // The TARGET's own type, not one recovered from its carrier: a carrier cannot tell
+                // a `UByte` from a `Boolean`, and each unboxes through its own descriptor.
+                let ty = target_ty.non_null();
                 let Some(suffix) = box_suffix(ty) else {
                     return Err(format!("an unboxing to `{ty:?}`"));
                 };
@@ -1564,7 +1615,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if left.is_float() != right.is_float() {
             return Err("an operator mixing integer and floating-point operands".to_string());
         }
-        let signed_of = |ty: Option<Ty>| !matches!(ty, Some(Ty::Char));
+        // `Char` and the four unsigned integers widen by zero-extension; everything else by sign.
+        let signed_of = |ty: Option<Ty>| {
+            !matches!(ty, Some(Ty::Char)) && !ty.is_some_and(|ty| ty.non_null().is_unsigned())
+        };
         let width = if left.bits() >= right.bits() {
             left
         } else {
@@ -1572,9 +1626,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         let lhs = self.resize(lhs, left, signed_of(lhs_ty), width);
         let rhs = self.resize(rhs, right, signed_of(rhs_ty), width);
-        // Only `Char` compares unsigned, and only against another `Char`; widened to `Int` it is a
-        // non-negative `Int` and signed comparison is the same thing.
-        let signed = !(matches!(lhs_ty, Some(Ty::Char)) && matches!(rhs_ty, Some(Ty::Char)));
+        // `Char` compares unsigned only against another `Char`: widened to `Int` it is a
+        // non-negative `Int` and a signed comparison is the same thing. An UNSIGNED integer
+        // compares unsigned at its own width, where the difference is the whole point — the top bit
+        // is a value there and a sign everywhere else.
+        let unsigned = |ty: Option<Ty>| ty.is_some_and(|ty| ty.non_null().is_unsigned());
+        let both_chars = matches!(lhs_ty, Some(Ty::Char)) && matches!(rhs_ty, Some(Ty::Char));
+        let signed = !(both_chars || unsigned(lhs_ty) || unsigned(rhs_ty));
         Ok((lhs, rhs, width, signed))
     }
 
@@ -1971,6 +2029,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return realized;
                         }
+                        // The unsigned integers: a value class the erasure made look like the
+                        // signed number sharing its bits, so every member where that difference
+                        // shows is answered on purpose rather than by the signed instruction.
+                        if let Some(realized) =
+                            self.unsigned_member(&owner, &name, params, *ret, receiver, args)
+                        {
+                            return realized;
+                        }
                         // A property reference answers its own members through its own table.
                         if let Some(realized) = self.reference_member(&name, receiver, args, *ret) {
                             return realized;
@@ -2082,6 +2148,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (Some(receiver), [argument]) = (receiver, args) else {
                     return Err("a malformed `compareTo`".to_string());
                 };
+                // The operand type named here is the erased one, which for an unsigned value is
+                // the signed number sharing its bits — and ordering is exactly the question that
+                // reads those bits differently. The receiver's own checked type decides.
+                if let Some(element) = self
+                    .type_of(receiver)
+                    .map(Ty::non_null)
+                    .filter(|ty| ty.is_unsigned())
+                {
+                    return self.unsigned_compare(element, receiver, *argument, ret);
+                }
                 let Some(suffix) = scalar_suffix(operand) else {
                     return Err("`compareTo` on a non-scalar operand".to_string());
                 };
@@ -2128,6 +2204,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Err("a malformed array size".to_string());
                 };
                 self.array_size(receiver)
+            }
+            // `"$u"`: the frontend names the conversion rather than letting the template reach for
+            // `Any.toString()`, because the value it would reach for is the signed number sharing
+            // the bits.
+            IrIntrinsic::UnsignedToString { source } => {
+                let Some(receiver) = receiver else {
+                    return Err("a malformed unsigned `toString`".to_string());
+                };
+                let Some(realized) = self.unsigned_intrinsic_to_string(source.non_null(), receiver)
+                else {
+                    return Err(format!("an unsigned `toString` of `{source:?}`"));
+                };
+                realized
             }
             IrIntrinsic::StringLength => {
                 let Some(receiver) = receiver else {
@@ -2392,24 +2481,6 @@ fn scalar_suffix(ty: Ty) -> Option<&'static str> {
     })
 }
 
-/// The Kotlin type a scalar carrier stands for, for naming the runtime's unboxers.
-fn target_ty_of(carrier: Carrier) -> Option<Ty> {
-    match carrier {
-        Carrier::Scalar(t, signed) => Some(match (t, signed) {
-            (types::I8, false) => Ty::Boolean,
-            (types::I8, true) => Ty::Byte,
-            (types::I16, true) => Ty::Short,
-            (types::I16, false) => Ty::Char,
-            (types::I32, _) => Ty::Int,
-            (types::I64, _) => Ty::Long,
-            (types::F32, _) => Ty::Float,
-            (types::F64, _) => Ty::Double,
-            _ => return None,
-        }),
-        _ => None,
-    }
-}
-
 /// The Kotlin type an arithmetic operator produces, which is not always its operands'.
 ///
 /// Arithmetic on the narrow integer types is `Int` arithmetic — Kotlin has no
@@ -2437,6 +2508,12 @@ fn box_suffix(ty: Ty) -> Option<&'static str> {
         Ty::Long => "long",
         Ty::Float => "float",
         Ty::Double => "double",
+        // Each unsigned type has a descriptor of its own, which is what makes `1u as? Int` fail
+        // and a boxed one render its value rather than the signed number sharing its bits.
+        Ty::UByte => "ubyte",
+        Ty::UShort => "ushort",
+        Ty::UInt => "uint",
+        Ty::ULong => "ulong",
         _ => return None,
     })
 }

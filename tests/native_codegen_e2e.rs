@@ -580,26 +580,18 @@ fn identity_equality_on_primitives_compares_values() {
 }
 
 #[test]
-fn unsigned_integers_are_declined_rather_than_carried_as_signed() {
-    let Some(target) = host() else {
+fn an_unsigned_integer_is_not_the_signed_one_sharing_its_bits() {
+    if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
-    };
-    // `UInt` is a value class over `Int`. Carrying it as the `Int` it wraps would make
-    // `1u as? Int` succeed and `UInt.MAX_VALUE` print as `-1`; until the generator models the
-    // wrapper, the file declines.
-    let (_, diagnostics) = compile(
-        &[(
-            "Main",
-            "fun same(x: UInt) = x as? Int\nfun main() { println(same(1u) == null) }\n",
-        )],
-        target,
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("unsigned integer type")),
-        "expected the backend to decline, got {diagnostics:?}"
+    }
+    // `UInt` is a value class over `Int`, and common lowering erases it to the `Int` it wraps.
+    // These are the two questions that erasure answers wrongly if nothing else is done: a boxed
+    // one must not BE an `Int`, and printing one must not print the signed number sharing its
+    // bits. The whole family was declined until both could be answered.
+    assert_eq!(
+        run("fun same(x: UInt) = x as? Int\n             fun main() {\n             \x20   println(same(1u) == null)\n             \x20   println(UInt.MAX_VALUE)\n             \x20   println(ULong.MAX_VALUE)\n             \x20   println(UByte.MAX_VALUE)\n             }\n"),
+        "true\n4294967295\n18446744073709551615\n255\n"
     );
 }
 

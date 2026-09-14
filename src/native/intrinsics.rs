@@ -60,6 +60,17 @@ enum ConsoleOperand {
 
 fn console_operand(ty: Ty) -> ConsoleOperand {
     match ty {
+        // Each unsigned type has its own entry point rather than taking the `Any?` overload: the
+        // value would have to be boxed to reach that one, and it is the runtime that boxes — with
+        // the descriptor that makes it print as the value and not as the signed number sharing its
+        // bits.
+        Ty::UByte => return ConsoleOperand::Scalar("ubyte"),
+        Ty::UShort => return ConsoleOperand::Scalar("ushort"),
+        Ty::UInt => return ConsoleOperand::Scalar("uint"),
+        Ty::ULong => return ConsoleOperand::Scalar("ulong"),
+        _ => {}
+    }
+    match ty {
         Ty::Byte => ConsoleOperand::Scalar("byte"),
         Ty::Short => ConsoleOperand::Scalar("short"),
         Ty::Int => ConsoleOperand::Scalar("int"),
@@ -207,6 +218,32 @@ pub(super) fn scalar_member(
     }
 }
 
+/// The unsigned integer a value-class member is declared on, for an owner that names one.
+///
+/// Kotlin compiles each of these members to a static taking the wrapped value, and the provider
+/// presents them under the value class's own name with kotlinc's `-impl` suffix. Both are spellings,
+/// which is why they are read here; what the caller gets back is the TYPE, which is what decides
+/// how wide the operands are and which questions are asked unsigned.
+pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
+    Some(match kotlin_owner(owner) {
+        "kotlin/UByte" => Ty::UByte,
+        "kotlin/UShort" => Ty::UShort,
+        "kotlin/UInt" => Ty::UInt,
+        "kotlin/ULong" => Ty::ULong,
+        _ => return None,
+    })
+}
+
+/// The Kotlin name of a value-class member, with kotlinc's mangling removed.
+///
+/// A member whose signature mentions a value class is emitted as `name-<suffix>`: `-impl` for the
+/// static carrying the wrapped value, and a hash of the signature where an overload would otherwise
+/// clash (`compareTo-WZ4Q5Ns`). A Kotlin identifier cannot contain `-`, so everything from the
+/// first one is the mangling and the name is what precedes it.
+pub(super) fn value_class_member(name: &str) -> &str {
+    name.split_once('-').map_or(name, |(kotlin, _)| kotlin)
+}
+
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
@@ -281,6 +318,19 @@ mod tests {
         assert!(is_indices("kotlin/text/StringsKt", "getIndices"));
         assert!(!is_indices("kotlin/collections/ArraysKt", "getSize"));
         assert!(!is_indices("kotlin/collections/AbstractList", "getIndices"));
+    }
+
+    #[test]
+    fn an_unsigned_member_is_recognized_by_its_value_class() {
+        assert_eq!(unsigned_owner("kotlin/UInt"), Some(Ty::UInt));
+        assert_eq!(unsigned_owner("kotlin/ULong"), Some(Ty::ULong));
+        assert_eq!(unsigned_owner("kotlin/Int"), None);
+        // kotlinc mangles a value class's members; the Kotlin name is what a table is written in.
+        // Both spellings occur: `-impl` for the static, and a signature hash where an overload
+        // would otherwise clash.
+        assert_eq!(value_class_member("toString-impl"), "toString");
+        assert_eq!(value_class_member("compareTo-WZ4Q5Ns"), "compareTo");
+        assert_eq!(value_class_member("plus"), "plus");
     }
 
     #[test]

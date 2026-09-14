@@ -138,6 +138,12 @@ impl<'a> FileLowering<'a> {
             Ty::Float => "kt_type_float",
             Ty::Double => "kt_type_double",
             Ty::Unit => "kt_type_unit",
+            // The four unsigned types. Each is a descriptor of its own precisely so that an `is`
+            // against it can answer, and so that `1u as? Int` cannot.
+            Ty::UByte => "kt_type_ubyte",
+            Ty::UShort => "kt_type_ushort",
+            Ty::UInt => "kt_type_uint",
+            Ty::ULong => "kt_type_ulong",
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)

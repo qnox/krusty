@@ -5787,10 +5787,37 @@ and behavior is checked by RUNNING the emitted program.
   on floating-point values (`-0.0`, `NaN`) is declined until the runtime pins its rules.
   Tests: `tests/native_codegen_e2e.rs` (`identity_equality_on_primitives_compares_values`).
 
-- **The unsigned integers are declined.** `UInt` is a value class over `Int`; carrying it as the
-  `Int` it wraps made `1u as? Int` succeed. Until the generator models the wrapper, any unsigned
-  type in a carried position declines the file.
-  Tests: `tests/native_codegen_e2e.rs` (`unsigned_integers_are_declined_rather_than_carried_as_signed`).
+- **The unsigned integers are carried by the checked type, not by the bits.** Common lowering
+  erases each of the four value classes to the signed machine integer it wraps, which is right
+  about the REPRESENTATION and silent about how to read it: `4294967295u` and `-1` are the same 32
+  bits. The generator recovers the difference from `ir.logical_types`, the checked type beside each
+  expression, and four decisions follow from it.
+
+  * **The carrier keeps the signedness.** `Carrier::Scalar(clif::Type, signed)` answers *unsigned*
+    for the four, so every widening zero-extends and every ABI parameter is `uext`. A member the
+    machine already answers the same way either way — `plus`, `minus`, `times`, the bitwise
+    operators, `inv` — is the signed instruction, because two's complement makes the bits identical;
+    a member where the machine offers both and the choice is the point — `compareTo` and the
+    orderings, `div`, `rem` — takes the unsigned one; `shr` is a LOGICAL shift, since the top bit is
+    a value. A member named by neither declines by name rather than falling back to the signed
+    answer, which is why the family was declined whole before this.
+  * **`UByte` and `UShort` are narrowed where the checked type says so.** Both reach the generator
+    already widened into an `Int` — `UShort.MAX_VALUE` arrives as `Const(Int(-1))` — so a value
+    whose checked type is narrower than the bits carrying it is `ireduce`d to its own width before
+    anything reads it. Only where the physical carrier is a scalar: the same expression boxed is a
+    reference, and reducing a pointer is not a narrowing.
+  * **Each has its own runtime descriptor.** `kt_type_ubyte`/`ushort`/`uint`/`ulong` sit beside the
+    signed ones, so a boxed `1u` answers `is UInt` and not `is Int`, `1u as? Int` is `null`, and
+    `"$any"` renders the value rather than the sign. Structural equality and `hashCode` group each
+    unsigned descriptor with the signed field it shares — the descriptors have already been required
+    to match, so the bits decide equality, and Kotlin defines each unsigned `hashCode` as the
+    wrapped value's.
+  * **`toString` leaves the machine.** `kt_ubyte_to_string` and its three siblings render through an
+    unsigned division loop; the signed renderer negates into unsigned space to reach the digits,
+    which is exactly the step that must not happen here.
+
+  Tests: `tests/native_unsigned_e2e.rs` (the whole file), `tests/native_codegen_e2e.rs`
+  (`an_unsigned_integer_is_not_the_signed_one_sharing_its_bits`).
 
 - **Arithmetic on `Byte`/`Short`/`Char` produces `Int`.** Kotlin has no `Byte.plus(Byte): Byte`, so
   the operands of a built-in arithmetic operator on a narrow integer type are widened to `i32`

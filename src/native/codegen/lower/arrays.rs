@@ -60,7 +60,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .non_null()
             .array_read_elem()
             .ok_or_else(|| format!("an array of `{array:?}`"))?;
-        check_carried(element)?;
         let stored = if array.non_null().is_reference_array() {
             any()
         } else {

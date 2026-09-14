@@ -121,6 +121,15 @@ extern const KType kt_type_float;
 extern const KType kt_type_double;
 extern const KType kt_type_unit;
 
+/* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
+   machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
+   being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing
+   its bits. */
+extern const KType kt_type_ubyte;
+extern const KType kt_type_ushort;
+extern const KType kt_type_uint;
+extern const KType kt_type_ulong;
+
 /* Every array: the header, the length, then `element_size` bytes per element beginning at the
    type's `instance_size`. One shape for `IntArray` and `Array<T>` alike — what differs is the
    stride and whether the collector looks inside. */
@@ -276,6 +285,10 @@ KRef kt_box_char(kt_char value);
 KRef kt_box_boolean(kt_boolean value);
 KRef kt_box_float(kt_float value);
 KRef kt_box_double(kt_double value);
+KRef kt_box_ubyte(kt_byte value);
+KRef kt_box_ushort(kt_short value);
+KRef kt_box_uint(kt_int value);
+KRef kt_box_ulong(kt_long value);
 
 kt_byte    kt_unbox_byte(KRef value);
 kt_short   kt_unbox_short(KRef value);
@@ -285,6 +298,16 @@ kt_char    kt_unbox_char(KRef value);
 kt_boolean kt_unbox_boolean(KRef value);
 kt_float   kt_unbox_float(KRef value);
 kt_double  kt_unbox_double(KRef value);
+kt_byte    kt_unbox_ubyte(KRef value);
+kt_short   kt_unbox_ushort(KRef value);
+kt_int     kt_unbox_uint(KRef value);
+kt_long    kt_unbox_ulong(KRef value);
+
+/* `toString` on each of the four, reading the bits as the value they stand for. */
+KRef kt_ubyte_to_string(kt_byte value);
+KRef kt_ushort_to_string(kt_short value);
+KRef kt_uint_to_string(kt_int value);
+KRef kt_ulong_to_string(kt_long value);
 
 /* Integer division, remainder and shifts. Kotlin defines all three; C leaves the interesting cases
    undefined. Division by zero throws in Kotlin and is undefined in C; `Int.MIN_VALUE / -1` overflows
@@ -294,6 +317,12 @@ kt_int  kt_div_int(kt_int a, kt_int b);
 kt_int  kt_rem_int(kt_int a, kt_int b);
 kt_long kt_div_long(kt_long a, kt_long b);
 kt_long kt_rem_long(kt_long a, kt_long b);
+/* The unsigned pair. Only division by zero is undefined for unsigned operands — there is no
+   `MIN_VALUE / -1` to wrap — so these are the signed helpers minus that case. */
+kt_int  kt_div_uint(kt_int a, kt_int b);
+kt_int  kt_rem_uint(kt_int a, kt_int b);
+kt_long kt_div_ulong(kt_long a, kt_long b);
+kt_long kt_rem_ulong(kt_long a, kt_long b);
 kt_int  kt_shl_int(kt_int a, kt_int bits);
 kt_int  kt_shr_int(kt_int a, kt_int bits);
 kt_int  kt_ushr_int(kt_int a, kt_int bits);
@@ -332,6 +361,10 @@ void kt_print_char(kt_char value);
 void kt_print_boolean(kt_boolean value);
 void kt_print_float(kt_float value);
 void kt_print_double(kt_double value);
+void kt_print_ubyte(kt_byte value);
+void kt_print_ushort(kt_short value);
+void kt_print_uint(kt_int value);
+void kt_print_ulong(kt_long value);
 
 void kt_println_any(KRef value);
 void kt_println_byte(kt_byte value);
@@ -342,6 +375,10 @@ void kt_println_char(kt_char value);
 void kt_println_boolean(kt_boolean value);
 void kt_println_float(kt_float value);
 void kt_println_double(kt_double value);
+void kt_println_ubyte(kt_byte value);
+void kt_println_ushort(kt_short value);
+void kt_println_uint(kt_int value);
+void kt_println_ulong(kt_long value);
 void kt_println_unit(void);
 
 /* The generated entry point calls this after running the program's `main`. */

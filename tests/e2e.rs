@@ -992,6 +992,8 @@ mod native_ranges_e2e;
 mod native_receiver_property_e2e;
 #[path = "native_strings_e2e.rs"]
 mod native_strings_e2e;
+#[path = "native_unsigned_e2e.rs"]
+mod native_unsigned_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]
 mod nested_class_ctor_scope_e2e;
 #[path = "nested_class_supertype_e2e.rs"]
