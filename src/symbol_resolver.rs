@@ -1402,7 +1402,12 @@ fn best_callable_member_overload<'a>(
             return true;
         }
         if arg.is_lambda_literal() {
-            if param.fun_arity().is_some() {
+            // Nullability is not part of a parameter's SHAPE. `(f: ((Int) -> Int)?)` still hosts a
+            // lambda literal directly; routing it to the SAM branch instead asked whether a
+            // nullable function type is a functional interface, which it is not, so the candidate
+            // was dropped and the whole call went unselected. Every sibling shape test here reads
+            // the parameter through `non_null` for exactly this reason.
+            if param.non_null().fun_arity().is_some() {
                 arg_fits_source(lib, src, param, &arg.ty())
             } else {
                 sam_arg_matches(lib, src, *param, arg.ty())
