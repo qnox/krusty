@@ -308,23 +308,33 @@ Use the shared helpers in `tests/common`:
 These helpers compile in process where possible and reuse persistent JVM runners/servers inside a test
 binary. Per-test JVM startup is one of the easiest ways to degrade the suite.
 
-## The Suite Runs on Both Backends
+## The Suite Runs on Every Enabled Backend
 
-Every test that asserts `box()` prints `OK` through `common::expect_box_ok_with_stdlib` also
-compiles, links and RUNS the same source through the native backend. There is no separate native
-suite to write and keep in step: the programs the suite already has were written to pin krusty's
-semantics, they are small, and their oracle is exactly the one the native lane uses.
+The suite is written ONCE. Which targets a run exercises is a property of the RUNNER, not of the
+helper a test happens to call: every box-running helper — `expect_box_ok_with_stdlib`,
+`expect_box_run_with_stdlib` and `compile_and_run_with_stdlib` — compiles, links and RUNS the same
+source on each enabled target and requires the same answer the JVM gave. There is no separate suite
+to write and keep in step: the programs the suite already has were written to pin krusty's
+semantics, they are small, and the string `box()` returns is already their oracle.
 
-What the second run means:
+`KRUSTY_TEST_BACKENDS` is the switch — a comma-separated list, defaulting to every target this build
+can actually reach. `KRUSTY_TEST_BACKENDS=jvm` narrows a run to the reference target alone.
+(`KRUSTY_NATIVE_E2E=0` is the earlier spelling of the same thing and still works.)
 
-- A construct the generator **declines** is a skip. The native track is younger than the suite, and
-  a decline is how it says a construct is not lowered yet.
-- A program it **accepts** must print `OK`. A wrong answer, a crash or a failed link fails the test
-  it came from, where the shape that provoked it is already written down.
+Adding a target — wasm next — is a `TestBackend` variant and one match arm in
+`tests/common/mod.rs`. It is never an edit to a test, and never a second suite.
 
-It costs about 6% of the suite's wall time and needs a prebuilt runtime for the host, which is the
-same condition the native tests already carry. `KRUSTY_NATIVE_E2E=0` turns it off for a run that
-only cares about the JVM path.
+What a cross-checked run means:
+
+- The JVM is the reference: it decides the expected answer, so a program that deliberately answers
+  something other than `OK` takes part on the same terms as one that does not.
+- A construct the generator **declines** is a skip. A younger backend says "not lowered yet" that
+  way, and failing a test for it would turn every JVM-side test into that backend's to-do list.
+- A program it **accepts** must answer what the JVM answered. A different string, a crash or a
+  failed link fails the test it came from, where the shape that provoked it is already written down.
+
+The native target needs a prebuilt runtime for the host, the same condition the native tests carry;
+without one it simply does not run.
 
 ## Environment Overrides
 

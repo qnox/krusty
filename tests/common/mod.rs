@@ -1566,7 +1566,10 @@ pub fn compile_and_run_box_files(
 pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path()))
+    // A `None` is the JVM path declining, which leaves no answer to cross-check against.
+    let answer = compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path()))?;
+    cross_check_backends(src, stem, &answer);
+    Some(answer)
 }
 
 /// Multi-file form of [`compile_and_run_with_stdlib`].
@@ -1623,7 +1626,9 @@ pub fn expect_box_run(
 pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> String {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()))
+    let answer = expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()));
+    cross_check_backends(src, stem, &answer);
+    answer
 }
 
 /// [`expect_box_run`] for a compile-only consumer: the emitted classes, or a panic naming why the
@@ -1661,34 +1666,90 @@ pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
         "OK",
         "{stem}"
     );
-    also_run_natively(src, stem);
+    cross_check_backends(src, stem, "OK");
 }
 
 /// The prefix every native decline carries, so a decline can be told from a wrong answer.
 const NATIVE_DECLINE: &str = "krusty: the native backend does not support ";
 
-/// Run the same `box()` source through the NATIVE backend as well, when this build has a runtime
-/// for the host.
+/// A target the suite's `box()` programs run on.
 ///
-/// The suite's own programs are a better corpus for the native track than anything written for it:
-/// they were written to pin krusty's semantics, they are small, and their oracle is already
-/// `box()` printing `OK` — the exact contract the box-corpus lane holds the generator to. Reusing
-/// them costs one flag rather than a second suite.
-///
-/// A construct the generator DECLINES is a skip. The native track is younger than the suite, and a
-/// decline is how it says a construct is not lowered yet; failing the test for one would turn every
-/// JVM-side test into a native to-do list. A program the generator ACCEPTS must print `OK`, and
-/// anything else — a wrong answer, a crash, a failed link — fails the test it came from, which is
-/// where the shape that provoked it is already written down.
+/// The suite is written ONCE. Which targets a run exercises is the runner's choice, not a property
+/// of the helper a test happens to call — so a new target is registered here and picked up by every
+/// existing test, rather than needing a second suite or an edit per call site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
-pub fn also_run_natively(src: &str, stem: &str) {
-    // On by default where there is a runtime to link against: the cost is about a tenth of the
-    // suite's time, and the first run of it found a symbol collision between a Kotlin `fun cast`
-    // and the runtime's own `kt_cast` that the box corpus had never provoked. `KRUSTY_NATIVE_E2E=0`
-    // turns it off for a run that only cares about the JVM path.
-    if std::env::var("KRUSTY_NATIVE_E2E").is_ok_and(|value| value == "0") {
-        return;
+pub enum TestBackend {
+    /// The reference target. Always runs: it is the one that decides the expected answer.
+    Jvm,
+    /// Cranelift + the prebuilt runtime for the host.
+    Native,
+}
+
+impl TestBackend {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Jvm => "jvm",
+            Self::Native => "native",
+        }
     }
+}
+
+/// Every target this run CROSS-CHECKS against the JVM answer, from `KRUSTY_TEST_BACKENDS`.
+///
+/// A comma-separated list of spellings; `jvm` is implicit and may be listed harmlessly. The default
+/// is every target this build can actually reach, so a contributor gets the wider check without
+/// asking for it, and `KRUSTY_TEST_BACKENDS=jvm` narrows a run to the reference target alone.
+#[allow(dead_code)]
+fn cross_checked_backends() -> Vec<TestBackend> {
+    let available = [TestBackend::Native];
+    let selected = std::env::var("KRUSTY_TEST_BACKENDS").ok();
+    let selected = match selected.as_deref() {
+        // Retained spelling of the first switch this replaced.
+        None => match std::env::var("KRUSTY_NATIVE_E2E").as_deref() {
+            Ok("0") => return Vec::new(),
+            _ => return available.to_vec(),
+        },
+        Some(list) => list,
+    };
+    available
+        .into_iter()
+        .filter(|backend| {
+            selected
+                .split(',')
+                .any(|name| name.trim() == backend.spelling())
+        })
+        .collect()
+}
+
+/// Run `src` on every cross-checked target and require the SAME answer the JVM gave.
+///
+/// The suite's own programs are a better corpus for a young backend than anything written for it:
+/// they were written to pin krusty's semantics, they are small, and their oracle is already the
+/// string `box()` returns. Reusing them costs one switch rather than a second suite.
+///
+/// Comparing against `expected` rather than against the literal `"OK"` is what lets EVERY box
+/// helper route through here, including the ones whose programs deliberately answer something else:
+/// the claim is that a backend agrees with the reference, which is the claim worth making.
+///
+/// A construct the generator DECLINES is a skip. A younger backend says "not lowered yet" that way,
+/// and failing a test for it would turn every JVM-side test into that backend's to-do list.
+#[allow(dead_code)]
+pub fn cross_check_backends(src: &str, stem: &str, expected: &str) {
+    for backend in cross_checked_backends() {
+        match backend {
+            TestBackend::Jvm => {}
+            TestBackend::Native => also_run_natively(src, stem, expected),
+        }
+    }
+}
+
+/// One cross-checked target: the native backend, when this build has a runtime for the host.
+///
+/// A program the generator ACCEPTS must answer what the JVM answered; anything else — a different
+/// string, a crash, a failed link — fails the test it came from, which is where the shape that
+/// provoked it is already written down.
+fn also_run_natively(src: &str, stem: &str, expected: &str) {
     let Some(target) = krusty::native::NativeTarget::host() else {
         return;
     };
@@ -1696,14 +1757,18 @@ pub fn also_run_natively(src: &str, stem: &str) {
         return;
     }
     match native_box_outcome(src, stem, target) {
-        NativeBox::Pass | NativeBox::Declined => {}
+        NativeBox::Declined => {}
+        NativeBox::Answered(answer) if answer == expected => {}
+        NativeBox::Answered(answer) => panic!(
+            "{stem}: the native backend answered {answer:?} where the JVM answered {expected:?}"
+        ),
         NativeBox::Failed(reason) => panic!("{stem}: the native backend ran it wrong — {reason}"),
     }
 }
 
-#[allow(dead_code)]
 enum NativeBox {
-    Pass,
+    /// What `box()` returned. The JVM's answer for the same program is the oracle.
+    Answered(String),
     /// Declined by the generator, or refused by the frontend before it — neither is the native
     /// backend running a program wrong.
     Declined,
@@ -1785,14 +1850,14 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr).trim()
         )),
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            if stdout == "OK\n" {
-                NativeBox::Pass
-            } else {
-                NativeBox::Failed(format!("box() printed {stdout:?}"))
-            }
-        }
+        // The program prints what `box()` returned, with a trailing newline the JVM run does not
+        // have. Trim only that, so a wrong answer is compared rather than reported as a failure of
+        // its own — the JVM's answer for the same source is the oracle.
+        Ok(output) => NativeBox::Answered(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_owned(),
+        ),
     }
 }
 
