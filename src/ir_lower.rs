@@ -12712,16 +12712,6 @@ impl<'a> Lower<'a> {
             .unwrap_or_else(|| callee.to_string())
     }
 
-    fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
-        let [arg] = args else {
-            return None;
-        };
-        let Expr::Lambda { params, body } = self.afile.expr(*arg).clone() else {
-            return None;
-        };
-        Some((*arg, params, body))
-    }
-
     /// The internal name of an explicit serializer `X` from `@Serializable(with = X::class)` on class
     /// `c`, or `None`. The arg is a class-literal `X::class` (`CallableRef{name:"class"}`); `X`'s
     /// internal comes from the checker's type of the literal's receiver.
@@ -26172,8 +26162,6 @@ impl<'a> Lower<'a> {
                         return crate::synthetics::lower_enum_values(self, &call);
                     }
                     crate::libraries::CompilerIntrinsic::ArrayFactory(_)
-                    | crate::libraries::CompilerIntrinsic::ForEach
-                    | crate::libraries::CompilerIntrinsic::ForEachIndexed
                     | crate::libraries::CompilerIntrinsic::Assert
                     | crate::libraries::CompilerIntrinsic::AssertFailsWith
                     | crate::libraries::CompilerIntrinsic::Print
@@ -26795,43 +26783,6 @@ impl<'a> Lower<'a> {
                     });
                 }
             }
-            // `iterable.forEach { x -> body }` is the stdlib `inline fun` whose body is
-            // `for (x in this) body` — inline it to a for-each loop (no closure), so a mutable
-            // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
-            // receiver being iterable (so a user `forEach` on a non-iterable falls through).
-            let one_lambda_arg = self.single_lambda_arg(&args);
-            let iteration_intrinsic = self
-                .info
-                .resolved_extension(e)
-                .and_then(|callable| callable.compiler_intrinsic);
-            if let (
-                Some(crate::libraries::CompilerIntrinsic::ForEach),
-                Some((arg, params, lbody)),
-            ) = (iteration_intrinsic, one_lambda_arg.as_ref())
-            {
-                let rty = self.info.ty(receiver);
-                // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
-                // by `lower_for_each` (and the checker element-types the lambda parameter).
-                let iterable = rty.array_elem().is_some()
-                    || rty == Ty::String
-                    || rty.obj_internal().map_or(false, |i| {
-                        self.runtime.counted_loop_info_name(i).is_some()
-                            || self.info.iterator_protocol(receiver).is_some()
-                    });
-                if iterable {
-                    let param = ast::first_lambda_param_or_it(params);
-                    // A `return@forEach` (or `return@<explicit label>`) in the body is a local return
-                    // from the lambda — the spliced loop's `continue`. Label the loop and register the
-                    // splice so the return lowering can find it.
-                    let source_label = self.lambda_label(*arg, "forEach");
-                    let loop_label = format!("$foreach${}", self.fresh_value());
-                    self.foreach_splice.push((source_label, loop_label.clone()));
-                    let lowered =
-                        self.lower_for_each(&param, receiver, *lbody, Some(loop_label), true);
-                    self.foreach_splice.pop();
-                    return lowered;
-                }
-            }
             // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
             // lowers its lambda to a `FunctionN` impl that can't suspend, so inline it into an
             // accumulating loop (kotlinc's own inline expansion) — putting the suspension in an
@@ -26844,7 +26795,11 @@ impl<'a> Lower<'a> {
             // facade; gating on the `List` result type + a resolved stdlib-collections extension
             // excludes them, so we never hand back an `ArrayList` where the static type is
             // `Sequence`/`Set` (→ VerifyError / ClassCastException).
-            let suspend_list_hof = match iteration_intrinsic {
+            let collection_intrinsic = self
+                .info
+                .resolved_extension(e)
+                .and_then(|callable| callable.compiler_intrinsic);
+            let suspend_list_hof = match collection_intrinsic {
                 Some(crate::libraries::CompilerIntrinsic::Map) => Some(false),
                 Some(crate::libraries::CompilerIntrinsic::FlatMap) => Some(true),
                 _ => None,
@@ -26873,33 +26828,6 @@ impl<'a> Lower<'a> {
                             return Some(v);
                         }
                     }
-                }
-            }
-            // `iterable.forEachIndexed { i, x -> body }` — the inline `forEachIndexed`, whose
-            // body is `var i = 0; for (x in this) { action(i, x); i++ }`. Inline it via the
-            // iterator path with an index counter (Obj iterables only, same as `forEach`).
-            if let (
-                Some(crate::libraries::CompilerIntrinsic::ForEachIndexed),
-                Some((_, params, lbody)),
-            ) = (iteration_intrinsic, one_lambda_arg.as_ref())
-            {
-                let rty = self.info.ty(receiver);
-                let iterable =
-                    rty.obj_internal().is_some() && self.info.iterator_protocol(receiver).is_some();
-                if iterable && params.len() == 2 {
-                    let idx = params[0].clone();
-                    let elem = params[1].clone();
-                    return self.lower_foreach_iterator(
-                        &elem,
-                        receiver,
-                        *lbody,
-                        rty,
-                        ForeachOpts {
-                            index: Some(&idx),
-                            label: None,
-                            hof_splice: true,
-                        },
-                    );
                 }
             }
             // A user `inline fun <recv>.name(args)` — expand it here (kotlinc's inliner) with the
