@@ -128,7 +128,13 @@ fn a_safe_call_reaches_the_kotlin_extension_by_the_same_rule() {
         \x20   sizes!![\"ab\"] = 3\n\
         \x20   return if (total() == 5) \"OK\" else \"fail: \" + total()\n\
         }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "a safe call to the extension");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(MAIN, "SafeExtension", &[stdlib], Some(jdk.as_path())),
+        "OK",
+        "a safe call to the extension",
+    );
 }
 
 #[test]

@@ -19,6 +19,35 @@ pub enum FirInlineCallReceiver {
     Extension(FirInlineValue),
 }
 
+/// Checked index behavior of a declaration-owned iteration body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirInlineIterationIndex {
+    Unchecked,
+    Checked { overflow: Box<FirInlineCall> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineIterationMemberCall {
+    pub declaration: ExternalCallableId,
+    pub receiver: ResolvedTy,
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirInlineIterationTraversal {
+    Iterator {
+        prepare: Box<[FirInlineIterationMemberCall]>,
+        has_next: Box<FirInlineIterationMemberCall>,
+        next: Box<FirInlineIterationMemberCall>,
+    },
+    Array,
+    Counted {
+        size: Box<FirInlineIterationMemberCall>,
+        get: Box<FirInlineIterationMemberCall>,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirInlineCall {
     pub declaration: ExternalCallableId,
@@ -52,12 +81,11 @@ pub enum FirInlineBodyPlan {
     /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
     /// All three convention calls were selected by the checker at the call site; lowering only
     /// splices the checked lambda body into the resulting loop.
-    ForEach {
+    Iteration {
         lambda_parameter: u32,
-        iterator_ty: ResolvedTy,
-        iterator: Box<FirIteratorCall>,
-        has_next: Box<FirIteratorCall>,
-        next: Box<FirIteratorCall>,
+        element: ResolvedTy,
+        index: Option<FirInlineIterationIndex>,
+        traversal: FirInlineIterationTraversal,
     },
     /// Checked structural expansion of an exact collection inline declaration. Iterator convention
     /// calls were selected in the declaration's lookup scope; factory/append are opaque provider

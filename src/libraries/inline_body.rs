@@ -36,6 +36,36 @@ pub struct InlineBodyDefault {
     pub value: DefaultValue,
 }
 
+/// How an exact declaration advances the index supplied to its iteration lambda.
+#[derive(Clone, Debug)]
+pub enum InlineIterationIndex {
+    /// The receiver's bounded traversal cannot overflow an Int index.
+    Unchecked,
+    /// The declaration checks the old post-increment value and calls this normalized target when it
+    /// is negative.
+    Checked { overflow: Box<InlineBodyCall> },
+}
+
+/// Provider-normalized traversal performed by an exact declaration-owned iteration body.
+/// Member calls retain their stable declaration records; arrays use target-neutral operations
+/// because their length/load instructions do not name callable declarations.
+#[derive(Clone, Debug)]
+pub enum InlineIterationTraversal {
+    Iterator {
+        /// Zero-argument calls applied left-to-right, beginning with the inline receiver and ending
+        /// in the iterator consumed by `has_next`/`next`. `Map.entries.iterator()` therefore needs
+        /// two steps while `Iterable.iterator()` needs one.
+        prepare: Vec<LibraryMember>,
+        has_next: Box<LibraryMember>,
+        next: Box<LibraryMember>,
+    },
+    Array,
+    Counted {
+        size: Box<LibraryMember>,
+        get: Box<LibraryMember>,
+    },
+}
+
 /// A declaration-defined inline body whose source-independent control-flow shape must be expanded
 /// before backend coroutine lowering. Providers decode this from the exact selected declaration's
 /// compiled inline body; source spelling never participates.
@@ -54,6 +84,14 @@ pub enum InlineBodyPlan {
         defaults: Vec<InlineBodyDefault>,
         /// A declaration parameter returned instead of the invocation result (`apply`/`also`).
         result: Option<InlineBodyValue>,
+    },
+    /// Iterate the extension receiver and invoke one function-typed parameter with the exact
+    /// declaration-owned argument order. An indexed declaration supplies its normalized overflow
+    /// call when the source loop is not statically bounded.
+    Iteration {
+        lambda_parameter: usize,
+        index: Option<InlineIterationIndex>,
+        traversal: InlineIterationTraversal,
     },
     /// Iterate the extension receiver, invoke one lambda for each element, and append its result to
     /// a fresh collection. The provider owns the exact factory and append declarations; consumers

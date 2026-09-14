@@ -31,6 +31,7 @@ use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeK
 mod callable_reference_selection;
 mod capture_analysis;
 mod collection_literals;
+mod collection_transform_bridge;
 mod compound_assignments;
 mod conditional_branch;
 mod constant_evaluation;
@@ -28928,63 +28929,6 @@ impl<'a> Checker<'a> {
                 let ext_literal_callable_types: Option<Vec<Option<Ty>>> = ext_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.fixed_expected_types.clone());
-                // Array/`String` `forEach`/`forEachIndexed` have no `Obj` generic signature; supply the
-                // lambda parameter types directly from the element (the index is `Int`).
-                let ext_lambda_pts = ext_lambda_pts.or_else(|| {
-                    let intrinsic = receiver_callables
-                        .functions()
-                        .iter()
-                        .filter(|function| function.is_extension())
-                        .find_map(|function| function.callable.compiler_intrinsic)?;
-                    let elem = if rt == Ty::String {
-                        Some(Ty::Char)
-                    } else {
-                        rt.array_elem()
-                    }?;
-                    match intrinsic {
-                        crate::libraries::CompilerIntrinsic::ForEach => Some(vec![vec![elem]]),
-                        crate::libraries::CompilerIntrinsic::ForEachIndexed => {
-                            Some(vec![vec![Ty::Int, elem]])
-                        }
-                        crate::libraries::CompilerIntrinsic::ArrayFactory(_)
-                        | crate::libraries::CompilerIntrinsic::Map
-                        | crate::libraries::CompilerIntrinsic::FlatMap
-                        | crate::libraries::CompilerIntrinsic::Assert
-                        | crate::libraries::CompilerIntrinsic::AssertFailsWith
-                        | crate::libraries::CompilerIntrinsic::Print
-                        | crate::libraries::CompilerIntrinsic::Println
-                        | crate::libraries::CompilerIntrinsic::StartCoroutine
-                        | crate::libraries::CompilerIntrinsic::CoroutineContext
-                        | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-                        | crate::libraries::CompilerIntrinsic::SuspendCoroutine
-                        | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
-                        | crate::libraries::CompilerIntrinsic::IsEmpty
-                        | crate::libraries::CompilerIntrinsic::IsNotEmpty
-                        | crate::libraries::CompilerIntrinsic::Count
-                        | crate::libraries::CompilerIntrinsic::EnumValues
-                        | crate::libraries::CompilerIntrinsic::EnumValueOf
-                        | crate::libraries::CompilerIntrinsic::TrimIndent
-                        | crate::libraries::CompilerIntrinsic::TrimMargin
-                        | crate::libraries::CompilerIntrinsic::StringPlus
-                        | crate::libraries::CompilerIntrinsic::NullableAnyToString
-                        | crate::libraries::CompilerIntrinsic::NumericConversion
-                        | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
-                        | crate::libraries::CompilerIntrinsic::PrimitiveCompare
-                        | crate::libraries::CompilerIntrinsic::PrimitiveBitAnd
-                        | crate::libraries::CompilerIntrinsic::PrimitiveBitOr
-                        | crate::libraries::CompilerIntrinsic::PrimitiveBitXor
-                        | crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft
-                        | crate::libraries::CompilerIntrinsic::PrimitiveShiftRight
-                        | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
-                        | crate::libraries::CompilerIntrinsic::BooleanNot
-                        | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
-                        | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_) => None,
-                        crate::libraries::CompilerIntrinsic::ArraySize
-                        | crate::libraries::CompilerIntrinsic::CharCode
-                        | crate::libraries::CompilerIntrinsic::StringLength => None,
-                    }
-                });
-
                 crate::trace_compiler!(
                     "lambda_shape",
                     "member call={name} receiver={rt:?} params={ext_lambda_pts:?} receivers={ext_lambda_recvs:?} contexts={ext_lambda_context_counts:?} provider={provider_member_lambda_pts:?}",
@@ -83944,7 +83888,7 @@ impl<'a> Checker<'a> {
             },
             _ => None,
         };
-        let intrinsic_iterator_receiver = (!selected.iterator_protocol_scope.is_empty()
+        let collection_transform_iterator_receiver = (!selected.iterator_protocol_scope.is_empty()
             && args
                 .iter()
                 .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. })))
@@ -84051,6 +83995,24 @@ impl<'a> Checker<'a> {
             // return here from rechecked operands erased `Set<String>` back to raw `Set` whenever a
             // postponed nested producer still exposed its private type variable.
             callable.ret = selected.callable.ret;
+            if let Some(crate::libraries::InlineBodyPlan::Iteration { traversal, .. }) =
+                callable.inline_body_plan.as_deref_mut()
+            {
+                if crate::symbol_resolver::specialize_inline_iteration_traversal(
+                    self.libraries,
+                    selected_receiver,
+                    traversal,
+                )
+                .is_none()
+                {
+                    self.diags.error(
+                        self.call_callee_name_span(e),
+                        "selected inline iteration body has an unpublishable traversal declaration"
+                            .to_string(),
+                    );
+                    return Some(Ty::Error);
+                }
+            }
             let ret = callable.ret;
             let mut resolved = ResolvedExtensionCall::library(callable.clone());
             // Preserve the call-site receiver chosen during applicability. A nominal classifier
@@ -84070,7 +84032,7 @@ impl<'a> Checker<'a> {
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
             self.record_resolved_extension_sam_arguments(e, args);
             if let Some((receiver, declared_receiver, declaration_scope)) =
-                intrinsic_iterator_receiver
+                collection_transform_iterator_receiver
             {
                 // An unqualified call selected from an implicit-receiver rung has no receiver AST
                 // expression. Key its declaration-scoped protocol by the call expression itself;
@@ -85338,88 +85300,6 @@ impl<'a> Checker<'a> {
             iter_ty,
             elem_ty,
         }))
-    }
-
-    /// Resolve one operator convention in the declaration-owned scope attached to a selected inline
-    /// body. The provider capability supplies the package scope; the checker performs the ordinary
-    /// member-then-extension precedence once and records the exact call for lowering.
-    fn declaration_zero_arg_operator(
-        &self,
-        recv: Ty,
-        name: &str,
-        declaration_scope: &[TypeName],
-    ) -> Option<ResolvedCall> {
-        let resolver =
-            crate::symbol_resolver::SymbolResolver::new_scoped(self.libraries, declaration_scope);
-        let callables = resolver.receiver_callables(recv, name);
-        for kind in [
-            crate::libraries::FnKind::Member,
-            crate::libraries::FnKind::Extension,
-        ] {
-            let (mut functions, _) = callables.clone().into_parts();
-            functions
-                .overloads
-                .retain(|candidate| candidate.kind == kind);
-            let candidates = crate::libraries::Callables::Functions(functions);
-            let (selected, params, ret) = match resolver
-                .select_receiver_function_with_params_tracking(recv, name, &[], &[], &candidates)
-            {
-                crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
-                crate::symbol_resolver::CandidateSelection::None => continue,
-                crate::symbol_resolver::CandidateSelection::Ambiguous => return None,
-            };
-            if !params.is_empty() || selected.context_count != 0 || !selected.flags.operator {
-                return None;
-            }
-            if kind == crate::libraries::FnKind::Extension {
-                let mut callable = selected.callable;
-                callable.ret = ret;
-                return Some(ResolvedCall::library_extension(callable));
-            }
-            let mut member = selected.member_with_return(ret);
-            member.params = params;
-            return Some(ResolvedCall::Member(
-                crate::symbol_resolver::ResolvedMember {
-                    receiver: recv,
-                    physical_params: selected.callable.physical_params.clone(),
-                    context_args: Vec::new(),
-                    ret,
-                    member,
-                    projected_return_hazard: selected.projected_return_hazard,
-                    suspend: selected.flags.suspend,
-                    origin: selected.callable.origin,
-                },
-            ));
-        }
-        None
-    }
-
-    fn record_declaration_iterator_protocol(
-        &mut self,
-        iterable: ExprId,
-        iterable_ty: Ty,
-        declaration_scope: &[TypeName],
-    ) -> Option<Ty> {
-        let iterator =
-            self.declaration_zero_arg_operator(iterable_ty, "iterator", declaration_scope)?;
-        let iter_ty = iterator.ret();
-        let has_next = self.declaration_zero_arg_operator(iter_ty, "hasNext", declaration_scope)?;
-        if has_next.ret() != Ty::Boolean {
-            return None;
-        }
-        let next = self.declaration_zero_arg_operator(iter_ty, "next", declaration_scope)?;
-        let elem_ty = next.ret();
-        self.iterator_protocols.insert(
-            iterable,
-            IteratorProtocolTarget {
-                iterator: Box::new(iterator),
-                has_next: Box::new(has_next),
-                next: Box::new(next),
-                iter_ty,
-                elem_ty,
-            },
-        );
-        Some(elem_ty)
     }
 
     fn record_iterator_protocol(

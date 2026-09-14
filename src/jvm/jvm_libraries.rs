@@ -14,6 +14,7 @@ use super::classpath::{
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
+use crate::jvm::names::same_mapped_virtual_name;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
@@ -2661,9 +2662,8 @@ impl JvmLibraries {
                     )
                 });
             } else {
-                // A mapped JVM method and its Kotlin builtin entry are two descriptions of one
-                // declaration, not two overloads. Prefer the builtin: it carries Kotlin-only facts such
-                // as `operator`, source names, and nullability while retaining the same physical target.
+                // A mapped JVM method and its Kotlin builtin entry describe one declaration. Prefer the
+                // builtin's Kotlin-only facts while retaining the same physical target.
                 members.retain(|member| {
                     !builtin_members.iter().any(|builtin| {
                         let member_physical = member
@@ -2674,7 +2674,7 @@ impl JvmLibraries {
                             .physical_name
                             .as_deref()
                             .unwrap_or(builtin.name.as_str());
-                        member_physical == builtin_physical
+                        same_mapped_virtual_name(internal, member_physical, builtin_physical)
                             && member.descriptor == builtin.descriptor
                     })
                 });
@@ -3844,33 +3844,7 @@ impl JvmLibraries {
             return;
         }
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
-            match plan {
-                InlineBodyPlan::InvokeLambda {
-                    prologue, cleanup, ..
-                } => {
-                    for call in prologue.iter_mut().chain(cleanup) {
-                        let kind = match call.receiver {
-                            Some(crate::libraries::InlineBodyCallReceiver::Dispatch(_)) => {
-                                FnKind::Member
-                            }
-                            Some(crate::libraries::InlineBodyCallReceiver::Extension(_)) => {
-                                FnKind::Extension
-                            }
-                            None => FnKind::TopLevel,
-                        };
-                        self.register_external_callable(&mut call.callable, kind);
-                    }
-                }
-                InlineBodyPlan::CollectionTransform {
-                    factory, append, ..
-                } => {
-                    let owner = factory
-                        .owner
-                        .expect("collection inline factory must name its classifier");
-                    self.register_external_constructor(owner, factory);
-                    self.register_external_inline_member(append);
-                }
-            }
+            self.register_inline_body_plan_dependencies(plan);
         }
         if let Some(identity) = callable.external_identity {
             self.cp.enrich_external_callable(identity, callable);
@@ -5297,8 +5271,6 @@ impl JvmLibraries {
                 if package.matches("kotlin/collections") || package.matches("kotlin/text") =>
             {
                 match name {
-                    "forEach" => Some(crate::libraries::CompilerIntrinsic::ForEach),
-                    "forEachIndexed" => Some(crate::libraries::CompilerIntrinsic::ForEachIndexed),
                     "map" if package.matches("kotlin/collections") => {
                         Some(crate::libraries::CompilerIntrinsic::Map)
                     }
@@ -5358,9 +5330,7 @@ impl JvmLibraries {
                     | crate::libraries::CompilerIntrinsic::BooleanNot
                     | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
                     | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_) => continue,
-                    crate::libraries::CompilerIntrinsic::ForEach
-                    | crate::libraries::CompilerIntrinsic::ForEachIndexed
-                    | crate::libraries::CompilerIntrinsic::StartCoroutine
+                    crate::libraries::CompilerIntrinsic::StartCoroutine
                     | crate::libraries::CompilerIntrinsic::Map
                     | crate::libraries::CompilerIntrinsic::FlatMap
                     | crate::libraries::CompilerIntrinsic::IsEmpty
@@ -5386,14 +5356,24 @@ impl JvmLibraries {
                     }
                     if matches!(
                         intrinsic,
-                        crate::libraries::CompilerIntrinsic::ForEach
-                            | crate::libraries::CompilerIntrinsic::ForEachIndexed
-                            | crate::libraries::CompilerIntrinsic::Map
+                        crate::libraries::CompilerIntrinsic::Map
                             | crate::libraries::CompilerIntrinsic::FlatMap
                     ) {
                         overload.iterator_protocol_scope =
                             declaration_package.into_iter().collect();
                     }
+                }
+            }
+        }
+        if let SymbolNamespace::Package(package) = namespace {
+            for overload in &mut overloads {
+                if overload.kind == FnKind::Extension
+                    && matches!(
+                        overload.callable.inline_body_plan.as_deref(),
+                        Some(InlineBodyPlan::CollectionTransform { .. })
+                    )
+                {
+                    overload.iterator_protocol_scope = vec![package];
                 }
             }
         }

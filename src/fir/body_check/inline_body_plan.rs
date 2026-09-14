@@ -3,14 +3,15 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MappingFailure {
     UnsupportedPlan,
+    IterationNeedsCallSiteProtocol,
     CollectionTransformNeedsCallSiteProtocol,
 }
 
-pub(super) fn publish(
-    plan: Option<&crate::libraries::InlineBodyPlan>,
+fn map_value(
+    value: crate::libraries::InlineBodyValue,
     receiver_parameter: Option<usize>,
-) -> Result<Option<Box<crate::fir::FirInlineBodyPlan>>, MappingFailure> {
-    let map_value = |value: crate::libraries::InlineBodyValue| match value {
+) -> Result<crate::fir::FirInlineValue, MappingFailure> {
+    match value {
         crate::libraries::InlineBodyValue::Cause => Ok(crate::fir::FirInlineValue::Cause),
         crate::libraries::InlineBodyValue::Parameter(parameter) => {
             if receiver_parameter == Some(parameter) {
@@ -26,59 +27,79 @@ pub(super) fn publish(
                 ))
             }
         }
-    };
-    let map_parameter =
-        |parameter| match map_value(crate::libraries::InlineBodyValue::Parameter(parameter))? {
-            crate::fir::FirInlineValue::Parameter(parameter) => Ok(parameter),
-            crate::fir::FirInlineValue::Receiver | crate::fir::FirInlineValue::Cause => {
-                Err(MappingFailure::UnsupportedPlan)
-            }
-        };
-    let call = |call: &crate::libraries::InlineBodyCall| {
-        let mut parameters = call.callable.params.clone();
-        if matches!(
-            call.receiver,
-            Some(crate::libraries::InlineBodyCallReceiver::Extension(_))
-        ) {
-            if call.callable.context_count >= parameters.len() {
-                return Err(MappingFailure::UnsupportedPlan);
-            }
-            parameters.remove(call.callable.context_count);
+    }
+}
+
+fn map_parameter(
+    parameter: usize,
+    receiver_parameter: Option<usize>,
+) -> Result<u32, MappingFailure> {
+    match map_value(
+        crate::libraries::InlineBodyValue::Parameter(parameter),
+        receiver_parameter,
+    )? {
+        crate::fir::FirInlineValue::Parameter(parameter) => Ok(parameter),
+        crate::fir::FirInlineValue::Receiver | crate::fir::FirInlineValue::Cause => {
+            Err(MappingFailure::UnsupportedPlan)
         }
-        Ok(crate::fir::FirInlineCall {
-            declaration: call
-                .callable
-                .external_identity
-                .ok_or(MappingFailure::UnsupportedPlan)?,
-            parameters: parameters
-                .into_iter()
-                .map(crate::fir::ResolvedTy::new)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| MappingFailure::UnsupportedPlan)?
-                .into_boxed_slice(),
-            result: crate::fir::ResolvedTy::new(call.callable.ret)
-                .map_err(|_| MappingFailure::UnsupportedPlan)?,
-            suspend: call.callable.suspend,
-            receiver: call
-                .receiver
-                .map(|receiver| match receiver {
-                    crate::libraries::InlineBodyCallReceiver::Dispatch(value) => {
-                        map_value(value).map(crate::fir::FirInlineCallReceiver::Dispatch)
-                    }
-                    crate::libraries::InlineBodyCallReceiver::Extension(value) => {
-                        map_value(value).map(crate::fir::FirInlineCallReceiver::Extension)
-                    }
-                })
-                .transpose()?,
-            arguments: call
-                .arguments
-                .iter()
-                .copied()
-                .map(map_value)
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-        })
-    };
+    }
+}
+
+fn map_call(
+    call: &crate::libraries::InlineBodyCall,
+    receiver_parameter: Option<usize>,
+) -> Result<crate::fir::FirInlineCall, MappingFailure> {
+    let mut parameters = call.callable.params.clone();
+    if matches!(
+        call.receiver,
+        Some(crate::libraries::InlineBodyCallReceiver::Extension(_))
+    ) {
+        if call.callable.context_count >= parameters.len() {
+            return Err(MappingFailure::UnsupportedPlan);
+        }
+        parameters.remove(call.callable.context_count);
+    }
+    Ok(crate::fir::FirInlineCall {
+        declaration: call
+            .callable
+            .external_identity
+            .ok_or(MappingFailure::UnsupportedPlan)?,
+        parameters: parameters
+            .into_iter()
+            .map(crate::fir::ResolvedTy::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| MappingFailure::UnsupportedPlan)?
+            .into_boxed_slice(),
+        result: crate::fir::ResolvedTy::new(call.callable.ret)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+        suspend: call.callable.suspend,
+        receiver: call
+            .receiver
+            .map(|receiver| match receiver {
+                crate::libraries::InlineBodyCallReceiver::Dispatch(value) => {
+                    map_value(value, receiver_parameter)
+                        .map(crate::fir::FirInlineCallReceiver::Dispatch)
+                }
+                crate::libraries::InlineBodyCallReceiver::Extension(value) => {
+                    map_value(value, receiver_parameter)
+                        .map(crate::fir::FirInlineCallReceiver::Extension)
+                }
+            })
+            .transpose()?,
+        arguments: call
+            .arguments
+            .iter()
+            .copied()
+            .map(|value| map_value(value, receiver_parameter))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice(),
+    })
+}
+
+pub(super) fn publish(
+    plan: Option<&crate::libraries::InlineBodyPlan>,
+    receiver_parameter: Option<usize>,
+) -> Result<Option<Box<crate::fir::FirInlineBodyPlan>>, MappingFailure> {
     let Some(plan) = plan else {
         return Ok(None);
     };
@@ -92,21 +113,21 @@ pub(super) fn publish(
             defaults,
             result,
         } => crate::fir::FirInlineBodyPlan::InvokeLambda {
-            lambda_parameter: map_parameter(*lambda_parameter)?,
+            lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
             arguments: arguments
                 .iter()
                 .copied()
-                .map(map_value)
+                .map(|value| map_value(value, receiver_parameter))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice(),
             prologue: prologue
                 .iter()
-                .map(call)
+                .map(|call| map_call(call, receiver_parameter))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice(),
             cleanup: cleanup
                 .iter()
-                .map(call)
+                .map(|call| map_call(call, receiver_parameter))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice(),
             cause: cause
@@ -117,7 +138,7 @@ pub(super) fn publish(
                 .iter()
                 .map(|default| {
                     Ok(crate::fir::FirInlineDefault {
-                        parameter: map_parameter(default.parameter)?,
+                        parameter: map_parameter(default.parameter, receiver_parameter)?,
                         value: match default.value {
                             crate::libraries::DefaultValue::Null => {
                                 crate::fir::FirInlineDefaultValue::Null
@@ -128,14 +149,191 @@ pub(super) fn publish(
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice(),
-            result: result.map(map_value).transpose()?,
+            result: result
+                .map(|value| map_value(value, receiver_parameter))
+                .transpose()?,
         },
+        crate::libraries::InlineBodyPlan::Iteration { .. } => {
+            return Err(MappingFailure::IterationNeedsCallSiteProtocol)
+        }
         // This plan also needs the call-site-selected iterator protocol and applied element type.
         // `selected_extension_call` publishes the complete checked variant in `calls`.
         crate::libraries::InlineBodyPlan::CollectionTransform { .. } => {
             return Err(MappingFailure::CollectionTransformNeedsCallSiteProtocol)
         }
     })))
+}
+
+pub(super) struct PublishedIteration {
+    pub(super) lambda_parameter: u32,
+    pub(super) index: Option<crate::fir::FirInlineIterationIndex>,
+    pub(super) traversal: crate::fir::FirInlineIterationTraversal,
+}
+
+pub(super) fn publish_iteration(
+    plan: &crate::libraries::InlineBodyPlan,
+    receiver_parameter: Option<usize>,
+    receiver: crate::types::Ty,
+    element: crate::types::Ty,
+) -> Result<PublishedIteration, MappingFailure> {
+    let crate::libraries::InlineBodyPlan::Iteration {
+        lambda_parameter,
+        index,
+        traversal,
+    } = plan
+    else {
+        return Err(MappingFailure::UnsupportedPlan);
+    };
+    let index = index
+        .as_ref()
+        .map(|index| match index {
+            crate::libraries::InlineIterationIndex::Unchecked => {
+                Ok(crate::fir::FirInlineIterationIndex::Unchecked)
+            }
+            crate::libraries::InlineIterationIndex::Checked { overflow } => {
+                if overflow.receiver.is_some()
+                    || !overflow.arguments.is_empty()
+                    || !overflow.callable.params.is_empty()
+                    || overflow.callable.context_count != 0
+                    || overflow.callable.ret != crate::types::Ty::Unit
+                    || overflow.callable.suspend
+                {
+                    return Err(MappingFailure::UnsupportedPlan);
+                }
+                Ok(crate::fir::FirInlineIterationIndex::Checked {
+                    overflow: Box::new(map_call(overflow, receiver_parameter)?),
+                })
+            }
+        })
+        .transpose()?;
+    let publish_member = |member: &crate::libraries::LibraryMember,
+                          receiver: crate::types::Ty|
+     -> Result<crate::fir::FirInlineIterationMemberCall, MappingFailure> {
+        Ok(crate::fir::FirInlineIterationMemberCall {
+            declaration: member
+                .external_identity
+                .ok_or(MappingFailure::UnsupportedPlan)?,
+            receiver: crate::fir::ResolvedTy::new(receiver)
+                .map_err(|_| MappingFailure::UnsupportedPlan)?,
+            parameters: member
+                .params
+                .iter()
+                .copied()
+                .map(crate::fir::ResolvedTy::new)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| MappingFailure::UnsupportedPlan)?
+                .into_boxed_slice(),
+            result: crate::fir::ResolvedTy::new(member.ret)
+                .map_err(|_| MappingFailure::UnsupportedPlan)?,
+        })
+    };
+    let traversal = match traversal {
+        crate::libraries::InlineIterationTraversal::Iterator {
+            prepare,
+            has_next,
+            next,
+        } => {
+            let mut current = receiver;
+            let mut published = Vec::with_capacity(prepare.len());
+            for member in prepare {
+                let call = publish_member(member, current)?;
+                if !call.parameters.is_empty() {
+                    return Err(MappingFailure::UnsupportedPlan);
+                }
+                current = call.result.get();
+                published.push(call);
+            }
+            let has_next = publish_member(has_next, current)?;
+            let next = publish_member(next, current)?;
+            if !has_next.parameters.is_empty()
+                || has_next.result.get() != crate::types::Ty::Boolean
+                || !next.parameters.is_empty()
+                || next.result.get() != element
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineIterationTraversal::Iterator {
+                prepare: published.into_boxed_slice(),
+                has_next: Box::new(has_next),
+                next: Box::new(next),
+            }
+        }
+        crate::libraries::InlineIterationTraversal::Array => {
+            if receiver.array_read_elem() != Some(element) {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineIterationTraversal::Array
+        }
+        crate::libraries::InlineIterationTraversal::Counted { size, get } => {
+            let size = publish_member(size, receiver)?;
+            let get = publish_member(get, receiver)?;
+            if !size.parameters.is_empty()
+                || size.result.get() != crate::types::Ty::Int
+                || get.parameters.as_ref()
+                    != [crate::fir::ResolvedTy::new(crate::types::Ty::Int).expect("resolved Int")]
+                || get.result.get() != element
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineIterationTraversal::Counted {
+                size: Box::new(size),
+                get: Box::new(get),
+            }
+        }
+    };
+    Ok(PublishedIteration {
+        lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
+        index,
+        traversal,
+    })
+}
+
+pub(super) fn publish_extension_iteration(
+    plan: &crate::libraries::InlineBodyPlan,
+    context_count: usize,
+    receiver: crate::fir::ResolvedTy,
+    parameters: &[crate::fir::ResolvedTy],
+) -> Result<crate::fir::FirInlineBodyPlan, MappingFailure> {
+    let crate::libraries::InlineBodyPlan::Iteration {
+        lambda_parameter,
+        index,
+        ..
+    } = plan
+    else {
+        return Err(MappingFailure::UnsupportedPlan);
+    };
+    // The provider plan numbers `(contexts..., receiver, values...)`, while the checked external
+    // call target has already separated its receiver and therefore numbers only
+    // `(contexts..., values...)`. Derive the action slot through the same mapping published into
+    // FIR, then inspect the target's normalized parameter contract. This keeps resolver carrier
+    // fields out of the checked boundary and makes ordinary and safe-call selectors consume the
+    // same non-null selected receiver; the nullable source evaluation lives only in `FirReceiver`.
+    let lambda_parameter = map_parameter(*lambda_parameter, Some(context_count))?;
+    let action = parameters
+        .get(lambda_parameter as usize)
+        .map(|parameter| parameter.get())
+        .and_then(|parameter| match parameter {
+            crate::types::Ty::Fun(signature) => Some(signature),
+            _ => None,
+        })
+        .filter(|signature| signature.params.len() == 1 + usize::from(index.is_some()))
+        .ok_or(MappingFailure::UnsupportedPlan)?;
+    let element = action
+        .params
+        .last()
+        .copied()
+        .ok_or(MappingFailure::UnsupportedPlan)?;
+    let published = publish_iteration(plan, Some(context_count), receiver.get(), element)?;
+    if published.lambda_parameter != lambda_parameter {
+        return Err(MappingFailure::UnsupportedPlan);
+    }
+    Ok(crate::fir::FirInlineBodyPlan::Iteration {
+        lambda_parameter: published.lambda_parameter,
+        element: crate::fir::ResolvedTy::new(element)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+        index: published.index,
+        traversal: published.traversal,
+    })
 }
 
 /// Commit applicability while both the complete checked call and a literal's checked body are
@@ -155,7 +353,7 @@ pub(super) fn finalize(
         crate::fir::FirInlineBodyPlan::InvokeLambda {
             lambda_parameter, ..
         }
-        | crate::fir::FirInlineBodyPlan::ForEach {
+        | crate::fir::FirInlineBodyPlan::Iteration {
             lambda_parameter, ..
         }
         | crate::fir::FirInlineBodyPlan::CollectionTransform {
@@ -201,6 +399,117 @@ mod tests {
     use super::*;
     use crate::fir::{FirCallTarget, FirExprId, FirExprKind, FirInlineBodyPlan};
     use crate::types::Ty;
+
+    #[test]
+    fn safe_iteration_call_retains_one_guarded_receiver_and_exact_plan() {
+        let (body, _) = checked_function_body_with_platform(
+            "fun total(values: HashMap<String, Int>?, definite: HashMap<String, Int>): Int {\n\
+             \x20   var total = 0\n\
+             \x20   values?.forEach { entry -> total += entry.key.length + entry.value }\n\
+             \x20   definite.forEach { entry -> total += entry.key.length + entry.value }\n\
+             \x20   return total\n\
+             }\n",
+            "total",
+            jvm_stdlib_semantics(),
+        );
+        let safe = (0..body.expression_count())
+            .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+            .find_map(|expression| match expression.kind {
+                FirExprKind::SafeCall { receiver, selector } => Some((receiver, selector)),
+                _ => None,
+            })
+            .expect("safe forEach call");
+        let FirExprKind::Call(call) = &body.expr(safe.1).expect("safe selector").kind else {
+            panic!("safe selector must retain the selected extension call")
+        };
+        let selected_receiver = call
+            .extension_receiver
+            .expect("selected extension receiver");
+        assert_eq!(safe.0.value, selected_receiver.value);
+        assert!(safe.0.conversion.is_none());
+        assert!(
+            body.expr(safe.0.value)
+                .expect("guarded nullable evaluation")
+                .ty
+                .get()
+                .is_nullable(),
+            "the safe guard owns the nullable source evaluation"
+        );
+        assert!(call.dispatch_receiver.is_none());
+        assert!(matches!(
+            call.arguments.as_ref(),
+            [crate::fir::FirCallArgument::Expression { parameter: 0, .. }]
+        ));
+        let FirCallTarget::External {
+            receiver: Some(receiver),
+            parameters,
+            inline_plan: Some(plan),
+            extension_receiver_parameter: None,
+            ..
+        } = &call.target
+        else {
+            panic!("safe extension must publish one external receiver and inline plan")
+        };
+        assert!(
+            !receiver.get().is_nullable(),
+            "the selected extension contract is non-null in the guarded branch"
+        );
+        assert_eq!(parameters.len(), 1, "the receiver is not a value parameter");
+        let FirInlineBodyPlan::Iteration {
+            lambda_parameter,
+            traversal:
+                crate::fir::FirInlineIterationTraversal::Iterator {
+                    prepare,
+                    has_next,
+                    next,
+                },
+            ..
+        } = plan.as_ref()
+        else {
+            panic!("safe Map extension must retain the exact iterator plan")
+        };
+        assert_eq!(*lambda_parameter, 0);
+        assert_eq!(prepare.len(), 2);
+        assert_eq!(prepare[0].receiver, *receiver);
+        assert_eq!(prepare[1].receiver, prepare[0].result);
+        assert_eq!(has_next.receiver, prepare[1].result);
+        assert_eq!(next.receiver, prepare[1].result);
+
+        let ordinary = (0..body.expression_count())
+            .filter_map(|raw| {
+                let id = FirExprId::from_raw(raw as u32);
+                let expression = body.expr(id)?;
+                (id != safe.1).then_some(expression)
+            })
+            .find_map(|expression| match &expression.kind {
+                FirExprKind::Call(call)
+                    if matches!(
+                        call.target,
+                        FirCallTarget::External {
+                            inline_plan: Some(_),
+                            ..
+                        }
+                    ) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("ordinary forEach call");
+        let FirCallTarget::External {
+            receiver: Some(ordinary_receiver),
+            parameters: ordinary_parameters,
+            inline_plan: Some(ordinary_plan),
+            extension_receiver_parameter: None,
+            ..
+        } = &ordinary.target
+        else {
+            panic!("ordinary extension must publish one external receiver and inline plan")
+        };
+        assert_eq!(ordinary_receiver, receiver);
+        assert_eq!(ordinary_parameters, parameters);
+        assert_eq!(ordinary_plan, plan);
+    }
 
     #[test]
     fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {

@@ -111,7 +111,7 @@ pub use crate::names::property_setter_name;
 /// Physical JVM name for a mapped Kotlin virtual member.
 pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
     match (owner, name) {
-        ("java/lang/CharSequence", "get") => "charAt",
+        ("java/lang/CharSequence" | "kotlin/CharSequence", "get") => "charAt",
         ("java/lang/String", "get") | ("kotlin/String", "get") => "charAt",
         ("java/lang/StringBuilder", "get") | ("kotlin/text/StringBuilder", "get") => "charAt",
         (
@@ -151,6 +151,11 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
         ("java/lang/Number", "toDouble") => "doubleValue",
         _ => name,
     }
+}
+
+/// Whether two semantic member spellings address one mapped JVM method.
+pub(super) fn same_mapped_virtual_name(owner: &str, left: &str, right: &str) -> bool {
+    mapped_builtin_virtual_name(owner, left) == mapped_builtin_virtual_name(owner, right)
 }
 
 pub fn mapped_builtin_virtual_source_name<'a>(owner: &str, name: &'a str) -> &'a str {

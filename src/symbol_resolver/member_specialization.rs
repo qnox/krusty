@@ -1,7 +1,9 @@
 //! Receiver-bound specialization of declared member signatures.
 
 use super::{ty_subst, ty_subst_keep_unbound, GSigBinds};
-use crate::libraries::{GenericSig, LibraryCallable, PropertyInfo};
+use crate::libraries::{
+    GenericSig, InlineIterationTraversal, LibraryCallable, LibraryMember, PropertyInfo,
+};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
@@ -260,6 +262,91 @@ pub(crate) fn specialize_signature_receiver_type(
     )
 }
 
+/// Apply an already-selected provider member declaration to one concrete dispatch receiver.
+/// Unlike ordinary member resolution this performs no name lookup or overload selection: decoded
+/// inline-body plans use it to specialize the exact stable declaration named by their bytecode.
+fn specialize_fixed_member_receiver(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    member: &LibraryMember,
+) -> Option<LibraryMember> {
+    let owner = member.owner?;
+    let classifier = source.classifier(owner)?;
+    let applied_owner = super::applied_hierarchy(source, receiver)
+        .into_iter()
+        .find_map(|(candidate, applied, _)| (candidate == owner).then_some(applied))?;
+    let bindings = super::classifier_bindings(&classifier, applied_owner);
+    let declaration_formals = classifier
+        .type_params()
+        .iter()
+        .chain(
+            member
+                .generic_sig
+                .as_ref()
+                .into_iter()
+                .flat_map(|signature| &signature.formals),
+        )
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut specialized = member.clone();
+    // `params`/`ret` are the erased callable realization for classpath members. Kotlin metadata's
+    // generic signature is the semantic declaration and retains the owning classifier's type
+    // parameters (`Map<K, V>.entries: Set<Map.Entry<K, V>>`, `Iterator<T>.next(): T`). Apply the
+    // already-selected receiver to that declaration; using the erased fields here would turn the
+    // exact stable chain back into `Set`/`Iterator`/`Any` after resolution.
+    let (declared_params, declared_ret) = member
+        .generic_sig
+        .as_ref()
+        .map_or((member.params.as_slice(), member.ret), |signature| {
+            (signature.params.as_slice(), signature.ret)
+        });
+    specialized.params = declared_params
+        .iter()
+        .map(|parameter| specialize_signature_input_type(source, *parameter, &bindings))
+        .collect();
+    specialized.ret = specialize_signature_output_type(source, declared_ret, &bindings);
+    member_slots_are_applied(&specialized.params, specialized.ret, &declaration_formals)
+        .then_some(specialized)
+}
+
+fn member_slots_are_applied(params: &[Ty], ret: Ty, declaration_formals: &[String]) -> bool {
+    !params
+        .iter()
+        .any(|parameter| crate::types::ty_mentions_param(*parameter, declaration_formals))
+        && !crate::types::ty_mentions_param(ret, declaration_formals)
+}
+
+/// Specialize the exact member chain decoded for an iteration body. The declaration identities are
+/// already fixed by the provider; this applies receiver type arguments only and never performs a
+/// spelling lookup or overload scan.
+pub(crate) fn specialize_inline_iteration_traversal(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    traversal: &mut InlineIterationTraversal,
+) -> Option<()> {
+    match traversal {
+        InlineIterationTraversal::Iterator {
+            prepare,
+            has_next,
+            next,
+        } => {
+            let mut current = receiver;
+            for member in prepare {
+                *member = specialize_fixed_member_receiver(source, current, member)?;
+                current = member.ret;
+            }
+            **has_next = specialize_fixed_member_receiver(source, current, has_next)?;
+            **next = specialize_fixed_member_receiver(source, current, next)?;
+        }
+        InlineIterationTraversal::Array => {}
+        InlineIterationTraversal::Counted { size, get } => {
+            **size = specialize_fixed_member_receiver(source, receiver, size)?;
+            **get = specialize_fixed_member_receiver(source, receiver, get)?;
+        }
+    }
+    Some(())
+}
+
 pub(super) fn specialize_callable(
     source: &dyn SymbolSource,
     callable: &mut LibraryCallable,
@@ -319,7 +406,7 @@ pub(super) fn specialize_call_sig(
 
 #[cfg(test)]
 mod projected_member_view_tests {
-    use super::{specialize_member_type, GSigBinds, TypePosition};
+    use super::{member_slots_are_applied, specialize_member_type, GSigBinds, TypePosition};
     use crate::libraries::LibraryType;
     use crate::symbol_source::SymbolSource;
     use crate::types::{type_name, Ty, TypeName};
@@ -380,5 +467,19 @@ mod projected_member_view_tests {
             specialize_member_type(&Source, nested, &out, TypePosition::Out),
             Ty::obj_args("sample/Invariant", &[Ty::out_projection(Ty::String)])
         );
+    }
+
+    #[test]
+    fn applied_member_slots_preserve_an_enclosing_declaration_identity() {
+        let provider_formals = ["T".to_owned()];
+        let provider_t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let source_e = Ty::ty_param("\0tp:source:emit:E", Ty::nullable(Ty::obj("kotlin/Any")));
+
+        assert!(member_slots_are_applied(&[], source_e, &provider_formals));
+        assert!(!member_slots_are_applied(
+            &[],
+            provider_t,
+            &provider_formals
+        ));
     }
 }

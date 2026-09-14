@@ -434,7 +434,7 @@ class Scope {
 
 fun box(): String = Scope().result()
 "#;
-    assert_eq!(run(SRC).expect("Unit receiver lambda"), "OK");
+    assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
 }
 
 #[test]
