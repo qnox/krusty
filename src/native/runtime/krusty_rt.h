@@ -256,6 +256,9 @@ KRef kt_string_plus(KRef a, KRef b);
 /* `String.length` — a count of UTF-16 CODE UNITS, which a UTF-8 string does not store. */
 kt_int kt_string_length(KRef self);
 
+/* `s[index]` — the UTF-16 code unit at `index`, walking the UTF-8 bytes to find it. */
+kt_char kt_string_get(KRef self, kt_int index);
+
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 

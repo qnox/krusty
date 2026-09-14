@@ -174,6 +174,39 @@ pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
     facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "until" && arity == 1
 }
 
+/// `x.indices` — the range of an indexable value's positions, which the provider presents as an
+/// extension property of the arrays or text file facade rather than a member.
+///
+/// Answering it needs the receiver's own `size`, so only the caller can decide whether THIS
+/// receiver has one; this says only that the declaration named is that extension property.
+pub(super) fn is_indices(owner: &str, name: &str) -> bool {
+    name == "getIndices"
+        && matches!(
+            facade_package(kotlin_owner(owner)),
+            Some("kotlin/collections" | "kotlin/text")
+        )
+}
+
+/// A dependency member the runtime answers with its arguments carried as VALUES, and the signature
+/// it is called with: `(receiver and parameters, result)`.
+///
+/// The ordinary member path crosses everything as a reference, which is right for a member that
+/// asks about an object and wrong for one that asks about a NUMBER — `s[i]` would box the index to
+/// pass it and the runtime would read the box as the index.
+pub(super) fn scalar_member(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    match (kotlin_owner(owner), name, params) {
+        ("kotlin/String" | "kotlin/CharSequence", "get", [Ty::Int]) => {
+            Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
@@ -240,6 +273,14 @@ mod tests {
         assert!(!is_range_until("kotlin/text/StringsKt", "until", 1));
         assert!(!is_range_until("kotlin/ranges/RangesKt", "downTo", 1));
         assert!(!is_range_until("kotlin/ranges/RangesKt", "until", 2));
+    }
+
+    #[test]
+    fn the_indices_extension_is_recognized_on_either_facade() {
+        assert!(is_indices("kotlin/collections/ArraysKt", "getIndices"));
+        assert!(is_indices("kotlin/text/StringsKt", "getIndices"));
+        assert!(!is_indices("kotlin/collections/ArraysKt", "getSize"));
+        assert!(!is_indices("kotlin/collections/AbstractList", "getIndices"));
     }
 
     #[test]

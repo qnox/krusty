@@ -181,6 +181,56 @@ impl BodyLowering<'_, '_, '_> {
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
     }
 
+    /// Whether a checked dependency property read names the `indices` extension.
+    pub(super) fn external_getter_is_indices(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+    ) -> bool {
+        let Some(property) = self.file.classpath.external_property(target) else {
+            return false;
+        };
+        let Some(getter) = self.file.classpath.external_callable(property.getter) else {
+            return false;
+        };
+        super::super::super::intrinsics::is_indices(
+            &getter.callable.owner.render(),
+            &getter.callable.name,
+        )
+    }
+
+    /// `x.indices` — `0..size - 1` of an indexable receiver.
+    ///
+    /// Only a receiver whose size this generator can read qualifies: an array, or a `String`. The
+    /// same extension property covers `Collection`, which needs a `size` there is no collection
+    /// runtime to answer yet, so one of those declines by receiver rather than by name.
+    pub(super) fn indices(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
+        let Some(ty) = self.type_of(receiver).map(Ty::non_null) else {
+            return Err("`indices` of a receiver with no known type".to_string());
+        };
+        let size = if ty.is_array() {
+            self.array_size(receiver)?
+        } else if ty == Ty::String {
+            let value = self.reference(receiver)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            self.runtime_call("kt_string_length", &[any()], Ty::Int, &[value])?
+        } else {
+            return Err(format!("`indices` of a `{ty:?}`"));
+        };
+        let Some(size) = size else {
+            return Ok(None);
+        };
+        let first = self.builder.ins().iconst(types::I32, 0);
+        let last = self.builder.ins().iadd_imm_s(size, -1);
+        self.runtime_call(
+            "kt_int_range",
+            &[Ty::Int, Ty::Int],
+            Ty::obj("kotlin/ranges/IntRange"),
+            &[first, last],
+        )
+    }
+
     /// The owner, name and result of a dependency getter naming a member of a range type.
     ///
     /// `range.first` reaches the generator as a checked read of a dependency property rather than as

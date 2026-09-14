@@ -194,3 +194,51 @@ fn a_char_range_iterates_as_characters() {
         "OK",
     );
 }
+
+#[test]
+fn an_arrays_indices_are_a_range_of_its_positions() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val values = Array<Int>(5) { it }\n\
+         \x20   var sum = 0\n\
+         \x20   for (index in values.indices) sum += values[index]\n\
+         \x20   if (sum != 10) return \"fail sum: $sum\"\n\
+         \x20   if (values.indices != 0..4) return \"fail range: \" + values.indices\n\
+         \x20   if (5 in values.indices) return \"fail: 5 is an index\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "ArrayIndices",
+        "OK",
+    );
+}
+
+#[test]
+fn an_empty_indexable_has_empty_indices() {
+    // `0..size - 1` of an empty receiver is `0..-1`, which is the empty range — not a wrap.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val values = IntArray(0)\n\
+         \x20   if (!values.indices.isEmpty()) return \"fail: array indices are not empty\"\n\
+         \x20   if (0 in values.indices) return \"fail: 0 is an index\"\n\
+         \x20   if (!\"\".indices.isEmpty()) return \"fail: string indices are not empty\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "EmptyIndices",
+        "OK",
+    );
+}
+
+#[test]
+fn a_strings_indices_count_its_characters() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val text = \"abcd\"\n\
+         \x20   var joined = \"\"\n\
+         \x20   for (index in text.indices) joined += text[index]\n\
+         \x20   if (joined != \"abcd\") return \"fail: $joined\"\n\
+         \x20   return if (text.indices == 0..3) \"OK\" else \"fail range: \" + text.indices\n\
+         }\n",
+        "StringIndices",
+        "OK",
+    );
+}

@@ -1391,6 +1391,20 @@ before:**
    that is what makes reading `first`/`last` off a receiver typed as a PROGRESSION sound: with no
    way to build one, the only progression a lowered program holds is a range.
 
+   **`x.indices` and `s[i]` followed, for 2255 pass.** `indices` is `0..size - 1` of the receiver,
+   so once ranges were objects it was one subtraction and a construction — for a receiver whose
+   size this generator can read, which is an array or a `String`; the same extension property covers
+   `Collection`, and that one declines by RECEIVER rather than by name, because there is no
+   collection runtime to answer its `size` yet. Indexing a string came with it, and it is where the
+   two encodings the runtime bridges disagree most: the text is stored as UTF-8 and Kotlin indexes
+   by UTF-16 unit, so `s[i]` walks the bytes the way `length` already counts them, and a character
+   outside the BMP is one UTF-8 sequence and TWO Kotlin indices — read back as the surrogate pair
+   Kotlin stores. Walking per access is what a string that stores UTF-8 costs; a program that wants
+   to iterate cheaply iterates the string rather than its indices. Carrying the index needed one
+   more thing: the dependency-member path crosses every argument as a REFERENCE, which is right for
+   a member that asks about an object and boxes the very number `s[i]` is about, so a small table
+   (`intrinsics::scalar_member`) names the members whose arguments cross as values.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

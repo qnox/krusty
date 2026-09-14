@@ -1909,6 +1909,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     wraps and that test would never stop. Kotlin's own `IntProgressionIterator` carries the same bit.
   A `Char` bound is compared UNSIGNED, so a code point above `0x7FFF` is not a negative number:
   `'\uFF00' in '\uF000'..'\uFFFF'` is true. Tests: `tests/native_ranges_e2e.rs`.
+
+- **A string is indexed by UTF-16 code unit, whatever it is stored as.** krusty's native runtime
+  stores text as UTF-8, and Kotlin's `String` is a sequence of UTF-16 code units, so `s.length`,
+  `s[i]` and `s.indices` all answer in units and not in bytes or code points. A character outside
+  the BMP is one UTF-8 sequence and TWO Kotlin indices, and reads back as the surrogate pair Kotlin
+  stores: in `"a\u00E9\u4E2D\uD83D\uDE00z"`, `length` is 6, `s[3]` is `\uD83D` and `s[4]` is
+  `\uDE00`. `x.indices` is `0..size - 1`, which for an empty receiver is the empty range `0..-1`.
+  Test: `tests/native_strings_e2e.rs`, `tests/native_ranges_e2e.rs`.
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that

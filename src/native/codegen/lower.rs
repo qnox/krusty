@@ -1083,6 +1083,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let member = self.enum_member_name(target).expect("checked by the guard");
                 self.enum_member(member, receiver)
             }
+            // `x.indices` is `0..size - 1` of the receiver, so it needs the receiver's own size
+            // rather than anything the property declaration says.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.external_getter_is_indices(target) => self.indices(receiver),
             // `range.first` and its three siblings: a checked read of a dependency property whose
             // getter the runtime answers, exactly as an explicit call to it would be.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1922,6 +1929,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             self.range_member(&owner, &name, receiver, args, *ret)
                         {
                             return realized;
+                        }
+                        // A member that asks about a NUMBER rather than an object, carried as one:
+                        // `s[i]` must not box its index to reach the runtime.
+                        if let Some((symbol, carried, answer)) =
+                            super::super::intrinsics::scalar_member(&owner, &name, params)
+                        {
+                            let mut arguments = vec![self.reference(receiver)?];
+                            for (argument, ty) in args.iter().zip(&carried[1..]) {
+                                let Some(value) = self.coerce(*argument, *ty)? else {
+                                    return Ok(None);
+                                };
+                                arguments.push(value);
+                            }
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            return self.runtime_call(symbol, &carried, answer, &arguments);
                         }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)

@@ -203,6 +203,47 @@ kt_int kt_string_length(KRef self) {
     return units;
 }
 
+/* `s[index]` — the UTF-16 code unit at `index`.
+
+   The text is stored as UTF-8, and Kotlin indexes by UTF-16 unit, so this walks the bytes the same
+   way `kt_string_length` counts them: a byte that is not a continuation byte starts one code point,
+   and one above U+FFFF occupies TWO units. Walking per access is what a string that stores UTF-8
+   costs, and it is the same cost `length` already pays; a program that wants to iterate cheaply
+   iterates the string rather than its indices. */
+kt_char kt_string_get(KRef self, kt_int index) {
+    const char *bytes = self->as.string.bytes;
+    kt_int byte_length = self->as.string.byte_length;
+    kt_int unit = 0;
+    for (kt_int at = 0; at < byte_length;) {
+        unsigned char lead = (unsigned char)bytes[at];
+        kt_int width = lead < 0x80u ? 1 : lead < 0xE0u ? 2 : lead < 0xF0u ? 3 : 4;
+        kt_int units = width == 4 ? 2 : 1;
+        if (index < unit + units) {
+            uint32_t code = lead;
+            if (width == 2) {
+                code = ((uint32_t)(lead & 0x1Fu) << 6) | ((unsigned char)bytes[at + 1] & 0x3Fu);
+            } else if (width == 3) {
+                code = ((uint32_t)(lead & 0x0Fu) << 12) |
+                       (((uint32_t)(unsigned char)bytes[at + 1] & 0x3Fu) << 6) |
+                       ((unsigned char)bytes[at + 2] & 0x3Fu);
+            } else if (width == 4) {
+                code = ((uint32_t)(lead & 0x07u) << 18) |
+                       (((uint32_t)(unsigned char)bytes[at + 1] & 0x3Fu) << 12) |
+                       (((uint32_t)(unsigned char)bytes[at + 2] & 0x3Fu) << 6) |
+                       ((unsigned char)bytes[at + 3] & 0x3Fu);
+                /* Above the BMP: the pair Kotlin stores, high unit first. */
+                uint32_t rest = code - 0x10000u;
+                return (kt_char)(index == unit ? 0xD800u + (rest >> 10) : 0xDC00u + (rest & 0x3FFu));
+            }
+            return (kt_char)code;
+        }
+        unit += units;
+        at += width;
+    }
+    kt_index_out_of_bounds(index, unit);
+    return 0;
+}
+
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */
 static kt_int kt_render_long(kt_long value, char *buffer) {
     char digits[20];
