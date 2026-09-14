@@ -22691,14 +22691,20 @@ impl<'a> Lower<'a> {
         // A platform value committed to a declared non-null type is guarded here, over the lowered
         // value, so every narrowing position the checker recorded goes through one rule.
         let r = r.map(|id| self.guard_platform_narrowing(e, id));
-        // Record the expression's LOGICAL (source) type verbatim, keyed by its IR id — the value-class
-        // pass reads it to recover a value's representation when the IR node alone is ambiguous (a library
-        // call's physical `Object` result whose logical type is a value class). VC-agnostic: just the type.
-        if let Some(id) = r {
+        // Preserve the checked type on the producer, then make any semantic-bottom/physical-
+        // fallthrough mismatch explicit before backend lowering sees this expression.
+        let r = r.map(|id| {
             let ty = self.info.semantic_ty(e);
-            if ty != Ty::Error {
-                self.ir.logical_types.insert(id, ty_to_ir(ty));
+            if ty == Ty::Error {
+                return id;
             }
+            let ty = ty_to_ir(ty);
+            self.ir.logical_types.insert(id, ty);
+            let completed = crate::ir::complete_bottom_value(&mut self.ir, id, ty);
+            self.ir.logical_types.insert(completed, ty);
+            completed
+        });
+        if let Some(id) = r {
             if let Some(&line) = self
                 .afile
                 .expr_source_lines
@@ -22851,15 +22857,6 @@ impl<'a> Lower<'a> {
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
             Expr::NotNull { operand } => {
-                // `null!!` (a statically-null operand) always throws — emit an actual `throw
-                // NullPointerException()` (an `athrow` the verifier knows diverges), not the
-                // `checkNotNull` call (which is `(Object)V` and so appears to fall through, leaving a
-                // handler placed right after it with an inconsistent frame).
-                if self.info.ty(operand) == Ty::Null {
-                    let exc =
-                        self.emit_new_external("java/lang/NullPointerException", "()V", vec![]);
-                    return Some(self.emit_throw(exc));
-                }
                 let v = self.expr(operand)?;
                 if self.info.semantic_ty(operand).is_reference() {
                     let asserted = self.ir.add_expr(IrExpr::NotNullAssert {

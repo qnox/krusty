@@ -6,6 +6,8 @@
 mod array_references;
 mod arrays;
 mod assertions;
+#[cfg(test)]
+mod bottom_value_tests;
 mod checked;
 mod checked_arguments;
 mod classifier_references;

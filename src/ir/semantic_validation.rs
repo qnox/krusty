@@ -305,6 +305,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         }
         IrExpr::Try { result, .. } => reject("try result", *result),
         IrExpr::Const(_)
+        | IrExpr::BottomValue { .. }
         | IrExpr::ClassConst { .. }
         | IrExpr::SingletonValue { .. }
         | IrExpr::GetValue(_)
