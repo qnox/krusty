@@ -19,6 +19,7 @@ use crate::types::{Ty, TypeName, Visibility};
 mod call_argument;
 mod callable_shapes;
 mod classifier_scope;
+mod declaration_specificity;
 mod generic_inference;
 mod hierarchy_projection;
 mod member_hierarchy;
@@ -29,6 +30,7 @@ pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
+pub(crate) use declaration_specificity::retain_most_specific_declarations;
 pub(crate) use generic_inference::*;
 pub(crate) use hierarchy_projection::{
     applied_hierarchy, apply_subtype_arguments_from_supertype, classifier_bindings,
@@ -1136,35 +1138,17 @@ fn unique_most_specific_with_conflicts<T>(
         return CandidateSelection::None;
     }
 
-    let mut selected = None;
-    for (index, (params, _)) in applicable.iter().enumerate() {
-        let dominated =
-            applicable
-                .iter()
-                .enumerate()
-                .any(|(other_index, (other, _))| {
-                    index != other_index
-                        && other.len() == params.len()
-                        && other.iter().zip(params).enumerate().all(
-                            |(position, (&left, &right))| {
-                                at_least_as_specific(position, left, right)
-                            },
-                        )
-                        && !params.iter().zip(other).enumerate().all(
-                            |(position, (&left, &right))| {
-                                at_least_as_specific(position, left, right)
-                            },
-                        )
-                });
-        if !dominated && selected.replace(index).is_some() {
-            return CandidateSelection::Ambiguous;
-        }
-    }
-
-    let Some(selected) = selected else {
+    let parameter_shapes = applicable
+        .iter()
+        .map(|(parameters, _)| parameters.as_slice())
+        .collect::<Vec<_>>();
+    let [selected] =
+        declaration_specificity::most_specific_indices(&parameter_shapes, at_least_as_specific)
+            .as_slice()
+    else {
         return CandidateSelection::Ambiguous;
     };
-    CandidateSelection::Selected(applicable.swap_remove(selected).1)
+    CandidateSelection::Selected(applicable.swap_remove(*selected).1)
 }
 
 fn fixed_parameter_shape(

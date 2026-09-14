@@ -54177,10 +54177,14 @@ impl<'a> Checker<'a> {
                 .iter()
                 .copied()
                 .zip(named_whole_arrays.iter().copied())
-                .map(|(visible_parameter, whole_array)| {
+                .enumerate()
+                .map(|(argument, (visible_parameter, whole_array))| {
                     let parameter = *shape.parameter_indices.get(visible_parameter)?;
                     let mut declared = *signature.params.get(parameter)?;
-                    if shape.call_sig.vararg_index == Some(visible_parameter) && !whole_array {
+                    if shape.call_sig.vararg_index == Some(visible_parameter)
+                        && !whole_array
+                        && !self.file.is_spread_arg(args[argument])
+                    {
                         declared = declared.array_read_elem().unwrap_or(declared);
                     }
                     Some(crate::types::ty_subst(declared, &HashMap::new()))
@@ -54388,22 +54392,12 @@ impl<'a> Checker<'a> {
         let selecting_extension = applicable
             .iter()
             .all(|(_, _, _, _, _, candidate, _, _)| candidate.is_extension());
-        let prefer_concrete = !selecting_extension
-            && applicable
-                .iter()
-                .any(|(rank, generic, _, missing_context, _, candidate, _, _)| {
-                    *rank == best
-                        && !generic
-                        && (!has_context || !missing_context)
-                        && candidate.receiver_rank == nearest_receiver
-                });
         let mut maximal = applicable
             .into_iter()
-            .filter(|(rank, generic, _, missing_context, _, candidate, _, _)| {
+            .filter(|(rank, _, _, missing_context, _, candidate, _, _)| {
                 *rank == best
                     && (!has_context || !missing_context)
                     && candidate.receiver_rank == nearest_receiver
-                    && (!prefer_concrete || !generic)
             })
             .collect::<Vec<_>>();
         if maximal.len() > 1 {
@@ -54450,6 +54444,13 @@ impl<'a> Checker<'a> {
                 .enumerate()
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
+        }
+        if !selecting_extension {
+            crate::symbol_resolver::retain_most_specific_declarations(
+                &self.fed_source(),
+                &mut maximal,
+                |(_, generic, _, _, _, _, _, parameters)| (parameters, *generic),
+            );
         }
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface

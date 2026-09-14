@@ -87,32 +87,15 @@ fn an_explicit_type_argument_still_selects_the_generic_candidate() {
     );
 }
 
-/// Control: the tiebreaker itself survives. With parameters that are equally specific — the same
-/// classifier on both sides — the NON-generic candidate is still the one selected, which is what
-/// `prefer_concrete` exists to do.
+/// Control: the tiebreaker itself survives. `@JvmName` keeps the equally erased source overloads
+/// physically distinct so the runtime result proves that the non-generic declaration was selected.
 #[test]
 fn a_concrete_candidate_still_wins_an_equally_specific_pair() {
-    let java = vec![(
-        "Tie.java".to_string(),
-        "package tie;\n\
-         public final class Tie<T> {\n\
-         \x20 public static <T> String pick(Class<T> type) { return \"generic\"; }\n\
-         \x20 public static String pick(Class<?> type) { return \"concrete\"; }\n\
-         }\n"
-        .to_string(),
-    )];
-    let (library, _) =
-        common::javac_compile(&java, &[]).expect("javac must compile the tie-break fixture");
-    let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
-    let result = common::compiler_diagnostics(
-        &[(
-            "Use.kt",
-            "import tie.Tie\n\
-             class Resp\n\
-             fun use(): String = Tie.pick(Resp::class.java)\n",
-        )],
-        &classpath,
-    );
+    const SRC: &str = "@kotlin.jvm.JvmName(\"genericPick\")\n\
+        fun <T> pick(value: T): String = \"generic\"\n\
+        fun pick(value: Any): String = \"concrete\"\n\
+        fun box(): String = if (pick(Any()) == \"concrete\") \"OK\" else \"wrong overload\"\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);
     assert_eq!(
         (result.reference_code, result.reference_stderr.as_str()),
         (0, ""),
@@ -123,6 +106,35 @@ fn a_concrete_candidate_still_wins_an_equally_specific_pair() {
         (0, ""),
         "an equally specific concrete candidate must still be selected"
     );
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "ConcreteGenericTiebreak");
+}
+
+/// A spread argument ranks the declaration's array parameter, while an element-form argument ranks
+/// its element. Reconstructing both as elements makes the generic declaration win both calls.
+#[test]
+fn a_spread_vararg_keeps_its_array_shape_for_the_generic_tiebreaker() {
+    const SRC: &str = "@kotlin.jvm.JvmName(\"genericPick\")\n\
+        fun <T> pick(vararg values: T): String = \"generic\"\n\
+        fun pick(vararg values: Any): String = \"concrete\"\n\
+        fun box(): String {\n\
+            if (pick(\"x\") != \"generic\") return \"element chose concrete\"\n\
+            if (pick(*arrayOf(\"x\")) != \"concrete\") return \"spread chose generic\"\n\
+            return \"OK\"\n\
+        }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc must accept the exact spread-vararg fixture"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty must accept the exact spread-vararg fixture"
+    );
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
+    common::expect_box_ok_with_stdlib(SRC, "SpreadVarargGenericTiebreak");
 }
 
 /// Control: INCOMPARABLE parameters are not a reason to keep the generic candidate. Two unrelated
