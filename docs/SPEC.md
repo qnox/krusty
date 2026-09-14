@@ -5295,6 +5295,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   from the Kotlin `@Metadata` local-class marking, which krusty does not emit, so the name would come
   back qualified (`codegen/box/reflection/classes/localClassSimpleName.kt`).
 
+  A local class's BODY properties are numbered from the body. The legacy `SourceMember` coordinate
+  numbers the constructor's `val` parameters first and the body's properties after them, but the
+  classifier's `Property` declarations count the body's alone, so the two numberings agree only
+  when there are no constructor `val`s. Reading one as the other names a LATER property: in
+  `class P(val n: Int) { val a = n * 2; val b = a + 1 }` every reference to `a` bound to `b`, so
+  `b` read an unwritten field and `p.a` answered with `b` — on both backends, since the wrong
+  identity is fixed before either sees the body. The checker resolves the declaration by its own
+  SOURCE RANGE (`Checker::body_local_property_declaration`), which cannot drift between the two
+  conventions (`tests/local_class_e2e.rs`).
+
   WHAT a local class captures is decided in that scope — the only place the enclosing bindings
   exist — and recorded as `TypeInfo::local_class_captures_by_class`. How a capture is represented is
   lowering's decision: each captured binding becomes a leading constructor parameter and field, and

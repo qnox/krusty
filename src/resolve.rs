@@ -22957,6 +22957,33 @@ impl<'a> Checker<'a> {
         Ok(None)
     }
 
+    /// The stable `Property` declaration a body-local classifier declared at `span`.
+    ///
+    /// Found by SOURCE RANGE, never by ordinal. The legacy `SourceMember` coordinate numbers a
+    /// class's constructor `val` parameters BEFORE its body properties, while a classifier's
+    /// `Property` declarations number the body properties alone. Counting one as the other names a
+    /// LATER property: in `class P(val n: Int) { val a = 1; val b = 2 }` every reference to `a`
+    /// bound to `b`, so `val b = a + 1` read an unwritten field and `p.a` answered with `b`. A
+    /// declaration's own range cannot drift between the two conventions.
+    fn body_local_property_declaration(
+        &self,
+        owner: Option<TypeName>,
+        span: crate::diag::Span,
+    ) -> Option<crate::fir::DeclarationId> {
+        let index = self.resolved_index?;
+        let owner = index.classifier_declaration(owner?)?;
+        index
+            .owned_declarations(owner)
+            .iter()
+            .copied()
+            .find(|declaration| {
+                index
+                    .declaration_anchor(*declaration)
+                    .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::Property)
+                    && index.declaration_range(*declaration) == Some(span)
+            })
+    }
+
     fn active_source_member_declaration(
         &self,
         source: crate::libraries::SourceMember,
@@ -69689,17 +69716,7 @@ impl<'a> Checker<'a> {
                         property: (cl.props.len() + property_index) as u32,
                     };
                     let stable_declaration = self
-                        .resolved_index
-                        .and_then(|index| {
-                            let owner = current_owner
-                                .and_then(|owner| index.classifier_declaration(owner))?;
-                            index.owned_declaration(
-                                owner,
-                                crate::fir::DeclarationKind::Property,
-                                u32::try_from(cl.props.len() + property_index)
-                                    .expect("too many local class properties"),
-                            )
-                        })
+                        .body_local_property_declaration(current_owner, property.span)
                         .or_else(|| {
                             props
                                 .iter()
@@ -71453,17 +71470,7 @@ impl<'a> Checker<'a> {
                         property: source_property_index as u32,
                     };
                     let stable_property = self
-                        .resolved_index
-                        .and_then(|index| {
-                            let owner = current_owner
-                                .and_then(|owner| index.classifier_declaration(owner))?;
-                            index.owned_declaration(
-                                owner,
-                                crate::fir::DeclarationKind::Property,
-                                u32::try_from(source_property_index)
-                                    .expect("too many class properties"),
-                            )
-                        })
+                        .body_local_property_declaration(current_owner, bp.span)
                         .or_else(|| self.active_source_member_declaration(source_member))
                         .or_else(|| {
                             props

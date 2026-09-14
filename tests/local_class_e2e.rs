@@ -82,3 +82,33 @@ fn named_local_object_is_rejected() {
         ["named object 'Registry' cannot be local. Try to use an anonymous object instead."]
     );
 }
+
+#[test]
+fn a_local_classs_body_properties_keep_their_own_identities() {
+    // A local class's body properties are numbered from the body; the legacy source coordinate
+    // numbers the constructor's `val` parameters first. Reading one numbering as the other bound
+    // every property reference to the NEXT declaration — `a` named `b` — so `val b = a + 1` saw an
+    // unwritten field and `p.a` answered with `b`. Both fail only when the counts can collide, so
+    // this covers one constructor `val` (where they did) and none (where they did not).
+    const SRC: &str = "fun box(): String {\n\
+    class P(val n: Int) {\n\
+        val a = n * 2\n\
+        val b = a + 1\n\
+        val c = b + 1\n\
+    }\n\
+    class Q {\n\
+        val a = 100\n\
+        val b = a + 1\n\
+    }\n\
+    val p = P(3)\n\
+    if (p.n != 3) return \"fail n=${p.n}\"\n\
+    if (p.a != 6) return \"fail a=${p.a}\"\n\
+    if (p.b != 7) return \"fail b=${p.b}\"\n\
+    if (p.c != 8) return \"fail c=${p.c}\"\n\
+    val q = Q()\n\
+    if (q.a != 100 || q.b != 101) return \"fail q=${q.a},${q.b}\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC).expect("local class should compile + run");
+    assert_eq!(out, "OK");
+}
