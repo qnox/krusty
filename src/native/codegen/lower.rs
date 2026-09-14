@@ -579,6 +579,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn statement(&mut self, id: u32) -> Result<(), Unsupported> {
+        // `var x = 0` in a class body stores NOTHING. The rule is Kotlin's, it is observable
+        // rather than an optimization, and the IR is what knows which store is a declaration's —
+        // see `IrFile::is_elided_initializer_store`. A fresh object's storage is already zero
+        // here, as it is on every target krusty emits for.
+        if self.file.ir.is_elided_initializer_store(id) {
+            return Ok(());
+        }
         match self.file.ir.expr(id).clone() {
             IrExpr::Block { stmts, value } => {
                 for statement in stmts {
@@ -1896,6 +1903,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Err("a malformed array size".to_string());
                 };
                 self.array_size(receiver)
+            }
+            IrIntrinsic::StringLength => {
+                let Some(receiver) = receiver else {
+                    return Err("a malformed `String.length`".to_string());
+                };
+                let value = self.reference(receiver)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call("kt_string_length", &[any()], ret, &[value])
             }
             IrIntrinsic::NullableAnyToString => {
                 let Some(receiver) = receiver else {

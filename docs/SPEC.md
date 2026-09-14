@@ -1296,6 +1296,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   completed surrogate pair comes back out as text), which is what lets the constant pool keep deduping
   on value equality. `trimIndent`/`trimMargin` fold in code units too, matching how Kotlin measures an
   indent. Tests: `tests/utf16_string_constant_e2e.rs`, `kt_string::tests`.
+  `length` counts those same UTF-16 code units, which is not free for a runtime that stores UTF-8:
+  the native runtime walks the bytes (`kt_string_length`), counting each byte that is not a
+  continuation byte and adding one more for each four-byte sequence, because a code point above
+  U+FFFF is written as a surrogate PAIR. `"aé中🙂".length` is 5 where the byte length is 10 and the
+  code-point count is 4 (`tests/native_codegen_e2e.rs::a_strings_length_counts_utf16_code_units`).
   - Where that indent ENDS is `Char.isWhitespace()`, which on the JVM is
     `Character.isWhitespace(c) || Character.isSpaceChar(c)` — **not** Rust's `char::is_whitespace`
     (the Unicode `White_Space` property). Checked against JBR 21 over the whole BMP, the two sets
@@ -1677,7 +1682,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same superclass shape. **Field-initializer default-value elision:** kotlinc omits a field initializer
   that stores the field's JVM default (`0`/`false`/`null`/`'\0'`, incl. `0.toByte()`), so a value a base
   constructor's virtual call already wrote survives; krusty does the same (test
-  `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). The delegation `<init>`
+  `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). The rule is KOTLIN's
+  rather than the JVM's and holds for every target krusty emits for, because each clears an
+  object's storage when it allocates (the native runtime in `kt_gc_allocate`) — so both backends
+  read it from one place, `IrFile::is_elided_initializer_store`, keyed by the store's exact
+  identity rather than its shape, since a later `init { x = 0 }` is a different statement with
+  different meaning. The delegation `<init>`
   *target signature* is read live from the (post-`value_classes`-pass) class at emit time, so the lowerer
   needs no value-class knowledge and a value-class `super(…)` argument erases correctly. A secondary
   constructor with lowerable defaults emits and calls the synthetic `DefaultConstructorMarker` overload;

@@ -1845,9 +1845,17 @@ fn a_class_declared_inside_a_function_runs() {
     // local left. That is what removing the decline showed — the model and the constructor path
     // already handled it, and the decline was a claim about a difficulty that was not there.
     assert_eq!(
-        run(
-            "fun make(base: Int): Int {\n             \x20   class Adder(val extra: Int) { fun sum() = base + extra }\n             \x20   return Adder(2).sum()\n             }\n             fun main() {\n             \x20   class Counter(val n: Int) { fun twice() = n * 2 }\n             \x20   class Box<T>(val v: T) { fun get(): T = v }\n             \x20   println(Counter(21).twice())\n             \x20   println(Box(42).get())\n             \x20   println(make(40))\n             }\n"
-        ),
+        run("fun make(base: Int): Int {\n\
+             \x20   class Adder(val extra: Int) { fun sum() = base + extra }\n\
+             \x20   return Adder(2).sum()\n\
+             }\n\
+             fun main() {\n\
+             \x20   class Counter(val n: Int) { fun twice() = n * 2 }\n\
+             \x20   class Box<T>(val v: T) { fun get(): T = v }\n\
+             \x20   println(Counter(21).twice())\n\
+             \x20   println(Box(42).get())\n\
+             \x20   println(make(40))\n\
+             }\n"),
         "42\n42\n42\n"
     );
 }
@@ -1863,9 +1871,29 @@ fn an_object_expression_implements_its_supertypes() {
     // and names it by its parameter list the way it names a secondary — which is why construction
     // now falls back to the primary when the list is the primary's own.
     assert_eq!(
-        run(
-            "interface A { fun a(): Int }\n             interface B { fun b(): Int }\n             abstract class Base(val n: Int) { abstract fun twice(): Int }\n             interface P { fun p(): Int }\n             class Holder(val n: Int) { fun make(): P = object : P { override fun p() = n } }\n             fun supplier(n: Int): P = object : P { override fun p() = n + 1 }\n             fun main() {\n             \x20   val both = object : A, B {\n             \x20       override fun a() = 20\n             \x20       override fun b() = 22\n             \x20   }\n             \x20   println(both.a() + both.b())\n             \x20   val based = object : Base(21) { override fun twice() = n * 2 }\n             \x20   println(based.twice())\n             \x20   println(Holder(42).make().p())\n             \x20   println(supplier(41).p())\n             \x20   val counter = object {\n             \x20       var seen = 0\n             \x20       fun next(): Int { seen += 1; return seen }\n             \x20   }\n             \x20   counter.next()\n             \x20   println(counter.next() + 40)\n             }\n"
-        ),
+        run("interface A { fun a(): Int }\n\
+             interface B { fun b(): Int }\n\
+             abstract class Base(val n: Int) { abstract fun twice(): Int }\n\
+             interface P { fun p(): Int }\n\
+             class Holder(val n: Int) { fun make(): P = object : P { override fun p() = n } }\n\
+             fun supplier(n: Int): P = object : P { override fun p() = n + 1 }\n\
+             fun main() {\n\
+             \x20   val both = object : A, B {\n\
+             \x20       override fun a() = 20\n\
+             \x20       override fun b() = 22\n\
+             \x20   }\n\
+             \x20   println(both.a() + both.b())\n\
+             \x20   val based = object : Base(21) { override fun twice() = n * 2 }\n\
+             \x20   println(based.twice())\n\
+             \x20   println(Holder(42).make().p())\n\
+             \x20   println(supplier(41).p())\n\
+             \x20   val counter = object {\n\
+             \x20       var seen = 0\n\
+             \x20       fun next(): Int { seen += 1; return seen }\n\
+             \x20   }\n\
+             \x20   counter.next()\n\
+             \x20   println(counter.next() + 40)\n\
+             }\n"),
         "42\n42\n42\n42\n42\n"
     );
 }
@@ -1882,9 +1910,19 @@ fn a_local_class_shares_the_mutable_locals_it_captures() {
     // says that field holds a reference, and without it the write lands in a copy and the enclosing
     // function reads the value it started with.
     assert_eq!(
-        run(
-            "fun box(): String {\n             \x20   var counted = 1\n             \x20   object { init { counted = 2 } }\n             \x20   var named = \"a\"\n             \x20   val setter = object { fun set() { named = \"b\" } }\n             \x20   setter.set()\n             \x20   var total = 0\n             \x20   class Bump { fun go() { total += 5 } }\n             \x20   Bump().go()\n             \x20   Bump().go()\n             \x20   return \"\" + counted + named + total\n             }\n             fun main() { println(box()) }\n"
-        ),
+        run("fun box(): String {\n\
+             \x20   var counted = 1\n\
+             \x20   object { init { counted = 2 } }\n\
+             \x20   var named = \"a\"\n\
+             \x20   val setter = object { fun set() { named = \"b\" } }\n\
+             \x20   setter.set()\n\
+             \x20   var total = 0\n\
+             \x20   class Bump { fun go() { total += 5 } }\n\
+             \x20   Bump().go()\n\
+             \x20   Bump().go()\n\
+             \x20   return \"\" + counted + named + total\n\
+             }\n\
+             fun main() { println(box()) }\n"),
         "2b10\n"
     );
 }
@@ -1902,9 +1940,16 @@ fn a_local_classs_properties_keep_their_own_identities() {
     // this reads the same values through krusty's JVM backend too (see the dual run in
     // `tests/common`).
     assert_eq!(
-        run(
-            "fun box(): String {\n             \x20   class P(val n: Int) {\n             \x20       val a = n * 2\n             \x20       val b = a + 1\n             \x20       val c = b + 1\n             \x20   }\n             \x20   val p = P(3)\n             \x20   return \"\" + p.n + \" \" + p.a + \" \" + p.b + \" \" + p.c\n             }\n             fun main() { println(box()) }\n"
-        ),
+        run("fun box(): String {\n\
+             \x20   class P(val n: Int) {\n\
+             \x20       val a = n * 2\n\
+             \x20       val b = a + 1\n\
+             \x20       val c = b + 1\n\
+             \x20   }\n\
+             \x20   val p = P(3)\n\
+             \x20   return \"\" + p.n + \" \" + p.a + \" \" + p.b + \" \" + p.c\n\
+             }\n\
+             fun main() { println(box()) }\n"),
         "3 6 7 8\n"
     );
 }
@@ -1920,9 +1965,21 @@ fn a_function_declared_inside_a_member_is_called_where_it_was_declared() {
     // be placed differently from — so to this generator it is a function with a symbol, and the
     // call is direct.
     assert_eq!(
-        run(
-            "class Counted {\n             \x20   val value: Int\n             \x20   init {\n             \x20       fun ten(): Int = 10\n             \x20       value = ten()\n             \x20   }\n             \x20   fun doubled(): Int {\n             \x20       fun twice(n: Int) = n * 2\n             \x20       return twice(value)\n             \x20   }\n             }\n             fun main() {\n             \x20   println(Counted().value)\n             \x20   println(Counted().doubled())\n             }\n"
-        ),
+        run("class Counted {\n\
+             \x20   val value: Int\n\
+             \x20   init {\n\
+             \x20       fun ten(): Int = 10\n\
+             \x20       value = ten()\n\
+             \x20   }\n\
+             \x20   fun doubled(): Int {\n\
+             \x20       fun twice(n: Int) = n * 2\n\
+             \x20       return twice(value)\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(Counted().value)\n\
+             \x20   println(Counted().doubled())\n\
+             }\n"),
         "10\n20\n"
     );
 }
@@ -1939,9 +1996,18 @@ fn a_companion_constant_is_read_wherever_it_is_named() {
     // compile-time constant, so program-start initialization is indistinguishable from the
     // companion's own.
     assert_eq!(
-        run(
-            "class Limits {\n             \x20   companion object {\n             \x20       const val MAX = 42\n             \x20       const val NAME = \"limit\"\n             \x20   }\n             }\n             object Solo { const val ONE = 1 }\n             fun main() {\n             \x20   println(Limits.MAX)\n             \x20   println(Limits.NAME)\n             \x20   println(Solo.ONE)\n             }\n"
-        ),
+        run("class Limits {\n\
+             \x20   companion object {\n\
+             \x20       const val MAX = 42\n\
+             \x20       const val NAME = \"limit\"\n\
+             \x20   }\n\
+             }\n\
+             object Solo { const val ONE = 1 }\n\
+             fun main() {\n\
+             \x20   println(Limits.MAX)\n\
+             \x20   println(Limits.NAME)\n\
+             \x20   println(Solo.ONE)\n\
+             }\n"),
         "42\nlimit\n1\n"
     );
 }
@@ -1957,9 +2023,102 @@ fn a_secondary_constructor_may_delegate_to_the_root_class() {
     // declares no state and no constructor to run. The class's own initializers still run, folded
     // into this constructor's body by the checked lowering.
     assert_eq!(
-        run(
-            "class Boxed {\n             \x20   val label: String\n             \x20   var seen = 0\n             \x20   init { seen = 1 }\n             \x20   constructor(text: String) { label = text }\n             \x20   constructor() : this(\"none\")\n             }\n             fun main() {\n             \x20   println(Boxed(\"here\").label)\n             \x20   println(Boxed().label)\n             \x20   println(Boxed().seen)\n             }\n"
-        ),
+        run("class Boxed {\n\
+             \x20   val label: String\n\
+             \x20   var seen = 0\n\
+             \x20   init { seen = 1 }\n\
+             \x20   constructor(text: String) { label = text }\n\
+             \x20   constructor() : this(\"none\")\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(Boxed(\"here\").label)\n\
+             \x20   println(Boxed().label)\n\
+             \x20   println(Boxed().seen)\n\
+             }\n"),
         "here\nnone\n1\n"
+    );
+}
+
+#[test]
+fn a_strings_length_counts_utf16_code_units() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin's `String.length` counts UTF-16 CODE UNITS, and a krusty string holds UTF-8, so the
+    // answer is neither the byte length nor the code-point count. A code point below U+0080 is one
+    // byte and one unit; `é` is two bytes and one unit; `中` is three bytes and one unit; an emoji
+    // above U+FFFF is four bytes and a SURROGATE PAIR, which is two units. A length reporting
+    // bytes would answer 10 for the third line rather than 5, and one counting code points 4.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   println(\"\".length)\n\
+             \x20   println(\"abc\".length)\n\
+             \x20   println(\"aé中🙂\".length)\n\
+             \x20   println(\"ab\" + \"cé中🙂\")\n\
+             \x20   println((\"ab\" + \"cé中🙂\").length)\n\
+             }\n"),
+        "0\n3\n5\nabcé中🙂\n7\n"
+    );
+}
+
+#[test]
+fn the_root_class_can_be_constructed() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Any()` is declared in no file and needs none: the root has no state and no constructor, so
+    // the whole of constructing one is an object carrying the runtime's own `kotlin.Any` type. Two
+    // of them are distinct, and each is itself.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val a = Any()\n\
+             \x20   val b = Any()\n\
+             \x20   println(a === a)\n\
+             \x20   println(a === b)\n\
+             \x20   println(a == b)\n\
+             }\n"),
+        "true\nfalse\nfalse\n"
+    );
+}
+
+#[test]
+fn a_declaration_that_stores_a_default_stores_nothing() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `var flag = false` in a class body emits no store, and that is Kotlin's rule rather than an
+    // optimization: the base constructor's call to `setup()` reaches the override and writes the
+    // fields BEFORE the subclass's initializers would run, so a store here would overwrite what
+    // the program just observed. A later `init { … }` assigning the same value is a different
+    // statement and still runs, which is why the store's identity comes from the IR rather than
+    // from its shape.
+    assert_eq!(
+        run("open class Base {\n\
+             \x20   open fun setup() {}\n\
+             \x20   init { setup() }\n\
+             }\n\
+             class Derived : Base() {\n\
+             \x20   override fun setup() {\n\
+             \x20       flag = true\n\
+             \x20       count = 4\n\
+             \x20       label = \"set\"\n\
+             \x20   }\n\
+             \x20   var flag = false\n\
+             \x20   var count = 0\n\
+             \x20   var label: String? = null\n\
+             \x20   var reset = 7\n\
+             \x20   init { reset = 0 }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val d = Derived()\n\
+             \x20   println(d.flag)\n\
+             \x20   println(d.count)\n\
+             \x20   println(d.label)\n\
+             \x20   println(d.reset)\n\
+             }\n"),
+        "true\n4\nset\n0\n"
     );
 }

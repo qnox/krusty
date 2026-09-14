@@ -541,10 +541,12 @@ impl<'a> FileLowering<'a> {
                 {
                     (None, Vec::new())
                 }
-                None => return Err(format!(
+                None => {
+                    return Err(format!(
                     "a secondary constructor delegating to a superclass outside this file (`{}`)",
                     owner.render()
-                )),
+                ))
+                }
             },
         };
         // A delegation argument may call a companion member (`constructor() : this(foo() + prop)`),
@@ -1118,6 +1120,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let name = internal.render();
         if defaulted {
             return Err(format!("a constructor default argument (`{name}`)"));
+        }
+        // `Any()` is declared in no file and needs none: the root has no state and no constructor,
+        // so the whole of constructing one is an object with its type and nothing after the
+        // header. `kt_type_any` is the runtime's, the same descriptor every other type points at
+        // as its super.
+        if super::super::super::intrinsics::is_any(internal) && args.is_empty() {
+            let descriptor = self.file.import_data("kt_type_any")?;
+            return Ok(Some(self.allocate(descriptor, model::HEADER_SIZE)?));
         }
         let class = self.file.class_of(internal, "construction of")?;
         let declaration = &self.file.ir.classes[class as usize];

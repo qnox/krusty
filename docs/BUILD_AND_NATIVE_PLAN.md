@@ -1290,6 +1290,17 @@ before:**
    its order IS observable. And a secondary constructor's `super()` reaching `kotlin.Any` needs
    nothing emitted: the root declares no state and no constructor, which is already why a class
    whose only supertype is `Any` calls no parent constructor.
+   Three more, for **2031 pass**. `String.length` is a count of UTF-16 code units and a krusty
+   string holds UTF-8, so the runtime walks the bytes: a byte that is not a continuation byte
+   starts one code point, and of those only the four-byte ones are a surrogate pair and count two.
+   `Any()` allocates an object with the runtime's own `kotlin.Any` type and nothing after the
+   header, because the root has no state. And a class-body declaration that stores the value a
+   fresh object's storage already holds — `var x = 0` — emits nothing, which is Kotlin's rule and
+   not an optimization: a base constructor that dispatches to an override writes those fields
+   before the subclass's initializers would, and leaving the store out is what lets the write
+   survive. That rule now lives with the IR (`IrFile::is_elided_initializer_store`) rather than in
+   the JVM backend, because every target krusty emits for clears an object's storage when it
+   allocates and so there is one rule, not one per backend.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

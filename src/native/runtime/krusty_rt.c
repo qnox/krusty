@@ -177,6 +177,28 @@ KRef kt_string_utf8(const char *bytes, kt_int byte_length) {
     return kt_string_of(NULL, bytes, byte_length);
 }
 
+/* Kotlin's `String.length` counts UTF-16 CODE UNITS; a krusty string holds UTF-8. The byte length
+   is therefore not the answer, and neither is the code-point count. In UTF-8 a byte that is not a
+   continuation byte (`10xxxxxx`) starts exactly one code point, so counting those counts code
+   points; of those, only the ones a four-byte sequence starts (`11110xxx`, i.e. above U+FFFF) are
+   written as a SURROGATE PAIR in UTF-16 and contribute two units. Everything else contributes one.
+
+   This walks the bytes on every call, which is what a string that stores UTF-8 costs; it is also
+   what makes the answer right for text a JVM-shaped length would have to be stored alongside. */
+kt_int kt_string_length(KRef self) {
+    const char *bytes = self->as.string.bytes;
+    kt_int byte_length = self->as.string.byte_length;
+    kt_int units = 0;
+    for (kt_int index = 0; index < byte_length; index++) {
+        unsigned char byte = (unsigned char)bytes[index];
+        if ((byte & 0xC0u) == 0x80u) {
+            continue;
+        }
+        units += (byte >= 0xF0u) ? 2 : 1;
+    }
+    return units;
+}
+
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */
 static kt_int kt_render_long(kt_long value, char *buffer) {
     char digits[20];

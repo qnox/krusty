@@ -200,6 +200,9 @@ KRef kt_string_utf8(const char *bytes, kt_int byte_length);
 /* `a + b` on strings, after both operands have been rendered. */
 KRef kt_string_plus(KRef a, KRef b);
 
+/* `String.length` — a count of UTF-16 CODE UNITS, which a UTF-8 string does not store. */
+kt_int kt_string_length(KRef self);
+
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 
