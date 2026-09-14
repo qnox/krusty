@@ -54453,14 +54453,13 @@ impl<'a> Checker<'a> {
         let semantic = overload.semantic_signature();
         let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
         let source = self.fed_source();
-        if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
-            crate::symbol_resolver::unify_ty_from_symbols(
-                &source,
-                receiver_shape,
-                receiver,
-                &mut bindings,
-            );
-        }
+        // Arguments bind before the receiver. A value parameter mentions a formal in an INVARIANT
+        // position and therefore fixes it exactly, while an extension receiver only requires that
+        // the receiver be assignable to the formal's instantiation — it is a lower bound, not an
+        // equation. Binding the receiver first pinned `P` to the receiver's own class, so
+        // `App().install(pluginOfPipe) { … }` judged `Plug<Pipe, Cfg>` against `Plug<App, B>` and
+        // declined the overload, leaving its lambda unshaped. The receiver now supplies only the
+        // formals the arguments leave open.
         self.merge_mapped_generic_argument_bindings(
             overload,
             (args, arg_tys),
@@ -54469,6 +54468,14 @@ impl<'a> Checker<'a> {
             type_args,
             &mut bindings,
         );
+        if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
+            crate::symbol_resolver::unify_ty_from_symbols(
+                &source,
+                receiver_shape,
+                receiver,
+                &mut bindings,
+            );
+        }
         bindings
     }
 
