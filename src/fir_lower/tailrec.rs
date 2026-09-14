@@ -23,15 +23,15 @@ pub(super) fn finish_tailrec_body(
     let tail = roots
         .pop()
         .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
-    // A `return` is a tail position wherever it stands, not only at the end of the body: nothing
-    // of this function runs after one. A `tailrec` whose recursion goes through a `return` in an
-    // earlier statement -- `if (x > 0) return f(x - 1)` before the body's last line -- was left
-    // recursing, so the function overflowed exactly the stack `tailrec` was written to spare.
-    for root in &mut roots {
-        *root = returning_tails(ir, *root, function, parameter_count, result, origin)?;
-    }
     let tail = tail_value(ir, tail, function, parameter_count, result, origin)?;
     roots.push(tail);
+    // The body's tail is one tail position; a `return` is another, wherever it stands, because
+    // nothing of this function runs after one. `tail_value` reads the first off the body's shape,
+    // and this sweeps the rest out of the whole body — after the rebuild above, so a tail the
+    // rebuild already turned into a loop step is not visited a second time.
+    for &root in &roots {
+        rewrite_returned_tail_calls(ir, root, function, parameter_count, result, origin)?;
+    }
     let loop_body = generated(
         ir,
         IrExpr::Block {
@@ -62,69 +62,109 @@ pub(super) fn finish_tailrec_body(
     ))
 }
 
-/// Rewrite the self-calls that a `return` puts in tail position anywhere inside `expression`.
+/// Rewrite every self-call that a `return` puts in tail position, wherever in the body it stands.
 ///
-/// Only the shapes that can carry a `return` with nothing of this function after it are descended:
-/// a block's statements and a `when`'s branches. A `return` inside a loop or a `try` is left as the
-/// ordinary call it is -- the first would jump out of its own loop into the rewritten one, and the
-/// second has a `finally` still to run. Those keep the ordinary call they already had, which is
-/// what they had before this rewrite existed.
-/// Rewrite the `return`-borne tail calls in every statement a block carries BEFORE its last, which
-/// its caller handles as the block's own tail position.
-fn rewrite_leading(
+/// What makes a `return` a tail position is not the shape it sits in: nothing of this function runs
+/// after one, so the call it returns is a tail call in a block, in a `when` branch, and inside a
+/// LOOP — Kotlin reads `while (…) { if (…) return f(x) }` as a tail call, and the `continue` this
+/// writes carries the synthetic loop's own label, so leaving the inner loop is the rewrite working
+/// rather than a reason to skip it.
+///
+/// What does stop the walk is OWNERSHIP of the `return`, and of what runs after it:
+///
+/// * An inlined lambda's body. Its `return`s are the lambda's to answer, and a non-local one that
+///   is this function's reaches the surrounding statement anyway; a local one does not, and nothing
+///   at this level tells them apart. The lambda's CAPTURES are ordinary expressions of this
+///   function and stay in the walk.
+/// * A `try`. Its `finally` still has to run, so a `return` inside it does not leave directly.
+///
+/// The rewrite happens IN PLACE, at the `return`'s own id: it is the same statement, saying the
+/// same thing, and everything that referred to it still does.
+fn rewrite_returned_tail_calls(
     ir: &mut IrFile,
-    stmts: &mut [ExprId],
+    root: ExprId,
     function: FunId,
     parameter_count: usize,
     result: Ty,
     origin: OriginId,
 ) -> Result<(), FirLoweringFailure> {
-    for statement in stmts {
-        *statement = returning_tails(ir, *statement, function, parameter_count, result, origin)?;
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        match ir.expr(expression) {
+            // A `try` keeps whatever it holds: its `finally` runs after the `return`.
+            IrExpr::Try { .. } => continue,
+            // An inlined lambda's body is the lambda's; its captures are this function's.
+            IrExpr::Lambda { captures, .. } => {
+                pending.extend(captures.clone());
+                continue;
+            }
+            IrExpr::Return(Some(_)) => {
+                // The same rewriter the body's own tail goes through, asked about this `return`
+                // instead: it is a tail position too, so whatever it makes of the body's last
+                // expression it makes of this one. The answer replaces the `return` where it
+                // stands, and a `return` it left a `return` is walked into like anything else.
+                let rebuilt =
+                    tail_value(ir, expression, function, parameter_count, result, origin)?;
+                let node = ir.expr(rebuilt).clone();
+                let stepped = !matches!(node, IrExpr::Return(_));
+                ir.exprs[expression as usize] = node;
+                if stepped {
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     Ok(())
 }
 
-fn returning_tails(
-    ir: &mut IrFile,
-    expression: ExprId,
-    function: FunId,
-    parameter_count: usize,
-    result: Ty,
-    origin: OriginId,
-) -> Result<ExprId, FirLoweringFailure> {
-    match ir.expr(expression).clone() {
-        IrExpr::Return(Some(_)) => {
-            tail_value(ir, expression, function, parameter_count, result, origin)
-        }
-        IrExpr::Block { stmts, value } => {
-            let stmts = stmts
-                .into_iter()
-                .map(|statement| {
-                    returning_tails(ir, statement, function, parameter_count, result, origin)
-                })
-                .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
-            // The block's value is descended too. It is the last statement of a `Unit` block —
-            // where a nested `if` ends up — and where it really is a value, nothing here changes
-            // it: a `return` is the only node this rewrites, and a `return` answers no one.
-            let value = value
-                .map(|value| returning_tails(ir, value, function, parameter_count, result, origin))
-                .transpose()?;
-            Ok(generated(ir, IrExpr::Block { stmts, value }, origin))
-        }
-        IrExpr::When { branches } => {
-            let branches = branches
-                .into_iter()
-                .map(|(condition, branch)| {
-                    Ok((
-                        condition,
-                        returning_tails(ir, branch, function, parameter_count, result, origin)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
-            Ok(generated(ir, IrExpr::When { branches }, origin))
-        }
-        _ => Ok(expression),
+/// Whether `call` is this function calling itself with its whole parameter list — the only shape
+/// the loop can step. A partial list is somebody else's overload, and a call with a receiver to
+/// re-bind is not the same frame.
+fn is_self_call(ir: &IrFile, call: ExprId, function: FunId, parameter_count: usize) -> bool {
+    matches!(
+        ir.expr(call),
+        IrExpr::Call {
+            callee: Callee::Local(target),
+            dispatch_receiver: None,
+            args,
+        } if *target == function && args.len() == parameter_count
+    )
+}
+
+/// The loop step a self-call becomes: every parameter reassigned, then `continue` to the synthetic
+/// loop. `call` must satisfy [`is_self_call`].
+fn loop_step(ir: &mut IrFile, call: ExprId, parameter_count: usize, origin: OriginId) -> IrExpr {
+    let IrExpr::Call { args, .. } = ir.expr(call).clone() else {
+        unreachable!("a self call is a call")
+    };
+    let mut updates = Vec::with_capacity(parameter_count + 1);
+    for (parameter, value) in args.into_iter().enumerate() {
+        updates.push(generated(
+            ir,
+            IrExpr::SetValue {
+                var: u32::try_from(parameter)
+                    .expect("tailrec parameter count exceeds packed value ids"),
+                value,
+            },
+            origin,
+        ));
+    }
+    updates.push(generated(
+        ir,
+        IrExpr::Continue {
+            label: Some(LOOP_LABEL.to_owned()),
+        },
+        origin,
+    ));
+    IrExpr::Block {
+        stmts: updates,
+        value: None,
     }
 }
 
@@ -137,38 +177,9 @@ fn tail_value(
     origin: OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     match ir.expr(expression).clone() {
-        IrExpr::Call {
-            callee: Callee::Local(target),
-            dispatch_receiver: None,
-            args,
-        } if target == function && args.len() == parameter_count => {
-            let mut updates = Vec::with_capacity(parameter_count + 1);
-            for (parameter, value) in args.into_iter().enumerate() {
-                updates.push(generated(
-                    ir,
-                    IrExpr::SetValue {
-                        var: u32::try_from(parameter)
-                            .expect("tailrec parameter count exceeds packed value ids"),
-                        value,
-                    },
-                    origin,
-                ));
-            }
-            updates.push(generated(
-                ir,
-                IrExpr::Continue {
-                    label: Some(LOOP_LABEL.to_owned()),
-                },
-                origin,
-            ));
-            Ok(generated(
-                ir,
-                IrExpr::Block {
-                    stmts: updates,
-                    value: None,
-                },
-                origin,
-            ))
+        IrExpr::Call { .. } if is_self_call(ir, expression, function, parameter_count) => {
+            let step = loop_step(ir, expression, parameter_count, origin);
+            Ok(generated(ir, step, origin))
         }
         IrExpr::Block {
             mut stmts,
@@ -179,7 +190,6 @@ fn tail_value(
             // tail position. This is the shape produced by a Unit-returning `if`/`when` whose
             // recursive call occupies one arm.
             if let Some(tail) = stmts.pop() {
-                rewrite_leading(ir, &mut stmts, function, parameter_count, result, origin)?;
                 stmts.push(tail_value(
                     ir,
                     tail,
@@ -195,7 +205,6 @@ fn tail_value(
         }
         IrExpr::Block { mut stmts, value } => {
             if let Some(value) = value {
-                rewrite_leading(ir, &mut stmts, function, parameter_count, result, origin)?;
                 stmts.push(tail_value(
                     ir,
                     value,
@@ -209,7 +218,6 @@ fn tail_value(
                 // as the final statement rather than as the block value. It is still the sole tail
                 // position of this block. The statements before it are tail positions only
                 // where they `return`.
-                rewrite_leading(ir, &mut stmts, function, parameter_count, result, origin)?;
                 stmts.push(tail_value(
                     ir,
                     tail,
@@ -228,6 +236,11 @@ fn tail_value(
         IrExpr::Return(Some(value)) => {
             tail_value(ir, value, function, parameter_count, result, origin)
         }
+        // A LOOP is not a value and has no tail position of its own: what leaves the function from
+        // inside one is a `return`, which the sweep reaches wherever it stands. Wrapping the loop
+        // in a `return` instead would return the loop — which is what a body ending in
+        // `while (true) { … return f(x) }` used to compile to, and the verifier said so.
+        IrExpr::While { .. } => Ok(expression),
         IrExpr::Return(None) => Ok(expression),
         IrExpr::When { branches } => {
             let branches = branches

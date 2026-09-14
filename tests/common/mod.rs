@@ -1946,6 +1946,27 @@ pub fn expect_box_run_against_ref(tag: &str, lib_src: &str, main: &str) -> Optio
     ))
 }
 
+/// Run one program's `box()` twice — once as krusty builds it, once as the REFERENCE compiler does
+/// — and require the same answer.
+///
+/// The `_against_ref` helpers pin how krusty READS a kotlinc-built dependency. This pins something
+/// else: that krusty's own build of a program AGREES with kotlinc's build of the same program, at
+/// run time, on a question no signature can answer. It is the shape a lowering decision needs when
+/// what it changes is what the program DOES — a `tailrec` that must not grow the stack, say, where
+/// the two builds differ by whether one of them throws `StackOverflowError`.
+///
+/// Returns `None` when no reference compiler is provisioned, so the caller can decide whether that
+/// is a skip or a failure; in CI it is provisioned and the comparison is the point of the test.
+#[allow(dead_code)]
+pub fn box_run_matches_kotlinc(src: &str, stem: &str) -> Option<(String, String)> {
+    let reference = kotlinc_lib_out(&[(&format!("{stem}.kt"), src)])?;
+    let mut classes: Vec<(String, Vec<u8>)> = Vec::new();
+    collect_class_files(&reference, &reference, &mut classes)?;
+    let expected = run_box(&classes, &format!("{stem}Kt"), &[stdlib_jar()])?;
+    let actual = expect_box_run_with_stdlib(src, stem);
+    Some((actual, expected))
+}
+
 /// Compile a dependency with the REFERENCE compiler and return its classpath dir, for tests that
 /// need the classpath rather than a `box()` run (a rejection assertion, say).
 #[allow(dead_code)]

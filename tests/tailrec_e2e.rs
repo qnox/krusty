@@ -59,8 +59,8 @@ fun box(): String {\n\
 fn tailrec_through_a_return_that_is_not_the_last_statement() {
     // A `return` is a tail position wherever it stands: nothing of the function runs after one. In
     // each of these the recursive `return` sits BEFORE the body's final statement, and the loop has
-    // to reach it there — 1,000,000-deep, so a call left in place is a StackOverflow rather than a
-    // slightly slower answer.
+    // to reach it there — 1,000,000-deep, so a call left in place is a StackOverflowError rather
+    // than a slightly slower answer.
     const SRC: &str = "tailrec fun early(n: Int): Int {\n\
     if (n > 0) return early(n - 1)\n\
     return 0\n\
@@ -90,6 +90,77 @@ fun box(): String {\n\
     if (nested(1000000, 0) != 1000000) return \"fail nested\"\n\
     if (chosen(1000000) != 0) return \"fail when\"\n\
     return \"OK\"\n\
+}\n";
+    let out = run(SRC);
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn tailrec_through_a_return_inside_a_loop() {
+    // A LOOP is not a boundary. Kotlin reads `while (…) { … return f(x) }` as a tail call, and the
+    // `continue` the rewrite writes carries the synthetic loop's own label — so leaving the inner
+    // loop is the rewrite working, not a reason to skip it. A syntax whitelist that refused to
+    // descend into loops left both of these recursing.
+    const SRC: &str = "tailrec fun walk(n: Int, acc: Int): Int {\n\
+    while (true) {\n\
+        if (n == 0) return acc\n\
+        return walk(n - 1, acc + 1)\n\
+    }\n\
+}\n\
+tailrec fun guardedByFor(n: Int, acc: Int): Int {\n\
+    for (once in 0..0) {\n\
+        if (n == 0) return acc\n\
+        return guardedByFor(n - 1, acc + 1)\n\
+    }\n\
+    return -1\n\
+}\n\
+fun box(): String {\n\
+    if (walk(1000000, 0) != 1000000) return \"fail while\"\n\
+    if (guardedByFor(1000000, 0) != 1000000) return \"fail for\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC);
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn a_return_a_finally_still_follows_is_not_rewritten() {
+    // A `try` IS a boundary: its `finally` runs after the `return`, so the call does not leave
+    // directly and the frame is still there to come back to. The order is what tells the two
+    // apart — real recursion finishes innermost-first, so the trail counts DOWN from the base
+    // case, where a loop step would append each `n` on the way in.
+    const SRC: &str = "var trail = \"\"\n\
+tailrec fun guarded(n: Int): Int {\n\
+    try {\n\
+        if (n > 0) return guarded(n - 1)\n\
+    } finally {\n\
+        trail += n.toString()\n\
+    }\n\
+    return 0\n\
+}\n\
+fun box(): String {\n\
+    guarded(3)\n\
+    return if (trail == \"0123\") \"OK\" else \"fail: \" + trail\n\
+}\n";
+    let out = run(SRC);
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn a_return_inside_an_inlined_lambda_keeps_its_call() {
+    // The other boundary: a lambda's `return`s are the lambda's to answer, and nothing at this
+    // level separates one that leaves this function from one that leaves only the lambda. Left
+    // alone, so the answer must simply still be right.
+    const SRC: &str = "tailrec fun inLambda(n: Int, acc: Int): Int {\n\
+    run {\n\
+        if (n == 0) return acc\n\
+        return inLambda(n - 1, acc + 1)\n\
+    }\n\
+    return -1\n\
+}\n\
+fun box(): String {\n\
+    val answer = inLambda(100, 0)\n\
+    return if (answer == 100) \"OK\" else \"fail: \" + answer\n\
 }\n";
     let out = run(SRC);
     assert_eq!(out, "OK");
@@ -127,4 +198,51 @@ fun box(): String {\n\
 }\n";
     let out = run(SRC);
     assert_eq!(out, "OK");
+}
+
+/// Every shape above, asked of the REFERENCE compiler as well: krusty's build and kotlinc's build
+/// of the same program must answer the same thing.
+///
+/// This is the assertion the box corpus cannot make for these cases. Its threshold tolerates known
+/// failures, so a `tailrec` that silently went back to recursing would keep the lane green; here
+/// the two builds are compared directly, and a `StackOverflowError` on one side and an answer on
+/// the other is exactly the divergence that would report.
+#[test]
+fn tailrec_rewriting_agrees_with_kotlinc() {
+    const SRC: &str = "var trail = \"\"\n\
+tailrec fun early(n: Int): Int {\n\
+    if (n > 0) return early(n - 1)\n\
+    return 0\n\
+}\n\
+tailrec fun inLoop(n: Int, acc: Int): Int {\n\
+    while (true) {\n\
+        if (n == 0) return acc\n\
+        return inLoop(n - 1, acc + 1)\n\
+    }\n\
+}\n\
+tailrec fun guarded(n: Int): Int {\n\
+    try {\n\
+        if (n > 0) return guarded(n - 1)\n\
+    } finally {\n\
+        trail += n.toString()\n\
+    }\n\
+    return 0\n\
+}\n\
+tailrec fun sum(n: Int): Int {\n\
+    if (n == 0) return 0\n\
+    return n + sum(n - 1)\n\
+}\n\
+fun box(): String {\n\
+    if (early(1000000) != 0) return \"fail early\"\n\
+    if (inLoop(1000000, 0) != 1000000) return \"fail loop\"\n\
+    guarded(3)\n\
+    if (trail != \"0123\") return \"fail finally: \" + trail\n\
+    if (sum(10) != 55) return \"fail sum\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some((krusty, reference)) = common::box_run_matches_kotlinc(SRC, "TailrecDiff") else {
+        panic!("tailrec differential: reference compiler unavailable");
+    };
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
 }

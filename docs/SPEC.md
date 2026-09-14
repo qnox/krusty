@@ -4323,14 +4323,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   statement is a tail call too. The rewrite used to reach only the body's last root, so such a
   function was left recursing — and a `tailrec` left recursing is not a slower answer but a
   `StackOverflowError`, which is exactly the outcome the modifier was written to rule out.
-  Descending stops at control flow that carries no scope of its own: a block's statements, a
-  block's value (which is the last statement of a `Unit` block, where a nested `if` ends up) and a
-  `when`'s branches. A `return` inside a LOOP or a `try` keeps its call: the first would jump out of
-  its own loop into the rewritten one, and the second has a `finally` still to run. Only a
-  `return` is rewritten, which is why descending into a block's value is safe wherever that value
-  really is one — a `return` answers no one.
+
+  **What bounds the search is OWNERSHIP, not syntax.** A loop is not a boundary: Kotlin reads
+  `while (…) { … return f(x) }` as a tail call, and the `continue` the rewrite writes carries the
+  synthetic loop's own label, so leaving the inner loop is the rewrite working rather than a reason
+  to skip it. Two things do stop it. An inlined LAMBDA's body owns its own `return`s, and nothing at
+  this level separates one that leaves the enclosing function from one that leaves only the lambda;
+  its captures are ordinary expressions of the enclosing function and stay in the walk. A `try` has
+  a `finally` that still has to run, so a `return` inside it does not leave directly — the ordering
+  of that `finally` is what a test can see, and does.
+
+  A trailing LOOP is left as the statement it is rather than wrapped in a `return`: a loop is not a
+  value and has no tail position of its own, and returning one is what a body ending in
+  `while (true) { … return f(x) }` used to compile to, which the verifier rejected.
   Tests: `tests/tailrec_e2e.rs` (`tailrec_through_a_return_that_is_not_the_last_statement`,
-  `a_call_that_only_looks_like_a_tail_call_still_recurses`).
+  `tailrec_through_a_return_inside_a_loop`, `a_return_a_finally_still_follows_is_not_rewritten`,
+  `a_return_inside_an_inlined_lambda_keeps_its_call`,
+  `a_call_that_only_looks_like_a_tail_call_still_recurses`, and
+  `tailrec_rewriting_agrees_with_kotlinc`, which asks the reference compiler the same questions).
 
 - **Element-form vararg calls select and lower against classpath extensions.** `"a.b".trim('.')`
   expands `trim(vararg chars: Char)` element-wise (an exact element type beats an assignable one, so
