@@ -943,6 +943,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Lower an expression; `None` is Kotlin `Unit`.
     fn expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
+        // `type_of` reads the PHYSICAL shape an expression lowers to, and a value class has the
+        // shape of what it wraps — so an unsigned value reaching a position that only wants a
+        // reference (`"".plus(UInt.MAX_VALUE)`, whose parameter is `Any?`) looked like an ordinary
+        // `Int` and went through as the signed number it wraps: `4294967295u` printing `-1`. The
+        // checked SEMANTIC type is already in common IR beside the expression; consult it here, at
+        // the one point every carried value passes through, so the decline covers every route in
+        // rather than the routes thought of one at a time.
+        if let Some(ty) = self.file.ir.logical_types.get(&id).copied() {
+            check_carried(ty)?;
+        }
         match self.file.ir.expr(id).clone() {
             IrExpr::Const(constant) => self.constant(&constant).map(Some),
             IrExpr::UnitInstance => Ok(None),

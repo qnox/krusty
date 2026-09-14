@@ -1850,12 +1850,16 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr).trim()
         )),
-        // The program prints what `box()` returned, with a trailing newline the JVM run does not
-        // have. Trim only that, so a wrong answer is compared rather than reported as a failure of
-        // its own — the JVM's answer for the same source is the oracle.
+        // The entry prints what `box()` returned, as the LAST line. Anything before it is the
+        // program's own output — `when (b) { true -> println("t") … }` prints `t` and then answers
+        // `OK` — which the JVM path never sees, because there the answer is a return value rather
+        // than a stream. Comparing whole stdout would fail every test whose program prints.
         Ok(output) => NativeBox::Answered(
             String::from_utf8_lossy(&output.stdout)
                 .trim_end_matches('\n')
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
                 .to_owned(),
         ),
     }
