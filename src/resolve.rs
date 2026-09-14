@@ -50,6 +50,7 @@ mod postponed_diagnostics;
 mod safe_call_flow;
 mod sam_constructors;
 mod scope;
+mod singleton_receivers;
 mod source_constructors;
 mod stable_path;
 mod stable_path_legacy_bridge;
@@ -24540,28 +24541,17 @@ impl<'a> Checker<'a> {
     /// that nested singleton; an object denotes itself. This records the Kotlin value receiver;
     /// target storage (including a JVM static field) is chosen only after common lowering.
     fn classifier_singleton_value(&self, internal: TypeName) -> Option<SingletonValue> {
-        let classifier = self.resolver().classifier(internal)?;
-        if classifier.is_object() {
-            return Some(SingletonValue {
-                classifier: internal,
-            });
-        }
-        let (_, companion) = classifier.companion_object.clone()?;
-        Some(SingletonValue {
-            classifier: companion,
-        })
+        singleton_receivers::classifier_singleton_value(&self.resolver(), internal)
     }
 
-    /// Singleton storage applies only when the selected implicit receiver is the singleton classifier
-    /// itself. A receiver of class `C` remains a scoped `C` instance even though `C` also has a
-    /// companion value.
     fn implicit_singleton_value(&self, ty: Ty, current: bool) -> Option<SingletonValue> {
-        if current {
-            return None;
-        }
-        let classifier = ty.non_null().obj_internal()?;
-        self.classifier_singleton_value(classifier)
-            .filter(|singleton| singleton.classifier == classifier)
+        singleton_receivers::implicit_singleton_value(
+            &self.resolver(),
+            ty,
+            current,
+            self.static_singleton_this.as_ref(),
+            self.static_companion_this.as_ref(),
+        )
     }
 
     /// The value a resolved classifier identity denotes in expression position. `None` means it is
