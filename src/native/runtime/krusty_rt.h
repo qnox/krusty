@@ -8,6 +8,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The runtime defines these itself (`krusty_rt.c`), because a compiler may synthesize calls to
+   them from ordinary assignments and loops even under -ffreestanding. Declared here so the
+   runtime's other translation units can call them without a C library's `<string.h>`. */
+void *memcpy(void *destination, const void *source, size_t length);
+void *memset(void *destination, int value, size_t length);
+
 typedef int8_t   kt_byte;
 typedef int16_t  kt_short;
 typedef int32_t  kt_int;
@@ -111,6 +117,8 @@ extern const KType kt_type_int;
 extern const KType kt_type_long;
 extern const KType kt_type_char;
 extern const KType kt_type_boolean;
+extern const KType kt_type_float;
+extern const KType kt_type_double;
 extern const KType kt_type_unit;
 
 /* Every array: the header, the length, then `element_size` bytes per element beginning at the
@@ -206,14 +214,20 @@ kt_int kt_string_length(KRef self);
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 
-/* No `kt_box_float`/`kt_box_double`: a floating-point value has no renderable form yet, so it must
-   not be able to reach a position where something would try to render it. */
+/* `Double.toString`/`Float.toString`: the shortest decimal that reads back as exactly this value,
+   written into `out` (32 bytes is always enough). Returns the number of bytes written. Defined in
+   `krusty_fp.c`, which is where the whole of that question lives. */
+kt_int kt_render_double(kt_double value, char *out);
+kt_int kt_render_float(kt_float value, char *out);
+
 KRef kt_box_byte(kt_byte value);
 KRef kt_box_short(kt_short value);
 KRef kt_box_int(kt_int value);
 KRef kt_box_long(kt_long value);
 KRef kt_box_char(kt_char value);
 KRef kt_box_boolean(kt_boolean value);
+KRef kt_box_float(kt_float value);
+KRef kt_box_double(kt_double value);
 
 kt_byte    kt_unbox_byte(KRef value);
 kt_short   kt_unbox_short(KRef value);
@@ -221,6 +235,8 @@ kt_int     kt_unbox_int(KRef value);
 kt_long    kt_unbox_long(KRef value);
 kt_char    kt_unbox_char(KRef value);
 kt_boolean kt_unbox_boolean(KRef value);
+kt_float   kt_unbox_float(KRef value);
+kt_double  kt_unbox_double(KRef value);
 
 /* Integer division, remainder and shifts. Kotlin defines all three; C leaves the interesting cases
    undefined. Division by zero throws in Kotlin and is undefined in C; `Int.MIN_VALUE / -1` overflows
@@ -261,6 +277,8 @@ void kt_print_int(kt_int value);
 void kt_print_long(kt_long value);
 void kt_print_char(kt_char value);
 void kt_print_boolean(kt_boolean value);
+void kt_print_float(kt_float value);
+void kt_print_double(kt_double value);
 
 void kt_println_any(KRef value);
 void kt_println_byte(kt_byte value);
@@ -269,6 +287,8 @@ void kt_println_int(kt_int value);
 void kt_println_long(kt_long value);
 void kt_println_char(kt_char value);
 void kt_println_boolean(kt_boolean value);
+void kt_println_float(kt_float value);
+void kt_println_double(kt_double value);
 void kt_println_unit(void);
 
 /* The generated entry point calls this after running the program's `main`. */

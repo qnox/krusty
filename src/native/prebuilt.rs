@@ -30,10 +30,17 @@ mod tests {
 
     #[test]
     fn a_prebuilt_runtime_has_every_source_and_is_an_elf_object() {
-        // On a host without clang this is legitimately empty; the native tests skip. On one with it,
-        // every target must carry all three objects, each a real ELF relocatable.
+        // On a host without clang this is legitimately empty; the native tests skip. On one with
+        // it, every target must carry one object per runtime source, each a real ELF relocatable.
+        // The count comes from `build.rs`'s own list, so adding a source cannot silently leave a
+        // target short of it.
+        const SOURCES: usize = 4;
         for (arch, objects) in PREBUILT {
-            assert_eq!(objects.len(), 3, "{arch:?} is missing a runtime object");
+            assert_eq!(
+                objects.len(),
+                SOURCES,
+                "{arch:?} is missing a runtime object"
+            );
             for (name, bytes) in objects.iter() {
                 assert!(name.ends_with(".o"), "{name}");
                 assert_eq!(&bytes[..4], b"\x7fELF", "{arch:?}/{name} is not ELF");

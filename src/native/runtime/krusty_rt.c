@@ -145,6 +145,8 @@ struct KObject {
         kt_long long_value;
         kt_char char_value;
         kt_boolean boolean_value;
+        kt_float float_value;
+        kt_double double_value;
     } as;
 };
 
@@ -157,6 +159,8 @@ KT_TYPE(kt_type_int, "kotlin.Int", sizeof(KObject), 0, NULL)
 KT_TYPE(kt_type_long, "kotlin.Long", sizeof(KObject), 0, NULL)
 KT_TYPE(kt_type_char, "kotlin.Char", sizeof(KObject), 0, NULL)
 KT_TYPE(kt_type_boolean, "kotlin.Boolean", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_float, "kotlin.Float", sizeof(KObject), 0, NULL)
+KT_TYPE(kt_type_double, "kotlin.Double", sizeof(KObject), 0, NULL)
 KT_TYPE(kt_type_unit, "kotlin.Unit", sizeof(KObject), 0, NULL)
 
 #undef KT_TYPE
@@ -272,6 +276,14 @@ static const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
         *storage = (KRef)buffer;
         return kt_bytes_of(buffer);
     }
+    if (type == &kt_type_double || type == &kt_type_float) {
+        KByteArray *buffer = kt_bytes_new(32);
+        *byte_length = type == &kt_type_double
+                           ? kt_render_double(value->as.double_value, kt_bytes_of(buffer))
+                           : kt_render_float(value->as.float_value, kt_bytes_of(buffer));
+        *storage = (KRef)buffer;
+        return kt_bytes_of(buffer);
+    }
     kt_long number;
     if (type == &kt_type_byte) {
         number = value->as.byte_value;
@@ -366,6 +378,20 @@ KT_BOX(boolean, kt_type_boolean, boolean_value, kt_boolean, 0, 1)
 
 #undef KT_BOX
 
+/* No small-value cache for these two: `(int)value` would round, so `0.5` and `0.0` would share a
+   cache slot and a boxed `0.5` would come back `0.0`. */
+KRef kt_box_float(kt_float value) {
+    KRef object = kt_new(&kt_type_float);
+    object->as.float_value = value;
+    return object;
+}
+
+KRef kt_box_double(kt_double value) {
+    KRef object = kt_new(&kt_type_double);
+    object->as.double_value = value;
+    return object;
+}
+
 /* Unboxing a `null` is Kotlin's `NullPointerException`. With no exception machinery yet, the
    honest realization is a diagnosable exit rather than a silent zero. */
 #define KT_UNBOX(suffix, field, type)                                                              \
@@ -382,6 +408,8 @@ KT_UNBOX(int, int_value, kt_int)
 KT_UNBOX(long, long_value, kt_long)
 KT_UNBOX(char, char_value, kt_char)
 KT_UNBOX(boolean, boolean_value, kt_boolean)
+KT_UNBOX(float, float_value, kt_float)
+KT_UNBOX(double, double_value, kt_double)
 
 #undef KT_UNBOX
 
@@ -496,6 +524,23 @@ static kt_boolean kt_builtin_equals(KRef self, KRef other) {
     if (type == &kt_type_long) {
         return self->as.long_value == other->as.long_value;
     }
+    /* Boxed floating-point values compare by BITS, which is what `equals` means in Kotlin and not
+       what `==` on two `Double`s means: `Double.NaN.equals(Double.NaN)` is true where
+       `Double.NaN == Double.NaN` is false, and `0.0.equals(-0.0)` is false where `0.0 == -0.0` is
+       true. The scalar comparison the generator emits for `==` is the other rule, and neither is
+       this one. */
+    if (type == &kt_type_double) {
+        uint64_t left, right;
+        memcpy(&left, &self->as.double_value, sizeof left);
+        memcpy(&right, &other->as.double_value, sizeof right);
+        return left == right;
+    }
+    if (type == &kt_type_float) {
+        uint32_t left, right;
+        memcpy(&left, &self->as.float_value, sizeof left);
+        memcpy(&right, &other->as.float_value, sizeof right);
+        return left == right;
+    }
     /* kotlin.Unit: one instance, already handled by identity above. */
     return false;
 }
@@ -558,6 +603,18 @@ static kt_int kt_builtin_hash_code(KRef self) {
     if (type == &kt_type_long) {
         uint64_t bits = (uint64_t)self->as.long_value;
         return (kt_int)(uint32_t)(bits ^ (bits >> 32));
+    }
+    /* Kotlin's answers for these are fixed — a program can print a hash — and they are the bits,
+       folded for a `Double` the way a `Long`'s are. */
+    if (type == &kt_type_double) {
+        uint64_t bits;
+        memcpy(&bits, &self->as.double_value, sizeof bits);
+        return (kt_int)(uint32_t)(bits ^ (bits >> 32));
+    }
+    if (type == &kt_type_float) {
+        uint32_t bits;
+        memcpy(&bits, &self->as.float_value, sizeof bits);
+        return (kt_int)bits;
     }
     return kt_any_hash_code(self);
 }
@@ -777,6 +834,8 @@ KT_CONSOLE(int, kt_int, kt_box_int)
 KT_CONSOLE(long, kt_long, kt_box_long)
 KT_CONSOLE(char, kt_char, kt_box_char)
 KT_CONSOLE(boolean, kt_boolean, kt_box_boolean)
+KT_CONSOLE(float, kt_float, kt_box_float)
+KT_CONSOLE(double, kt_double, kt_box_double)
 
 #undef KT_CONSOLE
 

@@ -436,24 +436,6 @@ fn a_null_check_and_identity_stay_pointer_comparisons() {
 }
 
 #[test]
-fn printing_a_floating_point_value_is_declined_at_compile_time() {
-    let Some(target) = host() else {
-        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
-        return;
-    };
-    // Kotlin's `Double.toString` is the shortest-round-trip algorithm. Nothing implements it yet,
-    // so the runtime has no way to render a floating-point value and no box to put one in — and
-    // the backend says so rather than producing a program that prints something Kotlin never would.
-    let (_, diagnostics) = compile(&[("Main", "fun main() { println(1.5) }")], target);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("native backend does not support")),
-        "expected a declining diagnostic, got {diagnostics:?}"
-    );
-}
-
-#[test]
 fn an_unsupported_construct_is_declined_with_a_diagnostic() {
     let Some(target) = host() else {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -2197,5 +2179,45 @@ fn an_enum_constant_may_have_a_body() {
              \x20   println(Plain.B.name + Plain.B.ordinal)\n\
              }\n"),
         "5\n12\n*MUL1\n2\nADD\nMUL\ntrue\nB1\n"
+    );
+}
+
+#[test]
+fn floating_point_values_render_as_kotlin_renders_them() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin's `toString` for a floating-point value is the SHORTEST decimal that reads back as
+    // exactly that value, printed plainly while the magnitude is in `[10^-3, 10^7)` and as
+    // `d.dddEn` outside it. The runtime works that out with exact integer arithmetic
+    // (`krusty_fp.c`); every value here is one where a shorter algorithm gives a different answer —
+    // `0.1` has no exact binary form, `0.1 + 0.2` needs all seventeen digits, `9999999.0` and
+    // `1.0E7` sit either side of the format boundary, and `Double.MIN_VALUE` is the case where the
+    // shortest decimal is deliberately NOT what Kotlin prints.
+    assert_eq!(
+        run(
+            "fun main() {\n\
+             \x20   println(0.0)\n\
+             \x20   println(-0.0)\n\
+             \x20   println(0.1)\n\
+             \x20   println(0.1 + 0.2)\n\
+             \x20   println(1.0 / 3.0)\n\
+             \x20   println(9999999.0)\n\
+             \x20   println(1.0E7)\n\
+             \x20   println(0.001)\n\
+             \x20   println(1.0E-4)\n\
+             \x20   println(Double.MIN_VALUE)\n\
+             \x20   println(Double.MAX_VALUE)\n\
+             \x20   println(1.0 / 0.0)\n\
+             \x20   println(0.0 / 0.0)\n\
+             \x20   println(1.0f / 3.0f)\n\
+             \x20   println(Float.MIN_VALUE)\n\
+             \x20   val boxed: Any = 2.5\n\
+             \x20   println(boxed)\n\
+             \x20   println(\"x=\" + 1.5 + \" y=\" + 2.5f)\n\
+             }\n"
+        ),
+        "0.0\n-0.0\n0.1\n0.30000000000000004\n0.3333333333333333\n9999999.0\n1.0E7\n0.001\n1.0E-4\n4.9E-324\n1.7976931348623157E308\nInfinity\nNaN\n0.33333334\n1.4E-45\n2.5\nx=1.5 y=2.5\n"
     );
 }

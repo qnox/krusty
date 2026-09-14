@@ -1296,6 +1296,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   completed surrogate pair comes back out as text), which is what lets the constant pool keep deduping
   on value equality. `trimIndent`/`trimMargin` fold in code units too, matching how Kotlin measures an
   indent. Tests: `tests/utf16_string_constant_e2e.rs`, `kt_string::tests`.
+  **A floating-point value renders as the SHORTEST decimal that reads back as exactly that value**,
+  plainly while the magnitude is in `[10^-3, 10^7)` and as `d.dddEn` outside it — `0.1` is `"0.1"`,
+  `0.1 + 0.2` is `"0.30000000000000004"`, `9999999.0` is `"9999999.0"` and `1.0E7` is `"1.0E7"`.
+  Two clauses beyond "shortest" are Kotlin's own: where ONE significant digit would suffice, the
+  two-digit decimals are considered alongside it and the closer to the value wins, which is why
+  `Double.MIN_VALUE` is `"4.9E-324"` rather than the shorter, equally round-tripping `5E-324`; and
+  `equals` on a BOXED value compares bits where `==` on two `Double`s compares numbers, so a boxed
+  `NaN` equals itself and a boxed `0.0` does not equal `-0.0`, each the opposite of the unboxed
+  answer. The native runtime computes the digits with exact integer arithmetic
+  (`src/native/runtime/krusty_fp.c`), verified against the JVM's own rendering over a million
+  values. Tests: `tests/float_rendering_e2e.rs`.
   `length` counts those same UTF-16 code units, which is not free for a runtime that stores UTF-8:
   the native runtime walks the bytes (`kt_string_length`), counting each byte that is not a
   continuation byte and adding one more for each four-byte sequence, because a code point above

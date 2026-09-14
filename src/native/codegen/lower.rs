@@ -1361,9 +1361,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let ty = source.expect("known scalar");
                 let Some(suffix) = box_suffix(ty) else {
                     return Err(format!(
-                        "a `{}` in a position that requires a reference (the runtime cannot render \
-                         a floating-point value)",
-                        if ty == Ty::Float { "Float" } else { "Double" }
+                        "a `{ty:?}` in a position that requires a reference"
                     ));
                 };
                 self.runtime_call(
@@ -1376,7 +1374,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             (Some(Carrier::Ref), Carrier::Scalar(_, _)) => {
                 let ty = target_ty_of(target).expect("scalar carrier");
                 let Some(suffix) = box_suffix(ty) else {
-                    return Err("an unboxing to a floating-point value".to_string());
+                    return Err(format!("an unboxing to `{ty:?}`"));
                 };
                 self.runtime_call(
                     &format!("kt_unbox_{suffix}"),
@@ -2209,8 +2207,7 @@ fn target_ty_of(carrier: Carrier) -> Option<Ty> {
     }
 }
 
-/// The runtime's box/unbox suffix. `None` for floating point: the runtime has no box for them on
-/// purpose, because it cannot render one (see `src/native/runtime/krusty_rt.c`).
+/// The runtime's box/unbox suffix for a scalar.
 fn box_suffix(ty: Ty) -> Option<&'static str> {
     Some(match ty {
         Ty::Boolean => "boolean",
@@ -2219,6 +2216,8 @@ fn box_suffix(ty: Ty) -> Option<&'static str> {
         Ty::Char => "char",
         Ty::Int => "int",
         Ty::Long => "long",
+        Ty::Float => "float",
+        Ty::Double => "double",
         _ => return None,
     })
 }

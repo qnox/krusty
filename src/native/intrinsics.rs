@@ -56,10 +56,6 @@ enum ConsoleOperand {
     Scalar(&'static str),
     /// A reference — the `Any?` overload, exactly as Kotlin's own overload set selects it.
     Reference,
-    /// A floating-point value, which the runtime cannot render (see `super::runtime`). Kept
-    /// distinct from the other two so it DECLINES rather than falling through to `Any?`, which
-    /// would ask for a box that deliberately does not exist.
-    Unrenderable,
 }
 
 fn console_operand(ty: Ty) -> ConsoleOperand {
@@ -70,7 +66,8 @@ fn console_operand(ty: Ty) -> ConsoleOperand {
         Ty::Long => ConsoleOperand::Scalar("long"),
         Ty::Char => ConsoleOperand::Scalar("char"),
         Ty::Boolean => ConsoleOperand::Scalar("boolean"),
-        Ty::Float | Ty::Double => ConsoleOperand::Unrenderable,
+        Ty::Float => ConsoleOperand::Scalar("float"),
+        Ty::Double => ConsoleOperand::Scalar("double"),
         _ => ConsoleOperand::Reference,
     }
 }
@@ -84,7 +81,6 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
             match console_operand(*argument) {
                 ConsoleOperand::Scalar(suffix) => Some(format!("kt_{name}_{suffix}")),
                 ConsoleOperand::Reference => Some(format!("kt_{name}_any")),
-                ConsoleOperand::Unrenderable => None,
             }
         }
         _ => None,
@@ -233,18 +229,16 @@ mod tests {
     }
 
     #[test]
-    fn printing_a_floating_point_value_is_declined_rather_than_routed_through_any() {
-        // The runtime has no `kt_box_double`, because Kotlin's `Double.toString` is the
-        // shortest-round-trip algorithm and nothing here implements it. Falling through to the
-        // `Any?` overload would ask for that box and fail at LINK time, with no diagnostic naming
-        // the construct.
+    fn a_floating_point_value_prints_through_its_own_overload() {
+        // Kotlin's overload set has one per primitive, and so does the runtime: the value reaches
+        // it unboxed, and `krusty_fp.c` decides what it looks like.
         assert_eq!(
-            runtime_function("kotlin/io/ConsoleKt", "println", &[Ty::Double]),
-            None
+            runtime_function("kotlin/io/ConsoleKt", "println", &[Ty::Double]).as_deref(),
+            Some("kt_println_double")
         );
         assert_eq!(
-            runtime_function("kotlin/io/ConsoleKt", "print", &[Ty::Float]),
-            None
+            runtime_function("kotlin/io/ConsoleKt", "print", &[Ty::Float]).as_deref(),
+            Some("kt_print_float")
         );
     }
 

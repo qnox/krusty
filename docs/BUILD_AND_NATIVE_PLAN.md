@@ -1324,6 +1324,25 @@ before:**
    because the subclass inherits the enum's whole layout and table. It found one gap in passing:
    `name` and `ordinal` belong to `kotlin.Enum`, which no file declares, so the checked property
    table had nothing to say about their types and a concatenation of one could not be typed.
+   Then floating point, for **2152 pass** — the largest single decline on the list, and the one with
+   an actual algorithm behind it. Kotlin's `toString` for a `Double` is the SHORTEST decimal that
+   reads back as exactly that value, printed plainly inside `[10^-3, 10^7)` and as `d.dddEn`
+   outside. That is not a formatting preference a runtime may pick: a program prints these, so
+   `0.1` must not come out `0.1000000000000000055511151231257827` and `1.0E7` must not come out
+   `10000000.0`. The runtime works it out with Steele & White's generator in Burger & Dybvig's
+   formulation — the value and both boundaries of its rounding interval carried as exact rationals,
+   scaled, then digits emitted until what is written already reads back — which means big integers
+   (the intermediates reach about 2^1140) and no floating-point arithmetic anywhere, since a
+   shortest-digits routine that rounded would be deciding the answer with the imprecision it exists
+   to describe. It lives in `src/native/runtime/krusty_fp.c` and was verified against the JVM's own
+   `Double.toString`/`Float.toString` over a million values — random bit patterns, every small
+   subnormal, powers of ten and their neighbours, short decimal literals — with no disagreement.
+   Two details are Kotlin's rather than the algorithm's and are written down where they are made:
+   where ONE digit would do, the two-digit decimals are considered alongside it and the closer wins
+   (which is why `Double.MIN_VALUE` is `4.9E-324` and not the shorter, equally round-tripping
+   `5E-324`), and `equals` on a boxed value compares BITS where `==` on two `Double`s compares
+   numbers — so a boxed `NaN` equals itself and a boxed `0.0` does not equal `-0.0`, each the
+   opposite of the unboxed answer.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
