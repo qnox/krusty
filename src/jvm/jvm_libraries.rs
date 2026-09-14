@@ -3,6 +3,8 @@
 //! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
+mod inline_body_plan;
+
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
@@ -3753,47 +3755,6 @@ fn interface_holder_method(
         .then_some((holder, descriptor))
 }
 
-fn inline_body_descriptor(callable: &LibraryCallable) -> Option<String> {
-    if !callable.suspend {
-        return Some(callable.descriptor.clone());
-    }
-    let close = callable.descriptor.rfind(')')?;
-    Some(format!(
-        "({}{}){}",
-        &callable.descriptor[1..close],
-        CONTINUATION_PARAM_DESCRIPTOR,
-        &callable.descriptor[close + 1..]
-    ))
-}
-
-fn callable_parameter_slots(parameters: &[Ty]) -> Vec<u16> {
-    let mut next = 0u16;
-    parameters
-        .iter()
-        .map(|parameter| {
-            let slot = next;
-            next += u16::from(matches!(*parameter, Ty::Long | Ty::Double)) + 1;
-            slot
-        })
-        .collect()
-}
-
-fn inline_plan_member(target: (&str, &str, &str, bool), suspend: bool) -> Option<LibraryMember> {
-    let (owner, name, descriptor, interface) = target;
-    let logical_descriptor = if suspend {
-        strip_continuation_param(descriptor)
-    } else {
-        descriptor.to_string()
-    };
-    let (params, ret) = parse_method_desc(&logical_descriptor)?;
-    let mut member = LibraryMember::new(name.to_string(), params, ret, logical_descriptor);
-    member.owner = Some(type_name(owner));
-    member.physical_ret = parse_method_desc(descriptor)?.1;
-    member.set_is_interface(interface);
-    member.set_suspend(suspend);
-    Some(member)
-}
-
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
@@ -5514,205 +5475,6 @@ impl crate::types::ClassifierAnnotationSource for JvmLibraries {
 }
 
 impl JvmLibraries {
-    fn inline_body_plan(&self, callable: &LibraryCallable) -> Option<InlineBodyPlan> {
-        if !callable.inline.can_inline() {
-            return None;
-        }
-        let body_descriptor = inline_body_descriptor(callable)?;
-        // Every candidate overload the provider builds computes a plan, so the decode below —
-        // body read, disassembly, invoke-site analysis — is memoized per declaration. The key must
-        // carry EVERY input the decode reads: besides the bytecode locator, the callable's
-        // physical slot layout and `$default` bridge — the same JVM method surfaces through
-        // several provider channels (plain, suspend facade, extension) whose plans differ in
-        // exactly those parameter indexes.
-        let parameter_slots = callable_parameter_slots(&callable.physical_params);
-        let default_descriptor = callable
-            .default_realization
-            .as_deref()
-            .map(|realization| realization.descriptor.as_str());
-        if let Some(plan) = self.cp.cached_inline_plan(
-            callable.owner,
-            &callable.name,
-            &body_descriptor,
-            &parameter_slots,
-            default_descriptor,
-        ) {
-            return plan.map(|boxed| *boxed);
-        }
-        let mut body_unavailable = false;
-        let plan = self.inline_body_plan_uncached(
-            callable,
-            &body_descriptor,
-            &parameter_slots,
-            &mut body_unavailable,
-        );
-        // "No plan" is only a memoizable FACT when it was decoded from bytes actually read. A
-        // failed body read (archive open/read error under load, a jar changing mid-run) must stay
-        // transient — publishing it into the per-entry global map would suppress the plan for
-        // every later compile sharing the jar (the body cache guards the same hazard one level
-        // down: "only a SUCCESSFUL read may populate the process-global cache").
-        if !body_unavailable {
-            self.cp.memoize_inline_plan(
-                callable.owner,
-                &callable.name,
-                &body_descriptor,
-                &parameter_slots,
-                default_descriptor,
-                plan.clone().map(Box::new),
-            );
-        }
-        plan
-    }
-
-    /// Decode one callable's inline-body plan from bytecode. `body_unavailable` is set (and `None`
-    /// returned) when a body READ failed — the caller must not memoize that answer; a `None` with
-    /// the flag clear is a decoded "no expandable shape", which is a stable fact of the bytes.
-    fn inline_body_plan_uncached(
-        &self,
-        callable: &LibraryCallable,
-        body_descriptor: &str,
-        parameter_slots: &[u16],
-        body_unavailable: &mut bool,
-    ) -> Option<InlineBodyPlan> {
-        let owner = callable.owner.render();
-        let inline_name = format!("{}$$forInline", callable.name);
-        let Some(body) = self
-            .cp
-            .method_code(&owner, &inline_name, body_descriptor)
-            .or_else(|| self.cp.method_code(&owner, &callable.name, body_descriptor))
-        else {
-            *body_unavailable = true;
-            return None;
-        };
-        let instructions = crate::jvm::inline::disassemble(&body.code)?;
-        let parameter_at = |slot: u16| {
-            parameter_slots
-                .iter()
-                .position(|candidate| *candidate == slot)
-        };
-        let invoke_sites =
-            crate::jvm::inline::function_invoke_sites(&instructions, &body.source_cp);
-        let [invoke] = invoke_sites.as_slice() else {
-            return None;
-        };
-        let invoke_loads = instructions[..*invoke]
-            .iter()
-            .rev()
-            .map_while(crate::jvm::inline::loaded_local)
-            .collect::<Vec<_>>();
-        // JVM invocation operands are loaded receiver-first. Walking backward therefore sees
-        // arguments first and the function object last.
-        let (&lambda_slot, invoke_argument_slots) = invoke_loads.split_last()?;
-        let lambda_parameter = parameter_at(lambda_slot)?;
-
-        let calls = instructions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, instruction)| {
-                let target = crate::jvm::inline::invoked_method(instruction, &body.source_cp)?;
-                (!target.0.starts_with("kotlin/jvm/internal/")
-                    && !target.0.starts_with("kotlin/jvm/functions/"))
-                .then_some((index, target))
-            })
-            .collect::<Vec<_>>();
-        let enter = calls.iter().find(|(index, target)| {
-            *index < *invoke && target.2.contains("Lkotlin/coroutines/Continuation;")
-        });
-        if enter.is_none() {
-            if !calls.is_empty() {
-                return None;
-            }
-            let argument_parameters = invoke_argument_slots
-                .iter()
-                .rev()
-                .map(|slot| parameter_at(*slot))
-                .collect::<Option<Vec<_>>>()?;
-            let return_parameter = instructions
-                .iter()
-                .rev()
-                .nth(1)
-                .and_then(crate::jvm::inline::loaded_local)
-                .and_then(parameter_at);
-            return Some(InlineBodyPlan::InvokeLambda {
-                lambda_parameter,
-                argument_parameters,
-                return_parameter,
-            });
-        }
-        let enter = enter?;
-        let cleanup_calls = calls
-            .iter()
-            .filter(|(index, target)| *index > *invoke && *target != enter.1)
-            .collect::<Vec<_>>();
-        let [cleanup, repeated] = cleanup_calls.as_slice() else {
-            return None;
-        };
-        if cleanup.1 != repeated.1 {
-            return None;
-        }
-        let receiver_slot = instructions[..enter.0]
-            .iter()
-            .rev()
-            .filter_map(crate::jvm::inline::loaded_local)
-            .nth(2)?;
-        if parameter_at(receiver_slot)? != 0 {
-            return None;
-        }
-        let state_slot = instructions[..enter.0]
-            .iter()
-            .rev()
-            .filter_map(crate::jvm::inline::loaded_local)
-            .nth(1)?;
-        let state_parameter = parameter_at(state_slot)?;
-        match self.inline_default_is_null(callable, parameter_slots, state_parameter) {
-            None => {
-                *body_unavailable = true;
-                return None;
-            }
-            Some(false) => return None,
-            Some(true) => {}
-        }
-        let enter = inline_plan_member(enter.1, true)?;
-        let cleanup = inline_plan_member(cleanup.1, false)?;
-        Some(InlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter,
-            state_parameter,
-            state_default: crate::libraries::DefaultValue::Null,
-            enter: Box::new(enter),
-            cleanup: Box::new(cleanup),
-        })
-    }
-
-    /// Whether the `$default` bridge stores `null` into `parameter`'s slot. `None` means the bridge
-    /// body could not be READ (a transient failure the caller must not memoize); `Some(false)`
-    /// covers every decoded negative, including "the callable has no `$default` bridge at all"
-    /// (stable — the bridge descriptor is part of the plan cache key).
-    fn inline_default_is_null(
-        &self,
-        callable: &LibraryCallable,
-        parameter_slots: &[u16],
-        parameter: usize,
-    ) -> Option<bool> {
-        let Some(realization) = callable.default_realization.as_deref() else {
-            return Some(false);
-        };
-        let owner = realization.declaration_owner.render();
-        // A failed bridge-body READ is the transient case the caller must not memoize.
-        let body = self
-            .cp
-            .method_code(&owner, &realization.name, &realization.descriptor)?;
-        let Some(instructions) = crate::jvm::inline::disassemble(&body.code) else {
-            return Some(false);
-        };
-        let Some(slot) = parameter_slots.get(parameter).copied() else {
-            return Some(false);
-        };
-        Some(instructions.windows(2).any(|window| {
-            matches!(window[0], crate::jvm::inline::Insn::Plain { op: 0x01, .. })
-                && crate::jvm::inline::stored_local(&window[1]) == Some(slot)
-        }))
-    }
-
     fn top_level_default_realization(
         &self,
         callable: &LibraryCallable,
@@ -7737,13 +7499,52 @@ mod tests {
                 function.callable.inline_body_plan.as_deref(),
                 Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
                     lambda_parameter: 2,
-                    state_parameter: 1,
+                    state: Some(state),
                     enter,
                     cleanup,
-                    ..
-                }) if enter.suspend() && !cleanup.suspend()
+                }) if state.parameter == 1 && enter.suspend() && !cleanup.suspend()
             )
         }));
+    }
+
+    /// The same shape with NO state argument. `Semaphore.withPermit` calls `acquire(continuation)`
+    /// and `release()`, where `Mutex.withLock` calls `lock(owner, continuation)` and
+    /// `unlock(owner)`. Reading the enter member's own descriptor is what makes both decode; a
+    /// fixed operand position recognized only the one that happens to carry an extra parameter.
+    #[test]
+    fn suspend_finally_inline_body_decodes_without_a_state_argument() {
+        let (Some(stdlib), Some(coroutines)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::coroutines_jar(),
+        ) else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, coroutines]),
+        ));
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlinx/coroutines/sync")),
+            "withPermit",
+        );
+        assert!(
+            symbols.callables.functions().iter().any(|function| {
+                matches!(
+                    function.callable.inline_body_plan.as_deref(),
+                    Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
+                        lambda_parameter: 1,
+                        state: None,
+                        enter,
+                        cleanup,
+                    }) if enter.suspend()
+                        && !cleanup.suspend()
+                        && enter.params.is_empty()
+                        && cleanup.params.is_empty()
+                        && enter.ret == Ty::Unit
+                        && cleanup.ret == Ty::Unit
+                )
+            }),
+            "withPermit must decode the stateless enter/cleanup shape with metadata-owned Unit results"
+        );
     }
 
     #[test]

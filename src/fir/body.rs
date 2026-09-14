@@ -1997,9 +1997,10 @@ pub struct FirBody {
     debug_name: Option<Box<str>>,
     source_lambda: bool,
     debug_binding_name: Option<Box<str>>,
+    /// Checked execution-scope fact; nested callable bodies own their own value.
+    pub(super) direct_suspension: bool,
     debug_value_names: HashMap<LocalValueId, Box<str>>,
-    /// Total physical source lines for debug metadata. This scalar output fact cannot locate or
-    /// reparse text and is discarded with ordinary FIR after its common-IR consumer runs.
+    /// Physical source-line count for debug output; it carries no source lookup capability.
     source_line_count: u32,
     expression_debug_lines: Vec<FirExpressionDebugLines>,
     statement_debug_lines: Vec<u32>,
@@ -2017,14 +2018,9 @@ pub struct FirBody {
     roots: Vec<FirStatementId>,
     local_value_count: u32,
     local_callable_count: u32,
-    /// Checked bodies of declarations lexically contained by this retained inline body (for
-    /// example an anonymous object's constructor and member methods). They are part of the inline
-    /// payload, not independently retained ordinary module bodies, and are consumed only when this
-    /// inline body is materialized in a caller.
+    /// Checked nested declarations retained only as part of this inline payload.
     inline_nested_declaration_bodies: Vec<FirBody>,
-    /// Closure environments of local classifiers declared by this checked fragment. This field is
-    /// populated only as part of constructing the FIR body itself. Consequently it survives Pass 1
-    /// only when the surrounding body is retained for inline/default semantics.
+    /// Local-class closure environments retained with inline/default bodies.
     class_body_contexts: HashMap<DeclarationId, ClassBodyContext>,
 }
 
@@ -2053,6 +2049,7 @@ impl FirBody {
             debug_name: None,
             source_lambda: false,
             debug_binding_name: None,
+            direct_suspension: false,
             debug_value_names: HashMap::new(),
             source_line_count: 0,
             expression_debug_lines: Vec::new(),

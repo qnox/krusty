@@ -3,6 +3,41 @@
 use super::*;
 
 impl BodyFirChecker<'_> {
+    fn record_expression_suspension(&mut self, source: ExprId) {
+        let invoke = match self.info.expr_lowers.get(&source) {
+            Some(
+                ExprLowering::Invoke { kind, .. } | ExprLowering::SafePropertyInvoke { kind, .. },
+            ) => match kind {
+                InvokeKind::Function { suspend, .. } => *suspend,
+                InvokeKind::Operator { target, .. } => target.suspends(),
+            },
+            Some(ExprLowering::ReceiverFnInvoke { suspend, .. }) => *suspend,
+            _ => false,
+        };
+        if self.info.convention_call_suspends(source) || invoke {
+            self.body.direct_suspension = true;
+        }
+    }
+
+    pub(super) fn finalize_inline_plan(
+        &self,
+        source: ExprId,
+        kind: &mut FirExprKind,
+    ) -> Result<(), BodyCheckFailure> {
+        let call = match kind {
+            FirExprKind::Call(call)
+            | FirExprKind::ComparisonCall { call, .. }
+            | FirExprKind::ContainmentCall { call, .. } => call,
+            _ => return Ok(()),
+        };
+        super::inline_body_plan::finalize(&self.body, call).map_err(|_| {
+            self.failure(
+                self.file.expr_span(source),
+                BodyCheckFailureKind::UnsupportedCallShape,
+            )
+        })
+    }
+
     pub(super) fn expression_origin(
         &mut self,
         expression: ExprId,
@@ -111,8 +146,10 @@ impl BodyFirChecker<'_> {
     pub(super) fn add_expression(
         &mut self,
         source: ExprId,
-        kind: FirExprKind,
+        mut kind: FirExprKind,
     ) -> Result<FirExprId, BodyCheckFailure> {
+        self.record_expression_suspension(source);
+        self.finalize_inline_plan(source, &mut kind)?;
         let origin = self.expression_origin(source)?;
         let semantic = self.info.semantic_ty(source);
         let stable = match &kind {
@@ -209,8 +246,10 @@ impl BodyFirChecker<'_> {
         &mut self,
         source: ExprId,
         ty: ResolvedTy,
-        kind: FirExprKind,
+        mut kind: FirExprKind,
     ) -> Result<FirExprId, BodyCheckFailure> {
+        self.record_expression_suspension(source);
+        self.finalize_inline_plan(source, &mut kind)?;
         let origin = self.expression_origin(source)?;
         Ok(self.body.add_expr(FirExpr { origin, ty, kind }))
     }

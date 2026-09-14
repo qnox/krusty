@@ -58,3 +58,14 @@ fn withlock_lambda_with_suspend_and_nonlocal_return_compiles() {
         "the non-local-return withLock shape should compile, not be declined"
     );
 }
+
+#[test]
+fn map_lambda_safely_invokes_a_suspend_function_property() {
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        class Holder(val callback: suspend () -> String)\n\
+        suspend fun answer(): String = \"OK\"\n\
+        suspend fun collect(holder: Holder?): String =\n\
+            listOf(0).map { holder?.callback() ?: \"none\" }[0]\n\
+        fun box(): String = runBlocking { collect(Holder { answer() }) }\n";
+    assert_eq!(run(MAIN).expect("safe suspend property in map"), "OK");
+}

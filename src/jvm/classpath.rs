@@ -1012,9 +1012,19 @@ fn global_entry_class_bytes_cache(key: &EntryKey) -> ClassBytesCache {
 /// the per-instance LRU.
 /// The full input set a plan decode reads: owner + source name + body descriptor locate the
 /// bytecode, but the SAME method surfaces through several provider channels (plain, suspend
-/// facade, extension) whose `physical_params` slot layouts and `$default` bridges differ — and the
-/// decoded plan's parameter INDEXES depend on both. Two channels must therefore never share a slot.
-type PlanKey = (TypeName, String, String, Vec<u16>, Option<String>);
+/// facade, extension) whose semantic roles, `physical_params` slot layouts, and `$default` targets
+/// differ — and the decoded plan's parameter INDEXES and defaults depend on all three. Two channels
+/// must therefore never share a plan unless every decoder input agrees.
+type PlanKey = (
+    TypeName,
+    String,
+    String,
+    Vec<u16>,
+    usize,
+    Option<Ty>,
+    Vec<Ty>,
+    Option<(TypeName, String, String)>,
+);
 type PlanMap = HashMap<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>;
 type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMap>>;
 fn global_plan_cache(key: &[EntryKey]) -> PlanCache {
@@ -4423,7 +4433,10 @@ impl Classpath {
         name: &str,
         body_descriptor: &str,
         parameter_slots: &[u16],
-        default_descriptor: Option<&str>,
+        context_count: usize,
+        source_receiver: Option<Ty>,
+        semantic_parameters: &[Ty],
+        default_target: Option<(TypeName, &str, &str)>,
     ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
         if !self.plan_is_cacheable() {
             cache_stat!(inline_plans, false);
@@ -4434,7 +4447,11 @@ impl Classpath {
             name.to_string(),
             body_descriptor.to_string(),
             parameter_slots.to_vec(),
-            default_descriptor.map(str::to_string),
+            context_count,
+            source_receiver,
+            semantic_parameters.to_vec(),
+            default_target
+                .map(|(owner, name, descriptor)| (owner, name.to_string(), descriptor.to_string())),
         );
         if let Some(hit) = self.inline_plans.borrow_mut().get(&key) {
             cache_stat!(inline_plans, true);
@@ -4459,7 +4476,10 @@ impl Classpath {
         name: &str,
         body_descriptor: &str,
         parameter_slots: &[u16],
-        default_descriptor: Option<&str>,
+        context_count: usize,
+        source_receiver: Option<Ty>,
+        semantic_parameters: &[Ty],
+        default_target: Option<(TypeName, &str, &str)>,
         plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     ) {
         if !self.plan_is_cacheable() {
@@ -4470,7 +4490,11 @@ impl Classpath {
             name.to_string(),
             body_descriptor.to_string(),
             parameter_slots.to_vec(),
-            default_descriptor.map(str::to_string),
+            context_count,
+            source_receiver,
+            semantic_parameters.to_vec(),
+            default_target
+                .map(|(owner, name, descriptor)| (owner, name.to_string(), descriptor.to_string())),
         );
         if let Some(global) = self.shared_inline_plans.as_ref() {
             global.write().unwrap().insert(key.clone(), plan.clone());
@@ -8542,11 +8566,40 @@ mod fq_tests {
             return_parameter: None,
         };
         let cp = Classpath::new(vec![]);
-        cp.memoize_inline_plan(owner, "run", "()V", &[0], None, Some(Box::new(plan)));
+        cp.memoize_inline_plan(
+            owner,
+            "run",
+            "()V",
+            &[0],
+            0,
+            None,
+            &[],
+            None,
+            Some(Box::new(plan)),
+        );
         assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], None)
+            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
                 .is_some(),
             "memoized plan served while the owner is jar/absent"
+        );
+        assert!(
+            cp.cached_inline_plan(owner, "run", "()V", &[0], 1, None, &[], None)
+                .is_none(),
+            "a semantic callable view must not reuse another view's plan"
+        );
+        assert!(
+            cp.cached_inline_plan(
+                owner,
+                "run",
+                "()V",
+                &[0],
+                0,
+                None,
+                &[],
+                Some((owner, "run$default", "()V")),
+            )
+            .is_none(),
+            "a distinct default realization must not reuse a plan"
         );
         // Overlaying the owner must make the remembered plan unreachable: the overlay is
         // per-request bytecode, and a later request can overlay DIFFERENT bytes under this name.
@@ -8558,19 +8611,19 @@ mod fq_tests {
         .expect("stub");
         cp.set_stub_overlay(stubs);
         assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], None)
+            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
                 .is_none(),
             "overlaid owner must not serve a remembered plan"
         );
-        cp.memoize_inline_plan(owner, "let", "()V", &[0], None, None);
+        cp.memoize_inline_plan(owner, "unrelated", "()V", &[0], 0, None, &[], None, None);
         cp.clear_stub_overlay();
         assert!(
-            cp.cached_inline_plan(owner, "let", "()V", &[0], None)
+            cp.cached_inline_plan(owner, "unrelated", "()V", &[0], 0, None, &[], None)
                 .is_none(),
             "a memoize attempted while overlaid must not be stored"
         );
         assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], None)
+            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
                 .is_some(),
             "the jar-derived plan is valid again once the overlay clears"
         );

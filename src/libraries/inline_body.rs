@@ -17,11 +17,14 @@ pub enum InlineBodyPlan {
         return_parameter: Option<usize>,
     },
     /// Invoke a suspending member on the extension receiver, invoke one lambda parameter, and invoke
-    /// a cleanup member with the same state argument on normal and exceptional exits.
+    /// a cleanup member on normal and exceptional exits.
+    ///
+    /// `state` is the optional argument both members take besides the receiver: `Mutex.withLock`
+    /// passes its `owner` to `lock`/`unlock`, while `Semaphore.withPermit` passes nothing to
+    /// `acquire`/`release`. `None` means both are called with the receiver alone.
     SuspendBeforeLambdaFinally {
         lambda_parameter: usize,
-        state_parameter: usize,
-        state_default: DefaultValue,
+        state: Option<InlineBodyState>,
         enter: Box<LibraryMember>,
         cleanup: Box<LibraryMember>,
     },
@@ -38,6 +41,14 @@ pub enum InlineBodyPlan {
         factory: Box<LibraryMember>,
         append: Box<LibraryMember>,
     },
+}
+
+/// The one argument a [`InlineBodyPlan::SuspendBeforeLambdaFinally`] body threads through its enter
+/// and cleanup members, and the value its own default supplies when the caller omits it.
+#[derive(Clone, Debug)]
+pub struct InlineBodyState {
+    pub parameter: usize,
+    pub default: DefaultValue,
 }
 
 #[derive(Clone, Debug)]
