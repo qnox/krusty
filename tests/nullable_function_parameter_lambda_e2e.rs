@@ -13,6 +13,22 @@
 
 use super::common;
 
+fn assert_both_box(src: &str, stem: &str) {
+    let result = common::compiler_diagnostics(&[("Main.kt", src)], &[common::stdlib_jar()]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc rejected the nullable-callable fixture"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty rejected the nullable-callable fixture"
+    );
+    assert_eq!(common::kotlinc_box_result(src), "OK");
+    common::expect_box_ok_with_stdlib(src, stem);
+}
+
 /// The failing shape: a lambda literal for a nullable function-typed constructor parameter, in a
 /// call whose result type is inferred.
 #[test]
@@ -20,7 +36,7 @@ fn a_lambda_literal_fits_a_nullable_function_parameter() {
     const MAIN: &str = "class Callbacks(val onEach: ((Int) -> Int)?)\n\
 fun build() = Callbacks({ value -> value * 2 })\n\
 fun box(): String = if (build().onEach?.invoke(21) == 42) \"OK\" else \"FAIL\"\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "nullable_function_parameter");
+    assert_both_box(MAIN, "nullable_function_parameter");
 }
 
 /// The same parameter carrying a DEFAULT, with a later parameter omitted — the corpus shape. The
@@ -40,7 +56,7 @@ fun box(): String {\n\
 \x20   if (callbacks.third != null) return \"FAIL: third\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "defaulted_nullable_function");
+    assert_both_box(MAIN, "defaulted_nullable_function");
 }
 
 /// A nullable SAM parameter keeps taking the SAM branch: the shape test decides which branch runs,
@@ -53,7 +69,7 @@ fn a_nullable_sam_parameter_still_converts() {
 class Callbacks(val mapper: Mapper?)\n\
 fun build() = Callbacks({ value -> value * 3 })\n\
 fun box(): String = if (build().mapper?.map(14) == 42) \"OK\" else \"FAIL\"\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "nullable_sam_parameter");
+    assert_both_box(MAIN, "nullable_sam_parameter");
 }
 
 /// A nullable parameter that is NOT function-shaped still rejects a lambda literal, so the widened
@@ -63,14 +79,40 @@ fn a_nullable_non_function_parameter_still_rejects_a_lambda() {
     const MAIN: &str = "class Callbacks(val label: String?)\n\
 fun build() = Callbacks({ value: Int -> value })\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a lambda for a String? parameter: {}",
-        result.reference_stderr
+    let reference_path = result
+        .reference_stderr
+        .split(':')
+        .next()
+        .expect("kotlinc diagnostic names Main.kt");
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (
+            1,
+            format!(
+                "{reference_path}:2:25: error: argument type mismatch: actual type is '(Int) -> Int', but 'String?' was expected.\nfun build() = Callbacks({{ value: Int -> value }})\n                        ^^^^^^^^^^^^^^^^^^^^^^^\n"
+            )
+            .as_str(),
+        )
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a lambda for a String? parameter: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    let krusty_path = result
+        .krusty_stderr
+        .split(':')
+        .next()
+        .expect("krusty diagnostic names Main.kt");
+    assert_eq!(
+        (
+            result.krusty_code,
+            result.krusty_stdout.as_str(),
+            result.krusty_stderr.as_str(),
+        ),
+        (
+            1,
+            "",
+            format!(
+                "{krusty_path}:2:25: error: argument type mismatch: actual type is '(Int) -> Int', but 'String?' was expected.\n\
+                 krusty: 1 error(s)\n"
+            )
+            .as_str(),
+        )
     );
 }

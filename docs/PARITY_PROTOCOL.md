@@ -2149,4 +2149,5 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   to compile was indistinguishable from one that compiled, both to a person reading the output and to
   any harness counting diagnostics. Measured on a private corpus, eight whole modules were passing
   this way.
-  `src/compiler.rs::tests::an_unattributed_signature_failure_is_reported_rather_than_silently_empty`.
+  `src/compiler/streaming_tests.rs::unattributed_signature_failure_reports_one_deterministic_internal_error`
+  and `src/compiler/streaming_tests.rs::attributed_signature_failure_is_not_duplicated_by_recovery`.

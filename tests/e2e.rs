@@ -1022,6 +1022,8 @@ mod nothing_nullable_e2e;
 mod nothing_nullable_join_e2e;
 #[path = "nullable_cast_e2e.rs"]
 mod nullable_cast_e2e;
+#[path = "nullable_function_parameter_lambda_e2e.rs"]
+mod nullable_function_parameter_lambda_e2e;
 #[path = "nullable_function_type_e2e.rs"]
 mod nullable_function_type_e2e;
 #[path = "nullable_primitive_box_e2e.rs"]
@@ -1058,8 +1060,6 @@ mod object_member_overload_e2e;
 mod object_member_ref_import_e2e;
 #[path = "object_method_ref_e2e.rs"]
 mod object_method_ref_e2e;
-#[path = "nullable_function_parameter_lambda_e2e.rs"]
-mod nullable_function_parameter_lambda_e2e;
 #[path = "object_receiver_lambda_e2e.rs"]
 mod object_receiver_lambda_e2e;
 #[path = "object_value_inference_e2e.rs"]
