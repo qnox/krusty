@@ -938,6 +938,80 @@ fn anonymous_class_mutable_capture_is_a_shared_cell_in_checked_fir() {
 }
 
 #[test]
+fn class_capture_write_retains_nullable_result_cell_type() {
+    let source = "class Result<T>\n\
+                  fun publish(result: Result<String>): Result<String>? {\n\
+                      var outcome: Result<String>? = null\n\
+                      val sink = object {\n\
+                          fun accept(value: Result<String>) { outcome = value }\n\
+                      }\n\
+                      sink.accept(result)\n\
+                      return outcome\n\
+                  }\n";
+    let mut diagnostics = DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("NullableResultCapture")],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let (mut index, mut inline_bodies, _default_arguments, mut sources) =
+        streamed.module.into_parts();
+    let info = analysis.types[0].as_ref().expect("checked source");
+    crate::resolve::publish_checked_local_signatures(
+        &analysis.files[0],
+        SourceFileId::from_raw(0),
+        &mut analysis.symbols,
+        info,
+        &mut index,
+    )
+    .expect("checked local signatures must publish before FIR body checking");
+    let mut session = BodyCheckSession::default();
+    let mut sink = RecordingSink::default();
+    for work in ordinary {
+        check_and_dispatch_bound_body_in_session(
+            &analysis.files[0],
+            info,
+            SourceFileId::from_raw(0),
+            work,
+            &index,
+            sources.origins_mut(),
+            &mut inline_bodies,
+            &mut sink,
+            &mut session,
+        )
+        .expect("nullable Result capture must become checked FIR");
+    }
+
+    let mut writes = Vec::new();
+    for (_, body) in &sink.0 {
+        for raw in 0..body.expression_count() {
+            let Some(expression) = body.expr(FirExprId::from_raw(raw as u32)) else {
+                continue;
+            };
+            let FirExprKind::ClassStorageSharedWrite { element, value, .. } = &expression.kind
+            else {
+                continue;
+            };
+            writes.push((
+                element.get(),
+                body.expr(*value)
+                    .expect("checked shared-cell RHS must exist")
+                    .ty
+                    .get(),
+            ));
+        }
+    }
+
+    let result = Ty::obj_args("Result", &[Ty::String]);
+    assert_eq!(writes, [(Ty::nullable(result), result)]);
+}
+
+#[test]
 fn anonymous_class_inferred_property_increment_keeps_outer_capture_mutable() {
     let source = "fun read(): Int {\n\
                       var value = 0\n\

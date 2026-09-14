@@ -1257,19 +1257,24 @@ pub enum FirExprKind {
         field: u32,
     },
     /// Write the element of a shared mutable-local cell stored in this classifier or an enclosing
-    /// local classifier. The synthetic capture field itself remains immutable.
+    /// local classifier. The synthetic capture field itself remains immutable. `element` is the
+    /// captured cell's exact declared type, which can differ from the RHS before its selected
+    /// assignment conversion.
     ClassStorageSharedWrite {
         owner: DeclarationId,
         enclosing_depth: u32,
         field: u32,
+        element: ResolvedTy,
         value: FirExprId,
         conversion: Option<FirConversion>,
     },
     /// Write through a shared mutable capture supplied by the current constructor's synthetic
-    /// prefix parameter, before the corresponding field is readable from `this`.
+    /// prefix parameter, before the corresponding field is readable from `this`. `element` is the
+    /// captured cell's exact declared type.
     ConstructorCaptureSharedWrite {
         owner: DeclarationId,
         field: u32,
+        element: ResolvedTy,
         value: FirExprId,
         conversion: Option<FirConversion>,
     },
@@ -1291,12 +1296,13 @@ pub enum FirExprKind {
         shared_cell: bool,
     },
     /// Write the shared cell stored in a checked local-class capture field through an explicitly
-    /// captured class receiver.
+    /// captured class receiver. `element` is the captured cell's exact declared type.
     CapturedClassStorageSharedWrite {
         owner: DeclarationId,
         receiver: FirExprId,
         path: Box<[DeclarationId]>,
         field: u32,
+        element: ResolvedTy,
         value: FirExprId,
         conversion: Option<FirConversion>,
     },
