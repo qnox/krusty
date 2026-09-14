@@ -15577,7 +15577,18 @@ impl<'a> Emitter<'a> {
                 .get(&expression)
                 .or_else(|| self.ir.logical_types.get(&call_expression))
                 .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing);
-        if !declared_nothing && !inferred_nothing {
+        // `null!!` — a not-null assertion whose VALUE type is `Nothing`. The assertion always
+        // throws, so everything after it is unreachable, but it physically leaves the asserted
+        // REFERENCE on the stack and falls through. A branch whose sibling yields a primitive
+        // (`if (c) true else null!!`) then merges that reference into an `int` frame and the
+        // verifier rejects the method. Terminate it exactly as a `Nothing` call is terminated.
+        let asserted_nothing = matches!(call_node, IrExpr::NotNullAssert { .. })
+            && self
+                .ir
+                .logical_types
+                .get(&expression)
+                .is_some_and(|ty| !ty.is_nullable() && ty.non_null() == Ty::Nothing);
+        if !declared_nothing && !inferred_nothing && !asserted_nothing {
             return false;
         }
         // The invoke was emitted with ZERO result words — `slot_words(Nothing)` is 0 because a

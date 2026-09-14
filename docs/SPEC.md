@@ -7448,3 +7448,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and `::a_prefix_increment_of_a_context_property_re_reads_with_its_context_argument`, both run under
   the provisioned reference compiler as well. Corpus:
   `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`, `statics/incInClassObject.kt`.
+- **A `Nothing`-typed value TERMINATES the path, whether it came from a call or from `null!!`.** A
+  `Nothing`-returning call already got this: it physically leaves a `java/lang/Void` and falls
+  through, so the backend discards that word and throws `KotlinNothingValueException`, exactly as
+  kotlinc does. `null!!` has the same value type and the same obligation — the assertion always
+  throws, so everything after it is unreachable — but it was emitted as an ordinary value: the
+  asserted REFERENCE stayed on the stack and the path fell through. Where the sibling branch yields
+  a primitive (`if (c) true else null!!`, and every width: `Int`, `Long`, `Double`, `Char`) the
+  merge frame then received a reference where an `int` belongs, and the JVM verifier rejected the
+  whole method — `Type null (current frame, stack[0]) is not assignable to integer`. A REFERENCE
+  sibling hid it, because `null` merges with `String` perfectly well; that is why the shape looked
+  like an IEEE-comparison bug (`fun f(a: Any?, b: Any?) = if (a is Float && b is Float) a == b else
+  null!!`) rather than the plain `Nothing` bug it is. The bottom-value termination now covers a
+  not-null assertion whose value type is `Nothing`, by the same rule and the same emitted throw.
+  Tests: `tests/nothing_call_branch_e2e.rs::not_null_assertion_of_null_terminates_a_boolean_branch`,
+  `::not_null_assertion_of_null_terminates_every_primitive_width`,
+  `::not_null_assertion_of_null_terminates_a_when_arm`, and
+  `::a_reference_sibling_of_a_terminated_assertion_still_merges` as the control — all four also run
+  under kotlinc where it is provisioned. The first three fail before this rule and pass after; the
+  fourth passes either way, which is the point of it.
