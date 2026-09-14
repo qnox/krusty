@@ -131,7 +131,7 @@ impl<'a> FileLowering<'a> {
 /// `field` reads lower to the slot anyway — and everything else is the slot itself. None of the
 /// JVM's synthesized `getX`/`setX` ABI is involved; that is a separate realization pass over the
 /// same IR.
-enum TopLevel {
+pub(super) enum TopLevel {
     /// The backing slot, by index into `IrFile::statics`.
     Slot(u32),
     /// A source-written accessor, by index into `IrFile::functions`.
@@ -153,7 +153,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// Resolve a checked top-level property to what realizes it.
-    fn top_level(&self, name: &str, setter: bool) -> Result<TopLevel, Unsupported> {
+    pub(super) fn top_level(&self, name: &str, setter: bool) -> Result<TopLevel, Unsupported> {
         let accessor = if setter {
             crate::names::property_setter_name(name)
         } else {
@@ -183,7 +183,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// Call a source-written top-level accessor.
-    fn accessor_call(
+    pub(super) fn accessor_call(
         &mut self,
         function: u32,
         arguments: &[Value],
@@ -214,6 +214,34 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let Some(value) = value else {
                     return Err("a `Unit` value assigned to a top-level property".to_string());
                 };
+                self.accessor_call(function, &[value])?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The carrier a write of a top-level property must produce.
+    pub(super) fn top_level_written_ty(&mut self, name: &str) -> Result<Ty, Unsupported> {
+        Ok(match self.top_level(name, true)? {
+            TopLevel::Slot(index) => self.file.ir.statics[index as usize].ty,
+            TopLevel::Accessor(function) => self.file.ir.functions[function as usize].params[0],
+        })
+    }
+
+    /// [`Self::top_level_write`] with the value already evaluated at that carrier.
+    pub(super) fn top_level_write_value(
+        &mut self,
+        name: &str,
+        value: Value,
+    ) -> Result<(), Unsupported> {
+        match self.top_level(name, true)? {
+            TopLevel::Slot(index) => {
+                let slot = self.file.statics[index as usize];
+                let address = self.data_address(slot);
+                self.builder.ins().store(trusted(), value, address, 0);
+                Ok(())
+            }
+            TopLevel::Accessor(function) => {
                 self.accessor_call(function, &[value])?;
                 Ok(())
             }

@@ -1422,6 +1422,23 @@ before:**
    ("hides member of supertype and needs `override`"): reading the language's rule rather than
    guessing. For an ordinary method the table is right and this never fires.
 
+   **Property references are objects, and that took the lane to 2303.** `::foo`, `C::p` and `x::p`
+   are values, and a value here is an object with an emitted type — the same shape a lambda takes,
+   with more surface: `KProperty` declares `get`, `KMutableProperty` adds `set`, `KCallable`
+   declares `name`, so the type carries three slots beyond `kotlin.Any`'s and the site's own bodies
+   fill them. Those bodies are emitted rather than lowered, because there is no IR to lower: common
+   lowering leaves the reference CHECKED — it names the property and says whether a receiver is
+   bound, and nothing more — precisely so each target may choose its representation. Emitting them
+   needed the property read and write split into halves taking an already-evaluated receiver, which
+   is what a synthesized body has and an IR-driven one does not.
+   One type per PROPERTY rather than per site is what makes the equality right. Kotlin compares a
+   callable reference by the declaration it names, so `::foo == ::foo` is true although each is
+   written in its own place; with one type per property the type IS the declaration, `equals` is a
+   pointer comparison plus the bound receivers when there are any, and an unbound reference has one
+   instance for the whole program. No reflection metadata is emitted, and none is needed.
+   A reference to a DEPENDENCY property, to an extension property, or to one with context
+   parameters still declines by name: each needs a receiver shape this object does not carry.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

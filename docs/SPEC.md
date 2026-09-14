@@ -1917,6 +1917,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stores: in `"a\u00E9\u4E2D\uD83D\uDE00z"`, `length` is 6, `s[3]` is `\uD83D` and `s[4]` is
   `\uDE00`. `x.indices` is `0..size - 1`, which for an empty receiver is the empty range `0..-1`.
   Test: `tests/native_strings_e2e.rs`, `tests/native_ranges_e2e.rs`.
+
+- **A callable reference compares by the declaration it names, and by the receiver it bound.**
+  `::foo == ::foo` is true although each `::foo` is written in its own place, and
+  `one::value == other::value` is false for two distinct receivers of the same property. krusty's
+  native target reaches both without any reflection metadata: it emits one TYPE per referenced
+  property rather than one per site, so the type IS the declaration, and `equals` compares the type
+  pointer plus — for a bound reference — the two receivers through `Any.equals`. A site that binds
+  no receiver has one instance for the whole program, so its references are the same object.
+  `KCallable.name` answers the property's Kotlin name; `get` answers a reference, so a primitive
+  property boxes on the way out and is unboxed back at the call site.
+  Tests: `tests/native_property_reference_e2e.rs`.
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that

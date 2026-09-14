@@ -14,6 +14,7 @@
 
 use super::*;
 use crate::fir::FirRangeOperation;
+use crate::types::TypeName;
 
 /// Which runtime range one pair of operand types selects, and the element they are carried as.
 ///
@@ -44,25 +45,30 @@ fn element(start: Ty, end: Ty) -> Option<(&'static str, Ty)> {
 /// is a range. The two members a range gets from `ClosedRange` — `start` and `endInclusive` — are
 /// overridden by each concrete range and so arrive under its own name; the interface is left out,
 /// because a user class may implement it and would not be one of these objects.
-fn range_element(owner: &str) -> Option<Ty> {
-    Some(match owner {
-        "kotlin/ranges/IntRange" | "kotlin/ranges/IntProgression" => Ty::Int,
-        "kotlin/ranges/LongRange" | "kotlin/ranges/LongProgression" => Ty::Long,
-        "kotlin/ranges/CharRange" | "kotlin/ranges/CharProgression" => Ty::Char,
-        _ => return None,
-    })
+fn range_element(owner: TypeName) -> Option<Ty> {
+    [
+        ("kotlin/ranges/IntRange", Ty::Int),
+        ("kotlin/ranges/IntProgression", Ty::Int),
+        ("kotlin/ranges/LongRange", Ty::Long),
+        ("kotlin/ranges/LongProgression", Ty::Long),
+        ("kotlin/ranges/CharRange", Ty::Char),
+        ("kotlin/ranges/CharProgression", Ty::Char),
+    ]
+    .into_iter()
+    .find_map(|(candidate, element)| owner.matches(candidate).then_some(element))
 }
 
 /// The range a type names, as (runtime suffix, element). `Ty::Obj` rather than a name, because this
 /// answers for the RESULT of a call that builds one.
 fn range_type(ty: Ty) -> Option<(&'static str, Ty)> {
-    let internal = ty.non_null().obj_internal()?.render();
-    Some(match internal.as_str() {
-        "kotlin/ranges/IntRange" => ("int", Ty::Int),
-        "kotlin/ranges/LongRange" => ("long", Ty::Long),
-        "kotlin/ranges/CharRange" => ("char", Ty::Char),
-        _ => return None,
-    })
+    let internal = ty.non_null().obj_internal()?;
+    [
+        ("kotlin/ranges/IntRange", "int", Ty::Int),
+        ("kotlin/ranges/LongRange", "long", Ty::Long),
+        ("kotlin/ranges/CharRange", "char", Ty::Char),
+    ]
+    .into_iter()
+    .find_map(|(candidate, kind, element)| internal.matches(candidate).then_some((kind, element)))
 }
 
 /// The runtime function answering one range member, and the width it answers at. Every bound is
@@ -90,12 +96,13 @@ fn is_range_iterator(ty: Ty) -> bool {
     let Some(internal) = ty.non_null().obj_internal() else {
         return false;
     };
-    matches!(
-        internal.render().as_str(),
-        "kotlin/collections/IntIterator"
-            | "kotlin/collections/LongIterator"
-            | "kotlin/collections/CharIterator"
-    )
+    [
+        "kotlin/collections/IntIterator",
+        "kotlin/collections/LongIterator",
+        "kotlin/collections/CharIterator",
+    ]
+    .iter()
+    .any(|candidate| internal.matches(candidate))
 }
 
 /// The runtime function answering one member of a range's iterator.
@@ -176,7 +183,7 @@ impl BodyLowering<'_, '_, '_> {
             // The element width the iterator answers at is the one the loop variable has.
             return Some(self.range_call(symbol, carried, ret.non_null(), receiver, args, ret));
         }
-        let element = range_element(owner)?;
+        let element = range_element(crate::types::type_name(owner))?;
         let (symbol, carried) = range_symbol(name, args.len())?;
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
     }
@@ -242,10 +249,13 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<(String, String, Ty)> {
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        let owner = getter.callable.owner.render();
-        range_element(&owner)?;
+        range_element(getter.callable.owner)?;
         range_symbol(&getter.callable.name, 0)?;
-        Some((owner, getter.callable.name.clone(), getter.callable.ret))
+        Some((
+            getter.callable.owner.render(),
+            getter.callable.name.clone(),
+            getter.callable.ret,
+        ))
     }
 
     /// `receiver until end`: both bounds at the element type, the range type as the result.

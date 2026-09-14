@@ -1358,10 +1358,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         index: usize,
         receiver: Option<u32>,
     ) -> Result<Option<Value>, Unsupported> {
-        let property = self.file.ir.classes[class as usize].properties[index].clone();
         let Some(receiver) = receiver else {
-            return Err(format!("a receiver-less read of `{}`", property.name));
+            let name = &self.file.ir.classes[class as usize].properties[index].name;
+            return Err(format!("a receiver-less read of `{name}`"));
         };
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        self.property_read_of(class, index, object)
+    }
+
+    /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.
+    pub(super) fn property_read_of(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        object: Value,
+    ) -> Result<Option<Value>, Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
         if property
             .storage_ty
             .is_some_and(|storage| carrier(storage) != carrier(property.ty))
@@ -1371,9 +1385,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 property.name
             ));
         }
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
         let key = model::SlotKey::Getter(class, property.name.clone());
         if let Some(slot) = self.file.model.slot(class, &key) {
             return self.dispatch(object, slot, &[], property.ty, &[]);
@@ -1410,34 +1421,58 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         receiver: Option<u32>,
         value: u32,
     ) -> Result<(), Unsupported> {
-        let property = self.file.ir.classes[class as usize].properties[index].clone();
         let Some(receiver) = receiver else {
-            return Err(format!("a receiver-less write of `{}`", property.name));
+            let name = &self.file.ir.classes[class as usize].properties[index].name;
+            return Err(format!("a receiver-less write of `{name}`"));
         };
+        let target_ty = self.written_property_ty(class, index)?;
         let Some(object) = self.receiver(receiver)? else {
             return Ok(());
-        };
-        let key = model::SlotKey::Setter(class, property.name.clone());
-        let through_slot = self.file.model.slot(class, &key);
-        let target_ty = match (through_slot, property.setter, property.backing_field) {
-            (Some(_), _, _) | (None, Some(_), _) => property.ty,
-            (None, None, Some(field)) => {
-                self.file.ir.classes[class as usize].fields[field as usize].ty
-            }
-            (None, None, None) => {
-                return Err(format!(
-                    "a property with neither storage nor a setter (`{}`)",
-                    property.name
-                ))
-            }
         };
         let value = self.coerce(value, target_ty)?;
         if self.terminated {
             return Ok(());
         }
         let Some(value) = value else {
-            return Err(format!("a `Unit` value assigned to `{}`", property.name));
+            let name = &self.file.ir.classes[class as usize].properties[index].name;
+            return Err(format!("a `Unit` value assigned to `{name}`"));
         };
+        self.property_write_of(class, index, object, value)
+    }
+
+    /// The carrier a write of one of a class's properties must produce: the property's own type
+    /// when a setter or a dispatch slot takes it, and the FIELD's when the store is direct.
+    pub(super) fn written_property_ty(
+        &mut self,
+        class: ClassId,
+        index: usize,
+    ) -> Result<Ty, Unsupported> {
+        let property = &self.file.ir.classes[class as usize].properties[index];
+        let key = model::SlotKey::Setter(class, property.name.clone());
+        let through_slot = self.file.model.slot(class, &key);
+        match (through_slot, property.setter, property.backing_field) {
+            (Some(_), _, _) | (None, Some(_), _) => Ok(property.ty),
+            (None, None, Some(field)) => {
+                Ok(self.file.ir.classes[class as usize].fields[field as usize].ty)
+            }
+            (None, None, None) => Err(format!(
+                "a property with neither storage nor a setter (`{}`)",
+                property.name
+            )),
+        }
+    }
+
+    /// [`Self::property_write`] with the receiver and the value already evaluated.
+    pub(super) fn property_write_of(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        object: Value,
+        value: Value,
+    ) -> Result<(), Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        let key = model::SlotKey::Setter(class, property.name.clone());
+        let through_slot = self.file.model.slot(class, &key);
         if let Some(slot) = through_slot {
             self.dispatch(object, slot, &[property.ty], Ty::Unit, &[value])?;
             return Ok(());

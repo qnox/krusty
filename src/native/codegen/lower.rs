@@ -19,6 +19,7 @@ mod enums;
 mod functions;
 mod objects;
 mod ranges;
+mod references;
 mod scope;
 mod statics;
 
@@ -179,6 +180,7 @@ pub fn lower_file(
         default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
         holders: HashMap::new(),
+        references: HashMap::new(),
     };
     lowering.declare_functions()?;
     lowering.declare_classes()?;
@@ -191,6 +193,7 @@ pub fn lower_file(
     lowering.define_default_wrappers()?;
     lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
+    lowering.declare_property_references()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
@@ -251,6 +254,8 @@ struct FileLowering<'a> {
     enum_entries: HashMap<ClassId, enums::EnumItems>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
     holders: HashMap<String, DataId>,
+    /// The emitted pieces of each property reference, by the expression that creates it.
+    references: HashMap<u32, references::ReferenceItems>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -1084,6 +1089,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let member = self.enum_member_name(target).expect("checked by the guard");
                 self.enum_member(member, receiver)
             }
+            // `p.name`: a checked read of a dependency property whose receiver is a property
+            // reference, answered out of the reference's own table.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.reference_property(target, receiver).is_some() => self
+                .reference_property(target, receiver)
+                .expect("checked by the guard"),
             // `x.indices` is `0..size - 1` of the receiver, so it needs the receiver's own size
             // rather than anything the property declaration says.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1126,6 +1140,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     }
                     Err(reason) => Err(reason),
                 }
+            }
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { .. }) => {
+                self.property_reference(id)
             }
             IrExpr::Checked(IrCheckedOperation::RangeConstruction {
                 operation,
@@ -1335,6 +1352,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // A constructed range is an object of the type the checker gave it, which is what makes
             // `1..3 == r` recognisable as an equality between references rather than a guess.
             IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
+            // A property reference is an object of the reflection type the checker gave it. When
+            // the node carries none, the interface every one of them wears answers the two
+            // questions asked of this — that it is a reference, and that its members are the
+            // reference machinery's.
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { mutable, .. }) => self
+                .file
+                .ir
+                .logical_types
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| {
+                    Ty::obj(if *mutable {
+                        "kotlin/reflect/KMutableProperty"
+                    } else {
+                        "kotlin/reflect/KProperty"
+                    })
+                }),
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
                 self.file.ir.checked_properties.get(target)?.ty
             }
@@ -1930,6 +1964,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) =
                             self.range_member(&owner, &name, receiver, args, *ret)
                         {
+                            return realized;
+                        }
+                        // A property reference answers its own members through its own table.
+                        if let Some(realized) = self.reference_member(&name, receiver, args, *ret) {
                             return realized;
                         }
                         // A member that asks about a NUMBER rather than an object, carried as one:
