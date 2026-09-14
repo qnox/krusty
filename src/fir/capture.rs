@@ -32,6 +32,23 @@ pub enum FirCaptureSource {
     ConstructorPrefix { owner: DeclarationId, field: u32 },
 }
 
+/// Where a read of a constructor's synthetic prefix parameter finds its value.
+///
+/// The two are different lookups, and the checker is the only thing that knows which one a given
+/// read is: in the constructor body the parameter is in scope and is read directly, while in a
+/// callable nested in the prefix the value arrived as one more capture and is read from the slot
+/// registered at the depth recorded here. Carrying the answer means lowering consumes the checked
+/// binding instead of trying one lookup and reinterpreting the node when it misses — which would
+/// bind whatever same-owner/field entry happened to be found first.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FirConstructorCaptureSite {
+    /// The constructor body itself: the synthetic prefix parameter is in scope.
+    Parameter,
+    /// A callable nested in the constructor prefix. The value is one of THIS body's captures,
+    /// keyed — like every other capture — by the depth of the body that supplies it.
+    Captured { enclosing_depth: u32 },
+}
+
 impl FirCaptureSource {
     /// The enclosing value slot, when this capture names one.
     pub fn value(self) -> Option<LocalValueId> {

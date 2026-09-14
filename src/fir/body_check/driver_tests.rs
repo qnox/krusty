@@ -1365,6 +1365,9 @@ fn nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix(
                             owner,
                             field: 0,
                             shared_cell: false,
+                            // The read is INSIDE the lambda, so the coordinate says captured, not
+                            // the constructor's own parameter.
+                            site: crate::fir::FirConstructorCaptureSite::Captured { enclosing_depth: 0 },
                         }) = body.expr(receiver.value).map(|expression| &expression.kind)
                         else {
                             return 0;
@@ -3215,6 +3218,8 @@ fn anonymous_inner_super_delegation_reads_checked_constructor_capture_parameters
             owner,
             field: 0,
             shared_cell: false,
+            // Read in the constructor body itself: the prefix parameter is in scope.
+            site: crate::fir::FirConstructorCaptureSite::Parameter,
         }) if *owner == anonymous
     ));
     assert_eq!(
@@ -3226,6 +3231,7 @@ fn anonymous_inner_super_delegation_reads_checked_constructor_capture_parameters
                     owner,
                     field: 0,
                     shared_cell: false,
+                    site: crate::fir::FirConstructorCaptureSite::Parameter,
                 } if owner == anonymous
             ))
             .count(),

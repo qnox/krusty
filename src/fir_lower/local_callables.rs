@@ -697,7 +697,14 @@ impl BodyLowering<'_> {
                     if let crate::fir::FirCaptureSource::ConstructorPrefix { owner, field } =
                         capture.source
                     {
-                        return self.constructor_capture_parameter(owner, field);
+                        // Depth 0 is this body, and a body supplying a constructor-prefix capture
+                        // at depth 0 IS the constructor: the arithmetic above has already decided
+                        // the coordinate, so it is stated rather than rediscovered.
+                        return self.constructor_capture_parameter(
+                            owner,
+                            field,
+                            crate::fir::FirConstructorCaptureSite::Parameter,
+                        );
                     }
                 }
                 let slot = if depth == 0 {

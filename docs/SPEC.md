@@ -7488,9 +7488,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   shared-cell upgrade machinery carries the new source outward through nested lambdas unchanged.
   The same rule extends to the enclosing-INSTANCE capture of a local or anonymous class declared in
   the argument, which had the identical defect one level up.
+  Which of the two the read means is the CHECKER's answer and travels on the node
+  ([`FirConstructorCaptureSite`]): in the constructor body the synthetic prefix parameter is in
+  scope and is read directly, and inside a lambda there the value is that frame's capture, at the
+  depth it was registered under. The depth grows with the nesting — 0 one lambda in, 1 two lambdas
+  in — so it is not a constant a lookup may leave out, and lowering performs exactly the one lookup
+  the coordinate names: a coordinate that names no slot fails rather than falling back to reading
+  the constructor's parameter, which in a body that is not that constructor is another
+  declaration's value of the same type.
   Tests: `tests/super_argument_capture_e2e.rs` (a captured local, an enclosing property, a lambda
   inside a lambda, two lambdas sharing one capture, a write through a shared cell, an enclosing
   instance reached from a nested anonymous object, and a call to an enclosing local function),
-  and `fir::body_check::driver_tests::nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix`
-  for the checked shape. Corpus: eight of the eleven red cases under
+  `fir::body_check::local_class_tests::a_constructor_prefix_read_carries_its_frame_in_fir` and
+  `fir::body_check::driver_tests::nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix`
+  for the checked shape, and
+  `fir_lower::tests::a_capture_coordinate_naming_no_slot_fails_rather_than_reading_the_parameter`
+  for the lowering contract. Corpus: eight of the eleven red cases under
   `closures/captureInSuperConstructorCall`, plus `super/kt4173_2.kt`.

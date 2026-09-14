@@ -1222,6 +1222,8 @@ pub enum FirExprKind {
         owner: DeclarationId,
         field: u32,
         shared_cell: bool,
+        /// Where the value is: the prefix parameter itself, or this body's capture of it.
+        site: super::FirConstructorCaptureSite,
     },
     /// Read one language-level class context supplied in the current constructor's semantic
     /// prefix. This is separate from local-class captures: `parameter` is the class context
@@ -1251,6 +1253,8 @@ pub enum FirExprKind {
         field: u32,
         value: FirExprId,
         conversion: Option<FirConversion>,
+        /// Where the cell is: the prefix parameter itself, or this body's capture of it.
+        site: super::FirConstructorCaptureSite,
     },
     /// Read a generated capture field through one or more enclosing local-class instances.
     EnclosingClassStorageRead {
