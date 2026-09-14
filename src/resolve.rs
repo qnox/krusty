@@ -24577,6 +24577,7 @@ impl<'a> Checker<'a> {
                     callee,
                     value_ty,
                     self.span(call),
+                    expected,
                 ) {
                     return ClassifierValueCall::Checked(ret);
                 }
@@ -24628,8 +24629,9 @@ impl<'a> Checker<'a> {
         callee: ExprId,
         classifier: TypeName,
         args: &[ExprId],
-        span: Span,
+        expected: Option<Ty>,
     ) -> Option<InvokeResolution> {
+        let span = self.span(call);
         let receiver = self.classifier_value_ty(callee, classifier)?;
         self.set(callee, receiver);
         let argument_types = self.invoke_operator_arg_tys(scope, call, receiver, args);
@@ -24643,6 +24645,7 @@ impl<'a> Checker<'a> {
             callee,
             receiver,
             span,
+            expected,
         ))
     }
 
@@ -28029,7 +28032,7 @@ impl<'a> Checker<'a> {
                         callee,
                         cls.internal_name(),
                         args,
-                        span,
+                        expected,
                     ) {
                         match resolution {
                             InvokeResolution::Selected(result) => return result,
@@ -28095,8 +28098,8 @@ impl<'a> Checker<'a> {
                                 constructor_mapping_error = Some(error);
                             }
                         }
-                        if let Some(resolution) =
-                            self.classifier_value_invoke(scope, call, callee, internal, args, span)
+                        if let Some(resolution) = self
+                            .classifier_value_invoke(scope, call, callee, internal, args, expected)
                         {
                             match resolution {
                                 InvokeResolution::Selected(result) => return result,
@@ -28531,6 +28534,7 @@ impl<'a> Checker<'a> {
                             callee,
                             value_ty,
                             span,
+                            expected,
                         ) {
                             return ret;
                         }
@@ -28986,6 +28990,7 @@ impl<'a> Checker<'a> {
                         receiver,
                         invoke_ty,
                         span,
+                        expected,
                     ) {
                         return ret;
                     }
@@ -29190,6 +29195,7 @@ impl<'a> Checker<'a> {
                             callee,
                             value_ty,
                             span,
+                            expected,
                         ) {
                             return ret;
                         }
@@ -29338,6 +29344,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        expected,
                     ) {
                         return ret;
                     }
@@ -29426,6 +29433,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        expected,
                     ) {
                         return ret;
                     }
@@ -32397,6 +32405,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        expected,
                     ) {
                         return ret;
                     }
@@ -32422,6 +32431,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        expected,
                     ) {
                         return ret;
                     }
@@ -32542,6 +32552,7 @@ impl<'a> Checker<'a> {
                         callee,
                         ct,
                         span,
+                        expected,
                     ) {
                         InvokeResolution::Selected(t) => return t,
                         InvokeResolution::Ambiguous(candidates) => {
@@ -32888,6 +32899,7 @@ impl<'a> Checker<'a> {
                     callee,
                     callee_ty,
                     span,
+                    expected,
                 ) {
                     return ret;
                 }
@@ -58968,6 +58980,7 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         receiver_ty: Ty,
         span: Span,
+        expected: Option<Ty>,
     ) -> InvokeResolution {
         let CallArgs {
             call,
@@ -59036,7 +59049,7 @@ impl<'a> Checker<'a> {
                     },
                     &explicit_type_args,
                     None,
-                    None,
+                    expected,
                     overloads.clone(),
                 );
                 if let Some(CallableCandidateSelection::Ambiguous(candidates)) = &member_selection {
@@ -59193,7 +59206,7 @@ impl<'a> Checker<'a> {
                         },
                         &[],
                         Some(receiver_ty),
-                        None,
+                        expected,
                         extensions.clone(),
                     );
                     if let Some(CallableCandidateSelection::Ambiguous(candidates)) =
@@ -59323,8 +59336,9 @@ impl<'a> Checker<'a> {
         receiver: ExprId,
         receiver_ty: Ty,
         span: Span,
+        expected: Option<Ty>,
     ) -> Option<Ty> {
-        match self.record_invoke(scope, call_args, receiver, receiver_ty, span) {
+        match self.record_invoke(scope, call_args, receiver, receiver_ty, span, expected) {
             InvokeResolution::Selected(ret) => Some(ret),
             InvokeResolution::Ambiguous(candidates) => {
                 self.diags.error(
@@ -77887,6 +77901,10 @@ impl<'a> Checker<'a> {
                         receiver,
                         recv,
                         self.span(e),
+                        // A safe call's expectation describes the nullable result of the whole
+                        // `?.` expression, not the invoke's own return type, so it is not an
+                        // expectation this selection may seed its formals from.
+                        None,
                     ) {
                         InvokeResolution::Selected(ty) => ty,
                         InvokeResolution::Ambiguous(_)
@@ -78105,6 +78123,8 @@ impl<'a> Checker<'a> {
                                 e,
                                 property_ty,
                                 self.span(e),
+                                // Nullable-wrapped expectation; see the invoke selection above.
+                                None,
                             ) {
                                 let invoke = self.expr_lowers.remove(&e);
                                 if let Some(ExprLowering::Invoke { params, kind, .. }) = invoke {

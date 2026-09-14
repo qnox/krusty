@@ -2408,3 +2408,28 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_fold_accumulator_seeds_its_operator`, `an_explicit_type_argument_on_the_receiver_still_works`,
   `a_declared_receiver_val_still_works`,
   `an_operand_that_does_not_fit_the_expectation_is_still_rejected`.
+- **An `invoke` operator selection receives the call's expected type (fix).** Every other callable
+  selection in the checker forwards the expression's expectation to `select_callable_candidate`;
+  the `invoke` operator path passed `None`, so a companion `operator fun invoke` inferred its type
+  parameters from the argument list alone. A formal that appears only as a lambda RESULT was then
+  pinned by whatever that lambda happened to produce — a `set` that throws fixed it to `Nothing` —
+  and a formal that appears only as a lambda PARAMETER was never bound at all, yielding
+  `expected 'P<String, String, A, A>', actual 'P<String, Nothing, A, B>'`.
+  The expectation now reaches every spelling of the convention: member and extension selection, the
+  companion factory's lambda SHAPE (so an expected-only formal is bound before the lambda body is
+  typed, which is what lets the body read `s.length`), and a member EXTENSION
+  `operator fun Recv.invoke` on an implicit dispatch receiver. A SAFE call lifts one nullable layer
+  rather than dropping the expectation: `a?.invoke(…)` has type `R?` where `R` is the invoke's own
+  result, so an expected `R?` constrains `R`. Seeding is a constraint and not a commitment — the
+  receiver and the arguments still refine it, and a mismatched expectation is still rejected.
+  A CONSTRUCTOR of the same shape was never affected, which is what kept the defect narrow.
+  The local-extension sibling has no expectation to thread: it performs no generic instantiation
+  from arguments or context, binding formals from `unify_ty(generic.receiver, receiver)` alone.
+  `tests/expected_type_seeds_invoke_e2e.rs::a_companion_invoke_binds_formals_only_the_expectation_supplies`,
+  `a_throwing_argument_does_not_pin_a_formal_the_expectation_fixes`,
+  `a_companion_invoke_body_reads_the_expected_parameter`,
+  `a_receiver_companion_invoke_body_reads_the_expected_receiver`,
+  `a_safe_property_invoke_lifts_the_nullable_expectation`,
+  `a_safe_function_value_invoke_keeps_its_declared_result`,
+  `a_member_extension_invoke_binds_the_expected_formal`,
+  `a_constructor_of_the_same_shape_still_infers`, `a_mismatched_expectation_is_still_rejected`.
