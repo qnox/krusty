@@ -2962,10 +2962,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java.util` class that does (`ArrayList`) is not an authoritative name. A member-name probe cannot see
   supertypes, so this needs its own coverage. Tests: `tests/mapped_string_scope_e2e.rs`.
 
-  Mapped collection scopes also admit `jvm_class_map::MAPPED_VISIBLE_METHODS`, matching
+  Mapped collection scopes also admit the exact physical signatures in the provider-owned,
+  versioned `visible_methods_2_4.tsv` policy (verified identical for the supported Kotlin 2.4.0 and
+  2.4.10 toolchains), matching
   `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`. Read-only signatures such as `stream` and
-  `getOrDefault` are visible on both collection faces; mutating signatures such as `removeIf`,
-  `computeIfAbsent`, and `merge` require a `Mutable*` receiver. Tests:
+  `getOrDefault` attach to the read-only declaration and are inherited by its mutable sibling;
+  mutating signatures such as `removeIf`, `computeIfAbsent`, and `merge` attach directly to the
+  `Mutable*` declaration. Tests:
   `tests/mapped_collection_scope_e2e.rs`.
 
   Other mapped built-ins retain their JVM scope. This keeps `CharSequence.chars`, `Enum.name`, and the
