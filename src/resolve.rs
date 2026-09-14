@@ -65296,13 +65296,17 @@ impl<'a> Checker<'a> {
             .iter()
             .any(|argument| self.file.expr_span(*argument).is_none())
         {
+            // Annotation applications were resolved and validated during header collection. A
+            // RESTRICTED pass re-enters a declaration it did not select solely to recreate that
+            // declaration's lexical type and value scopes, and the annotation expressions of the
+            // members it skipped are outside the fragment it retains. Two passes are restricted
+            // this way: Pass-1 default checking, and inline preparation, which selects only the
+            // inline declarations it must expand. An UNRESTRICTED pass has every expression and
+            // must never reach released syntax.
             assert!(
-                self.signature_defaults_only,
-                "only Pass-1 default checking may observe released annotation syntax"
+                self.signature_defaults_only || self.selected_body_declarations.is_some(),
+                "only a restricted pass may observe released annotation syntax"
             );
-            // Annotation applications were resolved and validated during header collection.
-            // Default checking re-enters this declaration solely to recreate its lexical type and
-            // value scopes; unrelated annotation expressions are outside the retained fragment.
             return;
         }
         let legacy_prebound = self
