@@ -110,7 +110,7 @@ impl ProductionSignatureSemantics<'_> {
             };
             let intrinsic = self
                 .with_resolver(scope, |resolver| {
-                    let overloads = resolver.top_level_candidates(&candidate.callee);
+                    let overloads = resolver.accessible_top_level_candidates(&candidate.callee);
                     let mut functions =
                         crate::libraries::FunctionSet { overloads }.into_top_level();
                     let first = functions.next()?;

@@ -81,6 +81,16 @@ pub fn compiler_diagnostics(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
 ) -> CompilerDiagnosticResult {
+    compiler_diagnostics_with_reference_args(sources, classpath, &[])
+}
+
+/// Compile named sources with both compiler CLIs, forwarding explicit language arguments only to
+/// kotlinc. Krusty reads the equivalent `// LANGUAGE:` directives from each source fixture.
+pub fn compiler_diagnostics_with_reference_args(
+    sources: &[(&str, &str)],
+    classpath: &[PathBuf],
+    reference_extra_args: &[String],
+) -> CompilerDiagnosticResult {
     let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
     let source_paths = write_fixture_sources(&work, sources);
     let joined_classpath = (!classpath.is_empty())
@@ -97,9 +107,10 @@ pub fn compiler_diagnostics(
     krusty.args(&source_paths);
     let krusty = krusty.output().expect("run krusty diagnostic fixture");
 
-    let reference_args = joined_classpath
+    let mut reference_args = joined_classpath
         .map(|classpath| vec!["-cp".to_string(), classpath.to_string_lossy().into_owned()])
         .unwrap_or_default();
+    reference_args.extend_from_slice(reference_extra_args);
     let (reference_code, reference_stderr) =
         kotlinc_paths_result(&source_paths, &work.join("reference-out"), &reference_args);
     let result = CompilerDiagnosticResult {

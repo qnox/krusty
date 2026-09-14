@@ -1067,12 +1067,16 @@ mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
 
+#[path = "extension_receiver_specificity_e2e.rs"]
+mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
 mod operator_index_e2e;
+#[path = "overload_declaration_specificity_e2e.rs"]
+mod overload_declaration_specificity_e2e;
 #[path = "overloaded_extension_e2e.rs"]
 mod overloaded_extension_e2e;
 #[path = "overloaded_inferred_return_e2e.rs"]
@@ -1121,6 +1125,8 @@ mod private_set_e2e;
 mod projected_receiver_extension_e2e;
 #[path = "property_accessor_e2e.rs"]
 mod property_accessor_e2e;
+#[path = "property_accessor_increment_e2e.rs"]
+mod property_accessor_increment_e2e;
 #[path = "property_conversion_inference_e2e.rs"]
 mod property_conversion_inference_e2e;
 #[path = "property_infer_member_e2e.rs"]
@@ -1535,3 +1541,6 @@ mod wrapped_param_type_e2e;
 mod reified_unit_splice_e2e;
 #[path = "reified_value_class_splice_e2e.rs"]
 mod reified_value_class_splice_e2e;
+
+#[path = "file_private_extension_scope_e2e.rs"]
+mod file_private_extension_scope_e2e;

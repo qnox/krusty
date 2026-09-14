@@ -20118,6 +20118,7 @@ struct CallableRefCandidates {
     property: Option<crate::symbol_resolver::ResolvedPropertyRef>,
     method: Option<crate::libraries::LibraryMember>,
     overloads: Vec<crate::libraries::FunctionInfo>,
+    inaccessible_extensions: Vec<crate::libraries::FunctionInfo>,
     extension_property: Option<crate::symbol_resolver::ResolvedPropertyRef>,
 }
 
@@ -20138,6 +20139,7 @@ impl CallableRefCandidates {
             property: None,
             method: None,
             overloads: Vec::new(),
+            inaccessible_extensions: Vec::new(),
             extension_property: None,
         }
     }
@@ -32499,8 +32501,8 @@ impl<'a> Checker<'a> {
                     && top_level_candidates.iter().any(|candidate| {
                         candidate.visibility == Visibility::Private
                             && candidate
-                                .source_key
-                                .is_some_and(|(source_file, _)| source_file != self.file_index)
+                                .source_file
+                                .is_none_or(|source_file| source_file != self.file_index)
                     })
                     && top_level_candidates
                         .iter()
@@ -51238,12 +51240,12 @@ impl<'a> Checker<'a> {
     fn selected_extension_ref(
         &self,
         overloads: &[crate::libraries::FunctionInfo],
+        inaccessible: &[crate::libraries::FunctionInfo],
         receiver: Ty,
         name: &str,
         expected: Option<&'static crate::types::FnSig>,
         binding: CallableReferenceBinding,
     ) -> ExtensionRefSelection {
-        let mut inaccessible = false;
         let candidates = overloads
             .iter()
             .cloned()
@@ -51284,22 +51286,13 @@ impl<'a> Checker<'a> {
                     );
                     return None;
                 }
-                let accessible = match function.visibility {
-                    Visibility::Public => true,
-                    Visibility::Internal => {
-                        Self::is_current_module_callable(&function)
-                            || self
-                                .libraries
-                                .internal_accessible(function.callable.owner)
-                    }
-                    Visibility::Private => {
-                        self.module_callable_source_file(&function) == Some(self.file_index)
-                            || function.flags.inline.must_inline()
-                    }
-                    Visibility::PackagePrivate | Visibility::Protected => false,
-                };
+                let accessible = crate::callable_access::source_callable_accessible(
+                    function.visibility,
+                    function.source_file,
+                    Some(self.file_index),
+                    || self.libraries.internal_accessible(function.callable.owner),
+                );
                 if !accessible {
-                    inaccessible = true;
                     return None;
                 }
                 let semantic_params = function.semantic_params();
@@ -51369,7 +51362,10 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            return if inaccessible {
+            // Kotlin diagnoses a receiver-applicable inaccessible declaration before an expected
+            // callable-shape mismatch. The quarantined family is intentionally not mapped or
+            // selected; its presence only determines this terminal diagnostic.
+            return if !inaccessible.is_empty() {
                 ExtensionRefSelection::Inaccessible
             } else {
                 ExtensionRefSelection::None
@@ -51599,6 +51595,7 @@ impl<'a> Checker<'a> {
         }
         let function = self.selected_extension_ref(
             &candidates.overloads,
+            &candidates.inaccessible_extensions,
             receiver,
             name,
             expected_function,
@@ -52615,6 +52612,7 @@ impl<'a> Checker<'a> {
                 || matches!(
                     self.selected_extension_ref(
                         &companion_candidates.overloads,
+                        &companion_candidates.inaccessible_extensions,
                         companion_ty,
                         name,
                         Some(expected),
@@ -52672,6 +52670,7 @@ impl<'a> Checker<'a> {
         if matches!(
             self.selected_extension_ref(
                 &candidates.overloads,
+                &candidates.inaccessible_extensions,
                 receiver_ty,
                 name,
                 Some(expected),
@@ -52745,20 +52744,12 @@ impl<'a> Checker<'a> {
                 if function.callable.suspend && !expected.suspend {
                     return None;
                 }
-                let accessible = match function.visibility {
-                    Visibility::Public => true,
-                    Visibility::Internal => {
-                        Self::is_current_module_callable(&function)
-                            || self
-                                .libraries
-                                .internal_accessible(function.callable.owner)
-                    }
-                    Visibility::Private => {
-                        self.module_callable_source_file(&function) == Some(self.file_index)
-                            || function.flags.inline.must_inline()
-                    }
-                    Visibility::PackagePrivate | Visibility::Protected => false,
-                };
+                let accessible = crate::callable_access::source_callable_accessible(
+                    function.visibility,
+                    function.source_file,
+                    Some(self.file_index),
+                    || self.libraries.internal_accessible(function.callable.owner),
+                );
                 if !accessible {
                     inaccessible = true;
                     return None;
@@ -52788,25 +52779,24 @@ impl<'a> Checker<'a> {
                 }
                 let type_arguments = specialization.ok()?;
                 let plan = self.callable_ref_argument_plan(&function, expected)?;
-                if function
-                    .source_key
-                    .is_some_and(|(source_file, _)| source_file != self.file_index)
+                // A stable module identity owns its checked default expressions. The literal
+                // payload is required only for the identity-less cross-file source path.
+                if function.stable_declaration.is_none()
+                    && function
+                        .source_file
+                        .is_some_and(|source_file| source_file != self.file_index)
                 {
-                    let needs_materialized_default = function.stable_declaration.is_none();
                     if let Some(parameter) = plan.iter().enumerate().find_map(
                         |(parameter, argument)| {
                             matches!(argument, AdaptedRefArgument::Default)
                                 .then_some(parameter)
                                 .filter(|&parameter| {
                                     let semantic = function.callable.params[parameter];
-                                    let unavailable = !function
+                                    !function
                                         .default_values
                                         .get(parameter)
                                         .and_then(Option::as_ref)
-                                        .is_some_and(|value| value.fills_param_ty(semantic));
-                                    unavailable
-                                        && (needs_materialized_default
-                                            || self.ty_is_value_class(semantic))
+                                        .is_some_and(|value| value.fills_param_ty(semantic))
                                 })
                         },
                     ) {
@@ -54187,17 +54177,20 @@ impl<'a> Checker<'a> {
                 .collect::<Option<Vec<_>>>()?;
             // Preserve the declaration-side parameter shapes aligned to SOURCE arguments. Generic
             // inference can make `<T> f(T)` and `<T> f(() -> T)` both specialize to the same lambda
-            // type, but Kotlin still chooses the structurally functional declaration. Named and
-            // vararg calls need this exact source-to-declaration mapping; reconstructing it later
-            // from positional parameter order would make specificity depend on argument spelling.
+            // type, but Kotlin still chooses the structurally functional declaration. Named/vararg
+            // calls need this exact mapping; positional reconstruction would depend on spelling.
             let declaration_specificity_params = argument_parameters
                 .iter()
                 .copied()
                 .zip(named_whole_arrays.iter().copied())
-                .map(|(visible_parameter, whole_array)| {
+                .enumerate()
+                .map(|(argument, (visible_parameter, whole_array))| {
                     let parameter = *shape.parameter_indices.get(visible_parameter)?;
                     let mut declared = *signature.params.get(parameter)?;
-                    if shape.call_sig.vararg_index == Some(visible_parameter) && !whole_array {
+                    if shape.call_sig.vararg_index == Some(visible_parameter)
+                        && !whole_array
+                        && !self.file.is_spread_arg(args[argument])
+                    {
                         declared = declared.array_read_elem().unwrap_or(declared);
                     }
                     Some(crate::types::ty_subst(declared, &HashMap::new()))
@@ -54405,22 +54398,12 @@ impl<'a> Checker<'a> {
         let selecting_extension = applicable
             .iter()
             .all(|(_, _, _, _, _, candidate, _, _)| candidate.is_extension());
-        let prefer_concrete = !selecting_extension
-            && applicable
-                .iter()
-                .any(|(rank, generic, _, missing_context, _, candidate, _, _)| {
-                    *rank == best
-                        && !generic
-                        && (!has_context || !missing_context)
-                        && candidate.receiver_rank == nearest_receiver
-                });
         let mut maximal = applicable
             .into_iter()
-            .filter(|(rank, generic, _, missing_context, _, candidate, _, _)| {
+            .filter(|(rank, _, _, missing_context, _, candidate, _, _)| {
                 *rank == best
                     && (!has_context || !missing_context)
                     && candidate.receiver_rank == nearest_receiver
-                    && (!prefer_concrete || !generic)
             })
             .collect::<Vec<_>>();
         if maximal.len() > 1 {
@@ -54468,24 +54451,26 @@ impl<'a> Checker<'a> {
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
         }
+        crate::symbol_resolver::retain_most_specific_declarations(
+            &self.fed_source(),
+            &mut maximal,
+            |(_, generic, _, _, _, candidate, _, parameters)| {
+                let receiver = candidate
+                    .is_extension()
+                    .then(|| {
+                        candidate
+                            .semantic_receiver()
+                            .map(|receiver| crate::types::ty_subst(receiver, &HashMap::new()))
+                    })
+                    .flatten();
+                (receiver, parameters, *generic)
+            },
+        );
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface
         // inherits the other, its overload wins (`MyRunnable : Runnable`; `foo(MyRunnable)` beats
         // `foo(Runnable)` for a lambda). Unrelated SAM targets remain incomparable and are reported
         // ambiguous by that same selector, so no wrapper realization is chosen by provider order.
-        if selecting_extension {
-            let concrete_shapes = maximal
-                .iter()
-                .filter(|(_, generic, ..)| !generic)
-                .map(|(_, _, _, _, _, candidate, params, _)| (candidate.receiver, params.clone()))
-                .collect::<Vec<_>>();
-            maximal.retain(|(_, generic, _, _, _, candidate, params, _)| {
-                !*generic
-                    || !concrete_shapes.iter().any(|(receiver, concrete_params)| {
-                        *receiver == candidate.receiver && concrete_params == params
-                    })
-            });
-        }
         let selected_index = if maximal.len() == 1 {
             0
         } else {
@@ -56230,6 +56215,7 @@ impl<'a> Checker<'a> {
                     property: facets.property_ref.clone(),
                     method: facets.method_ref.clone(),
                     overloads: facets.overloads.clone(),
+                    inaccessible_extensions: facets.inaccessible_extensions.clone(),
                     extension_property: facets.extension_property_ref(),
                 },
                 Some(Symbol::Instance(_))
@@ -56686,22 +56672,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn module_callable_source_file(
-        &self,
-        candidate: &crate::libraries::FunctionInfo,
-    ) -> Option<u32> {
-        candidate.source_key.map(|(file, _)| file).or_else(|| {
-            candidate
-                .stable_declaration
-                .and_then(|declaration| self.resolved_index?.declaration_anchor(declaration))
-                .map(|anchor| anchor.source.raw())
-        })
-    }
-
-    fn is_current_module_callable(candidate: &crate::libraries::FunctionInfo) -> bool {
-        candidate.stable_declaration.is_some() || candidate.source_key.is_some()
-    }
-
     fn source_callable_visible(&self, candidate: &crate::libraries::FunctionInfo) -> bool {
         if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
             || self.suppresses_diagnostic("INVISIBLE_MEMBER")
@@ -56714,17 +56684,12 @@ impl<'a> Checker<'a> {
         ) {
             return true;
         }
-        match candidate.visibility {
-            Visibility::Public => true,
-            Visibility::Internal => {
-                Self::is_current_module_callable(candidate)
-                    || self.libraries.internal_accessible(candidate.callable.owner)
-            }
-            Visibility::Private => {
-                self.module_callable_source_file(candidate) == Some(self.file_index)
-            }
-            Visibility::PackagePrivate | Visibility::Protected => false,
-        }
+        crate::callable_access::source_callable_accessible(
+            candidate.visibility,
+            candidate.source_file,
+            Some(self.file_index),
+            || self.libraries.internal_accessible(candidate.callable.owner),
+        )
     }
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
@@ -69437,31 +69402,39 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: (cl.props.len() + property_index) as u32,
                     };
-                    let stable_declaration = self
-                        .resolved_index
-                        .and_then(|index| {
-                            let owner = current_owner
-                                .and_then(|owner| index.classifier_declaration(owner))?;
-                            index.owned_declaration(
-                                owner,
-                                crate::fir::DeclarationKind::Property,
-                                u32::try_from(cl.props.len() + property_index)
-                                    .expect("too many local class properties"),
+                    // The active class/body coordinate is the production declaration identity.
+                    let stable_declaration = self.active_declarations.map(|active| {
+                        active
+                            .class_body_property_declaration(
+                                d,
+                                u32::try_from(property_index).expect("too many class properties"),
                             )
-                        })
-                        .or_else(|| {
-                            props
-                                .iter()
-                                .find(|candidate| candidate.source_member == Some(source_member))
-                                .and_then(|candidate| candidate.stable_declaration)
-                        });
-                    // An explicit or already-finalized property type does not need local
-                    // inference, but its declaration still belongs to this body-local classifier
-                    // and therefore is absent from the immutable provider used by member reads.
-                    // Publish that exact checked header into the same bounded overlay as inferred
-                    // properties before deciding whether an initializer must be forced.
+                            .expect("active local-class body property has no stable declaration")
+                    });
+                    let exact_property = |candidate: &ScopedProperty| match stable_declaration {
+                        Some(declaration) => candidate.stable_declaration == Some(declaration),
+                        None => candidate.source_member == Some(source_member),
+                    };
+                    let inference_property = |candidate: &ScopedProperty| match stable_declaration {
+                        Some(declaration) => candidate.stable_declaration == Some(declaration),
+                        None => {
+                            candidate.source_member == Some(source_member)
+                                || candidate.name == property.name
+                        }
+                    };
+                    let mutable_inference_property =
+                        |candidate: &ScopedProperty| match stable_declaration {
+                            Some(declaration) => candidate.stable_declaration == Some(declaration),
+                            None => {
+                                candidate.source_member == Some(source_member)
+                                    || (candidate.name == property.name
+                                        && candidate.ty == Ty::Error)
+                            }
+                        };
+                    // Publish explicit/finalized headers into the same bounded body-local overlay
+                    // before deciding whether an initializer must be forced.
                     if let Some(checked) = props.iter().find(|candidate| {
-                        candidate.source_member == Some(source_member)
+                        exact_property(candidate)
                             && candidate.ty != Ty::Error
                             && !candidate.ty.mentions_pending()
                     }) {
@@ -69470,21 +69443,16 @@ impl<'a> Checker<'a> {
                                 owner,
                                 property,
                                 source_member,
-                                self.active_source_member_declaration(source_member),
+                                stable_declaration,
                                 checked.ty,
                                 cl.is_interface(),
                             );
                         }
                     }
                     let has_unresolved = props.iter().any(|candidate| {
-                        candidate.ty == Ty::Error
-                            && (candidate.source_member == Some(source_member)
-                                || candidate.name == property.name)
+                        candidate.ty == Ty::Error && inference_property(candidate)
                     });
-                    let absent = !props.iter().any(|candidate| {
-                        candidate.source_member == Some(source_member)
-                            || candidate.name == property.name
-                    });
+                    let absent = !props.iter().any(inference_property);
                     if !has_unresolved && !(absent && property.declared_ty().is_none()) {
                         continue;
                     }
@@ -69536,10 +69504,10 @@ impl<'a> Checker<'a> {
                                 cl.is_interface(),
                             );
                         }
-                        if let Some(scoped) = props.iter_mut().find(|candidate| {
-                            candidate.source_member == Some(source_member)
-                                || (candidate.name == property.name && candidate.ty == Ty::Error)
-                        }) {
+                        if let Some(scoped) = props
+                            .iter_mut()
+                            .find(|candidate| mutable_inference_property(candidate))
+                        {
                             scoped.ty = constraint;
                             if scoped.owner_storage_ty == Some(Ty::Error) {
                                 scoped.owner_storage_ty = Some(constraint);
@@ -69587,15 +69555,15 @@ impl<'a> Checker<'a> {
                             owner,
                             property,
                             source_member,
-                            self.active_source_member_declaration(source_member),
+                            stable_declaration,
                             inferred,
                             cl.is_interface(),
                         );
                     }
-                    if let Some(scoped) = props.iter_mut().find(|candidate| {
-                        candidate.source_member == Some(source_member)
-                            || (candidate.name == property.name && candidate.ty == Ty::Error)
-                    }) {
+                    if let Some(scoped) = props
+                        .iter_mut()
+                        .find(|candidate| mutable_inference_property(candidate))
+                    {
                         scoped.ty = inferred;
                         if scoped.owner_storage_ty == Some(Ty::Error) {
                             scoped.owner_storage_ty = Some(inferred);
@@ -69611,8 +69579,7 @@ impl<'a> Checker<'a> {
                             class_storage: None,
                             enum_entry_property: None,
                             source_member: Some(source_member),
-                            stable_declaration: self
-                                .active_source_member_declaration(source_member),
+                            stable_declaration,
                         });
                         let scoped = props.last().expect("a checked local property was appended");
                         self.declare_scoped_property(property_scope, scoped, false);
@@ -71201,25 +71168,15 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: source_property_index as u32,
                     };
-                    let stable_property = self
-                        .resolved_index
-                        .and_then(|index| {
-                            let owner = current_owner
-                                .and_then(|owner| index.classifier_declaration(owner))?;
-                            index.owned_declaration(
-                                owner,
-                                crate::fir::DeclarationKind::Property,
-                                u32::try_from(source_property_index)
-                                    .expect("too many class properties"),
+                    // This is the body-property ordinal, not the constructor-prefixed source ordinal.
+                    let stable_property = self.active_declarations.map(|active| {
+                        active
+                            .class_body_property_declaration(
+                                d,
+                                u32::try_from(bp_index).expect("too many class properties"),
                             )
-                        })
-                        .or_else(|| self.active_source_member_declaration(source_member))
-                        .or_else(|| {
-                            props
-                                .iter()
-                                .find(|candidate| candidate.source_member == Some(source_member))
-                                .and_then(|candidate| candidate.stable_declaration)
-                        });
+                            .expect("active class body property has no stable declaration")
+                    });
                     let extension_receiver = bp
                         .receiver
                         .as_ref()
@@ -71248,16 +71205,15 @@ impl<'a> Checker<'a> {
                             let properties = callables.properties();
                             let property = properties
                                 .iter()
-                                .find(|property| {
-                                    stable_property.is_some_and(|stable| {
-                                        property.stable_declaration == Some(stable)
-                                    }) || property.source_member == Some(source_member)
+                                .find(|property| match stable_property {
+                                    Some(stable) => property.stable_declaration == Some(stable),
+                                    None => property.source_member == Some(source_member),
                                 })
                                 .or_else(|| {
-                                    // Anonymous/body-local members need not own a module-stable
-                                    // declaration ID. Their finalized classifier header is still the
-                                    // authority: Kotlin permits one ordinary property per name, while
-                                    // a member extension is identified by its semantic receiver.
+                                    // Retained legacy checkers have no active declaration inventory.
+                                    if stable_property.is_some() {
+                                        return None;
+                                    }
                                     let mut candidates =
                                         properties.iter().filter(
                                             |property| match extension_receiver {

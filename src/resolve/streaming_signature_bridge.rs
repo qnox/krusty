@@ -686,7 +686,7 @@ impl ProductionSignatureSemantics<'_> {
             .collect::<std::collections::HashSet<_>>();
         let candidates = self
             .with_resolver(scope, |resolver| {
-                Some(resolver.top_level_candidates(spelling))
+                Some(resolver.accessible_top_level_candidates(spelling))
             })
             .ok()?;
         if !file.explicit_context_arguments && !names.is_empty() {
@@ -1754,11 +1754,6 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<Vec<Option<usize>>> {
         let mut mappings = candidates
             .iter()
-            // Argument mapping must use the same source-callable family that can participate in
-            // selection. Public declarations, compiler-provided must-inline bodies, and stable
-            // declarations from this compilation all carry that fact on the normalized candidate;
-            // no provider/origin branch belongs here.
-            .filter(|candidate| Self::candidate_participates_in_signature_selection(candidate))
             .filter_map(|candidate| {
                 Self::candidate_call_slots(
                     candidate,

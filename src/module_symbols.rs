@@ -585,11 +585,8 @@ impl<'a> ModuleSymbols<'a> {
         }
     }
 
-    /// The module's TOP-LEVEL function overloads of `name` as [`FunctionInfo`]s — every `fun name(...)`
-    /// declared at file scope, each stamped with its declaring facade [`Origin::Module`]. The building
-    /// block `resolve_symbols`/`resolve_top_level` share, so the source answers a name without the old
-    /// receiver-indexed `functions()` API.
-    pub fn top_level_overloads(&self, name: &str) -> Vec<FunctionInfo> {
+    /// The module's top-level function overloads of `name`, normalized for [`Self::symbols`].
+    fn top_level_overloads(&self, name: &str) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         if let Some(sigs) = self.syms.funs.get(name) {
             for sig in sigs {
@@ -610,45 +607,6 @@ impl<'a> ModuleSymbols<'a> {
             }
         }
         overloads
-    }
-
-    pub fn top_level_overloads_in_scope(
-        &self,
-        name: &str,
-        packages: &[TypeName],
-    ) -> Vec<FunctionInfo> {
-        self.top_level_overloads(name)
-            .into_iter()
-            .filter(|fi| {
-                fi.source_key
-                    .and_then(|(file, decl)| {
-                        self.syms.funs.get(name).and_then(|sigs| {
-                            sigs.iter().find(|sig| {
-                                sig.source_file == Some(file)
-                                    && sig.source_decl.is_some_and(|d| d.0 == decl)
-                            })
-                        })
-                    })
-                    .is_some_and(|sig| packages.iter().any(|pkg| pkg.matches(&sig.package)))
-            })
-            .collect()
-    }
-
-    /// Package-scoped top-level overloads callable from this source file.
-    pub fn top_level_overloads_accessible_in_scope(
-        &self,
-        name: &str,
-        packages: &[TypeName],
-    ) -> Vec<FunctionInfo> {
-        self.top_level_overloads_in_scope(name, packages)
-            .into_iter()
-            .filter(|function| {
-                !function.visibility.is_private()
-                    || function
-                        .source_key
-                        .is_some_and(|(file, _)| Some(file) == self.source_file)
-            })
-            .collect()
     }
 
     fn declared_callables_for(
@@ -964,6 +922,7 @@ fn fn_info(
         call_sig: sig.call_sig(),
         default_values: sig.param_default_values.clone(),
         context_count: sig.context_count,
+        source_file: sig.source_file,
         source_key: sig
             .source_file
             .zip(sig.source_decl)
@@ -1793,6 +1752,60 @@ mod tests {
         assert!(
             std::rc::Rc::ptr_eq(&first, &second),
             "repeated queries must not rebuild the namespace record"
+        );
+    }
+
+    #[test]
+    fn package_symbols_preserve_private_extension_identity_and_file() {
+        let mut symbols = FrontendSymbols::default();
+        let receiver = Ty::obj("demo/Endpoint");
+        let own_declaration = crate::fir::DeclarationId::from_raw(11);
+        let sibling_declaration = crate::fir::DeclarationId::from_raw(12);
+
+        let mut own = sig(Vec::new(), Ty::String);
+        own.visibility = Visibility::Private;
+        own.source_file = Some(0);
+        own.stable_declaration = Some(own_declaration);
+        own.package = "demo".into();
+
+        let mut sibling = sig(Vec::new(), Ty::Int);
+        sibling.visibility = Visibility::Private;
+        sibling.source_file = Some(1);
+        sibling.stable_declaration = Some(sibling_declaration);
+        sibling.package = "demo".into();
+
+        let mut missing_provenance = sig(Vec::new(), Ty::Boolean);
+        missing_provenance.visibility = Visibility::Private;
+        missing_provenance.package = "demo".into();
+
+        symbols.ext_funs.entry("mark".into()).or_default().insert(
+            receiver.extension_recv_key(),
+            vec![own, sibling, missing_provenance],
+        );
+
+        let functions = ModuleSymbols::for_file(&symbols, 0)
+            .symbols(SymbolNamespace::Package(type_name("demo")), "mark")
+            .callables
+            .clone()
+            .into_parts()
+            .0
+            .overloads;
+
+        assert_eq!(functions.len(), 3);
+        assert_eq!(
+            functions
+                .iter()
+                .map(|function| (
+                    function.stable_declaration,
+                    function.source_file,
+                    function.source_key,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (Some(own_declaration), Some(0), None),
+                (Some(sibling_declaration), Some(1), None),
+                (None, None, None),
+            ]
         );
     }
 

@@ -2563,7 +2563,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             self.applied_source_alias_expansion(scope, spelling, &resolved_type_arguments);
         let nested_classifier = self.lexically_nested_classifier(scope, spelling);
         let selected = self.with_resolver(scope, |resolver| {
-            let candidates = resolver.top_level_candidates(spelling);
+            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
+            let candidates = if include_invisible {
+                resolver.top_level_candidates(spelling)
+            } else {
+                resolver.accessible_top_level_candidates(spelling)
+            };
             crate::trace_compiler!(
                 "signature",
                 "top-level candidates spelling={spelling} arguments={argument_types:?} candidates={:?}",
@@ -2583,8 +2588,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments,
                 trailing_lambda,
             ) {
-                    let (selected, callable) =
-                    if self.table.declaration_suppresses_visibility(scope.owner) {
+                let (selected, callable) = if include_invisible {
                         resolver.select_top_level_function_candidates_with_expected_ignoring_visibility(
                             spelling,
                             explicit.candidates,
@@ -2592,15 +2596,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             &resolved_type_arguments,
                             expected.map(crate::fir::ResolvedTy::get),
                         )?
-                    } else {
-                        resolver.select_top_level_function_candidates_with_expected(
-                            spelling,
-                            explicit.candidates,
-                            &explicit.arguments,
-                            &resolved_type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )?
-                    };
+                } else {
+                    resolver.select_top_level_function_candidates_with_expected(
+                        spelling,
+                        explicit.candidates,
+                        &explicit.arguments,
+                        &resolved_type_arguments,
+                        expected.map(crate::fir::ResolvedTy::get),
+                    )?
+                };
                 return Some((
                     SelectedTopLevelCall::Callable {
                         parameter_by_argument: Self::selected_argument_parameters(
@@ -2630,7 +2634,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let (selected_arguments, selected_argument_types) = mapped
                 .clone()
                 .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
-            if self.table.declaration_suppresses_visibility(scope.owner) {
+            if include_invisible {
                 let all_top_level = candidates
                     .iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
@@ -2695,7 +2699,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // separately; two or more individually applicable declarations combined with no
             // family winner is exactly an ambiguity, without reproducing applicability or
             // specificity rules in the signature evaluator.
-            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
             let individually_applicable = candidates
                 .iter()
                 .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
@@ -2742,39 +2745,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 "call selection {spelling} arguments={selected_arguments:?} type_arguments={resolved_type_arguments:?} selected={}",
                 symbol.is_some(),
             );
-            // `pick_top_level` admits only PUBLIC declarations, so a call to a `private`/`internal`
-            // top-level function in the same file never gets a `top_level_call` facet and the whole
-            // module's signatures decline. The checker reaches those through its own
-            // `source_callable_visible` rung; mirror that here, and only when the visible family is
-            // unambiguous.
-            let same_module_callable = || {
-                let visible = candidates
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.kind == crate::libraries::FnKind::TopLevel
-                            && match candidate.visibility {
-                                crate::types::Visibility::Public => false,
-                                crate::types::Visibility::Internal => {
-                                    candidate.source_key.is_some()
-                                }
-                                crate::types::Visibility::Private => candidate
-                                    .source_key
-                                    .is_some_and(|(file, _)| file == scope.source.raw()),
-                                crate::types::Visibility::PackagePrivate
-                                | crate::types::Visibility::Protected => false,
-                            }
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                resolver
-                    .select_top_level_function_candidates_with_expected_ignoring_visibility(
-                        spelling,
-                        visible,
-                        &selected_arguments,
-                        &resolved_type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )
-            };
+            // Callable selection above already used the common file/module visibility gate. This
+            // symbol query supplies only the remaining value and constructor facets.
             if let Some(symbol) = symbol {
                 if let crate::symbol_resolver::Symbol::Member(facets) = &symbol {
                     if let [property] = facets.values.as_slice() {
@@ -2798,21 +2770,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         argument_types.clone(),
                     ));
                 }
-            }
-            if let Some((selected, callable)) = same_module_callable() {
-                return Some((
-                    SelectedTopLevelCall::Callable {
-                        parameter_by_argument: Self::selected_argument_parameters(
-                            &selected,
-                            arguments,
-                            trailing_lambda,
-                        ),
-                        callable: Box::new(callable),
-                        source: selected.source_key,
-                        declaration: selected.stable_declaration,
-                    },
-                    selected_argument_types,
-                ));
             }
             // A lexically nested classifier is a nearer type-scope rung than file imports. Use
             // the same ordering as value/type lookup instead of letting an imported same-named
@@ -3128,7 +3085,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             (Vec<Ty>, Vec<Option<usize>>, crate::libraries::CallSig),
             _,
         > = self.with_resolver(scope, |resolver| {
-            let candidates = resolver.top_level_candidates(spelling);
+            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
+            let candidates = if include_invisible {
+                resolver.top_level_candidates(spelling)
+            } else {
+                resolver.accessible_top_level_candidates(spelling)
+            };
             let argument_names = arguments
                 .iter()
                 .map(|argument| match argument {
@@ -3162,9 +3124,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             );
             let (kinds, slots) =
                 Self::probe_call_arguments(&candidates, arguments, trailing_lambda)?;
-            let visibility_override = self
-                .table
-                .declaration_suppresses_visibility(scope.owner)
+            let visibility_override = include_invisible
                 .then(|| {
                     resolver.select_top_level_function_candidates_ignoring_visibility(
                         spelling,
@@ -3213,17 +3173,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .or_else(|| {
                     let mut visible = candidates.iter().filter(|candidate| {
                         candidate.kind == crate::libraries::FnKind::TopLevel
-                            && match candidate.visibility {
-                                crate::types::Visibility::Public => true,
-                                crate::types::Visibility::Internal => {
-                                    candidate.source_key.is_some()
-                                }
-                                crate::types::Visibility::Private => candidate
-                                    .source_key
-                                    .is_some_and(|(file, _)| file == scope.source.raw()),
-                                crate::types::Visibility::PackagePrivate
-                                | crate::types::Visibility::Protected => false,
-                            }
+                            && resolver.non_member_callable_accessible(candidate)
                     });
                     let selected = visible.next()?.clone();
                     visible.next().is_none().then(|| {
@@ -3578,7 +3528,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
             }
             let candidates = self.with_resolver(scope, |resolver| {
-                Some(resolver.top_level_candidates(spelling))
+                Some(resolver.accessible_top_level_candidates(spelling))
             })?;
             let mut candidates_with_finalized_signatures = Vec::with_capacity(candidates.len());
             for mut candidate in candidates {
@@ -4089,41 +4039,40 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .non_null()
                 .obj_internal()
                 .is_none_or(|classifier| !self.classifier_is_singleton(classifier));
-        let candidates = self.with_resolver(scope, |resolver| {
-            let property = resolver
-                .resolve_symbol(
+        let candidates =
+            self.with_resolver(scope, |resolver| {
+                let crate::symbol_resolver::Symbol::Member(facets) = resolver.resolve_symbol(
                     crate::symbol_resolver::SymRecv::Value(receiver.get()),
                     spelling,
                     &[],
                     &[],
-                )
-                .and_then(|symbol| match symbol {
-                    crate::symbol_resolver::Symbol::Member(facets) => facets
-                        .property_ref
-                        .clone()
-                        .or_else(|| facets.extension_property_ref()),
-                    crate::symbol_resolver::Symbol::Instance(_)
-                    | crate::symbol_resolver::Symbol::Companion(_)
-                    | crate::symbol_resolver::Symbol::Constructor(_) => None,
-                });
-            // A callable reference selects from the overload FAMILY under its contextual function
-            // shape. Asking `resolve_symbol(..., [])` for that family prematurely selects a
-            // zero-argument call and drops source members whose return is still demand-driven.
-            let candidates = resolver
-                .receiver_callables(receiver.get(), spelling)
-                .functions()
-                .iter()
-                .filter(|candidate| {
-                    matches!(
-                        candidate.kind,
-                        crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension
-                    )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            (property.is_some() || !candidates.is_empty()).then_some((property, candidates))
-        });
-        let (property, mut candidates) = match candidates {
+                )?
+                else {
+                    return None;
+                };
+                let property = facets
+                    .property_ref
+                    .clone()
+                    .or_else(|| facets.extension_property_ref());
+                // A callable reference selects from the overload FAMILY under its contextual function
+                // shape. Asking `resolve_symbol(..., [])` for that family prematurely selects a
+                // zero-argument call and drops source members whose return is still demand-driven.
+                let candidates = facets
+                    .overloads
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(
+                            candidate.kind,
+                            crate::libraries::FnKind::Member | crate::libraries::FnKind::Extension
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let inaccessible = facets.inaccessible_extensions.clone();
+                (property.is_some() || !candidates.is_empty() || !inaccessible.is_empty())
+                    .then_some((property, candidates, inaccessible))
+            });
+        let (property, mut candidates, inaccessible) = match candidates {
             Ok(candidates) => candidates,
             Err(_failure) if unbound => {
                 return Err(self.record_unresolved_reference(scope.owner, origin, spelling));
@@ -4190,6 +4139,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return Ok(expected);
             }
             return crate::fir::ResolvedTy::new(natural).map_err(|_| Self::failure());
+        }
+        // Visibility precedes expected callable-shape mismatch, matching kotlinc. These retained
+        // declarations are diagnostic facts only and never join the selected candidate family.
+        if candidates.is_empty() && !inaccessible.is_empty() {
+            return Err(self.record_source_diagnostic(
+                scope.owner,
+                origin,
+                format!("cannot access '{spelling}': it is private in its file"),
+            ));
         }
         if let Some(expected) = expected {
             let Ty::Fun(expected_function) = expected.get().non_null() else {

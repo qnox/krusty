@@ -15,6 +15,7 @@ pub mod ast;
 pub mod ast_print;
 mod ast_validate;
 pub mod backend;
+mod callable_access;
 pub mod compiler;
 pub mod conformance;
 pub mod contracts;
