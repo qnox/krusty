@@ -1891,6 +1891,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A range's own answers, reproduced by krusty's native runtime.** The native target owns
+  `IntRange`, `LongRange` and `CharRange` rather than reading them out of a library, so each answer
+  is a decision written down here and pinned by `tests/native_ranges_e2e.rs`:
+  - `a until b` answers the EMPTY range when `b` is the element type's minimum, rather than
+    computing `b - 1` and wrapping round to the maximum — which would make every value a member.
+  - An empty range is one whose `first` exceeds its `last`; that is a value, not an error, and
+    `3..1` is it.
+  - `equals` is true when both ranges are empty, or when both bounds match, and only WITHIN one
+    range type: `1..3` is an `IntRange` and never equals the `LongRange` of the same bounds.
+  - `hashCode` is `-1` for an empty range, else `31 * first + last` with each bound folded through
+    its own `hashCode` first — which for a `Long` is its two halves xored together.
+  - `toString` is `"$first..$last"`, with a `CharRange`'s bounds rendered as the characters they are
+    (`'a'..'c'` renders `a..c`, not `97..99`).
+  - Iterating a materialized range terminates at the element type's maximum: the iterator carries a
+    "there is another" bit rather than testing `next <= last`, because incrementing past the maximum
+    wraps and that test would never stop. Kotlin's own `IntProgressionIterator` carries the same bit.
+  A `Char` bound is compared UNSIGNED, so a code point above `0x7FFF` is not a negative number:
+  `'\uFF00' in '\uF000'..'\uFFFF'` is true. Tests: `tests/native_ranges_e2e.rs`.
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that

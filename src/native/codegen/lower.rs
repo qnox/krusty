@@ -18,6 +18,7 @@ mod defaults;
 mod enums;
 mod functions;
 mod objects;
+mod ranges;
 mod scope;
 mod statics;
 
@@ -1082,6 +1083,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let member = self.enum_member_name(target).expect("checked by the guard");
                 self.enum_member(member, receiver)
             }
+            // `range.first` and its three siblings: a checked read of a dependency property whose
+            // getter the runtime answers, exactly as an explicit call to it would be.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.range_getter(target).is_some() => {
+                let (owner, name, ret) = self.range_getter(target).expect("checked by the guard");
+                self.range_member(&owner, &name, receiver, &[], ret)
+                    .expect("a range member, by the guard")
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1106,6 +1118,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     Err(reason) => Err(reason),
                 }
             }
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction {
+                operation,
+                start,
+                start_type,
+                end,
+                end_type,
+                result,
+            }) => self.range_construction(operation, start, start_type, end, end_type, result),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
@@ -1296,11 +1316,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
-                match self.enum_member_name(*target)? {
-                    "name" => Ty::String,
-                    _ => Ty::Int,
+                match self.enum_member_name(*target) {
+                    Some("name") => Ty::String,
+                    Some(_) => Ty::Int,
+                    // A range's own members answer at their element's width.
+                    None => self.range_getter(*target)?.2,
                 }
             }
+            // A constructed range is an object of the type the checker gave it, which is what makes
+            // `1..3 == r` recognisable as an equality between references rather than a guess.
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
                 self.file.ir.checked_properties.get(target)?.ty
             }
@@ -1889,6 +1914,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             super::super::intrinsics::float_predicate(&owner, &name)
                         {
                             return self.float_predicate(predicate, receiver);
+                        }
+                        // A range object's members are the runtime's, and `contains` is why they
+                        // are not table entries below: that path crosses every argument as a
+                        // reference, which would box the very `Int` the question is about.
+                        if let Some(realized) =
+                            self.range_member(&owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
                         }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)

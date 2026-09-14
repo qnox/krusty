@@ -1374,6 +1374,23 @@ before:**
    makes the numbering independent of the map's iteration order — sorting by slot alone did not,
    because two keys sharing a slot compared equal.
 
+   **Ranges as values took it to 2243 pass.** A range a loop consumes never becomes an object —
+   common lowering turns `for (i in 1..10)` into a counted loop before this backend sees it, the
+   same trade the JVM's own range intrinsics make. What was declining is the other half: a range the
+   program KEEPS, passes or asks a question of. That one is an ordinary heap object, and the three
+   closed integral ranges are the runtime's own types rather than a library's, which is the whole
+   point of owning the runtime — `equals`, `hashCode` and `toString` are written where the object
+   is, so they answer what the Kotlin declaration each stands for answers, and `docs/SPEC.md`
+   records each decision with its test. One struct serves all three, with the bounds kept at 64 bits
+   and the descriptor telling them apart; a `Char` bound is stored zero-extended so a code point
+   above `0x7FFF` is not read as a negative number. `for (x in r)` over a materialized range then
+   needed an iterator, which is one more runtime object carrying a "there is another" bit rather
+   than a `next <= last` test — `for (i in (Int.MAX_VALUE - 2)..Int.MAX_VALUE)` is why, since
+   incrementing past the maximum wraps and that test would never stop. Kotlin's own
+   `IntProgressionIterator` carries the same bit. `step`, `downTo` and `reversed` still decline, and
+   that is what makes reading `first`/`last` off a receiver typed as a PROGRESSION sound: with no
+   way to build one, the only progression a lowered program holds is a range.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

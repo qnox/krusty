@@ -158,6 +158,51 @@ extern const KType kt_type_boolean_array;
 extern const KType kt_type_float_array;
 extern const KType kt_type_double_array;
 
+/* ---- ranges ---------------------------------------------------------------------------------- */
+
+/* `1..3`, `a..<b`, `'a'..'z'` as a VALUE. The three closed integral ranges share one shape — two
+   bounds — and differ only by descriptor, which is what `equals`, `hashCode` and `toString` read to
+   answer the way the Kotlin declaration each stands for does. The bounds are kept at 64 bits for
+   all three so one struct serves them; the narrower two are stored sign- or zero-extended exactly
+   as their Kotlin type reads them, so a comparison at this width answers what one at their own
+   width would. */
+typedef struct KRange {
+    KObjectHeader header;
+    kt_long first;
+    kt_long last;
+} KRange;
+
+extern const KType kt_type_int_range;
+extern const KType kt_type_long_range;
+extern const KType kt_type_char_range;
+
+/* `first..last`. An empty range is one whose `first` exceeds its `last`, which is a value, not an
+   error: `3..1` is the empty range and Kotlin says so. */
+KRef kt_int_range(kt_int first, kt_int last);
+KRef kt_long_range(kt_long first, kt_long last);
+KRef kt_char_range(kt_char first, kt_char last);
+
+/* `first..<last` / `first until last`. Kotlin answers the EMPTY range rather than wrapping when
+   `last` is the element type's minimum, so the half-open form is a function and not `last - 1`. */
+KRef kt_int_range_until(kt_int first, kt_int last);
+KRef kt_long_range_until(kt_long first, kt_long last);
+KRef kt_char_range_until(kt_char first, kt_char last);
+
+/* `value in range`. The caller widens its own element to 64 bits — signed for `Int` and `Long`,
+   unsigned for `Char` — which is the same widening the bounds were stored with. */
+kt_boolean kt_range_contains(KRef range, kt_long value);
+/* `range.first` / `range.last` / `range.start` / `range.endInclusive`, at the range's own width. */
+kt_long kt_range_first(KRef range);
+kt_long kt_range_last(KRef range);
+kt_boolean kt_range_is_empty(KRef range);
+
+/* `for (x in range)` over a range the program materialized. The iterator is its own object because
+   the loop reads it twice per step; a range iterated straight from a literal never becomes one,
+   because common lowering turns that into a counted loop before this backend sees it. */
+KRef kt_range_iterator(KRef range);
+kt_boolean kt_range_iterator_has_next(KRef iterator);
+kt_long kt_range_iterator_next(KRef iterator);
+
 /* Defaults, callable directly for `super.toString()` and friends. */
 kt_boolean kt_any_equals(KRef self, KRef other);
 kt_int kt_any_hash_code(KRef self);

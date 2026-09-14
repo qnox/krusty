@@ -413,6 +413,183 @@ KT_UNBOX(double, double_value, kt_double)
 
 #undef KT_UNBOX
 
+/* ---- ranges ---------------------------------------------------------------------------------- */
+
+/* `1..3` as a value. The three closed integral ranges share one struct and one set of methods; the
+   descriptor is what tells them apart, and it has to, because Kotlin's three declarations answer
+   `equals`, `hashCode` and `toString` differently. An `IntRange` never equals a `LongRange` with
+   the same bounds, which the type comparison in `kt_range_equals` is exactly. */
+
+static kt_boolean kt_range_equals(KRef self, KRef other);
+static kt_int kt_range_hash_code(KRef self);
+static KRef kt_range_to_string(KRef self);
+
+static const kt_fn kt_range_vtable[] = {(kt_fn)kt_range_equals, (kt_fn)kt_range_hash_code,
+                                        (kt_fn)kt_range_to_string};
+
+/* A range type or a range iterator: the shape fixes the instance size, and the table decides the
+   three `kotlin.Any` members. A range answers all three by its bounds, as Kotlin's declarations do;
+   an iterator is an ordinary object that answers by identity, as Kotlin's own iterators do. */
+#define KT_RANGE_TYPE(identifier, kotlin_name, shape, table)                                       \
+    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, sizeof(shape), 0,              \
+                              0,           NULL,                    &kt_type_any,                  \
+                              table, 3, 0};
+
+KT_RANGE_TYPE(kt_type_int_range, "kotlin.ranges.IntRange", KRange, kt_range_vtable)
+KT_RANGE_TYPE(kt_type_long_range, "kotlin.ranges.LongRange", KRange, kt_range_vtable)
+KT_RANGE_TYPE(kt_type_char_range, "kotlin.ranges.CharRange", KRange, kt_range_vtable)
+
+
+static KRef kt_range_new(const KType *type, kt_long first, kt_long last) {
+    KRange *range = (KRange *)kt_gc_allocate(type, sizeof(KRange));
+    range->first = first;
+    range->last = last;
+    return (KRef)range;
+}
+
+KRef kt_int_range(kt_int first, kt_int last) {
+    return kt_range_new(&kt_type_int_range, first, last);
+}
+
+KRef kt_long_range(kt_long first, kt_long last) {
+    return kt_range_new(&kt_type_long_range, first, last);
+}
+
+KRef kt_char_range(kt_char first, kt_char last) {
+    return kt_range_new(&kt_type_char_range, first, last);
+}
+
+/* The half-open form. Kotlin's `until` answers the declared EMPTY range when `last` is the element
+   type's minimum, rather than computing `last - 1` and wrapping round to the maximum. That empty
+   range is a specific pair of bounds -- `1..0` for the integral types, and the same pair widened
+   for `Char` -- so an empty range from `until` prints and hashes as that one. */
+KRef kt_int_range_until(kt_int first, kt_int last) {
+    if (last == INT32_MIN) {
+        return kt_int_range(1, 0);
+    }
+    return kt_int_range(first, last - 1);
+}
+
+KRef kt_long_range_until(kt_long first, kt_long last) {
+    if (last == INT64_MIN) {
+        return kt_long_range(1, 0);
+    }
+    return kt_long_range(first, last - 1);
+}
+
+KRef kt_char_range_until(kt_char first, kt_char last) {
+    if (last == 0) {
+        return kt_char_range(1, 0);
+    }
+    return kt_char_range(first, (kt_char)(last - 1));
+}
+
+static kt_boolean kt_range_empty(const KRange *range) { return range->first > range->last; }
+
+kt_boolean kt_range_is_empty(KRef range) { return kt_range_empty((const KRange *)range); }
+
+kt_long kt_range_first(KRef range) { return ((const KRange *)range)->first; }
+
+kt_long kt_range_last(KRef range) { return ((const KRange *)range)->last; }
+
+/* `value in range`. The bounds were stored at 64 bits with the element type's own signedness, so
+   the caller widens the same way and one comparison serves all three. */
+kt_boolean kt_range_contains(KRef range, kt_long value) {
+    const KRange *self = (const KRange *)range;
+    return self->first <= value && value <= self->last;
+}
+
+/* Two ranges are equal when both are empty, or when both bounds match -- and only within one range
+   type: `1..3` is an `IntRange` and never equals the `LongRange` of the same bounds. */
+static kt_boolean kt_range_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != self->header.type) {
+        return false;
+    }
+    const KRange *a = (const KRange *)self;
+    const KRange *b = (const KRange *)other;
+    if (kt_range_empty(a) && kt_range_empty(b)) {
+        return true;
+    }
+    return a->first == b->first && a->last == b->last;
+}
+
+/* Kotlin's own: `-1` for an empty range, else `31 * first + last`, with each bound folded through
+   its own `hashCode` first -- which for a `Long` is the two halves xored together. */
+static kt_int kt_range_hash_code(KRef self) {
+    const KRange *range = (const KRange *)self;
+    if (kt_range_empty(range)) {
+        return -1;
+    }
+    if (self->header.type == &kt_type_long_range) {
+        kt_int first = (kt_int)(range->first ^ (kt_long)((uint64_t)range->first >> 32));
+        kt_int last = (kt_int)(range->last ^ (kt_long)((uint64_t)range->last >> 32));
+        return (kt_int)(31u * (uint32_t)first + (uint32_t)last);
+    }
+    return (kt_int)(31u * (uint32_t)range->first + (uint32_t)range->last);
+}
+
+/* A range's iterator: the bounds again, plus the one bit that makes the LAST step terminate
+   without overflowing. `for (i in 1..Int.MAX_VALUE)` is why the bit exists — incrementing past the
+   maximum wraps, and a `next <= last` test would then never stop. Kotlin's own
+   `IntProgressionIterator` carries the same flag for the same reason. */
+typedef struct KRangeIterator {
+    KObjectHeader header;
+    kt_long next;
+    kt_long last;
+    kt_boolean has_next;
+} KRangeIterator;
+
+KT_RANGE_TYPE(kt_type_int_iterator, "kotlin.collections.IntIterator", KRangeIterator, kt_any_vtable)
+KT_RANGE_TYPE(kt_type_long_iterator, "kotlin.collections.LongIterator", KRangeIterator, kt_any_vtable)
+KT_RANGE_TYPE(kt_type_char_iterator, "kotlin.collections.CharIterator", KRangeIterator, kt_any_vtable)
+
+KRef kt_range_iterator(KRef range) {
+    const KRange *bounds = (const KRange *)range;
+    const KType *type = range->header.type == &kt_type_long_range   ? &kt_type_long_iterator
+                        : range->header.type == &kt_type_char_range ? &kt_type_char_iterator
+                                                                    : &kt_type_int_iterator;
+    KRangeIterator *iterator = (KRangeIterator *)kt_gc_allocate(type, sizeof(KRangeIterator));
+    iterator->next = bounds->first;
+    iterator->last = bounds->last;
+    iterator->has_next = bounds->first <= bounds->last;
+    return (KRef)iterator;
+}
+
+kt_boolean kt_range_iterator_has_next(KRef iterator) {
+    return ((const KRangeIterator *)iterator)->has_next;
+}
+
+kt_long kt_range_iterator_next(KRef iterator) {
+    KRangeIterator *self = (KRangeIterator *)iterator;
+    if (!self->has_next) {
+        KT_FAIL("krusty: no more elements in this range\n");
+    }
+    kt_long value = self->next;
+    if (value == self->last) {
+        self->has_next = false;
+    } else {
+        self->next = value + 1;
+    }
+    return value;
+}
+
+#undef KT_RANGE_TYPE
+
+/* `"$first..$last"`, with a `CharRange`'s bounds rendered as the characters they are. */
+static KRef kt_range_to_string(KRef self) {
+    const KRange *range = (const KRange *)self;
+    kt_boolean chars = self->header.type == &kt_type_char_range;
+    KByteArray *buffer = kt_bytes_new(48);
+    char *out = kt_bytes_of(buffer);
+    kt_int length =
+        chars ? kt_render_char((kt_char)range->first, out) : kt_render_long(range->first, out);
+    out[length++] = '.';
+    out[length++] = '.';
+    length += chars ? kt_render_char((kt_char)range->last, out + length)
+                    : kt_render_long(range->last, out + length);
+    return kt_string_of((KRef)buffer, kt_bytes_of(buffer), length);
+}
+
 /* Static storage, not the heap: the collector never sees it as an object, and nothing needs it
    to. */
 KRef kt_unit(void) {

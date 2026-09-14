@@ -165,6 +165,15 @@ pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
 /// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
 /// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
 /// which is what `4.toString()` means anyway.
+/// `a until b` — the half-open range builder, which the provider presents as an extension function
+/// of the ranges file facade rather than a member of the range it answers.
+///
+/// Recognized here rather than where ranges are lowered, for the same reason [`facade_package`]
+/// lives here: the facade is the JVM provider's spelling, not Kotlin's.
+pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "until" && arity == 1
+}
+
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
@@ -219,6 +228,18 @@ mod tests {
             runtime_function("kotlin/io/ConsoleKt", "println", &[]).as_deref(),
             Some("kt_println_unit")
         );
+    }
+
+    #[test]
+    fn the_half_open_range_builder_is_recognized_on_its_facade() {
+        assert!(is_range_until("kotlin/ranges/RangesKt", "until", 1));
+        assert!(is_range_until("kotlin/ranges/URangesKt", "until", 1));
+        // A member of a real class in the same package is not the facade's extension, and neither
+        // is a same-named function of another package.
+        assert!(!is_range_until("kotlin/ranges/IntRange", "until", 1));
+        assert!(!is_range_until("kotlin/text/StringsKt", "until", 1));
+        assert!(!is_range_until("kotlin/ranges/RangesKt", "downTo", 1));
+        assert!(!is_range_until("kotlin/ranges/RangesKt", "until", 2));
     }
 
     #[test]
