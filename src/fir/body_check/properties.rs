@@ -1449,6 +1449,7 @@ impl BodyFirChecker<'_> {
         let span =
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
         let receiver_ty = self.resolved_type(span, resolution.receiver_ty)?;
+        let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
         let read = self.selected_property_read(
             origin,
             receiver_ty,
@@ -1456,6 +1457,7 @@ impl BodyFirChecker<'_> {
             dispatch_receiver,
             extension_receiver,
             &context_arguments,
+            &substitutions,
         );
         let convention = if dec { "dec" } else { "inc" };
         let updated_kind = if self
@@ -1487,7 +1489,7 @@ impl BodyFirChecker<'_> {
             context_arguments: context_arguments.clone(),
             value: updated,
             conversion: None,
-            substitutions: Box::new([]),
+            substitutions: substitutions.clone(),
         };
         if !prefix {
             return Ok(Some(write));
@@ -1514,6 +1516,7 @@ impl BodyFirChecker<'_> {
             dispatch_receiver,
             extension_receiver,
             &context_arguments,
+            &substitutions,
         );
         Ok(Some(FirExprKind::Block {
             statements,
@@ -1524,10 +1527,10 @@ impl BodyFirChecker<'_> {
     /// One read of the SELECTED property access.
     ///
     /// A prefix increment reads twice, and the second read is the same selection as the first: the
-    /// same getter, the same receivers, the same context arguments. Spelling it out a second time
-    /// invites exactly one class of bug — a part of the selection silently left off, which for a
-    /// context-parameter property means emitting its getter again with the operands missing — so
-    /// both reads are built here instead.
+    /// same getter, receivers, context arguments, and declaration substitutions. Spelling it out a
+    /// second time invites exactly one class of bug — a part of the selection silently left off,
+    /// which for a context-parameter property means emitting its getter again with the operands
+    /// missing — so both reads are built here instead.
     fn selected_property_read(
         &mut self,
         origin: OriginId,
@@ -1536,6 +1539,7 @@ impl BodyFirChecker<'_> {
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
         context_arguments: &[FirReceiver],
+        substitutions: &[FirTypeSubstitution],
     ) -> FirExprId {
         self.body.add_expr(FirExpr {
             origin,
@@ -1545,7 +1549,7 @@ impl BodyFirChecker<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 context_arguments: context_arguments.into(),
-                substitutions: Box::new([]),
+                substitutions: substitutions.into(),
             },
         })
     }
@@ -1759,6 +1763,7 @@ impl BodyFirChecker<'_> {
             })?;
         let read_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let updated_ty = self.resolved_type(span, resolution.updated_ty)?;
+        let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
         let read = self.selected_property_read(
             cause,
             read_ty,
@@ -1766,6 +1771,7 @@ impl BodyFirChecker<'_> {
             dispatch_receiver,
             extension_receiver,
             &context_arguments,
+            &substitutions,
         );
         let convention = if decrement { "dec" } else { "inc" };
         let increment = |checker: &mut Self, operand| -> Result<FirExprId, BodyCheckFailure> {
@@ -1839,7 +1845,7 @@ impl BodyFirChecker<'_> {
                 context_arguments: context_arguments.clone(),
                 value,
                 conversion: None,
-                substitutions: Box::new([]),
+                substitutions: substitutions.clone(),
             },
         });
         statements.push(self.body.add_statement(FirStatement {
@@ -1862,6 +1868,7 @@ impl BodyFirChecker<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 &context_arguments,
+                &substitutions,
             ),
         };
         Ok(Some(FirExprKind::Block {

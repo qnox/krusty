@@ -9,22 +9,20 @@
 
 use super::common;
 
-/// The same program under the REFERENCE compiler, when it is provisioned.
+/// The same program under the provisioned REFERENCE compiler.
 ///
-/// Accessor-call COUNT is a claim about what kotlinc does, so pin it against kotlinc rather than
-/// only against krusty's own reading of the corpus. `None` means the reference compiler is not
-/// provisioned in this environment; CI provisions it.
-fn reference_box(src: &str) -> Option<String> {
-    let out = common::kotlinc_library(src)?;
+/// Accessor-call COUNT is a claim about what kotlinc does, so setup, compilation, emitted `box`,
+/// and execution are all mandatory assertions rather than optional coverage.
+fn reference_box(src: &str) -> String {
+    let out = common::kotlinc_library(src).expect("compile accessor fixture with kotlinc");
     common::run_box(&[], "LibKt", &[out, common::stdlib_jar()])
+        .expect("run kotlinc-built accessor fixture")
 }
 
 /// Run `src` under both compilers and assert both answer `"OK"`.
 fn both_compilers_agree(src: &str, stem: &str) {
     common::expect_box_ok_with_stdlib(src, stem);
-    if let Some(reference) = reference_box(src) {
-        assert_eq!(reference, "OK", "{stem}: reference compiler");
-    }
+    assert_eq!(reference_box(src), "OK", "{stem}: reference compiler");
 }
 
 #[test]
