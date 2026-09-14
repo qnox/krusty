@@ -2095,3 +2095,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   already carries this fact to its cloned call; the value-class clone now does too.
   `tests/reified_value_class_splice_e2e.rs::a_reified_nullable_value_class_result_still_splices`,
   `a_reified_non_null_value_class_result_still_splices`.
+- **A member `val`'s null proof survives a foreign receiver lambda (fix).** A bare own-member read
+  (`token`) is an alias for a dispatch-property read, so its stability is decided through the
+  receiver that OWNS the property. That decision was made against whatever `this` meant at the proof
+  site instead. Inside a lambda typed `Other.() -> R` — `install(Auth) { bearer { … } }` and every
+  other builder of that shape — `this` is the builder, which has no such member, so the proof was
+  silently dropped and `if (token != null) use(token)` still saw `T?`. The owning receiver is still
+  on the scope's rung stack and the binding records exactly which rung it is, so the decision now
+  reads that rung. A binding naming no live rung still declines, as do a `var`, a custom getter, a
+  delegate and an `open` property on a non-final class.
+  `tests/receiver_lambda_member_smartcast_e2e.rs::a_member_val_smart_casts_inside_a_foreign_receiver_lambda`,
+  `the_proof_survives_several_nested_foreign_receivers`,
+  `a_mutable_member_still_declines_inside_a_foreign_receiver_lambda`,
+  `a_custom_getter_still_declines_inside_a_foreign_receiver_lambda`.

@@ -50,7 +50,10 @@ mod postponed_diagnostics;
 mod safe_call_flow;
 mod sam_constructors;
 mod scope;
+mod singleton_receivers;
 mod source_constructors;
+mod stable_path;
+mod stable_path_legacy_bridge;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
@@ -75,6 +78,7 @@ use local_class_scope::{
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
+use stable_path::StablePathRead;
 use streaming_signature_bridge::*;
 pub(crate) use streaming_signature_bridge::{
     extract_source_contract_candidates, finalize_streamed_top_level_conflicts,
@@ -24564,28 +24568,17 @@ impl<'a> Checker<'a> {
     /// that nested singleton; an object denotes itself. This records the Kotlin value receiver;
     /// target storage (including a JVM static field) is chosen only after common lowering.
     fn classifier_singleton_value(&self, internal: TypeName) -> Option<SingletonValue> {
-        let classifier = self.resolver().classifier(internal)?;
-        if classifier.is_object() {
-            return Some(SingletonValue {
-                classifier: internal,
-            });
-        }
-        let (_, companion) = classifier.companion_object.clone()?;
-        Some(SingletonValue {
-            classifier: companion,
-        })
+        singleton_receivers::classifier_singleton_value(&self.resolver(), internal)
     }
 
-    /// Singleton storage applies only when the selected implicit receiver is the singleton classifier
-    /// itself. A receiver of class `C` remains a scoped `C` instance even though `C` also has a
-    /// companion value.
     fn implicit_singleton_value(&self, ty: Ty, current: bool) -> Option<SingletonValue> {
-        if current {
-            return None;
-        }
-        let classifier = ty.non_null().obj_internal()?;
-        self.classifier_singleton_value(classifier)
-            .filter(|singleton| singleton.classifier == classifier)
+        singleton_receivers::implicit_singleton_value(
+            &self.resolver(),
+            ty,
+            current,
+            self.static_singleton_this.as_ref(),
+            self.static_companion_this.as_ref(),
+        )
     }
 
     /// The value a resolved classifier identity denotes in expression position. `None` means it is
@@ -65367,139 +65360,7 @@ impl<'a> Checker<'a> {
         path: &NarrowPath,
         site: Span,
     ) -> Option<Ty> {
-        let mut ty = if path.root == "this" {
-            scope.this_ty()?
-        } else {
-            let Some(local) = self.lookup(scope, &path.root) else {
-                // A same-file top-level `val` with its compiler-default backing-field getter is a
-                // stable value just like a local `val`. Cross-module and computed/delegated
-                // properties remain unstable because an accessor call can return a different value.
-                if !path.segments.is_empty() {
-                    return None;
-                }
-                let TopLevelPropertySelection::Selected(access) =
-                    self.select_top_level_property(scope, &path.root)
-                else {
-                    return None;
-                };
-                if access.property.context_count != 0 {
-                    return None;
-                }
-                if let Some(index) = self.resolved_index {
-                    let declaration = access.property.stable_declaration?;
-                    let anchor = index.declaration_anchor(declaration)?;
-                    if anchor.source.raw() != self.file_index {
-                        return None;
-                    }
-                    let flags = index.declaration_header(declaration)?.flags;
-                    if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-                        || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-                        || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-                        || flags.has(crate::fir::DeclarationFlags::EXTERNAL)
-                        || flags.has(crate::fir::DeclarationFlags::EXPECT)
-                    {
-                        return None;
-                    }
-                    return Some(access.property.ty);
-                }
-                let property = {
-                    let (source_file, source_decl) = access.property.source_key?;
-                    if source_file != self.file_index {
-                        return None;
-                    }
-                    let Decl::Property(property) = self.file.decl(DeclId(source_decl)) else {
-                        return None;
-                    };
-                    property
-                };
-                if property.is_var
-                    || property.getter_declared
-                    || property.delegate.is_some()
-                    || property.is_external
-                    || property.is_expect
-                {
-                    return None;
-                }
-                return Some(access.property.ty);
-            };
-            if local.is_var
-                && (!path.segments.is_empty()
-                    || !matches!(local.origin, ReceiverFnValueOrigin::Local)
-                    || self.closure_reassigned_before(&path.root, site))
-            {
-                return None;
-            }
-            if local.has_unstable_delegated_read() {
-                return None;
-            }
-            // A bare own-member read (`label`) is an alias for a dispatch-property read
-            // (`this.label`), not a captured immutable slot. Route it through the segmented path
-            // so custom/delegated/open getters receive exactly the same stability decision as the
-            // qualified spelling. This also declines an enclosing-instance property in an inner
-            // class: bare lookup may find it, but the current `this` is not that property's receiver.
-            if path.segments.is_empty()
-                && matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
-            {
-                return self.stable_path_ty(
-                    scope,
-                    &NarrowPath {
-                        root: "this".to_string(),
-                        segments: vec![path.root.clone()],
-                    },
-                    site,
-                );
-            }
-            // A member/top-level property as the ROOT of a longer path re-reads through its
-            // accessor each time; only a plain local/`val` slot is a stable root there. (For a
-            // ROOT-ONLY top-level path, the shadowing mechanism remains conservative;
-            // dispatch properties were normalized to `this.<name>` above.)
-            if !path.segments.is_empty() && !matches!(local.origin, ReceiverFnValueOrigin::Local) {
-                return None;
-            }
-            local.ty
-        };
-        for segment in &path.segments {
-            let recv = ty.non_null();
-            let internal = recv.obj_internal()?;
-            let class = self.resolver().classifier(internal)?;
-            if let Some(index) = self.resolved_index {
-                let source = self.fed_source();
-                let callables =
-                    crate::symbol_resolver::members_in_hierarchy(&source, recv, segment);
-                let property = callables
-                    .properties()
-                    .iter()
-                    .find(|property| property.kind == crate::libraries::PropKind::Member)?;
-                let flags = index
-                    .declaration_header(property.stable_declaration?)?
-                    .flags;
-                if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-                    || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-                    || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-                    || (flags.has(crate::fir::DeclarationFlags::OPEN) && !class.is_final())
-                    || property.context_count != 0
-                {
-                    return None;
-                }
-                ty = property.ty.projection_read_ty();
-                continue;
-            }
-            let symbols = self.module.legacy_symbols()?;
-            let (owner, property) = symbols.declared_member_prop(internal, segment)?;
-            if property.setter_name.is_some()
-                || property.has_custom_getter
-                || (property.is_open && !class.is_final())
-                || !property.context_params.is_empty()
-            {
-                return None;
-            }
-            // Use the same generic-property instantiation as ordinary member reads and probes; a
-            // path proof is sound only when its declared and read-time types are identical.
-            ty = symbols
-                .applied_declared_member_prop_ty(recv, owner, segment, property.ty)
-                .projection_read_ty();
-        }
-        Some(ty)
+        StablePathRead::new(self).ty(scope, path, site)
     }
 
     /// The one stability failure kotlinc reports as SMARTCAST_IMPOSSIBLE: the path's root is a

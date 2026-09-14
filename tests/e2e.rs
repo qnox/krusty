@@ -1159,6 +1159,8 @@ mod receiver_fn_value_invoke_e2e;
 mod receiver_lambda_e2e;
 #[path = "receiver_lambda_in_method_e2e.rs"]
 mod receiver_lambda_in_method_e2e;
+#[path = "receiver_lambda_member_smartcast_e2e.rs"]
+mod receiver_lambda_member_smartcast_e2e;
 #[path = "reference_adaptation_e2e.rs"]
 mod reference_adaptation_e2e;
 #[path = "reference_in_range_e2e.rs"]
