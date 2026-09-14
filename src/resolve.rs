@@ -50,6 +50,7 @@ mod postponed_diagnostics;
 mod safe_call_flow;
 mod sam_constructors;
 mod scope;
+mod singleton_receivers;
 mod source_constructors;
 mod stable_path;
 mod stable_path_legacy_bridge;
@@ -24540,57 +24541,17 @@ impl<'a> Checker<'a> {
     /// that nested singleton; an object denotes itself. This records the Kotlin value receiver;
     /// target storage (including a JVM static field) is chosen only after common lowering.
     fn classifier_singleton_value(&self, internal: TypeName) -> Option<SingletonValue> {
-        let classifier = self.resolver().classifier(internal)?;
-        if classifier.is_object() {
-            return Some(SingletonValue {
-                classifier: internal,
-            });
-        }
-        let (_, companion) = classifier.companion_object.clone()?;
-        Some(SingletonValue {
-            classifier: companion,
-        })
+        singleton_receivers::classifier_singleton_value(&self.resolver(), internal)
     }
 
-    /// Singleton storage applies only when the selected implicit receiver is the singleton classifier
-    /// itself. A receiver of class `C` remains a scoped `C` instance even though `C` also has a
-    /// companion value.
     fn implicit_singleton_value(&self, ty: Ty, current: bool) -> Option<SingletonValue> {
-        // The NEAREST receiver is normally a real `this` in the frame, which lowering reads from
-        // its slot; naming a singleton there would be a longer way to the same value. The
-        // exception is a receiver that stands in for a `this` that does not exist — an enclosing
-        // object, or the target's companion, installed for a constructor header or a delegation
-        // argument. That one is backed by no slot at all, so lowering has nothing to read: without
-        // the singleton, `constructor() : this(foo())` reaching a companion `foo` loads the
-        // half-built instance, which the JVM verifier rejects as `uninitializedThis`.
-        if current {
-            return self.static_this_singleton(ty);
-        }
-        let classifier = ty.non_null().obj_internal()?;
-        self.classifier_singleton_value(classifier)
-            .filter(|singleton| singleton.classifier == classifier)
-    }
-
-    /// The singleton a receiver denotes when it stands in for a `this` that does not exist.
-    ///
-    /// These are the two handles retained when such a receiver is installed for a constructor
-    /// header or delegation argument — the enclosing object, and the target's companion. The
-    /// identity comes from the handle rather than being re-derived from the type, so an implicitly
-    /// selected receiver and the explicit `this` spelling, which consults the same two facts,
-    /// cannot disagree about what the receiver denotes.
-    fn static_this_singleton(&self, ty: Ty) -> Option<SingletonValue> {
-        self.static_singleton_this
-            .as_ref()
-            .filter(|instance| ty == Ty::obj_name(instance.classifier))
-            .cloned()
-            .or_else(|| {
-                self.static_companion_this
-                    .as_ref()
-                    .filter(|instance| ty == Ty::obj_name(instance.companion))
-                    .map(|instance| SingletonValue {
-                        classifier: instance.companion,
-                    })
-            })
+        singleton_receivers::implicit_singleton_value(
+            &self.resolver(),
+            ty,
+            current,
+            self.static_singleton_this.as_ref(),
+            self.static_companion_this.as_ref(),
+        )
     }
 
     /// The value a resolved classifier identity denotes in expression position. `None` means it is
