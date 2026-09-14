@@ -10,6 +10,117 @@ struct SharedClassCaptureBackend;
 
 struct PackageDeclarationBackend;
 
+struct RecoveryMustNotLowerBackend;
+
+impl Backend for RecoveryMustNotLowerBackend {
+    type State = ();
+
+    fn lower_file(
+        &self,
+        _checked: CheckedFile<'_>,
+        _stem: &str,
+        _state: &mut Self::State,
+        _diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        panic!("diagnostic recovery must not invoke legacy syntax lowering")
+    }
+
+    fn lower_ir_file(
+        &self,
+        _file: CheckedIrFile<'_>,
+        _state: &mut Self::State,
+        _diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        panic!("diagnostic recovery must not reach common lowering")
+    }
+
+    fn finalize(&self, _state: Self::State, _module_name: &str) -> Vec<Artifact> {
+        panic!("diagnostic recovery must not finalize backend output")
+    }
+}
+
+fn empty_signature_recovery_analysis() -> StreamingSourceSetAnalysis {
+    let mut setup_diags = DiagSink::new();
+    let symbols =
+        crate::frontend::collect_signatures(&[], &mut setup_diags).into_pass_two_symbols();
+    assert!(setup_diags.diags.is_empty());
+    StreamingSourceSetAnalysis {
+        symbols,
+        reparse_sources: Vec::new(),
+        streamed: Some(crate::frontend::StreamedPassState {
+            module: crate::fir::FrontendModule::new(
+                crate::fir::ResolvedModuleIndex::default(),
+                crate::fir::InlineBodyStore::default(),
+                crate::fir::DefaultArgumentStore::default(),
+                crate::fir::SourceMap::default(),
+            ),
+            diagnostic_recovery: true,
+        }),
+    }
+}
+
+#[test]
+fn unattributed_signature_failure_reports_one_deterministic_internal_error() {
+    let mut diagnostics = DiagSink::new();
+    diagnostics.set_file(9);
+
+    let outputs = emit_analyzed(
+        empty_signature_recovery_analysis(),
+        &[],
+        &RecoveryMustNotLowerBackend,
+        "main",
+        &mut diagnostics,
+    );
+
+    assert_eq!(outputs, []);
+    assert_eq!(diagnostics.diags.len(), 1);
+    let diagnostic = &diagnostics.diags[0];
+    assert_eq!(diagnostic.file, 0);
+    assert_eq!(diagnostic.span, Span::new(0, 0));
+    assert_eq!(diagnostic.editor_span, None);
+    assert_eq!(diagnostic.severity, crate::diag::Severity::Error);
+    assert_eq!(diagnostic.kind, crate::diag::DiagnosticKind::Compiler);
+    assert_eq!(
+        diagnostic.msg,
+        "internal error: module signatures were not finalized and no source diagnostic explains it"
+    );
+    assert!(diagnostic.identity.is_none());
+    assert_eq!(
+        diagnostics.render_all(&[("Recovery.kt", "")]),
+        "Recovery.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it\n"
+    );
+}
+
+#[test]
+fn attributed_signature_failure_is_not_duplicated_by_recovery() {
+    let mut diagnostics = DiagSink::new();
+    diagnostics.set_file(7);
+    diagnostics.error(Span::new(1, 2), "existing signature error");
+
+    let outputs = emit_analyzed(
+        empty_signature_recovery_analysis(),
+        &[],
+        &RecoveryMustNotLowerBackend,
+        "main",
+        &mut diagnostics,
+    );
+
+    assert_eq!(outputs, []);
+    assert_eq!(diagnostics.diags.len(), 1);
+    let diagnostic = &diagnostics.diags[0];
+    assert_eq!(diagnostic.file, 7);
+    assert_eq!(diagnostic.span, Span::new(1, 2));
+    assert_eq!(diagnostic.editor_span, None);
+    assert_eq!(diagnostic.severity, crate::diag::Severity::Error);
+    assert_eq!(diagnostic.kind, crate::diag::DiagnosticKind::Compiler);
+    assert_eq!(diagnostic.msg, "existing signature error");
+    assert!(diagnostic.identity.is_none());
+    assert_eq!(
+        diagnostics.render("Existing.kt", "abc"),
+        "Existing.kt:1:2: error: existing signature error\n"
+    );
+}
+
 impl Backend for SharedClassCaptureBackend {
     type State = u8;
 
