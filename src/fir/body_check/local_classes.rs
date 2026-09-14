@@ -809,7 +809,10 @@ impl BodyFirChecker<'_> {
                         },
                     );
                     if let Some(binding) = source_binding {
-                        if self.reads_constructor_prefix_capture(binding.owner, 0) {
+                        if self.reads_constructor_prefix_capture(
+                            binding.owner,
+                            binding.enclosing_depth,
+                        ) {
                             FirLocalClassCaptureSource::ConstructorCapture {
                                 owner: binding.owner,
                                 field: binding.field,
@@ -834,6 +837,8 @@ impl BodyFirChecker<'_> {
                         let owner = self.current_storage_owner().ok_or_else(|| {
                             self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                         })?;
+                        // No binding to read a depth from: `current_storage_owner` IS this body's
+                        // storage owner, so the depth is zero by construction rather than assumed.
                         if self.reads_constructor_prefix_capture(owner, 0) {
                             FirLocalClassCaptureSource::ConstructorCapture {
                                 owner,

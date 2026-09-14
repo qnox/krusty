@@ -4,6 +4,23 @@ fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);
 }
 
+/// [`run_ok`], and the same program under the REFERENCE compiler when it is provisioned.
+///
+/// A capture that must be read from the constructor prefix is a claim about what kotlinc emits, so
+/// pin it against kotlinc rather than only against krusty. `None` means the reference compiler is
+/// not provisioned in this environment; CI provisions it.
+fn run_ok_with_reference(stem: &str, body: &str) {
+    run_ok(stem, body);
+    let Some(out) = common::kotlinc_library(body) else {
+        return;
+    };
+    assert_eq!(
+        common::run_box(&[], "LibKt", &[out, common::stdlib_jar()]).as_deref(),
+        Some("OK"),
+        "{stem}: reference compiler"
+    );
+}
+
 #[test]
 fn captures_read_parameter() {
     run_ok(
@@ -315,7 +332,7 @@ fn property_initializer_captures_same_named_enclosing_value() {
 
 #[test]
 fn anonymous_object_in_a_super_constructor_argument_reads_the_constructor_capture() {
-    run_ok(
+    run_ok_with_reference(
         "AnonInSuperArgument",
         "interface Callback { fun invoke(): String }\n\
          open class Base(val fn: Callback)\n\
@@ -328,7 +345,7 @@ fn anonymous_object_in_a_super_constructor_argument_reads_the_constructor_captur
 
 #[test]
 fn nested_anonymous_objects_in_a_super_constructor_argument_read_the_constructor_capture() {
-    run_ok(
+    run_ok_with_reference(
         "NestedAnonInSuperArgument",
         "interface Callback { fun invoke(): String }\n\
          open class Base(val fn: Callback) : Callback { override fun invoke() = fn.invoke() }\n\
