@@ -1963,6 +1963,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` takes unrelated SAM interfaces, and the tiebreaker
   still picks the non-generic one.
   `tests/overload_declaration_specificity_e2e.rs::a_generic_candidate_wins_when_its_parameter_is_more_specific`.
+- **Declaration specificity includes an extension's receiver (fix).** Extensions no longer bypass
+  the common declaration-specificity pass or use a separate generic/concrete filter. The resolved
+  declared receiver is prepended to the same source-argument-aligned parameter shape used by
+  ordinary callables, preserving named/default/vararg mapping. A bounded generic receiver can
+  therefore outrank `Any`, while equal receivers still reach Kotlin's non-generic tiebreaker.
+  `tests/extension_receiver_specificity_e2e.rs`.
 - **A lambda parameter's declared result decides its body's POSITION (fix).** A lambda whose declared
   result is `Unit` ends in statement position, which is what makes a trailing `when` with no `else`
   legal — the shape every Kotlin builder DSL is written around.

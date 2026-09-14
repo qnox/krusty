@@ -18,6 +18,7 @@ use crate::types::{Ty, TypeName, Visibility};
 
 mod call_argument;
 mod callable_shapes;
+mod candidate_access;
 mod classifier_scope;
 mod declaration_specificity;
 mod generic_inference;
@@ -2344,19 +2345,26 @@ impl<'a> SymbolResolver<'a> {
             for level in &levels {
                 let scoped = callables_from_symbols(&level.symbols);
                 functions.extend(
-                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter())
-                        .into_iter()
-                        .filter(|(_, _, function)| {
-                            function
-                                .annotations
-                                .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                        })
-                        .map(|(rank, _, function)| {
-                            let mut function = function.clone();
-                            function.receiver_rank = rank;
-                            function.scope_rung = level.kind.callable_scope_rung();
-                            function
-                        }),
+                    ranked_extension_candidates(
+                        &self.src,
+                        receiver,
+                        scoped
+                            .functions()
+                            .iter()
+                            .filter(|function| self.non_member_callable_accessible(function)),
+                    )
+                    .into_iter()
+                    .filter(|(_, _, function)| {
+                        function
+                            .annotations
+                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+                    })
+                    .map(|(rank, _, function)| {
+                        let mut function = function.clone();
+                        function.receiver_rank = rank;
+                        function.scope_rung = level.kind.callable_scope_rung();
+                        function
+                    }),
                 );
             }
             let mut extension_property_level_found = false;
@@ -2375,15 +2383,21 @@ impl<'a> SymbolResolver<'a> {
                 // time here would put two copies of one declaration in the same priority bucket and
                 // read as an ambiguity. A level holding ONLY annotated declarations is therefore
                 // empty for tower purposes and the walk continues past it.
-                let extensions =
-                    ranked_extension_candidates(&self.src, receiver, scoped.functions().iter())
-                        .into_iter()
-                        .filter(|(_, _, function)| {
-                            !function
-                                .annotations
-                                .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                        })
-                        .collect::<Vec<_>>();
+                let extensions = ranked_extension_candidates(
+                    &self.src,
+                    receiver,
+                    scoped
+                        .functions()
+                        .iter()
+                        .filter(|function| self.non_member_callable_accessible(function)),
+                )
+                .into_iter()
+                .filter(|(_, _, function)| {
+                    !function
+                        .annotations
+                        .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+                })
+                .collect::<Vec<_>>();
                 crate::trace_compiler!(
                     "resolve",
                     "receiver scope applicable name={name} receiver={receiver:?} extensions={:?}",
@@ -3904,15 +3918,7 @@ impl<'a> SymbolResolver<'a> {
         let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
         let mut parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty, GSigBinds)> = fs
             .top_level()
-            .filter(|candidate| {
-                include_invisible
-                    || crate::callable_access::source_callable_accessible(
-                        candidate.visibility,
-                        candidate.source_file,
-                        self.access_file,
-                        || self.lib.internal_accessible(candidate.callable.owner),
-                    )
-            })
+            .filter(|candidate| include_invisible || self.non_member_callable_accessible(candidate))
             .filter(|o| top_level_exact_parameters_admit(o, args, type_args))
             .filter_map(|o| {
                 let semantic = o.semantic_signature();

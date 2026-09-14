@@ -54444,31 +54444,26 @@ impl<'a> Checker<'a> {
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
         }
-        if !selecting_extension {
-            crate::symbol_resolver::retain_most_specific_declarations(
-                &self.fed_source(),
-                &mut maximal,
-                |(_, generic, _, _, _, _, _, parameters)| (parameters, *generic),
-            );
-        }
+        crate::symbol_resolver::retain_most_specific_declarations(
+            &self.fed_source(),
+            &mut maximal,
+            |(_, generic, _, _, _, candidate, _, parameters)| {
+                let receiver = candidate
+                    .is_extension()
+                    .then(|| {
+                        candidate
+                            .semantic_receiver()
+                            .map(|receiver| crate::types::ty_subst(receiver, &HashMap::new()))
+                    })
+                    .flatten();
+                (receiver, parameters, *generic)
+            },
+        );
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface
         // inherits the other, its overload wins (`MyRunnable : Runnable`; `foo(MyRunnable)` beats
         // `foo(Runnable)` for a lambda). Unrelated SAM targets remain incomparable and are reported
         // ambiguous by that same selector, so no wrapper realization is chosen by provider order.
-        if selecting_extension {
-            let concrete_shapes = maximal
-                .iter()
-                .filter(|(_, generic, ..)| !generic)
-                .map(|(_, _, _, _, _, candidate, params, _)| (candidate.receiver, params.clone()))
-                .collect::<Vec<_>>();
-            maximal.retain(|(_, generic, _, _, _, candidate, params, _)| {
-                !*generic
-                    || !concrete_shapes.iter().any(|(receiver, concrete_params)| {
-                        *receiver == candidate.receiver && concrete_params == params
-                    })
-            });
-        }
         let selected_index = if maximal.len() == 1 {
             0
         } else {
@@ -69408,10 +69403,30 @@ impl<'a> Checker<'a> {
                             )
                             .expect("active local-class body property has no stable declaration")
                     });
+                    let exact_property = |candidate: &ScopedProperty| match stable_declaration {
+                        Some(declaration) => candidate.stable_declaration == Some(declaration),
+                        None => candidate.source_member == Some(source_member),
+                    };
+                    let inference_property = |candidate: &ScopedProperty| match stable_declaration {
+                        Some(declaration) => candidate.stable_declaration == Some(declaration),
+                        None => {
+                            candidate.source_member == Some(source_member)
+                                || candidate.name == property.name
+                        }
+                    };
+                    let mutable_inference_property =
+                        |candidate: &ScopedProperty| match stable_declaration {
+                            Some(declaration) => candidate.stable_declaration == Some(declaration),
+                            None => {
+                                candidate.source_member == Some(source_member)
+                                    || (candidate.name == property.name
+                                        && candidate.ty == Ty::Error)
+                            }
+                        };
                     // Publish explicit/finalized headers into the same bounded body-local overlay
                     // before deciding whether an initializer must be forced.
                     if let Some(checked) = props.iter().find(|candidate| {
-                        candidate.source_member == Some(source_member)
+                        exact_property(candidate)
                             && candidate.ty != Ty::Error
                             && !candidate.ty.mentions_pending()
                     }) {
@@ -69427,14 +69442,9 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let has_unresolved = props.iter().any(|candidate| {
-                        candidate.ty == Ty::Error
-                            && (candidate.source_member == Some(source_member)
-                                || candidate.name == property.name)
+                        candidate.ty == Ty::Error && inference_property(candidate)
                     });
-                    let absent = !props.iter().any(|candidate| {
-                        candidate.source_member == Some(source_member)
-                            || candidate.name == property.name
-                    });
+                    let absent = !props.iter().any(inference_property);
                     if !has_unresolved && !(absent && property.declared_ty().is_none()) {
                         continue;
                     }
@@ -69486,10 +69496,10 @@ impl<'a> Checker<'a> {
                                 cl.is_interface(),
                             );
                         }
-                        if let Some(scoped) = props.iter_mut().find(|candidate| {
-                            candidate.source_member == Some(source_member)
-                                || (candidate.name == property.name && candidate.ty == Ty::Error)
-                        }) {
+                        if let Some(scoped) = props
+                            .iter_mut()
+                            .find(|candidate| mutable_inference_property(candidate))
+                        {
                             scoped.ty = constraint;
                             if scoped.owner_storage_ty == Some(Ty::Error) {
                                 scoped.owner_storage_ty = Some(constraint);
@@ -69542,10 +69552,10 @@ impl<'a> Checker<'a> {
                             cl.is_interface(),
                         );
                     }
-                    if let Some(scoped) = props.iter_mut().find(|candidate| {
-                        candidate.source_member == Some(source_member)
-                            || (candidate.name == property.name && candidate.ty == Ty::Error)
-                    }) {
+                    if let Some(scoped) = props
+                        .iter_mut()
+                        .find(|candidate| mutable_inference_property(candidate))
+                    {
                         scoped.ty = inferred;
                         if scoped.owner_storage_ty == Some(Ty::Error) {
                             scoped.owner_storage_ty = Some(inferred);

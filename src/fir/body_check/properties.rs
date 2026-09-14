@@ -1295,8 +1295,8 @@ impl BodyFirChecker<'_> {
 
     /// `c++` / `c--` where `c` is a MEMBER property reached through an implicit receiver. The
     /// checker recorded the write target in `StmtLowering::ImplicitPropertyWrite`; this reads that
-    /// property, applies the increment, and writes it back. Statement position discards the result,
-    /// so no prefix/postfix distinction survives into FIR.
+    /// property, applies the increment, and writes it back. Statement position discards the value,
+    /// but prefix form still preserves its observable second getter invocation.
     ///
     /// `None` when the statement is not an implicit-property increment, so the caller keeps its own
     /// diagnosis rather than reporting a property failure for a genuinely unknown local.

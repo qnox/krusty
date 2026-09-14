@@ -2,6 +2,56 @@
 
 use super::common;
 
+#[test]
+fn a_same_file_package_qualified_private_call_is_visible_during_signature_inference() {
+    const LIB: &str = "package p\n\
+private fun secret(block: () -> String): String = block()\n\
+val inferred = p.secret { \"OK\" }\n\
+fun exposed(): String = inferred\n";
+    const MAIN: &str = "fun box(): String = p.exposed()\n";
+    let sources = [("Lib.kt", LIB), ("Main.kt", MAIN)];
+    let result = common::compiler_diagnostics(&sources, &[]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc rejected the same-file qualified private call"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty must preserve the caller file while selecting a qualified call"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "QualifiedPrivateSignature");
+}
+
+#[test]
+fn sibling_private_extensions_do_not_shape_inferred_calls() {
+    const A: &str = "package p\n\
+class E\n\
+private fun E.mark(block: () -> String): String = block()\n\
+val fromA = E().mark { \"A\" }\n\
+fun a(): String = fromA\n";
+    const B: &str = "package p\n\
+private fun E.mark(prefix: Int = 0, block: (Int) -> String): String = block(prefix)\n\
+val fromB = E().mark { \"B$it\" }\n\
+fun b(): String = fromB\n";
+    const MAIN: &str =
+        "fun box(): String = if (p.a() == \"A\" && p.b() == \"B0\") \"OK\" else \"wrong\"\n";
+    let sources = [("A.kt", A), ("B.kt", B), ("Main.kt", MAIN)];
+    let result = common::compiler_diagnostics(&sources, &[]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc rejected the private-extension inference fixture"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "a sibling private extension must not affect argument mapping"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "PrivateExtensionInference");
+}
+
 /// The failing signature shape: the call precedes its own file's declaration, while a sibling file
 /// declares the same private extension with an already-known return type.
 #[test]
