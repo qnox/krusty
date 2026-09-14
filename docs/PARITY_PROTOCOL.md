@@ -2092,6 +2092,6 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   FILE, costing a module every class it would have emitted.
   Only a value class whose underlying is NULLABLE is wrapped this way, which is why the same call
   spliced for every other result type, a non-nullable value class included. External-call realization
-  already moves this fact the same way when IT rewrites a call; the value-class clone now does too.
-   `tests/reified_value_class_splice_e2e.rs::a_reified_nullable_value_class_result_still_splices`,
-   `a_reified_non_null_value_class_result_still_splices`.
+  already carries this fact to its cloned call; the value-class clone now does too.
+  `tests/reified_value_class_splice_e2e.rs::a_reified_nullable_value_class_result_still_splices`,
+  `a_reified_non_null_value_class_result_still_splices`.

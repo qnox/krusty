@@ -24,6 +24,9 @@ use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use std::collections::{HashMap, HashSet};
 
 mod descriptor_parameters;
+mod operation_relocation;
+
+use operation_relocation::clone_below_representation_wrapper;
 
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
@@ -5530,7 +5533,7 @@ fn repr(
 
 /// Replace the expr at `id` with `(X)<orig>.unbox-impl()` — checkcast then unbox a boxed `X`.
 fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let new_id = clone_expr_with_type_facts(ir, id);
+    let new_id = clone_below_representation_wrapper(ir, id);
     let cast = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
@@ -5556,45 +5559,9 @@ fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     ir.physical_types.insert(id, u);
 }
 
-/// Preserve the expression's physical/logical facts while moving it below a representation wrapper.
-fn clone_expr_with_type_facts(ir: &mut IrFile, id: ExprId) -> ExprId {
-    let new_id = ir.exprs.len() as ExprId;
-    ir.exprs.push(ir.exprs[id as usize].clone());
-    if let Some(ty) = ir.physical_types.get(&id).copied() {
-        ir.physical_types.insert(new_id, ty);
-    }
-    if let Some(ty) = ir.logical_types.get(&id).copied() {
-        ir.logical_types.insert(new_id, ty);
-    }
-    if let Some(ty) = ir.property_declaration_types.get(&id).copied() {
-        ir.property_declaration_types.insert(new_id, ty);
-    }
-    // The representation wrapper is not itself the selected suspension. Move that identity to the
-    // cloned original so CPS appends the continuation to the call, then realizes the wrapper around
-    // the call's synchronous/resumed result.
-    if let Some(result) = ir.suspend_calls.remove(&id) {
-        ir.suspend_calls.insert(new_id, result);
-    }
-    if let Some(result) = ir.value_class_suspend_calls.remove(&id) {
-        ir.value_class_suspend_calls.insert(new_id, result);
-    }
-    if let Some(result) = ir.intrinsic_suspension_points.remove(&id) {
-        ir.intrinsic_suspension_points.insert(new_id, result);
-    }
-    // The reified type arguments belong to the CALL, which is now the cloned node. Leaving them on
-    // the wrapper makes the splicer see a call with no reified arguments and decline — and a
-    // `MustInline` callee that declines bails the whole FILE. Only a value class whose underlying is
-    // NULLABLE gets wrapped here, which is why `resp.body<Wrapped>()` spliced for every other result
-    // type. External-call realization already moves this fact the same way when IT rewrites a call.
-    if let Some(substitutions) = ir.reified_call_subst.remove(&id) {
-        ir.reified_call_subst.insert(new_id, substitutions);
-    }
-    new_id
-}
-
 /// Replace an erased-reference expression with an explicit cast to its known boxed value class.
 fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
-    let arg = clone_expr_with_type_facts(ir, id);
+    let arg = clone_below_representation_wrapper(ir, id);
     ir.exprs[id as usize] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
         arg,
@@ -5603,7 +5570,7 @@ fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
 }
 
 fn unbox_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let orig_id = clone_expr_with_type_facts(ir, id);
+    let orig_id = clone_below_representation_wrapper(ir, id);
     let boxed_ty = Ty::nullable(Ty::obj_name(x));
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
@@ -6250,7 +6217,7 @@ fn box_nullable_vc_tail(
 
 /// Replace the expr at `id` with `box-impl(<original expr at id>)`.
 fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let new_id = clone_expr_with_type_facts(ir, id);
+    let new_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let d = desc(&u);
     let owner_rendered = x.render();
@@ -6270,7 +6237,7 @@ fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
 /// Null-safe box: replace the expr at `id` with `{ tmp = <orig>; if (tmp == null) null else box-impl(tmp) }`
 /// — boxing a nullable (reference-underlying) value class without hitting the ctor null-check on `null`.
 fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let orig_id = clone_expr_with_type_facts(ir, id);
+    let orig_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
