@@ -43,6 +43,7 @@ mod dependency_platform;
 mod finalized_projection;
 mod interface_delegation;
 mod lambda_expectation;
+mod lambda_returns;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
@@ -80,6 +81,8 @@ pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
 use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
+use lambda_returns::LambdaReturnScopes;
+pub use lambda_returns::ReturnTarget;
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
@@ -20687,12 +20690,6 @@ pub enum ImplicitPropertyWriteTarget {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReturnTarget {
-    Function,
-    Lambda(ExprId),
-}
-
 #[derive(Clone, Debug)]
 pub struct CompoundAssignmentTarget {
     /// The exact operator selected by the checker. Provider origin remains linkage metadata on the
@@ -34999,23 +34996,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn return_target(&self, label: Option<&str>) -> Option<ReturnTarget> {
-        match label {
-            Some(label) => self
-                .lambda_return_labels
-                .iter()
-                .rev()
-                .find_map(|(candidate, lambda)| {
-                    (candidate == label).then_some(ReturnTarget::Lambda(*lambda))
-                })
-                .or_else(|| {
-                    (self.function_return_label.as_deref() == Some(label))
-                        .then_some(ReturnTarget::Function)
-                }),
-            None => Some(self.bare_return_target),
-        }
-    }
-
     fn stmt_return(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -35029,12 +35009,12 @@ impl<'a> Checker<'a> {
                 "'return' is prohibited here.",
             );
         }
-        let Some(target) = self.return_target(label.as_deref()) else {
+        let Some(target) = self.lambda_returns.target(label.as_deref()) else {
             crate::trace_compiler!(
                 "resolve",
                 "return label miss label={:?} active={:?} statement={s:?}",
                 label,
-                self.lambda_return_labels
+                self.lambda_returns.active_labels()
             );
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
@@ -35047,14 +35027,14 @@ impl<'a> Checker<'a> {
         };
         self.stmt_return_targets.insert(s, target);
         if label.is_some() && matches!(target, ReturnTarget::Lambda(_)) {
-            let returned = if let Some(ex) = e {
-                self.expr(scope, ex)
-            } else {
-                Ty::Unit
+            let ReturnTarget::Lambda(lambda) = target else {
+                unreachable!("the labelled lambda-return branch checked its target")
             };
-            if let ReturnTarget::Lambda(lambda) = target {
-                self.record_lambda_return_type(lambda, returned);
-            }
+            let returned = match e {
+                Some(expression) => self.check_lambda_return_value(scope, expression, lambda),
+                None => Ty::Unit,
+            };
+            self.lambda_returns.record_returned_type(lambda, returned);
             return;
         }
         let rt = self.ret_ty;
@@ -35075,6 +35055,31 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// Check one value leaving a labelled lambda against that lambda's result position. A fixed
+    /// expectation both contextualizes generic inference and validates the produced value at the
+    /// return expression itself; after that boundary the contribution has the expected type, so a
+    /// diagnosed mismatch cannot cascade into an unrelated aggregate lambda-result error.
+    fn check_lambda_return_value(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        lambda: ExprId,
+    ) -> Ty {
+        let Some(expected) = self.lambda_returns.expected_type(lambda) else {
+            return self.expr(scope, expression);
+        };
+        let returned = self.expr_expected(scope, expression, expected);
+        let actual =
+            self.recorded_expression_type_for_expected(scope, expression, returned, expected);
+        self.narrow_platform_value(expected, expression, PlatformNarrowing::Declaration);
+        self.expect_assignable(expected, actual, self.span(expression), "return");
+        if returned == Ty::Error {
+            Ty::Error
+        } else {
+            expected
         }
     }
 
@@ -35227,7 +35232,9 @@ impl<'a> Checker<'a> {
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
-        let previous_function_return_label = self.function_return_label.replace(f.name.clone());
+        let previous_function_return_label = self
+            .lambda_returns
+            .replace_function_label(Some(f.name.clone()));
         let suppression_depth =
             self.push_declaration_suppressions(scope, &f.annotations, &f.annotation_args);
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
@@ -35751,7 +35758,8 @@ impl<'a> Checker<'a> {
         );
         self.active_statement_suppressions
             .truncate(suppression_depth);
-        self.function_return_label = previous_function_return_label;
+        self.lambda_returns
+            .restore_function_label(previous_function_return_label);
     }
 }
 
@@ -46220,7 +46228,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
         fn_closure_reassigned: Vec::new(),
-        active_lambda_chain: Vec::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
         symbolic_signature_inference: false,
@@ -46242,10 +46249,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_labels: Vec::new(),
         loop_depth: 0,
         return_allowed: true,
-        lambda_return_labels: Vec::new(),
-        function_return_label: None,
-        lambda_return_types: HashMap::new(),
-        bare_return_target: ReturnTarget::Function,
+        lambda_returns: LambdaReturnScopes::default(),
     }
 }
 
@@ -49429,10 +49433,6 @@ struct Checker<'a> {
     fn_reassigned: std::collections::HashSet<String>,
     /// Captured writes, with their enclosing lambdas and assigned expression when one exists.
     fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
-    /// Lexical lambda chain whose body is being checked, outermost first. This is transient
-    /// Pass-2 control-flow state: it distinguishes a write sequenced in the current execution from
-    /// a write owned by another closure that can invalidate a smart-cast between proof and use.
-    active_lambda_chain: Vec<ExprId>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -49484,20 +49484,9 @@ struct Checker<'a> {
     loop_labels: Vec<String>,
     loop_depth: usize,
     return_allowed: bool,
-    /// Active lambda labels, innermost last. The checker resolves a source `return@label` against
-    /// this lexical stack and records the target expression for lowering.
-    lambda_return_labels: Vec<(String, ExprId)>,
-    /// The implicit label of the named function whose body is currently being checked. A labeled
-    /// non-local return from an inline lambda may name this declaration (`return@outer value`), in
-    /// which case it has the same semantic target as a bare non-local return.
-    function_return_label: Option<String>,
-    /// Value types contributed by `return@label value`, keyed by the lambda the label denotes.
-    /// This is separate from control-flow targets: a lambda ending in a labeled return has body type
-    /// `Nothing`, while its function result is the returned value's type.
-    lambda_return_types: HashMap<ExprId, Ty>,
-    /// Owner of an unlabelled return in the current return scope. Plain lambdas leave this as the
-    /// enclosing function; anonymous functions temporarily install their own lambda identity.
-    bare_return_target: ReturnTarget,
+    /// Resolver-owned return labels, targets, expected/result types, and active lambda nesting for
+    /// the body currently being checked.
+    lambda_returns: LambdaReturnScopes,
 }
 
 /// What a local class reads from its enclosing scope, split by whether the reference is modelled.
@@ -49514,9 +49503,7 @@ struct LocalClassCaptures {
 struct BodyState {
     ret_ty: Ty,
     return_allowed: bool,
-    lambda_return_labels: Vec<(String, ExprId)>,
-    function_return_label: Option<String>,
-    bare_return_target: ReturnTarget,
+    lambda_returns: LambdaReturnScopes,
     loop_labels: Vec<String>,
     loop_depth: usize,
     this_unavailable: bool,
@@ -49527,7 +49514,6 @@ struct BodyState {
     symbolic_signature_inference: bool,
     fn_reassigned: std::collections::HashSet<String>,
     fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
-    active_lambda_chain: Vec<ExprId>,
     lexical_class_context: Vec<TypeName>,
     exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
 }
@@ -50001,12 +49987,7 @@ impl<'a> Checker<'a> {
         BodyState {
             ret_ty: std::mem::replace(&mut self.ret_ty, Ty::Unit),
             return_allowed: std::mem::replace(&mut self.return_allowed, true),
-            lambda_return_labels: std::mem::take(&mut self.lambda_return_labels),
-            function_return_label: self.function_return_label.take(),
-            bare_return_target: std::mem::replace(
-                &mut self.bare_return_target,
-                ReturnTarget::Function,
-            ),
+            lambda_returns: std::mem::take(&mut self.lambda_returns),
             // A `break`/`continue` inside a local class's member cannot target an enclosing loop.
             loop_labels: std::mem::take(&mut self.loop_labels),
             loop_depth: std::mem::replace(&mut self.loop_depth, 0),
@@ -50024,7 +50005,6 @@ impl<'a> Checker<'a> {
             ),
             fn_reassigned: std::mem::take(&mut self.fn_reassigned),
             fn_closure_reassigned: std::mem::take(&mut self.fn_closure_reassigned),
-            active_lambda_chain: std::mem::take(&mut self.active_lambda_chain),
             lexical_class_context: std::mem::take(&mut self.lexical_class_context),
             exact_anonymous_class_roots: std::mem::take(&mut self.exact_anonymous_class_roots),
         }
@@ -50033,9 +50013,7 @@ impl<'a> Checker<'a> {
     fn restore_body_state(&mut self, saved: BodyState) {
         self.ret_ty = saved.ret_ty;
         self.return_allowed = saved.return_allowed;
-        self.lambda_return_labels = saved.lambda_return_labels;
-        self.function_return_label = saved.function_return_label;
-        self.bare_return_target = saved.bare_return_target;
+        self.lambda_returns = saved.lambda_returns;
         self.loop_labels = saved.loop_labels;
         self.loop_depth = saved.loop_depth;
         self.this_unavailable = saved.this_unavailable;
@@ -50046,7 +50024,6 @@ impl<'a> Checker<'a> {
         self.symbolic_signature_inference = saved.symbolic_signature_inference;
         self.fn_reassigned = saved.fn_reassigned;
         self.fn_closure_reassigned = saved.fn_closure_reassigned;
-        self.active_lambda_chain = saved.active_lambda_chain;
         self.lexical_class_context = saved.lexical_class_context;
         self.exact_anonymous_class_roots = saved.exact_anonymous_class_roots;
     }
@@ -61396,7 +61373,8 @@ impl<'a> Checker<'a> {
             .copied()
             .filter(|&lambda| !self.lambda_is_inline_spliced(lambda))
             .eq(self
-                .active_lambda_chain
+                .lambda_returns
+                .active_chain()
                 .iter()
                 .copied()
                 .filter(|&lambda| !self.lambda_is_inline_spliced(lambda)))
@@ -66930,7 +66908,9 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
-        let previous_function_return_label = self.function_return_label.replace(f.name.clone());
+        let previous_function_return_label = self
+            .lambda_returns
+            .replace_function_label(Some(f.name.clone()));
         let suppression_depth = self.check_function_annotation_applications(scope, f);
         self.check_infix_declaration(f, false);
         let previous_diagnostic_function = self.diagnostic_function.replace((
@@ -67253,7 +67233,8 @@ impl<'a> Checker<'a> {
         }
         self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
-        self.function_return_label = previous_function_return_label;
+        self.lambda_returns
+            .restore_function_label(previous_function_return_label);
         self.diagnostic_function = previous_diagnostic_function;
         self.active_statement_suppressions
             .truncate(suppression_depth);
@@ -71612,7 +71593,9 @@ impl<'a> Checker<'a> {
                     .checked_local_class_declarations
                     .contains(&DeclId(owner)),
             });
-        let previous_function_return_label = self.function_return_label.replace(f.name.clone());
+        let previous_function_return_label = self
+            .lambda_returns
+            .replace_function_label(Some(f.name.clone()));
         self.check_infix_declaration(f, true);
         self.reset_body_mutations(
             (!self.signature_defaults_only || default_owned_method)
@@ -71940,7 +71923,8 @@ impl<'a> Checker<'a> {
             self.this_labels.pop();
         }
         self.this_extension_receiver = dispatch_extension_receiver;
-        self.function_return_label = previous_function_return_label;
+        self.lambda_returns
+            .restore_function_label(previous_function_return_label);
         self.active_statement_suppressions
             .truncate(suppression_depth);
     }
@@ -77028,14 +77012,14 @@ impl<'a> Checker<'a> {
                     self.diags
                         .error(self.span(e), "'return' is prohibited here.");
                 }
-                let target = match self.return_target(label.as_deref()) {
+                let target = match self.lambda_returns.target(label.as_deref()) {
                     Some(target) => target,
                     None => {
                         crate::trace_compiler!(
                             "resolve",
                             "return label miss label={:?} active={:?} expression={e:?}",
                             label,
-                            self.lambda_return_labels
+                            self.lambda_returns.active_labels()
                         );
                         self.diags.error(
                             self.span(e),
@@ -77052,10 +77036,15 @@ impl<'a> Checker<'a> {
                     let returned = if label.is_none() || matches!(target, ReturnTarget::Function) {
                         self.expr_expected(scope, v, self.ret_ty)
                     } else {
-                        self.expr(scope, v)
+                        match target {
+                            ReturnTarget::Lambda(lambda) => {
+                                self.check_lambda_return_value(scope, v, lambda)
+                            }
+                            ReturnTarget::Function => self.expr(scope, v),
+                        }
                     };
                     if let ReturnTarget::Lambda(lambda) = target {
-                        self.record_lambda_return_type(lambda, returned);
+                        self.lambda_returns.record_returned_type(lambda, returned);
                     }
                 }
                 Ty::Nothing
@@ -77522,7 +77511,9 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                     self.declare(scope, name, pty, false);
                 }
-                self.with_lambda_return_scope(scope, e, implicit_label, |c| c.expr(scope, body))
+                self.with_lambda_return_scope(scope, e, implicit_label, None, |c| {
+                    c.expr(scope, body)
+                })
             };
             // Parameter types: an explicit annotation (`{ x: Int -> … }`) drives the function type so a
             // direct call (`f(3)`) type-checks; an unannotated parameter erases to `Object`. The return
@@ -85292,6 +85283,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         e: ExprId,
         implicit_label: Option<&str>,
+        expected_return: Option<Ty>,
         check: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let label = self
@@ -85301,17 +85293,13 @@ impl<'a> Checker<'a> {
             .map(String::as_str)
             .or(implicit_label)
             .map(str::to_string);
-        let label_depth = self.lambda_return_labels.len();
-        let lambda_depth = self.active_lambda_chain.len();
+        let frame = self
+            .lambda_returns
+            .enter_lambda(e, label.clone(), expected_return);
         crate::trace_compiler!(
             "resolve",
-            "lambda return scope enter expression={e:?} label={label:?} depth={label_depth}"
+            "lambda return scope enter expression={e:?} label={label:?}"
         );
-        if let Some(label) = &label {
-            self.lambda_return_labels.push((label.clone(), e));
-        }
-        self.active_lambda_chain.push(e);
-        self.lambda_return_types.remove(&e);
         let anonymous = self.file.anon_fun_lambdas.contains(&e.0);
         // A lambda is a control-flow boundary — EXCEPT an inlined one. Since Kotlin 2.2
         // (`BreakContinueInInlineLambdas`, default-on at the 2.4 language level krusty targets) a
@@ -85336,25 +85324,28 @@ impl<'a> Checker<'a> {
                 Some(r) => self.type_ref_ty(scope, &r),
                 None => Ty::Unit,
             };
-            let state = (self.ret_ty, self.return_allowed, self.bare_return_target);
+            let state = (
+                self.ret_ty,
+                self.return_allowed,
+                self.lambda_returns
+                    .replace_bare_target(ReturnTarget::Lambda(e)),
+            );
             self.ret_ty = ret;
             self.return_allowed = true;
-            self.bare_return_target = ReturnTarget::Lambda(e);
             state
         });
         let out = check(self);
         if let Some((ret_ty, return_allowed, bare_return_target)) = saved {
             self.ret_ty = ret_ty;
             self.return_allowed = return_allowed;
-            self.bare_return_target = bare_return_target;
+            self.lambda_returns.replace_bare_target(bare_return_target);
         }
         self.loop_labels = outer_loop_labels;
         self.loop_depth = outer_loop_depth;
-        self.lambda_return_labels.truncate(label_depth);
-        self.active_lambda_chain.truncate(lambda_depth);
+        self.lambda_returns.leave_lambda(e, frame);
         crate::trace_compiler!(
             "resolve",
-            "lambda return scope exit expression={e:?} label={label:?} depth={label_depth}"
+            "lambda return scope exit expression={e:?} label={label:?}"
         );
         out
     }
@@ -85373,19 +85364,13 @@ impl<'a> Checker<'a> {
         match self.file.anon_fun_ret.get(&e.0).cloned() {
             Some(declared) => self.type_ref_ty(scope, &declared),
             None if coerce_return_to_unit => Ty::Unit,
-            None => match self.lambda_return_types.remove(&e) {
+            None => match self.lambda_returns.take_returned_type(e) {
                 None => bret,
                 Some(returned) if bret == Ty::Nothing => returned,
                 Some(_) if bret == Ty::Error => Ty::Error,
                 Some(returned) => crate::symbol_resolver::merge_inferred_ty(Some(returned), bret),
             },
         }
-    }
-
-    fn record_lambda_return_type(&mut self, lambda: ExprId, returned: Ty) {
-        let current = self.lambda_return_types.get(&lambda).copied();
-        let merged = crate::symbol_resolver::merge_inferred_ty(current, returned);
-        self.lambda_return_types.insert(lambda, merged);
     }
 
     fn check_lambda_body(
@@ -85598,7 +85583,7 @@ impl<'a> Checker<'a> {
                 }
                 let coerce = mode.coerce_return_to_unit;
                 let expected_return = mode.expected_return;
-                self.with_lambda_return_scope(scope, e, receiver_label, |c| {
+                self.with_lambda_return_scope(scope, e, receiver_label, expected_return, |c| {
                     c.check_lambda_body(scope, body, coerce, expected_return)
                 })
             };
