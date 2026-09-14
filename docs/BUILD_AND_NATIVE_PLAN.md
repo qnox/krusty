@@ -1451,6 +1451,14 @@ before:**
    Kotlin gives its metadata no receiver to read through, so its type answers `name` and puts the
    runtime's abstract trap in the two slots no type a program can name there declares.
 
+   **Extension property references followed, for 2379.** The object carries at most one receiver,
+   and which kind it is turned out not to matter to it: `x::p` binds a class's and `"ab"::ext` an
+   extension one, and either way it is the single operand the accessor leads with. What the site
+   cannot realize is a property whose accessor wants MORE than one — a member extension property has
+   two receivers and a context property has operands beyond them — and the property's own LAYOUT is
+   what says which it is, rather than the `extension_receiver` flag on the node, which is a fact
+   about the accessor's parameter list and not about this object.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

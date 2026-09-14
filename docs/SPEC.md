@@ -1942,6 +1942,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the same value however early it is asked for — which is the same reason a `const val`'s owner says
   nothing. Any other class-owned initializer still declines rather than guess at the order.
   Tests: `tests/native_property_reference_e2e.rs`.
+
+- **A property reference carries at most ONE receiver, and which kind it is does not change the
+  object.** `x::p` binds a class's receiver and `"ab"::ext` an extension one; either way it is the
+  single operand the accessor leads with, so krusty's native target stores one field and `get` takes
+  one argument. `String::id` on an extension property is the unbound form of the same thing, and
+  calls the top-level accessor the checked lowering built rather than reading storage — an extension
+  property has no object of its own to keep a field in. A property whose accessor wants MORE than
+  one receiver (a member extension property) or operands beyond it (context parameters) is declined:
+  the object has no room to carry them. Which it is comes from the property's LAYOUT rather than from
+  the reference node's `extension_receiver` flag, which is a fact about the accessor's parameter list
+  and not about this object.
+  Tests: `tests/native_property_reference_e2e.rs`.
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that

@@ -43,6 +43,13 @@ enum Access {
     TopLevel,
     /// A member of a class of this file, read and written through the receiver.
     Member { class: ClassId, index: usize },
+    /// A top-level EXTENSION property. There is no storage — an extension property has no object
+    /// of its own to keep a field in — so both directions are calls to the accessor the checked
+    /// lowering built, with the receiver as its leading argument.
+    Extension {
+        getter: FunId,
+        setter: Option<FunId>,
+    },
 }
 
 /// One reference site, as the declaration pass reads it out of the checked node.
@@ -68,21 +75,25 @@ fn reference_site(expr: &IrExpr) -> Option<(&crate::fir::PropertyId, Option<u32>
     else {
         return None;
     };
-    // An EXTENSION receiver is a second receiver the object would have to carry and `get` would
-    // have to pass; that is a different shape, declined by name below rather than guessed at.
-    if extension_receiver.is_some() {
-        return None;
-    }
+    // The object carries at most ONE receiver, and which of the two it is does not matter to it:
+    // `x::p` binds a class's, `"ab"::ext` an extension one, and both arrive as the single operand
+    // the accessor leads with. BOTH at once is a member extension property, whose accessor wants
+    // two receivers this object has no room for; that shape is left to decline by name.
+    let bound = match (dispatch_receiver, extension_receiver) {
+        (None, None) => None,
+        (Some(receiver), None) | (None, Some(receiver)) => Some(*receiver),
+        (Some(_), Some(_)) => return None,
+    };
+    // `extension_receiver` says the property's receiver is an EXTENSION one rather than a class's,
+    // which is a fact about the accessor's parameter list and not about this object: either way the
+    // reference carries one receiver, bound here or handed to `get`. What the site cannot realize
+    // is a property whose accessor wants more than that, and the layout below is what says so.
     let property = match target {
-        FirPropertyReferenceTarget::Module(property) => property,
-        FirPropertyReferenceTarget::SpecializedModule {
-            property,
-            extension_receiver: false,
-            ..
-        } => property,
+        FirPropertyReferenceTarget::Module(property)
+        | FirPropertyReferenceTarget::SpecializedModule { property, .. } => property,
         _ => return None,
     };
-    Some((property, *dispatch_receiver, *mutable))
+    Some((property, bound, *mutable))
 }
 
 impl<'a> FileLowering<'a> {
@@ -208,31 +219,31 @@ impl<'a> FileLowering<'a> {
         mutable: bool,
     ) -> Option<Site> {
         let checked = self.ir.checked_properties.get(property)?;
-        // A property reached through an accessor taking operands this object does not carry —
-        // context parameters or an extension receiver — is not one of these.
-        if self
-            .ir
-            .local_property_layouts
-            .get(property)
-            .is_some_and(|layout| {
-                matches!(
-                    layout,
-                    IrLocalPropertyLayout::TopLevelAccessor { .. }
-                        | IrLocalPropertyLayout::MemberExtension { .. }
-                )
-            })
-        {
-            return None;
-        }
-        let access = match checked.class {
-            None => Access::TopLevel,
-            Some(class) => {
-                let index = self.ir.classes[class as usize]
-                    .properties
-                    .iter()
-                    .position(|candidate| candidate.name == checked.name)?;
-                Access::Member { class, index }
-            }
+        let access = match self.ir.local_property_layouts.get(property) {
+            // A top-level extension property: one receiver, which this object carries or is handed.
+            Some(IrLocalPropertyLayout::TopLevelAccessor {
+                getter,
+                setter,
+                receiver: Some(_),
+                context_parameters,
+            }) if context_parameters.is_empty() => Access::Extension {
+                getter: *getter,
+                setter: *setter,
+            },
+            // A MEMBER extension property, or one with context parameters: its accessor takes
+            // operands this object does not carry, so the site is left to decline by name.
+            Some(IrLocalPropertyLayout::TopLevelAccessor { .. })
+            | Some(IrLocalPropertyLayout::MemberExtension { .. }) => return None,
+            _ => match checked.class {
+                None => Access::TopLevel,
+                Some(class) => {
+                    let index = self.ir.classes[class as usize]
+                        .properties
+                        .iter()
+                        .position(|candidate| candidate.name == checked.name)?;
+                    Access::Member { class, index }
+                }
+            },
         };
         Some(Site {
             name: checked.name.clone(),
@@ -434,6 +445,10 @@ impl<'a> FileLowering<'a> {
                         body.null_check(object)?;
                         body.property_read_of(class, index, object)?
                     }
+                    Access::Extension { getter, .. } => {
+                        let object = receiver(body, params, receiver_offset);
+                        body.accessor_of(getter, object, None)?
+                    }
                 };
                 let answer = match value {
                     Some(value) => body
@@ -482,6 +497,12 @@ impl<'a> FileLowering<'a> {
                             return Err(format!("a `Unit` value assigned to `{name}`"));
                         };
                         body.property_write_of(class, index, object, value)?;
+                    }
+                    Access::Extension { setter, .. } => {
+                        let setter =
+                            setter.ok_or_else(|| format!("a write to the read-only `{name}`"))?;
+                        let object = receiver(body, params, receiver_offset);
+                        body.accessor_of(setter, object, Some(params[2]))?;
                     }
                 }
                 body.builder.ins().return_(&[]);
@@ -596,6 +617,38 @@ impl BodyLowering<'_, '_, '_> {
             _ => return None,
         };
         Some(self.reference_call(slot, receiver, args, ret))
+    }
+
+    /// Call a top-level extension accessor: the receiver, then the written value for a setter.
+    ///
+    /// Everything crosses this object's members as a reference, so each operand is converted to the
+    /// type the accessor declares before the call rather than handed over as a box.
+    pub(super) fn accessor_of(
+        &mut self,
+        accessor: FunId,
+        object: Value,
+        value: Option<Value>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let params = self.file.ir.functions[accessor as usize].params.clone();
+        let mut arguments = Vec::with_capacity(params.len());
+        for (operand, ty) in std::iter::once(object).chain(value).zip(&params) {
+            let Some(argument) = self.convert(operand, Some(any()), *ty)? else {
+                return Err("a `Unit` operand of an extension accessor".to_string());
+            };
+            arguments.push(argument);
+        }
+        if arguments.len() != params.len() {
+            return Err(format!(
+                "an extension accessor taking {} operands for {} parameters",
+                arguments.len(),
+                params.len()
+            ));
+        }
+        let id = self.file.functions[accessor as usize]
+            .ok_or_else(|| "an extension accessor with no body".to_string())?;
+        let func_ref = self.func_ref(id);
+        let call = self.builder.ins().call(func_ref, &arguments);
+        Ok(self.builder.inst_results(call).first().copied())
     }
 
     /// `p.name` — a checked read of a dependency property whose receiver is a reference.

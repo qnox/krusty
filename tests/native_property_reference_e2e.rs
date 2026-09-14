@@ -237,3 +237,55 @@ fn two_delegated_properties_are_handed_their_own_metadata() {
         "OK",
     );
 }
+
+#[test]
+fn an_extension_property_reference_passes_its_receiver_to_the_accessor() {
+    // An extension property has no object of its own to keep a field in, so both directions are
+    // calls to the accessor with the receiver as its leading argument.
+    expect_native_box(
+        "val String.id: String get() = this\n\
+         fun box(): String {\n\
+         \x20   val reference = String::id\n\
+         \x20   if (reference.get(\"123\") != \"123\") return \"fail: \" + reference.get(\"123\")\n\
+         \x20   if (reference.name != \"id\") return \"fail name: \" + reference.name\n\
+         \x20   return reference.get(\"OK\")\n\
+         }\n",
+        "ExtensionPropertyReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_bound_extension_property_reference_keeps_the_receiver_it_bound() {
+    expect_native_box(
+        "val String.doubled: String get() = this + this\n\
+         fun box(): String {\n\
+         \x20   val reference = \"ab\"::doubled\n\
+         \x20   val answer = reference.get()\n\
+         \x20   return if (answer == \"abab\") \"OK\" else \"fail: $answer\"\n\
+         }\n",
+        "BoundExtensionPropertyReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_mutable_extension_property_reference_writes_through_its_setter() {
+    expect_native_box(
+        "class Cell(var stored: String)\n\
+         var Cell.text: String\n\
+         \x20   get() = stored\n\
+         \x20   set(value) {\n\
+         \x20       stored = value + \"!\"\n\
+         \x20   }\n\
+         fun box(): String {\n\
+         \x20   val reference = Cell::text\n\
+         \x20   val cell = Cell(\"a\")\n\
+         \x20   if (reference.get(cell) != \"a\") return \"fail get\"\n\
+         \x20   reference.set(cell, \"b\")\n\
+         \x20   return if (cell.stored == \"b!\") \"OK\" else \"fail: \" + cell.stored\n\
+         }\n",
+        "MutableExtensionPropertyReference",
+        "OK",
+    );
+}
