@@ -542,20 +542,29 @@ impl BodyFirChecker<'_> {
         }))
     }
 
-    pub(super) fn class_storage_read_kind(
-        &mut self,
-        binding: ClassCaptureBinding,
-        origin: OriginId,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        if self.constructor_prefix_capture_access
-            && binding.enclosing_depth == 0
+    /// Is a capture of `owner` being reached while the CONSTRUCTOR PREFIX is in scope — a
+    /// superclass or sibling-constructor argument, or a constructor default?
+    ///
+    /// There the instance does not exist yet, so the capture has to come from the constructor
+    /// parameter carrying it. Reading the storage instead loads it off a `this` the JVM verifier
+    /// will not let you touch, and that a target without a verifier answers with a zero.
+    fn reads_constructor_prefix_capture(&self, owner: DeclarationId, enclosing_depth: u32) -> bool {
+        self.constructor_prefix_capture_access
+            && enclosing_depth == 0
             && self
                 .index
                 .declaration_anchor(DeclarationId::from_raw(self.body.owner().raw()))
                 .filter(|anchor| anchor.kind == DeclarationKind::Constructor)
                 .and_then(|anchor| anchor.owner)
-                == Some(binding.owner)
-        {
+                == Some(owner)
+    }
+
+    pub(super) fn class_storage_read_kind(
+        &mut self,
+        binding: ClassCaptureBinding,
+        origin: OriginId,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        if self.reads_constructor_prefix_capture(binding.owner, binding.enclosing_depth) {
             return Ok(FirExprKind::ConstructorCaptureRead {
                 owner: binding.owner,
                 field: binding.field,
@@ -598,15 +607,7 @@ impl BodyFirChecker<'_> {
         value: FirExprId,
         conversion: Option<FirConversion>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        if self.constructor_prefix_capture_access
-            && binding.enclosing_depth == 0
-            && self
-                .index
-                .declaration_anchor(DeclarationId::from_raw(self.body.owner().raw()))
-                .filter(|anchor| anchor.kind == DeclarationKind::Constructor)
-                .and_then(|anchor| anchor.owner)
-                == Some(binding.owner)
-        {
+        if self.reads_constructor_prefix_capture(binding.owner, binding.enclosing_depth) {
             return Ok(FirExprKind::ConstructorCaptureSharedWrite {
                 owner: binding.owner,
                 field: binding.field,
@@ -758,7 +759,15 @@ impl BodyFirChecker<'_> {
                                 capture_identity,
                             },
                         );
-                        if let Some((receiver, path)) =
+                        if self.reads_constructor_prefix_capture(
+                            binding.owner,
+                            binding.enclosing_depth,
+                        ) {
+                            FirLocalClassCaptureSource::ConstructorCapture {
+                                owner: binding.owner,
+                                field: binding.field,
+                            }
+                        } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
                             FirLocalClassCaptureSource::CapturedClassStorage {
@@ -796,7 +805,15 @@ impl BodyFirChecker<'_> {
                         },
                     );
                     if let Some(binding) = source_binding {
-                        if let Some((receiver, path)) =
+                        if self.reads_constructor_prefix_capture(
+                            binding.owner,
+                            binding.enclosing_depth,
+                        ) {
+                            FirLocalClassCaptureSource::ConstructorCapture {
+                                owner: binding.owner,
+                                field: binding.field,
+                            }
+                        } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
                             FirLocalClassCaptureSource::CapturedClassStorage {
@@ -808,7 +825,7 @@ impl BodyFirChecker<'_> {
                         } else {
                             FirLocalClassCaptureSource::ClassStorage {
                                 owner: binding.owner,
-                                enclosing_depth: 0,
+                                enclosing_depth: binding.enclosing_depth,
                                 field: binding.field,
                             }
                         }
@@ -816,10 +833,17 @@ impl BodyFirChecker<'_> {
                         let owner = self.current_storage_owner().ok_or_else(|| {
                             self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                         })?;
-                        FirLocalClassCaptureSource::ClassStorage {
-                            owner,
-                            enclosing_depth: 0,
-                            field: source_field,
+                        if self.reads_constructor_prefix_capture(owner, 0) {
+                            FirLocalClassCaptureSource::ConstructorCapture {
+                                owner,
+                                field: source_field,
+                            }
+                        } else {
+                            FirLocalClassCaptureSource::ClassStorage {
+                                owner,
+                                enclosing_depth: 0,
+                                field: source_field,
+                            }
                         }
                     }
                 }

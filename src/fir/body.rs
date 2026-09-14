@@ -12,6 +12,7 @@ use super::header::{
 };
 use super::identities::ExternalCallableId;
 use super::inline_body::FirInlineBodyPlan;
+use super::local_class_capture::FirLocalClassCapture;
 use super::signature::ResolvedTy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -915,72 +916,6 @@ pub struct FirImplicitReceiverCapture {
     /// capture site; nested forwarding retains it unchanged and never repeats classifier lookup.
     pub path: Box<[DeclarationId]>,
     pub ty: ResolvedTy,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirLocalClassCaptureSource {
-    Value(LocalValueId),
-    Captured {
-        enclosing_depth: u32,
-        source: LocalValueId,
-    },
-    ClassStorage {
-        owner: DeclarationId,
-        enclosing_depth: u32,
-        field: u32,
-    },
-    CapturedClassStorage {
-        owner: DeclarationId,
-        receiver: FirExprId,
-        path: Box<[DeclarationId]>,
-        field: u32,
-    },
-    DispatchReceiver,
-    /// Exact `inner`-classifier edges from the construction body's dispatch receiver to the
-    /// enclosing instance being captured. A semantic receiver depth is not a value-slot address;
-    /// publishing the declaration path here keeps common lowering mechanical.
-    EnclosingReceiver {
-        path: Box<[DeclarationId]>,
-    },
-    /// A receiver owned by an enclosing callable frame and explicitly captured by the current
-    /// local callable. The coordinate is the same checked capture identity carried by
-    /// [`FirBody::implicit_receiver_captures`]; lowering reads that exact lifted parameter slot.
-    CapturedImplicitReceiver {
-        enclosing_depth: u32,
-        current: bool,
-        depth: u32,
-        path: Box<[DeclarationId]>,
-    },
-    ImplicitReceiver {
-        current: bool,
-        depth: u32,
-    },
-}
-
-impl FirLocalClassCaptureSource {
-    fn storage_payload_bytes(&self) -> usize {
-        match self {
-            Self::CapturedClassStorage { path, .. }
-            | Self::EnclosingReceiver { path }
-            | Self::CapturedImplicitReceiver { path, .. } => {
-                path.len() * std::mem::size_of::<DeclarationId>()
-            }
-            Self::Value(_)
-            | Self::Captured { .. }
-            | Self::ClassStorage { .. }
-            | Self::DispatchReceiver
-            | Self::ImplicitReceiver { .. } => 0,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirLocalClassCapture {
-    pub origin: OriginId,
-    pub name: Box<str>,
-    pub ty: ResolvedTy,
-    pub shared_cell: bool,
-    pub source: FirLocalClassCaptureSource,
 }
 
 /// One checked interface-delegate value evaluated at an anonymous-object construction site. The
