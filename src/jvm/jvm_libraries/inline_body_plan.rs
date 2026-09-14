@@ -646,15 +646,16 @@ impl JvmLibraries {
                         Some(InlineBodyCallReceiver::Extension(_)) => FnKind::Extension,
                         None => FnKind::TopLevel,
                     };
-                    self.register_external_callable(&mut call.callable, kind);
+                    self.register_external_inline_dependency_callable(&mut call.callable, kind);
                 }
                 if let Some(recovery) = recovery {
                     let owner = recovery
                         .constructor
                         .owner
                         .expect("inline recovery constructor must name its classifier");
+                    recovery.constructor.external_identity = None;
                     self.register_external_constructor(owner, &mut recovery.constructor);
-                    self.register_external_callable(
+                    self.register_external_inline_dependency_callable(
                         &mut recovery.failure.callable,
                         FnKind::TopLevel,
                     );
@@ -664,7 +665,10 @@ impl JvmLibraries {
                 index, traversal, ..
             } => {
                 if let Some(InlineIterationIndex::Checked { overflow }) = index {
-                    self.register_external_callable(&mut overflow.callable, FnKind::TopLevel);
+                    self.register_external_inline_dependency_callable(
+                        &mut overflow.callable,
+                        FnKind::TopLevel,
+                    );
                 }
                 self.register_inline_iteration_traversal(traversal);
             }
@@ -679,6 +683,7 @@ impl JvmLibraries {
                 let owner = factory
                     .owner
                     .expect("collection inline factory must name its classifier");
+                factory.external_identity = None;
                 self.register_external_constructor(owner, factory);
                 if let Some(capacity) = capacity {
                     match capacity {
@@ -687,16 +692,18 @@ impl JvmLibraries {
                         }
                         crate::libraries::InlineCollectionCapacity::Extension {
                             callable, ..
-                        } => self.register_external_callable(callable, FnKind::Extension),
+                        } => self.register_external_inline_dependency_callable(
+                            callable,
+                            FnKind::Extension,
+                        ),
                     }
                 }
                 match append {
                     crate::libraries::InlineCollectionAppend::Member(member) => {
                         self.register_external_inline_member(member)
                     }
-                    crate::libraries::InlineCollectionAppend::Extension(callable) => {
-                        self.register_external_callable(callable, FnKind::Extension)
-                    }
+                    crate::libraries::InlineCollectionAppend::Extension(callable) => self
+                        .register_external_inline_dependency_callable(callable, FnKind::Extension),
                 }
             }
         }

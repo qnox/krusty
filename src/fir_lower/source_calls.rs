@@ -624,10 +624,10 @@ impl BodyLowering<'_> {
                         ret: call.result.get(),
                         substitutions: Vec::new(),
                         defaults: Vec::new(),
-                        extension_receiver_parameter: Some(0),
+                        extension_receiver_parameter: None,
                     },
-                    dispatch_receiver: None,
-                    args: vec![receiver, default],
+                    dispatch_receiver: Some(receiver),
+                    args: vec![default],
                 });
                 self.ir
                     .ext_call_source_receiver
@@ -767,10 +767,10 @@ impl BodyLowering<'_> {
                 };
                 (
                     call.declaration,
-                    None,
-                    vec![accumulator, part],
+                    Some(accumulator),
+                    vec![part],
                     vec![accumulator_parameter.get(), part_parameter.get()],
-                    Some(0),
+                    None,
                     call.source_receiver.get(),
                 )
             }

@@ -3857,12 +3857,24 @@ impl JvmLibraries {
         self.register_external_inline_callable(member, FnKind::Member);
     }
 
+    /// Inline-plan caches are shared by immutable classpath composition, while callable identities
+    /// are local to one `Classpath` instance. Always re-home a cached dependency through the
+    /// consuming classpath's physical declaration key before the plan crosses the provider boundary.
+    fn register_external_inline_dependency_callable(
+        &self,
+        callable: &mut LibraryCallable,
+        kind: FnKind,
+    ) {
+        callable.external_identity = None;
+        self.register_external_callable(callable, kind);
+    }
+
     fn register_external_inline_callable(&self, member: &mut LibraryMember, kind: FnKind) {
         let Some(owner) = member.owner else {
             return;
         };
         let mut callable = FunctionInfo::classifier_member(kind, owner, member.clone()).callable;
-        self.register_external_callable(&mut callable, kind);
+        self.register_external_inline_dependency_callable(&mut callable, kind);
         member.external_identity = callable.external_identity;
     }
 

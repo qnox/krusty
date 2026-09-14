@@ -2483,29 +2483,6 @@ pub fn splice(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splice_unified_branchless_drops_return_and_stores_args() {
-        // Body of `inline fun triple(x: Int): Int = x * 3` — `iload_0; iconst_3; imul; ireturn`.
-        let body = MethodCode {
-            max_stack: 2,
-            max_locals: 1,
-            code: vec![0x1a, 0x06, 0x68, 0xac],
-            source_cp: vec![C::Other],
-            stackmap: None,
-            handlers: vec![],
-            locals: vec![],
-        };
-        let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let bs = splice_unified(&body, "(I)I", 3, &[], 0, &mut cw, &HashMap::new())
-            .expect("branchless splice");
-        // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
-        // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
-        assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
-        // A pure branchless body needs no join frame — appendable at any operand-stack height.
-        assert!(!bs.join_required);
-    }
-
     #[test]
     fn finds_function_invoke_sites() {
         // pool: Function1.invoke(Object)Object as an InterfaceMethodref, + an unrelated Methodref.
