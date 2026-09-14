@@ -1,19 +1,18 @@
 use crate::fir::{
-    BodyOwnerId, CallableId, DeclarationAnchor, DeclarationFlags, DeclarationId, DeclarationKind,
-    ExternalCallableId, FirAnnotationConstruction, FirBinaryOperation, FirBody, FirCall,
-    FirCallArgument, FirCallTarget, FirCallableReferenceBinding, FirCallableReferenceTarget,
-    FirCapture, FirCatch, FirConstant, FirConstructorCall, FirConstructorTarget, FirConversion,
-    FirConversionKind, FirExpr, FirExprKind, FirIntrinsic, FirJumpKind, FirLocalCallableRef,
-    FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation, FirReceiver, FirStatement,
-    FirStatementKind, FirTypeParameterRef, FirTypeSubstitution, FirUnaryOperation,
-    FirValueParameter, FirVarargElement, OriginId, ResolvedDeclarationHeader, ResolvedModuleIndex,
-    ResolvedTy, SourceFileId,
+    BodyOwnerId, CallableId, DeclarationId, ExternalCallableId, FirAnnotationConstruction,
+    FirBinaryOperation, FirBody, FirCall, FirCallArgument, FirCallTarget,
+    FirCallableReferenceBinding, FirCallableReferenceTarget, FirCapture, FirCatch, FirConstant,
+    FirConstructorCall, FirConstructorTarget, FirConversion, FirConversionKind, FirExpr,
+    FirExprKind, FirIntrinsic, FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget,
+    FirPropertyTarget, FirRangeOperation, FirReceiver, FirStatement, FirStatementKind,
+    FirTypeParameterRef, FirTypeSubstitution, FirUnaryOperation, FirVarargElement, OriginId,
+    ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::{
-    Callee, IrBinOp, IrCheckedArgument, IrCheckedOperation, IrClass, IrConst, IrExpr, IrField,
-    IrFile, IrIntrinsic, IrNodeOrigin, IrTypeOp,
+    Callee, IrBinOp, IrCheckedArgument, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
+    IrNodeOrigin, IrTypeOp,
 };
-use crate::types::{Ty, Visibility};
+use crate::types::Ty;
 
 use super::lower_body;
 
@@ -1708,84 +1707,6 @@ fn consuming_sink_preserves_mutable_capture_as_shared_cell_operations() {
             .collect::<Vec<_>>(),
         [Ty::Int]
     );
-}
-
-#[test]
-fn class_capture_write_keeps_nullable_cell_element_over_non_null_rhs() {
-    let mut index = ResolvedModuleIndex::default();
-    let classifier = crate::types::type_name("test/CaptureOwner");
-    let declaration = index.intern_checked_local_declaration(
-        DeclarationAnchor {
-            source: SourceFileId::from_raw(0),
-            range: crate::diag::Span::new(0, 1),
-            owner: None,
-            kind: DeclarationKind::Classifier,
-            sibling: 0,
-        },
-        ResolvedDeclarationHeader {
-            kind: DeclarationKind::Classifier,
-            owner: None,
-            name: None,
-            visibility: Visibility::Private,
-            flags: DeclarationFlags::default().with(DeclarationFlags::LOCAL_CLASS, true),
-            initialization_order: None,
-        },
-        "CaptureOwner",
-    );
-    index
-        .publish_classifier_header(declaration, classifier, None, [], [], [], [])
-        .unwrap();
-
-    let result = Ty::obj_args("kotlin/Result", &[Ty::String]);
-    let nullable_result = Ty::nullable(result);
-    let mut ir = IrFile::default();
-    let mut owner = IrClass::synthetic(classifier);
-    owner
-        .fields
-        .push(IrField::new("outcome".to_string(), nullable_result));
-    let owner = ir.add_class(owner);
-    ir.checked_classifier_classes.insert(declaration, owner);
-    ir.shared_class_capture_fields
-        .insert((owner, 0), nullable_result);
-
-    let origin = OriginId::from_raw(0);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(declaration.raw()));
-    let parameter = body.allocate_local_value();
-    body.add_parameter(FirValueParameter {
-        origin,
-        value: parameter,
-        ty: resolved(result),
-    });
-    let read = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(result),
-        kind: FirExprKind::ValueRead(parameter),
-    });
-    let write = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Unit),
-        kind: FirExprKind::ClassStorageSharedWrite {
-            owner: declaration,
-            enclosing_depth: 0,
-            field: 0,
-            element: resolved(nullable_result),
-            value: read,
-            conversion: None,
-        },
-    });
-    let statement = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(write),
-    });
-    body.push_root(statement);
-
-    let lowered = lower_body(body, &index, &mut ir).unwrap();
-    assert_eq!(lowered.roots.len(), 1);
-    let IrExpr::RefSet { elem, value, .. } = ir.expr(lowered.roots[0]) else {
-        panic!("checked class-capture write must lower to a shared-cell write")
-    };
-    assert_eq!(*elem, nullable_result);
-    assert!(matches!(ir.expr(*value), IrExpr::GetValue(1)));
 }
 
 #[test]

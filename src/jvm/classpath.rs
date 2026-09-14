@@ -8416,11 +8416,8 @@ mod fq_tests {
             None,
             Some(Box::new(plan)),
         );
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
-                .is_some(),
-            "memoized plan served while the owner is jar/absent"
-        );
+        let same_view = cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None);
+        assert!(same_view.is_some());
         assert!(
             cp.cached_inline_plan(owner, "run", "()V", &[0], 1, None, &[], None)
                 .is_none(),

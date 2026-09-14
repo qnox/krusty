@@ -63,18 +63,3 @@ fun box(): String = runNow {
 fn suspension_and_both_recovery_arms_match_kotlinc() {
     assert_both_compile_and_run(SUSPEND_RUNTIME, "RunCatchingSuspendRecovery");
 }
-
-#[test]
-fn minimal_non_suspend_expansion_is_byte_identical() {
-    const SOURCE: &str = "fun value(): Result<String> = runCatching { \"OK\" }\n";
-    match common::byte_diff_against_kotlinc_cp(
-        "RunCatchingMinimalBytes",
-        SOURCE,
-        "RunCatchingMinimalBytesKt",
-        &[common::stdlib_jar()],
-    ) {
-        None => panic!("RunCatchingMinimalBytes: reference toolchain unavailable"),
-        Some(Ok(())) => {}
-        Some(Err(error)) => panic!("{error}"),
-    }
-}

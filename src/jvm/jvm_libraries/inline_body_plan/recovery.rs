@@ -487,6 +487,17 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             panic!("runCatching plan regression requires kotlin-stdlib")
         };
+        let warm = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib.clone()],
+        )));
+        let warm_symbols =
+            warm.symbols(SymbolNamespace::Package(type_name("kotlin")), "runCatching");
+        assert!(warm_symbols
+            .callables
+            .functions()
+            .iter()
+            .any(|function| function.callable.inline_body_plan.is_some()));
+
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
         )));
@@ -518,8 +529,17 @@ mod tests {
         assert!(defaults.is_empty());
         assert_eq!(recovery.caught, Ty::obj("kotlin/Throwable"));
         assert_eq!(recovery.constructor.params.len(), 1);
-        assert!(recovery.constructor.external_identity.is_some());
         assert_eq!(recovery.failure.arguments, [InlineBodyValue::Cause]);
-        assert!(recovery.failure.callable.external_identity.is_some());
+        for identity in [
+            recovery.constructor.external_identity,
+            recovery.failure.callable.external_identity,
+        ] {
+            let identity = identity.expect("cached dependency must receive a current identity");
+            let realization = libraries
+                .cp
+                .external_callable(identity)
+                .expect("cached dependency identity must resolve in the current classpath");
+            assert_eq!(realization.callable.external_identity, Some(identity));
+        }
     }
 }
