@@ -167,6 +167,34 @@ extern const KType kt_type_boolean_array;
 extern const KType kt_type_float_array;
 extern const KType kt_type_double_array;
 
+/* ---- lists --------------------------------------------------------------------------------- */
+
+/* `listOf(...)` as a value: an immutable list over the `Array<T>` a vararg call already built,
+   which is what Kotlin's own `listOf(vararg)` wraps too. Being immutable is what makes sharing
+   that array sound — nothing a program can write through reaches it. `MutableList` is a different
+   type and is not one of these. */
+extern const KType kt_type_list;
+extern const KType kt_type_list_iterator;
+
+KRef kt_list_of(KRef elements);
+KRef kt_list_empty(void);
+kt_int kt_list_size(KRef list);
+kt_boolean kt_list_is_empty(KRef list);
+KRef kt_list_get(KRef list, kt_int index);
+kt_int kt_list_index_of(KRef list, KRef value);
+kt_int kt_list_last_index_of(KRef list, KRef value);
+kt_boolean kt_list_contains(KRef list, KRef value);
+KRef kt_list_iterator(KRef list);
+kt_boolean kt_list_iterator_has_next(KRef iterator);
+KRef kt_list_iterator_next(KRef iterator);
+
+/* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
+   two iterable things this runtime has may turn up. The descriptor decides which, and `next`
+   answers a reference because an interface-typed receiver has its element type erased. */
+KRef kt_iterable_iterator(KRef iterable);
+kt_boolean kt_iterator_has_next(KRef iterator);
+KRef kt_iterator_next(KRef iterator);
+
 /* ---- ranges ---------------------------------------------------------------------------------- */
 
 /* `1..3`, `a..<b`, `'a'..'z'` as a VALUE. The three closed integral ranges share one shape — two

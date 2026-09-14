@@ -185,6 +185,56 @@ pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
     facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "until" && arity == 1
 }
 
+/// Whether a declaration's owner is the collections file facade `listOf` and its neighbours live
+/// in. They are top-level functions of `kotlin.collections`, so they reach a backend as members of
+/// the facade class the stdlib declares them in — the `kotlin/io/ConsoleKt` situation again, and
+/// normalized in the same place.
+pub(super) fn is_collections_facade(owner: &str) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/collections")
+}
+
+/// How a program iterates a receiver it could only type by an INTERFACE.
+///
+/// `Iterable` and `Iterator` both have a Kotlin spelling and a `java.util` one — the provider
+/// presents a Kotlin collection interface under whichever name the declaration it read carried —
+/// and normalizing that here is the point: a backend asks which of the two roles a type plays, not
+/// which library spelled it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IterationRole {
+    /// Something a `for` loop asks for an iterator.
+    Iterable,
+    /// The iterator itself.
+    Iterator,
+}
+
+/// Which role a type name plays, or `None` for anything that plays neither.
+pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<IterationRole> {
+    [
+        ("kotlin/collections/Iterable", IterationRole::Iterable),
+        ("kotlin/collections/Collection", IterationRole::Iterable),
+        ("kotlin/collections/List", IterationRole::Iterable),
+        ("java/lang/Iterable", IterationRole::Iterable),
+        ("java/util/Collection", IterationRole::Iterable),
+        ("java/util/List", IterationRole::Iterable),
+        ("kotlin/collections/Iterator", IterationRole::Iterator),
+        ("java/util/Iterator", IterationRole::Iterator),
+    ]
+    .into_iter()
+    .find_map(|(candidate, role)| internal.matches(candidate).then_some(role))
+}
+
+/// Whether a type name is the read-only list the native runtime builds, under either spelling.
+pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
+    [
+        "kotlin/collections/List",
+        "kotlin/collections/Collection",
+        "java/util/List",
+        "java/util/Collection",
+    ]
+    .iter()
+    .any(|candidate| internal.matches(candidate))
+}
+
 /// `x.indices` — the range of an indexable value's positions, which the provider presents as an
 /// extension property of the arrays or text file facade rather than a member.
 ///

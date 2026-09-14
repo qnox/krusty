@@ -17,6 +17,7 @@ mod arrays;
 mod defaults;
 mod enums;
 mod functions;
+mod lists;
 mod objects;
 mod ranges;
 mod references;
@@ -1200,6 +1201,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.range_member(&owner, &name, receiver, &[], ret)
                     .expect("a range member, by the guard")
             }
+            // `values.size`: the same runtime answer an explicit call to the getter would get,
+            // and reached the same way — by the receiver, not by the property's declaration.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.list_getter(target).is_some() => {
+                let name = self.list_getter(target).expect("checked by the guard");
+                match self.list_member(&name, receiver, &[], Ty::Int) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that is not a list")),
+                }
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1458,7 +1472,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
                     Some(_) => Ty::Int,
-                    // A range's own members answer at their element's width.
+                    // A list's `size` is an `Int`; a range's own members answer at their element's
+                    // width.
+                    None if self.list_getter(*target).is_some() => Ty::Int,
                     None => self.range_getter(*target)?.2,
                 }
             }
@@ -2100,6 +2116,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) = self.reference_member(&name, receiver, args, *ret) {
                             return realized;
                         }
+                        // A `listOf` result and the iterator it answers with.
+                        if let Some(realized) = self.list_member(&name, receiver, args, *ret) {
+                            return realized;
+                        }
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.
                         if let Some((symbol, carried, answer)) =
@@ -2133,6 +2153,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.runtime_call(symbol, &signature, *ret, &arguments)
                     }
                     None => {
+                        if let Some(realized) = self.list_construction(&owner, &name, args) {
+                            return realized;
+                        }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_function(&owner, &name, params)
                         else {

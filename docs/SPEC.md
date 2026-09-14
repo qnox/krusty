@@ -1955,6 +1955,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and not about this object.
   Tests: `tests/native_property_reference_e2e.rs`.
 
+- **A list is the array a vararg call already built, with a header.** `listOf(...)` reaches a
+  backend with its elements packed into an `Array<T>`, and krusty's native target wraps that array
+  rather than copying it — which is what Kotlin's own `listOf(vararg)` does, and what makes the
+  elements traced by a collector that already knows how to trace an array. Being READ-ONLY is what
+  makes sharing sound: nothing a program can write through reaches it. `MutableList`, `Set` and
+  `Map` are not this type and decline by name. The list answers all three of `kotlin.Any`'s members
+  by its contents, as Kotlin's `List` does.
+  Which call reaches the runtime is decided by the RECEIVER's type, never by the owner declaring the
+  member — the same rule ranges follow, and for the same reason: `iterator` is declared on
+  `Iterable`, which a user class may implement, and a file declaring such a class overrides a
+  dependency method and is declined whole.
+  **`Iterable` is the one type that cannot decide, because a RANGE is one too.** A generic body or
+  an inlined stdlib extension — `for (e in this)` inside `Iterable<T>.forEach` — types its receiver
+  by the interface, and no static type can then say which of the two iterable things the runtime has
+  is in hand; reading a range as a list takes a bound for a pointer. So an interface-typed receiver
+  routes to a runtime dispatch on the DESCRIPTOR, and `next` there answers a reference, because a
+  receiver typed by the interface has its element type erased.
+  Tests: `tests/native_lists_e2e.rs`.
+
 - **A `Nothing`-typed producer that returns is a checked bottom value, and the completion mode is
   what says so.** `Nothing` promises there is no value, and most producers keep the promise by never
   coming back; two do not. A call whose generic result is SUBSTITUTED to `Nothing` really produces

@@ -657,6 +657,219 @@ static KRef kt_range_to_string(KRef self) {
     return kt_string_of((KRef)buffer, kt_bytes_of(buffer), length);
 }
 
+/* ---- lists --------------------------------------------------------------------------------- */
+
+/* `listOf(...)` as a VALUE. The elements are an ordinary `Array<T>` the list holds, which is what
+   Kotlin's own `listOf(vararg)` does with the array a vararg call already built -- so the elements
+   are traced by the collector through the array it already knows how to trace, and the list itself
+   has exactly one reference field.
+
+   The list is IMMUTABLE, which is what makes sharing the vararg array sound: nothing a program can
+   write through reaches it. `MutableList` is not this type and is not realized here. */
+typedef struct KList {
+    KObjectHeader header;
+    KRef elements;
+} KList;
+
+static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
+
+static kt_boolean kt_list_equals(KRef self, KRef other);
+static kt_int kt_list_hash_code(KRef self);
+static KRef kt_list_to_string(KRef self);
+
+static const kt_fn kt_list_vtable[] = {(kt_fn)kt_list_equals, (kt_fn)kt_list_hash_code,
+                                       (kt_fn)kt_list_to_string};
+
+const KType kt_type_list = {"kotlin.collections.List",
+                            sizeof("kotlin.collections.List") - 1,
+                            sizeof(KList),
+                            1,
+                            0,
+                            kt_list_offsets,
+                            &kt_type_any,
+                            kt_list_vtable,
+                            3,
+                            0};
+
+/* The cursor an iterator holds is an INDEX, not a pointer: the collector may not move an object,
+   but an index needs no such promise and reads the same whatever the list is. */
+typedef struct KListIterator {
+    KObjectHeader header;
+    KRef list;
+    kt_int at;
+} KListIterator;
+
+static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list)};
+
+/* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. */
+const KType kt_type_list_iterator = {"kotlin.collections.Iterator",
+                                     sizeof("kotlin.collections.Iterator") - 1,
+                                     sizeof(KListIterator),
+                                     1,
+                                     0,
+                                     kt_list_iterator_offsets,
+                                     &kt_type_any,
+                                     kt_any_vtable,
+                                     3,
+                                     0};
+
+static KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array + 1); }
+
+static kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
+
+KRef kt_list_of(KRef elements) {
+    /* The allocation can collect, so the array has to be reachable across it; it is, in this
+       local, which the conservative root scan reads. */
+    KList *list = (KList *)kt_gc_allocate(&kt_type_list, sizeof(KList));
+    list->elements = elements;
+    return (KRef)list;
+}
+
+KRef kt_list_empty(void) { return kt_list_of(kt_array_new(&kt_type_array, 0)); }
+
+kt_int kt_list_size(KRef list) { return kt_length_of(((const KList *)list)->elements); }
+
+kt_boolean kt_list_is_empty(KRef list) { return kt_list_size(list) == 0; }
+
+KRef kt_list_get(KRef list, kt_int index) {
+    KRef elements = ((const KList *)list)->elements;
+    if (index < 0 || index >= kt_length_of(elements)) {
+        kt_index_out_of_bounds(index, kt_length_of(elements));
+    }
+    return kt_elements_of(elements)[index];
+}
+
+kt_int kt_list_index_of(KRef list, KRef value) {
+    KRef elements = ((const KList *)list)->elements;
+    kt_int length = kt_length_of(elements);
+    for (kt_int i = 0; i < length; i++) {
+        if (kt_equals(kt_elements_of(elements)[i], value)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+kt_int kt_list_last_index_of(KRef list, KRef value) {
+    KRef elements = ((const KList *)list)->elements;
+    for (kt_int i = kt_length_of(elements) - 1; i >= 0; i--) {
+        if (kt_equals(kt_elements_of(elements)[i], value)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+kt_boolean kt_list_contains(KRef list, KRef value) { return kt_list_index_of(list, value) >= 0; }
+
+KRef kt_list_iterator(KRef list) {
+    KListIterator *iterator =
+        (KListIterator *)kt_gc_allocate(&kt_type_list_iterator, sizeof(KListIterator));
+    iterator->list = list;
+    iterator->at = 0;
+    return (KRef)iterator;
+}
+
+kt_boolean kt_list_iterator_has_next(KRef iterator) {
+    const KListIterator *self = (const KListIterator *)iterator;
+    return self->at < kt_list_size(self->list);
+}
+
+KRef kt_list_iterator_next(KRef iterator) {
+    KListIterator *self = (KListIterator *)iterator;
+    if (self->at >= kt_list_size(self->list)) {
+        KT_FAIL("krusty: no more elements in this list\n");
+    }
+    return kt_list_get(self->list, self->at++);
+}
+
+/* An `Iterable` or an `Iterator` that the generator could only type by the INTERFACE — a generic
+   body, an inlined stdlib extension — may be holding either of the two things this runtime can
+   iterate. The static type cannot say which, so the descriptor does.
+
+   `next` answers a reference for the same reason the question arises: a receiver typed by the
+   interface has its element type erased, so what a caller there expects is the boxed element. */
+KRef kt_iterable_iterator(KRef iterable) {
+    if (iterable != NULL && iterable->header.type == &kt_type_list) {
+        return kt_list_iterator(iterable);
+    }
+    return kt_range_iterator(iterable);
+}
+
+kt_boolean kt_iterator_has_next(KRef iterator) {
+    if (iterator != NULL && iterator->header.type == &kt_type_list_iterator) {
+        return kt_list_iterator_has_next(iterator);
+    }
+    return kt_range_iterator_has_next(iterator);
+}
+
+KRef kt_iterator_next(KRef iterator) {
+    if (iterator == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (iterator->header.type == &kt_type_list_iterator) {
+        return kt_list_iterator_next(iterator);
+    }
+    kt_long value = kt_range_iterator_next(iterator);
+    if (iterator->header.type == &kt_type_long_iterator) {
+        return kt_box_long(value);
+    }
+    if (iterator->header.type == &kt_type_char_iterator) {
+        return kt_box_char((kt_char)value);
+    }
+    return kt_box_int((kt_int)value);
+}
+
+/* Kotlin's `List.equals`: same size and elementwise equal, and only against another list. A list
+   never equals a set with the same members, which the type comparison is. */
+static kt_boolean kt_list_equals(KRef self, KRef other) {
+    if (self == other) {
+        return true;
+    }
+    if (other == NULL || other->header.type != &kt_type_list) {
+        return false;
+    }
+    kt_int size = kt_list_size(self);
+    if (size != kt_list_size(other)) {
+        return false;
+    }
+    KRef left = ((const KList *)self)->elements;
+    KRef right = ((const KList *)other)->elements;
+    for (kt_int i = 0; i < size; i++) {
+        if (!kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Kotlin's own: 1 folded with `31 * h + e.hashCode()`, a null element contributing 0. */
+static kt_int kt_list_hash_code(KRef self) {
+    KRef elements = ((const KList *)self)->elements;
+    kt_int length = kt_length_of(elements);
+    uint32_t hash = 1;
+    for (kt_int i = 0; i < length; i++) {
+        hash = 31u * hash + (uint32_t)kt_hash_code(kt_elements_of(elements)[i]);
+    }
+    return (kt_int)hash;
+}
+
+/* `[a, b, c]`, each element through its own `toString` — which is what makes this a loop over
+   `kt_string_plus` rather than a render into one buffer: an element's rendering may itself
+   allocate, and the joined text has to stay reachable across that. */
+static KRef kt_list_to_string(KRef self) {
+    KRef elements = ((const KList *)self)->elements;
+    kt_int length = kt_length_of(elements);
+    KRef text = kt_string_utf8("[", 1);
+    for (kt_int i = 0; i < length; i++) {
+        if (i > 0) {
+            text = kt_string_plus(text, kt_string_utf8(", ", 2));
+        }
+        text = kt_string_plus(text, kt_to_string(kt_elements_of(elements)[i]));
+    }
+    return kt_string_plus(text, kt_string_utf8("]", 1));
+}
+
 /* Static storage, not the heap: the collector never sees it as an object, and nothing needs it
    to. */
 KRef kt_unit(void) {

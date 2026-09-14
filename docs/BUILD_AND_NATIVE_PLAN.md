@@ -1501,6 +1501,17 @@ before:**
    loop-rewritten function is a stack overflow at exactly the depth the modifier was written to
    make safe. The generator declines those rather than emitting them.
 
+   **A list runtime was the largest single decline left, and it took 2436.** `listOf` accounted for
+   38 files, almost all of them `for (x in listOf(...))`, and the piece that was missing turned out
+   to be small: a vararg call already builds an `Array<T>`, so a list is that array with a header —
+   which is what Kotlin's own `listOf(vararg)` wraps too, and what makes its elements traced by a
+   collector that already knows arrays. What was NOT small was deciding which calls may reach it.
+   Keying on the receiver's type is the rule ranges already follow, but `Iterable` breaks it, because
+   a range is an `Iterable` as much as a list is: the first version sent an inlined
+   `Iterable<T>.forEach` over a range into the list helpers, which read a bound as a pointer and
+   segfaulted. A receiver the generator can only type by the interface is now answered by a runtime
+   dispatch on the descriptor instead — the honest place for a question no static type can settle.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

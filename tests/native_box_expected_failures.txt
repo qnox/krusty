@@ -2,6 +2,7 @@
 # backend that the JVM lane fails on as well. Format: <path relative to the box corpus root><TAB><reason>.
 # A case not listed here that fails, or a case listed here that passes, fails the test — so this list
 # can only shrink honestly. See tests/kotlin_box_native_conformance.rs.
+callableReference/property/extensionPropertyReferenceWithTypeParameter.kt	`List<T>::foo` names a LOCAL extension function `foo` and the checker does not see it there, so the reference falls through to the top-level extension PROPERTY of the same name and the program answers "not" where it should answer "led" — reduced to that one reference, the checker reports `unresolved reference 'foo'`; krusty's JVM backend prints the identical "fail", so the resolution is the checker's, not the generator's
 casts/kt83324.kt	the frontend smart-casts a `var` that the loop reassigns, so the IR carries a cast to the first assignment's class; the cast fails at runtime (a frontend defect, not a lowering one)
 classes/selfcreate.kt	an anonymous object passes its enclosing instance's `b` to its own superclass constructor; krusty's JVM backend rejects the same program with `VerifyError: Bad type on operand stack`
 contextParameters/classMemberAndTopLevelWithContext.kt	a context parameter picks the wrong receiver — krusty's JVM backend prints the identical "NOK", so this is the frontend's, not the generator's
