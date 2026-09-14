@@ -1121,6 +1121,8 @@ mod private_set_e2e;
 mod projected_receiver_extension_e2e;
 #[path = "property_accessor_e2e.rs"]
 mod property_accessor_e2e;
+#[path = "property_accessor_increment_e2e.rs"]
+mod property_accessor_increment_e2e;
 #[path = "property_conversion_inference_e2e.rs"]
 mod property_conversion_inference_e2e;
 #[path = "property_infer_member_e2e.rs"]
