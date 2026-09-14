@@ -44,7 +44,8 @@ pub enum FirInlineBodyPlan {
         arguments: Box<[FirInlineValue]>,
         prologue: Box<[FirInlineCall]>,
         cleanup: Box<[FirInlineCall]>,
-        records_cause: bool,
+        /// Nullable semantic throwable type recorded by the checked catch template.
+        cause: Option<ResolvedTy>,
         defaults: Box<[FirInlineDefault]>,
         result: Option<FirInlineValue>,
     },

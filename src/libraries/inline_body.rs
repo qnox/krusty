@@ -48,7 +48,9 @@ pub enum InlineBodyPlan {
         arguments: Vec<InlineBodyValue>,
         prologue: Vec<InlineBodyCall>,
         cleanup: Vec<InlineBodyCall>,
-        records_cause: bool,
+        /// Semantic type of the throwable local recorded by the exact catch template. `None` when
+        /// the lambda is not wrapped in such a catch.
+        cause: Option<crate::types::Ty>,
         defaults: Vec<InlineBodyDefault>,
         /// A declaration parameter returned instead of the invocation result (`apply`/`also`).
         result: Option<InlineBodyValue>,
@@ -74,41 +76,4 @@ pub struct InlineCollectionLocalNames {
     pub inner_receiver: Box<str>,
     pub destination: Box<str>,
     pub element: Box<str>,
-}
-
-impl InlineBodyPlan {
-    /// Return the unguarded lambda-only subset consumed by the parser-era migration path.
-    /// Checked FIR consumes every other plan directly and unconditionally.
-    pub fn plain_invoke_lambda(&self) -> Option<(usize, Vec<usize>, Option<usize>)> {
-        let Self::InvokeLambda {
-            lambda_parameter,
-            arguments,
-            prologue,
-            cleanup,
-            records_cause,
-            defaults,
-            result,
-        } = self
-        else {
-            return None;
-        };
-        if !prologue.is_empty() || !cleanup.is_empty() || *records_cause || !defaults.is_empty() {
-            return None;
-        }
-        let parameter = |value: &InlineBodyValue| match value {
-            InlineBodyValue::Parameter(parameter) => Some(*parameter),
-            InlineBodyValue::Cause => None,
-        };
-        Some((
-            *lambda_parameter,
-            arguments
-                .iter()
-                .map(parameter)
-                .collect::<Option<Vec<_>>>()?,
-            match result {
-                None => None,
-                Some(result) => Some(parameter(result)?),
-            },
-        ))
-    }
 }

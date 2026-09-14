@@ -5104,7 +5104,7 @@ impl JvmLibraries {
                 };
                 let Some(getter_method) =
                     self.cp
-                        .facade_static(&facade_rendered, &getter_sig.name, &getter_sig.desc)
+                        .facade_static(facade, &getter_sig.name, &getter_sig.desc)
                 else {
                     crate::trace_compiler!(
                         "metadata_properties",
@@ -5179,11 +5179,9 @@ impl JvmLibraries {
                     if sparams.len() != context_count + receiver_params + 1 || sret != Ty::Unit {
                         return None;
                     }
-                    let setter_method = self.cp.facade_static(
-                        &facade_rendered,
-                        &setter_sig.name,
-                        &setter_sig.desc,
-                    )?;
+                    let setter_method =
+                        self.cp
+                            .facade_static(facade, &setter_sig.name, &setter_sig.desc)?;
                     if !setter_method.public {
                         return None;
                     }
@@ -7451,223 +7449,6 @@ mod tests {
             ),
             Some(Ty::fun(vec![Ty::String], Ty::Int)),
         );
-    }
-
-    #[test]
-    fn metadata_inline_bodies_decode_parameter_roles_without_source_dispatch() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "let");
-        let decoded = symbols
-            .callables
-            .functions()
-            .iter()
-            .map(|function| {
-                (
-                    function.callable.owner,
-                    function.callable.descriptor.as_str(),
-                    function.callable.inline,
-                    function.callable.inline_body_plan.as_deref(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            symbols.callables.functions().iter().any(|function| {
-                matches!(
-                    function.callable.inline_body_plan.as_deref(),
-                    Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                        lambda_parameter: 1,
-                        arguments,
-                        ..
-                    }) if arguments.as_slice()
-                        == [crate::libraries::InlineBodyValue::Parameter(0)]
-                )
-            }),
-            "decoded declarations: {decoded:?}"
-        );
-    }
-
-    #[test]
-    fn suspend_finally_inline_body_decodes_exact_member_handles() {
-        let (Some(stdlib), Some(coroutines)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::coroutines_jar(),
-        ) else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, coroutines]),
-        ));
-        let symbols = libraries.symbols(
-            SymbolNamespace::Package(type_name("kotlinx/coroutines/sync")),
-            "withLock",
-        );
-        assert!(symbols.callables.functions().iter().any(|function| {
-            matches!(
-                function.callable.inline_body_plan.as_deref(),
-                Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                    lambda_parameter: 2,
-                    arguments,
-                    prologue,
-                    cleanup,
-                    records_cause: false,
-                    defaults,
-                    result: None,
-                }) if arguments.is_empty()
-                    && defaults.len() == 1
-                    && defaults[0].parameter == 1
-                    && defaults[0].value == crate::libraries::DefaultValue::Null
-                    && matches!(prologue.as_slice(), [enter]
-                        if enter.callable.suspend
-                            && enter.receiver == Some(
-                                crate::libraries::InlineBodyCallReceiver::Dispatch(
-                                    crate::libraries::InlineBodyValue::Parameter(0),
-                                ),
-                            )
-                            && enter.arguments.as_slice()
-                                == [crate::libraries::InlineBodyValue::Parameter(1)])
-                    && matches!(cleanup.as_slice(), [cleanup]
-                        if !cleanup.callable.suspend
-                            && cleanup.receiver == Some(
-                                crate::libraries::InlineBodyCallReceiver::Dispatch(
-                                    crate::libraries::InlineBodyValue::Parameter(0),
-                                ),
-                            )
-                            && cleanup.arguments.as_slice()
-                                == [crate::libraries::InlineBodyValue::Parameter(1)])
-            )
-        }));
-    }
-
-    /// The same shape with NO state argument. `Semaphore.withPermit` calls `acquire(continuation)`
-    /// and `release()`, where `Mutex.withLock` calls `lock(owner, continuation)` and
-    /// `unlock(owner)`. Reading the enter member's own descriptor is what makes both decode; a
-    /// fixed operand position recognized only the one that happens to carry an extra parameter.
-    #[test]
-    fn suspend_finally_inline_body_decodes_without_a_state_argument() {
-        let (Some(stdlib), Some(coroutines)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::coroutines_jar(),
-        ) else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, coroutines]),
-        ));
-        let symbols = libraries.symbols(
-            SymbolNamespace::Package(type_name("kotlinx/coroutines/sync")),
-            "withPermit",
-        );
-        assert!(
-            symbols.callables.functions().iter().any(|function| {
-                matches!(
-                    function.callable.inline_body_plan.as_deref(),
-                    Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                        lambda_parameter: 1,
-                        arguments,
-                        prologue,
-                        cleanup,
-                        records_cause: false,
-                        defaults,
-                        result: None,
-                    }) if arguments.is_empty()
-                        && defaults.is_empty()
-                        && matches!(prologue.as_slice(), [enter]
-                            if enter.callable.suspend
-                                && enter.callable.params.is_empty()
-                                && enter.callable.ret == Ty::Unit
-                                && enter.receiver == Some(
-                                    crate::libraries::InlineBodyCallReceiver::Dispatch(
-                                        crate::libraries::InlineBodyValue::Parameter(0),
-                                    ),
-                                )
-                                && enter.arguments.is_empty())
-                        && matches!(cleanup.as_slice(), [cleanup]
-                            if !cleanup.callable.suspend
-                                && cleanup.callable.params.is_empty()
-                                && cleanup.callable.ret == Ty::Unit
-                                && cleanup.receiver == Some(
-                                    crate::libraries::InlineBodyCallReceiver::Dispatch(
-                                        crate::libraries::InlineBodyValue::Parameter(0),
-                                    ),
-                                )
-                                && cleanup.arguments.is_empty())
-                )
-            }),
-            "withPermit must decode the stateless enter/cleanup shape with metadata-owned Unit results"
-        );
-    }
-
-    #[test]
-    fn use_inline_body_decodes_exact_semantic_extension_cleanup() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
-        let [function] = symbols.callables.functions() else {
-            panic!("kotlin.io.use must have exactly one metadata declaration")
-        };
-        assert_eq!(
-            function.callable.descriptor,
-            "(Ljava/io/Closeable;Lkotlin/jvm/functions/Function1;)Ljava/lang/Object;"
-        );
-        let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            arguments,
-            prologue,
-            cleanup,
-            records_cause,
-            defaults,
-            result,
-        }) = function.callable.inline_body_plan.as_deref()
-        else {
-            panic!("kotlin.io.use must publish its exact checked inline-body contract")
-        };
-        assert_eq!(*lambda_parameter, 1);
-        assert_eq!(
-            arguments.as_slice(),
-            [crate::libraries::InlineBodyValue::Parameter(0)]
-        );
-        assert!(prologue.is_empty());
-        assert!(*records_cause);
-        assert!(defaults.is_empty());
-        assert_eq!(*result, None);
-        let [cleanup] = cleanup.as_slice() else {
-            panic!("kotlin.io.use must have exactly one cleanup call")
-        };
-        assert_eq!(cleanup.callable.owner, type_name("kotlin/io/CloseableKt"));
-        assert_eq!(cleanup.callable.name, "closeFinally");
-        assert_eq!(
-            cleanup.callable.descriptor,
-            "(Ljava/io/Closeable;Ljava/lang/Throwable;)V"
-        );
-        assert_eq!(cleanup.callable.params.len(), 2);
-        assert_eq!(cleanup.callable.ret, Ty::Unit);
-        assert!(!cleanup.callable.suspend);
-        assert_eq!(
-            cleanup.receiver,
-            Some(crate::libraries::InlineBodyCallReceiver::Extension(
-                crate::libraries::InlineBodyValue::Parameter(0),
-            ))
-        );
-        assert_eq!(
-            cleanup.arguments.as_slice(),
-            [crate::libraries::InlineBodyValue::Cause]
-        );
-        assert!(cleanup
-            .callable
-            .generic_sig
-            .as_deref()
-            .and_then(|signature| signature.receiver)
-            .is_some());
-        assert!(cleanup.callable.external_identity.is_some());
     }
 
     #[test]

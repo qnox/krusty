@@ -914,7 +914,7 @@ mod tests {
             arguments: Vec::new(),
             prologue: Vec::new(),
             cleanup: Vec::new(),
-            records_cause: false,
+            cause: None,
             defaults: Vec::new(),
             result: None,
         }));

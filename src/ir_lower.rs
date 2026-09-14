@@ -41,6 +41,7 @@ use crate::types::{
 
 mod classifier_hierarchy;
 mod compound_assignments;
+mod inline_body_legacy_bridge;
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
@@ -16814,7 +16815,7 @@ impl<'a> Lower<'a> {
         plan: &crate::libraries::InlineBodyPlan,
     ) -> Option<u32> {
         let (lambda_parameter, argument_parameters, return_parameter) =
-            plan.plain_invoke_lambda()?;
+            inline_body_legacy_bridge::plain_invoke_lambda(plan)?;
         let slots = self.info.resolved_call_arg_slots.get(&call)?;
         if slots.len() != callable.params.len() {
             return None;
@@ -20987,7 +20988,7 @@ impl<'a> Lower<'a> {
         let parameters =
             self.extension_plan_arguments(call, receiver, args, callable.params.len())?;
         let (lambda_parameter, argument_parameters, return_parameter) =
-            plan.plain_invoke_lambda()?;
+            inline_body_legacy_bridge::plain_invoke_lambda(plan)?;
         let lambda = parameters.get(lambda_parameter).copied().flatten()?;
         let arguments = argument_parameters
             .iter()
@@ -27242,7 +27243,7 @@ impl<'a> Lower<'a> {
                 if let Some((lambda_parameter, argument_parameters, return_parameter)) = member
                     .inline_body_plan
                     .as_deref()
-                    .and_then(crate::libraries::InlineBodyPlan::plain_invoke_lambda)
+                    .and_then(inline_body_legacy_bridge::plain_invoke_lambda)
                 {
                     let parameters = std::iter::once(Some(receiver))
                         .chain(args.iter().copied().map(Some))

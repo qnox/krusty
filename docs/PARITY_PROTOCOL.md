@@ -2050,3 +2050,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   receives a continuation, and emission fails with "call arity mismatch" — which bails the whole
    FILE, so one `withPermit` cost a module every class it would have emitted.
    `tests/suspend_inline_stateless_finally_e2e.rs::with_permit_hosts_a_suspension_in_its_lambda`.
+- **Inline lambda regions use one checked body-plan contract (fix).** The provider previously
+  published separate plan variants for an unguarded lambda invocation and an
+  enter/lambda/finally region. That closed model could not describe `Closeable.use`: its lambda
+  receives the extension receiver, its `finally` cleanup consumes both that receiver and the
+  throwable which left the lambda, and it has no prologue.
+  `InvokeLambda` now carries parameter-relative invocation operands, optional checked prologue and
+  cleanup calls, declaration defaults, an optional recorded cause, and an optional returned
+  parameter. Each nested call carries its metadata-normalized callable identity and semantic
+  dispatch-versus-extension receiver role; bytecode is used only to recognize the exact control-flow
+  template and physical target. Checked FIR publishes that complete contract, and common lowering
+  treats it as an obligation rather than retrying an ordinary dependency call.
+  The exact recognizer rejects extra effects, altered handler ranges, or a cleanup other than the
+  duplicated `finally` target. Runtime coverage proves suspension, lambda operand mapping, close on
+  exceptional exit, and suppression of a close failure onto the body exception.
+  `tests/use_inline_finally_e2e.rs`.

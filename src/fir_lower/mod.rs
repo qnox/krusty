@@ -18,6 +18,7 @@ mod external_references;
 mod function_references;
 mod generics;
 mod initialization;
+mod inline_body;
 mod inline_returns;
 mod inlining;
 mod interface_delegation;
