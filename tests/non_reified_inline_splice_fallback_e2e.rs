@@ -5,13 +5,13 @@ use super::common;
 const LIBRARY: &str = "@file:JvmName(\"Api\")\n\
     @file:JvmMultifileClass\n\
     package dependency\n\
-    inline fun <T> retain(value: T): T =\n\
-    \x20 if (System.nanoTime() == Long.MIN_VALUE) throw IllegalStateException() else value\n";
+    inline fun <T> retain(value: T, fail: Boolean): T =\n\
+    \x20 if (fail) throw IllegalStateException() else value\n";
 
 const MAIN: &str = "package consumer\n\
     import dependency.retain\n\
     fun box(): String {\n\
-    \x20 val value = \"OK!\".substring(0, retain<Int>(2))\n\
+    \x20 val value = \"OK!\".substring(0, retain<Int>(2, false))\n\
     \x20 return if (value == \"OK\") \"OK\" else \"F:$value\"\n\
     }\n";
 
@@ -90,7 +90,7 @@ fn a_declined_non_reified_splice_matches_kotlinc_runtime_behavior() {
         vec![(
             "dependency/Api".to_string(),
             "retain".to_string(),
-            "(Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
+            "(Ljava/lang/Object;Z)Ljava/lang/Object;".to_string(),
         )],
         "the unsupported public non-reified body must use its legal direct call",
     );
