@@ -3921,30 +3921,55 @@ fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         else {
             return None;
         };
-        matches!(
-            plan.as_ref(),
-            FirInlineBodyPlan::SuspendBeforeLambdaFinally { .. }
-        )
+        matches!(plan.as_ref(), FirInlineBodyPlan::InvokeLambda { cleanup, .. }
+            if !cleanup.is_empty())
         .then_some(plan.as_ref())
     });
-    let Some(FirInlineBodyPlan::SuspendBeforeLambdaFinally {
+    let Some(FirInlineBodyPlan::InvokeLambda {
         lambda_parameter,
-        state,
-        enter,
+        arguments,
+        prologue,
         cleanup,
+        records_cause,
+        defaults,
+        result,
     }) = plan
     else {
         panic!("withLock must publish its selected structural plan in checked FIR")
     };
-    let state = state
-        .as_ref()
-        .expect("withLock threads its `owner` through lock/unlock");
-    assert_eq!((*lambda_parameter, state.parameter), (1, 0));
-    assert_eq!(state.default, FirInlineDefaultValue::Null);
+    assert_eq!(*lambda_parameter, 1);
+    assert!(arguments.is_empty());
+    assert_eq!(
+        defaults.as_ref(),
+        [crate::fir::FirInlineDefault {
+            parameter: 0,
+            value: FirInlineDefaultValue::Null,
+        }]
+    );
+    assert!(!records_cause);
+    assert_eq!(*result, None);
+    let [enter] = prologue.as_ref() else {
+        panic!("withLock must enter one checked region before its lambda")
+    };
+    let [cleanup] = cleanup.as_ref() else {
+        panic!("withLock must leave one checked region from finally")
+    };
     assert_eq!(enter.parameters.len(), 1);
     assert_eq!(cleanup.parameters.len(), 1);
     assert_eq!(enter.result.get(), Ty::Unit);
     assert_eq!(cleanup.result.get(), Ty::Unit);
+    assert_eq!(
+        enter.receiver,
+        Some(crate::fir::FirInlineCallReceiver::Dispatch(
+            crate::fir::FirInlineValue::Receiver,
+        ))
+    );
+    assert_eq!(
+        enter.arguments.as_ref(),
+        [crate::fir::FirInlineValue::Parameter(0)]
+    );
+    assert_eq!(cleanup.receiver, enter.receiver);
+    assert_eq!(cleanup.arguments, enter.arguments);
     assert!(enter.suspend);
     assert!(!cleanup.suspend);
     assert_ne!(enter.declaration, cleanup.declaration);
@@ -3958,11 +3983,24 @@ fn present_inline_plan_conversion_failure_is_not_absence() {
         Ty::Unit,
         "()V".to_string(),
     );
-    let plan = crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
+    let callable = crate::libraries::FunctionInfo::classifier_member(
+        crate::libraries::FnKind::Member,
+        crate::types::type_name("test/Owner"),
+        member,
+    )
+    .callable;
+    let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
         lambda_parameter: 0,
-        state: None,
-        enter: Box::new(member.clone()),
-        cleanup: Box::new(member),
+        arguments: Vec::new(),
+        prologue: vec![crate::libraries::InlineBodyCall {
+            callable: Box::new(callable),
+            receiver: None,
+            arguments: Vec::new(),
+        }],
+        cleanup: Vec::new(),
+        records_cause: false,
+        defaults: Vec::new(),
+        result: None,
     };
 
     assert_eq!(

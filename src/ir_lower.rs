@@ -16813,19 +16813,13 @@ impl<'a> Lower<'a> {
         callable: &crate::libraries::LibraryCallable,
         plan: &crate::libraries::InlineBodyPlan,
     ) -> Option<u32> {
-        let crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            argument_parameters,
-            return_parameter,
-        } = plan
-        else {
-            return None;
-        };
+        let (lambda_parameter, argument_parameters, return_parameter) =
+            plan.plain_invoke_lambda()?;
         let slots = self.info.resolved_call_arg_slots.get(&call)?;
         if slots.len() != callable.params.len() {
             return None;
         }
-        let lambda = slots.get(*lambda_parameter).copied().flatten()?;
+        let lambda = slots.get(lambda_parameter).copied().flatten()?;
         if !matches!(self.afile.expr(lambda), Expr::Lambda { .. }) {
             return None;
         }
@@ -20992,17 +20986,9 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let parameters =
             self.extension_plan_arguments(call, receiver, args, callable.params.len())?;
-        let crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            argument_parameters,
-            return_parameter,
-        } = plan
-        else {
-            // Structural suspend/collection plans are checked-FIR contracts. The legacy AST
-            // lowerer must neither duplicate their expansion nor fall back to an ordinary call.
-            return None;
-        };
-        let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
+        let (lambda_parameter, argument_parameters, return_parameter) =
+            plan.plain_invoke_lambda()?;
+        let lambda = parameters.get(lambda_parameter).copied().flatten()?;
         let arguments = argument_parameters
             .iter()
             .map(|parameter| parameters.get(*parameter).copied().flatten())
@@ -27253,16 +27239,15 @@ impl<'a> Lower<'a> {
                     return Some(r);
                 }
                 let member = resolved.member;
-                if let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                    lambda_parameter,
-                    argument_parameters,
-                    return_parameter,
-                }) = member.inline_body_plan.as_deref()
+                if let Some((lambda_parameter, argument_parameters, return_parameter)) = member
+                    .inline_body_plan
+                    .as_deref()
+                    .and_then(crate::libraries::InlineBodyPlan::plain_invoke_lambda)
                 {
                     let parameters = std::iter::once(Some(receiver))
                         .chain(args.iter().copied().map(Some))
                         .collect::<Vec<_>>();
-                    let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
+                    let lambda = parameters.get(lambda_parameter).copied().flatten()?;
                     let arguments = argument_parameters
                         .iter()
                         .map(|parameter| parameters.get(*parameter).copied().flatten())

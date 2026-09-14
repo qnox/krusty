@@ -3847,9 +3847,21 @@ impl JvmLibraries {
         }
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
             match plan {
-                InlineBodyPlan::SuspendBeforeLambdaFinally { enter, cleanup, .. } => {
-                    self.register_external_inline_member(enter);
-                    self.register_external_inline_member(cleanup);
+                InlineBodyPlan::InvokeLambda {
+                    prologue, cleanup, ..
+                } => {
+                    for call in prologue.iter_mut().chain(cleanup) {
+                        let kind = match call.receiver {
+                            Some(crate::libraries::InlineBodyCallReceiver::Dispatch(_)) => {
+                                FnKind::Member
+                            }
+                            Some(crate::libraries::InlineBodyCallReceiver::Extension(_)) => {
+                                FnKind::Extension
+                            }
+                            None => FnKind::TopLevel,
+                        };
+                        self.register_external_callable(&mut call.callable, kind);
+                    }
                 }
                 InlineBodyPlan::CollectionTransform {
                     factory, append, ..
@@ -3860,7 +3872,6 @@ impl JvmLibraries {
                     self.register_external_constructor(owner, factory);
                     self.register_external_inline_member(append);
                 }
-                InlineBodyPlan::InvokeLambda { .. } => {}
             }
         }
         if let Some(identity) = callable.external_identity {
@@ -7470,9 +7481,10 @@ mod tests {
                     function.callable.inline_body_plan.as_deref(),
                     Some(crate::libraries::InlineBodyPlan::InvokeLambda {
                         lambda_parameter: 1,
-                        argument_parameters,
+                        arguments,
                         ..
-                    }) if argument_parameters.as_slice() == [0]
+                    }) if arguments.as_slice()
+                        == [crate::libraries::InlineBodyValue::Parameter(0)]
                 )
             }),
             "decoded declarations: {decoded:?}"
@@ -7497,12 +7509,36 @@ mod tests {
         assert!(symbols.callables.functions().iter().any(|function| {
             matches!(
                 function.callable.inline_body_plan.as_deref(),
-                Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
+                Some(crate::libraries::InlineBodyPlan::InvokeLambda {
                     lambda_parameter: 2,
-                    state: Some(state),
-                    enter,
+                    arguments,
+                    prologue,
                     cleanup,
-                }) if state.parameter == 1 && enter.suspend() && !cleanup.suspend()
+                    records_cause: false,
+                    defaults,
+                    result: None,
+                }) if arguments.is_empty()
+                    && defaults.len() == 1
+                    && defaults[0].parameter == 1
+                    && defaults[0].value == crate::libraries::DefaultValue::Null
+                    && matches!(prologue.as_slice(), [enter]
+                        if enter.callable.suspend
+                            && enter.receiver == Some(
+                                crate::libraries::InlineBodyCallReceiver::Dispatch(
+                                    crate::libraries::InlineBodyValue::Parameter(0),
+                                ),
+                            )
+                            && enter.arguments.as_slice()
+                                == [crate::libraries::InlineBodyValue::Parameter(1)])
+                    && matches!(cleanup.as_slice(), [cleanup]
+                        if !cleanup.callable.suspend
+                            && cleanup.receiver == Some(
+                                crate::libraries::InlineBodyCallReceiver::Dispatch(
+                                    crate::libraries::InlineBodyValue::Parameter(0),
+                                ),
+                            )
+                            && cleanup.arguments.as_slice()
+                                == [crate::libraries::InlineBodyValue::Parameter(1)])
             )
         }));
     }
@@ -7530,21 +7566,108 @@ mod tests {
             symbols.callables.functions().iter().any(|function| {
                 matches!(
                     function.callable.inline_body_plan.as_deref(),
-                    Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
+                    Some(crate::libraries::InlineBodyPlan::InvokeLambda {
                         lambda_parameter: 1,
-                        state: None,
-                        enter,
+                        arguments,
+                        prologue,
                         cleanup,
-                    }) if enter.suspend()
-                        && !cleanup.suspend()
-                        && enter.params.is_empty()
-                        && cleanup.params.is_empty()
-                        && enter.ret == Ty::Unit
-                        && cleanup.ret == Ty::Unit
+                        records_cause: false,
+                        defaults,
+                        result: None,
+                    }) if arguments.is_empty()
+                        && defaults.is_empty()
+                        && matches!(prologue.as_slice(), [enter]
+                            if enter.callable.suspend
+                                && enter.callable.params.is_empty()
+                                && enter.callable.ret == Ty::Unit
+                                && enter.receiver == Some(
+                                    crate::libraries::InlineBodyCallReceiver::Dispatch(
+                                        crate::libraries::InlineBodyValue::Parameter(0),
+                                    ),
+                                )
+                                && enter.arguments.is_empty())
+                        && matches!(cleanup.as_slice(), [cleanup]
+                            if !cleanup.callable.suspend
+                                && cleanup.callable.params.is_empty()
+                                && cleanup.callable.ret == Ty::Unit
+                                && cleanup.receiver == Some(
+                                    crate::libraries::InlineBodyCallReceiver::Dispatch(
+                                        crate::libraries::InlineBodyValue::Parameter(0),
+                                    ),
+                                )
+                                && cleanup.arguments.is_empty())
                 )
             }),
             "withPermit must decode the stateless enter/cleanup shape with metadata-owned Unit results"
         );
+    }
+
+    #[test]
+    fn use_inline_body_decodes_exact_semantic_extension_cleanup() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
+        let [function] = symbols.callables.functions() else {
+            panic!("kotlin.io.use must have exactly one metadata declaration")
+        };
+        assert_eq!(
+            function.callable.descriptor,
+            "(Ljava/io/Closeable;Lkotlin/jvm/functions/Function1;)Ljava/lang/Object;"
+        );
+        let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+            lambda_parameter,
+            arguments,
+            prologue,
+            cleanup,
+            records_cause,
+            defaults,
+            result,
+        }) = function.callable.inline_body_plan.as_deref()
+        else {
+            panic!("kotlin.io.use must publish its exact checked inline-body contract")
+        };
+        assert_eq!(*lambda_parameter, 1);
+        assert_eq!(
+            arguments.as_slice(),
+            [crate::libraries::InlineBodyValue::Parameter(0)]
+        );
+        assert!(prologue.is_empty());
+        assert!(*records_cause);
+        assert!(defaults.is_empty());
+        assert_eq!(*result, None);
+        let [cleanup] = cleanup.as_slice() else {
+            panic!("kotlin.io.use must have exactly one cleanup call")
+        };
+        assert_eq!(cleanup.callable.owner, type_name("kotlin/io/CloseableKt"));
+        assert_eq!(cleanup.callable.name, "closeFinally");
+        assert_eq!(
+            cleanup.callable.descriptor,
+            "(Ljava/io/Closeable;Ljava/lang/Throwable;)V"
+        );
+        assert_eq!(cleanup.callable.params.len(), 2);
+        assert_eq!(cleanup.callable.ret, Ty::Unit);
+        assert!(!cleanup.callable.suspend);
+        assert_eq!(
+            cleanup.receiver,
+            Some(crate::libraries::InlineBodyCallReceiver::Extension(
+                crate::libraries::InlineBodyValue::Parameter(0),
+            ))
+        );
+        assert_eq!(
+            cleanup.arguments.as_slice(),
+            [crate::libraries::InlineBodyValue::Cause]
+        );
+        assert!(cleanup
+            .callable
+            .generic_sig
+            .as_deref()
+            .and_then(|signature| signature.receiver)
+            .is_some());
+        assert!(cleanup.callable.external_identity.is_some());
     }
 
     #[test]

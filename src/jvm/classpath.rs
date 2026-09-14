@@ -8562,8 +8562,12 @@ mod fq_tests {
         let owner = type_name("p/Widget");
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
             lambda_parameter: 0,
-            argument_parameters: Vec::new(),
-            return_parameter: None,
+            arguments: Vec::new(),
+            prologue: Vec::new(),
+            cleanup: Vec::new(),
+            records_cause: false,
+            defaults: Vec::new(),
+            result: None,
         };
         let cp = Classpath::new(vec![]);
         cp.memoize_inline_plan(

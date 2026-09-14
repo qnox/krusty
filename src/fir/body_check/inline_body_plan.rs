@@ -10,40 +10,73 @@ pub(super) fn publish(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
 ) -> Result<Option<Box<crate::fir::FirInlineBodyPlan>>, MappingFailure> {
-    let map_value = |parameter: usize| {
-        if receiver_parameter == Some(parameter) {
-            Ok(crate::fir::FirInlineValue::Receiver)
-        } else {
-            let parameter = parameter
-                .checked_sub(usize::from(
-                    receiver_parameter.is_some_and(|receiver| parameter > receiver),
+    let map_value = |value: crate::libraries::InlineBodyValue| match value {
+        crate::libraries::InlineBodyValue::Cause => Ok(crate::fir::FirInlineValue::Cause),
+        crate::libraries::InlineBodyValue::Parameter(parameter) => {
+            if receiver_parameter == Some(parameter) {
+                Ok(crate::fir::FirInlineValue::Receiver)
+            } else {
+                let parameter = parameter
+                    .checked_sub(usize::from(
+                        receiver_parameter.is_some_and(|receiver| parameter > receiver),
+                    ))
+                    .ok_or(MappingFailure::UnsupportedPlan)?;
+                Ok(crate::fir::FirInlineValue::Parameter(
+                    u32::try_from(parameter).map_err(|_| MappingFailure::UnsupportedPlan)?,
                 ))
-                .ok_or(MappingFailure::UnsupportedPlan)?;
-            Ok(crate::fir::FirInlineValue::Parameter(
-                u32::try_from(parameter).map_err(|_| MappingFailure::UnsupportedPlan)?,
-            ))
+            }
         }
     };
-    let map_parameter = |parameter| match map_value(parameter)? {
-        crate::fir::FirInlineValue::Parameter(parameter) => Ok(parameter),
-        crate::fir::FirInlineValue::Receiver => Err(MappingFailure::UnsupportedPlan),
-    };
-    let member_call = |member: &crate::libraries::LibraryMember| {
-        Ok(crate::fir::FirInlineMemberCall {
-            declaration: member
+    let map_parameter =
+        |parameter| match map_value(crate::libraries::InlineBodyValue::Parameter(parameter))? {
+            crate::fir::FirInlineValue::Parameter(parameter) => Ok(parameter),
+            crate::fir::FirInlineValue::Receiver | crate::fir::FirInlineValue::Cause => {
+                Err(MappingFailure::UnsupportedPlan)
+            }
+        };
+    let call = |call: &crate::libraries::InlineBodyCall| {
+        let mut parameters = call.callable.params.clone();
+        if matches!(
+            call.receiver,
+            Some(crate::libraries::InlineBodyCallReceiver::Extension(_))
+        ) {
+            if call.callable.context_count >= parameters.len() {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            parameters.remove(call.callable.context_count);
+        }
+        Ok(crate::fir::FirInlineCall {
+            declaration: call
+                .callable
                 .external_identity
                 .ok_or(MappingFailure::UnsupportedPlan)?,
-            parameters: member
-                .params
-                .iter()
-                .copied()
+            parameters: parameters
+                .into_iter()
                 .map(crate::fir::ResolvedTy::new)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| MappingFailure::UnsupportedPlan)?
                 .into_boxed_slice(),
-            result: crate::fir::ResolvedTy::new(member.ret)
+            result: crate::fir::ResolvedTy::new(call.callable.ret)
                 .map_err(|_| MappingFailure::UnsupportedPlan)?,
-            suspend: member.suspend(),
+            suspend: call.callable.suspend,
+            receiver: call
+                .receiver
+                .map(|receiver| match receiver {
+                    crate::libraries::InlineBodyCallReceiver::Dispatch(value) => {
+                        map_value(value).map(crate::fir::FirInlineCallReceiver::Dispatch)
+                    }
+                    crate::libraries::InlineBodyCallReceiver::Extension(value) => {
+                        map_value(value).map(crate::fir::FirInlineCallReceiver::Extension)
+                    }
+                })
+                .transpose()?,
+            arguments: call
+                .arguments
+                .iter()
+                .copied()
+                .map(map_value)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice(),
         })
     };
     let Some(plan) = plan else {
@@ -52,39 +85,47 @@ pub(super) fn publish(
     Ok(Some(Box::new(match plan {
         crate::libraries::InlineBodyPlan::InvokeLambda {
             lambda_parameter,
-            argument_parameters,
-            return_parameter,
+            arguments,
+            prologue,
+            cleanup,
+            records_cause,
+            defaults,
+            result,
         } => crate::fir::FirInlineBodyPlan::InvokeLambda {
             lambda_parameter: map_parameter(*lambda_parameter)?,
-            arguments: argument_parameters
+            arguments: arguments
                 .iter()
                 .copied()
                 .map(map_value)
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice(),
-            result: return_parameter.map(map_value).transpose()?,
-        },
-        crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter,
-            state,
-            enter,
-            cleanup,
-        } => crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter: map_parameter(*lambda_parameter)?,
-            state: match state {
-                None => None,
-                Some(state) => Some(crate::fir::FirInlineBodyState {
-                    parameter: map_parameter(state.parameter)?,
-                    default: match state.default {
-                        crate::libraries::DefaultValue::Null => {
-                            crate::fir::FirInlineDefaultValue::Null
-                        }
-                        _ => return Err(MappingFailure::UnsupportedPlan),
-                    },
-                }),
-            },
-            enter: member_call(enter)?,
-            cleanup: member_call(cleanup)?,
+            prologue: prologue
+                .iter()
+                .map(call)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice(),
+            cleanup: cleanup
+                .iter()
+                .map(call)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice(),
+            records_cause: *records_cause,
+            defaults: defaults
+                .iter()
+                .map(|default| {
+                    Ok(crate::fir::FirInlineDefault {
+                        parameter: map_parameter(default.parameter)?,
+                        value: match default.value {
+                            crate::libraries::DefaultValue::Null => {
+                                crate::fir::FirInlineDefaultValue::Null
+                            }
+                            _ => return Err(MappingFailure::UnsupportedPlan),
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice(),
+            result: result.map(map_value).transpose()?,
         },
         // This plan also needs the call-site-selected iterator protocol and applied element type.
         // `selected_extension_call` publishes the complete checked variant in `calls`.
@@ -115,9 +156,6 @@ pub(super) fn finalize(
             lambda_parameter, ..
         }
         | crate::fir::FirInlineBodyPlan::CollectionTransform {
-            lambda_parameter, ..
-        }
-        | crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
             lambda_parameter, ..
         } => *lambda_parameter,
     };

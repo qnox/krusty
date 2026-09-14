@@ -9,6 +9,32 @@ use super::signature::ResolvedTy;
 pub enum FirInlineValue {
     Receiver,
     Parameter(u32),
+    /// Throwable escaping the lambda, or `null` on its normal exit.
+    Cause,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirInlineCallReceiver {
+    Dispatch(FirInlineValue),
+    Extension(FirInlineValue),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineCall {
+    pub declaration: ExternalCallableId,
+    /// Context and source value parameters. An extension receiver remains the explicit semantic
+    /// receiver above and is not duplicated in this list.
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
+    pub suspend: bool,
+    pub receiver: Option<FirInlineCallReceiver>,
+    pub arguments: Box<[FirInlineValue]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirInlineDefault {
+    pub parameter: u32,
+    pub value: FirInlineDefaultValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,6 +42,10 @@ pub enum FirInlineBodyPlan {
     InvokeLambda {
         lambda_parameter: u32,
         arguments: Box<[FirInlineValue]>,
+        prologue: Box<[FirInlineCall]>,
+        cleanup: Box<[FirInlineCall]>,
+        records_cause: bool,
+        defaults: Box<[FirInlineDefault]>,
         result: Option<FirInlineValue>,
     },
     /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
@@ -46,24 +76,6 @@ pub enum FirInlineBodyPlan {
         append_parameter: ResolvedTy,
         append_result: ResolvedTy,
     },
-    /// Inline a declaration whose checked body enters a suspending region, invokes a zero-argument
-    /// lambda, and leaves the region from `finally`. The selected member identities are opaque;
-    /// target-specific owners, descriptors, and invocation opcodes remain provider/backend data.
-    SuspendBeforeLambdaFinally {
-        lambda_parameter: u32,
-        /// The optional argument both members take besides the receiver, with the value the
-        /// declaration's own default supplies when the caller omits it. `withLock` threads its
-        /// `owner`; `withPermit` threads nothing.
-        state: Option<FirInlineBodyState>,
-        enter: FirInlineMemberCall,
-        cleanup: FirInlineMemberCall,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirInlineBodyState {
-    pub parameter: u32,
-    pub default: FirInlineDefaultValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,12 +100,4 @@ impl From<&crate::libraries::InlineCollectionLocalNames> for FirInlineCollection
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirInlineDefaultValue {
     Null,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirInlineMemberCall {
-    pub declaration: ExternalCallableId,
-    pub parameters: Box<[ResolvedTy]>,
-    pub result: ResolvedTy,
-    pub suspend: bool,
 }
