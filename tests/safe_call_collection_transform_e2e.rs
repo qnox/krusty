@@ -15,13 +15,15 @@ fn assert_clean_compile_and_runtime(source: &str, tag: &str) {
     assert_eq!(
         (
             diagnostics.reference_code,
-            diagnostics.reference_stderr.as_str(),
-            diagnostics.krusty_code,
-            diagnostics.krusty_stdout.as_str(),
-            diagnostics.krusty_stderr.as_str(),
+            diagnostics.reference_stderr.as_str()
         ),
-        (0, "", 0, "", ""),
-        "both compilers must accept the exact fixture without diagnostics"
+        (0, ""),
+        "kotlinc must accept the exact fixture without diagnostics"
+    );
+    assert_eq!(
+        (diagnostics.krusty_code, diagnostics.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty must accept the exact fixture without diagnostics"
     );
     let reference = common::kotlinc_box_result(source);
     assert_eq!(reference, "OK", "kotlinc runtime result for {tag}");

@@ -20571,32 +20571,6 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Lower a `for (name in iterable) body` (also the inlined target of `iterable.forEach { … }`):
-    /// dispatch to the counted range loop, the array/`String` index loop, or the iterator protocol.
-    /// Whether `e`'s AST subtree contains a SUSPEND call (a call the checker resolved to a suspend
-    /// member/function). Stops at a nested `Lambda` (its body is a separate scope). Used to gate the
-    /// suspend-only inline-HOF loop desugar below: a non-suspend HOF keeps its normal library call.
-    fn ast_subtree_suspends(&self, e: AstExprId) -> bool {
-        let call_suspends = self.info.resolved_member(e).is_some_and(|m| m.suspend)
-            || self.info.resolved_extension(e).is_some_and(|c| c.suspend)
-            || self
-                .info
-                .resolved_top_level_call(e)
-                .is_some_and(|c| c.callable.suspend)
-            || self.info.resolved_companion(e).is_some_and(|m| m.suspend());
-        if call_suspends {
-            return true;
-        }
-        if matches!(self.afile.expr(e), Expr::Lambda { .. }) {
-            return false;
-        }
-        self.afile
-            .any_child_expr(e, &mut |c| self.ast_subtree_suspends(c), &mut |s| {
-                self.afile
-                    .any_child_stmt(s, &mut |c| self.ast_subtree_suspends(c))
-            })
-    }
-
     /// The common concrete (non-`Nothing`/`Unit`) type of every `return@<label>` value expression in
     /// `e`'s subtree. This recovers an inline-lambda result type that inference collapsed to `Nothing`
     /// because every path is a local labeled return. Recurses into both `Stmt::Return` and

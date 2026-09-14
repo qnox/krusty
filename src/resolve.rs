@@ -48374,8 +48374,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                     ),
                     _ => return None,
                 };
-                let explicit_receiver = file
-                    .explicit_call_receiver(expression)
+                let explicit_receiver = crate::ast::explicit_call_receiver(file, expression)
                     .map(|receiver| (receiver, info.ty(receiver)));
                 Some(crate::plugins::FrontendSelectedCall {
                     expression,
@@ -83532,7 +83531,7 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         self.mark_context_extension_receiver_used(scope, e, &context_args);
         let selected_receiver = selected.receiver.unwrap_or(rt);
-        let receiver_expression = self.file.explicit_call_receiver(e);
+        let receiver_expression = crate::ast::explicit_call_receiver(self.file, e);
         if let Some(receiver_expression) = receiver_expression {
             if selected_receiver != rt
                 && self

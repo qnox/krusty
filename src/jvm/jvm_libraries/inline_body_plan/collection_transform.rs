@@ -1,7 +1,10 @@
 //! Strict recognition of declaration-owned collection-transform bodies.
 
 use super::iteration::{class_name, recognize_collection_transform_traversal, RecognizedTraversal};
-use super::{loaded_reference_local, stored_reference_local, InlineDependency, MethodTarget};
+use super::{
+    exact_parameter_null_check, loaded_reference_local, stored_int_local, stored_reference_local,
+    InlineDependency, MethodTarget,
+};
 use crate::jvm::classreader::{MethodCode, MethodLocal};
 use crate::jvm::inline::{self, BranchTarget, Insn};
 use crate::libraries::{
@@ -165,17 +168,12 @@ fn recognize<'a>(
                         _ => None,
                     })
             });
-    let (lambda_parameter, action) = action_parameters.next()?;
+    let (lambda_parameter, _action) = action_parameters.next()?;
     if action_parameters.next().is_some() {
         return None;
     }
-    if callable.ret.type_args().len() != 1
-        || callable
-            .generic_sig
-            .as_deref()
-            .and_then(|signature| signature.receiver)
-            .is_none()
-    {
+    let generic = callable.generic_sig.as_deref()?;
+    if generic.ret.type_args().len() != 1 || generic.receiver.is_none() {
         return None;
     }
     let (physical_parameters, physical_result) =
@@ -185,14 +183,38 @@ fn recognize<'a>(
     }
     let receiver_descriptor = physical_parameters.get(receiver_parameter)?;
 
+    // Consume the complete declaration prefix. The two parameter checks and two inline-marker
+    // locals are representation scaffolding; every other operation below is part of the published
+    // transform. Fixing every instruction position here prevents an unmodeled invocation from
+    // being silently dropped by the structural expansion.
+    let outer_marker_slot = instructions.get(7).and_then(stored_int_local)?;
+    if !exact_parameter_null_check(
+        instructions.get(0..3)?,
+        &body.source_cp,
+        parameter_slots[receiver_parameter],
+    ) || !exact_parameter_null_check(
+        instructions.get(3..6)?,
+        &body.source_cp,
+        *parameter_slots.get(lambda_parameter)?,
+    ) || instructions.get(6).and_then(integer_constant) != Some(0)
+        || parameter_slots.contains(&outer_marker_slot)
+    {
+        return None;
+    }
+
     let invoke_sites = inline::function_invoke_sites(instructions, &body.source_cp);
     let [invoke] = invoke_sites.as_slice() else {
         return None;
     };
+    let invoke_target = inline::invoked_method(instructions.get(*invoke)?, &body.source_cp)?;
+    let (invoke_parameters, invoke_result) =
+        crate::jvm::names::parse_method_descriptor(invoke_target.2)?;
     if instructions
         .get(invoke.checked_sub(2)?)
         .and_then(loaded_reference_local)
         != Some(*parameter_slots.get(lambda_parameter)?)
+        || invoke_parameters.len() != 1
+        || !(invoke_result.starts_with('L') || invoke_result.starts_with('['))
     {
         return None;
     }
@@ -209,7 +231,10 @@ fn recognize<'a>(
             class_name(instruction, &body.source_cp, 0xbb).map(|owner| (index, owner))
         });
     let (allocation_index, allocation_owner) = allocations.next()?;
-    if allocations.next().is_some() || !plain(instructions.get(allocation_index + 1), 0x59) {
+    if allocation_index != 10
+        || allocations.next().is_some()
+        || !plain(instructions.get(allocation_index + 1), 0x59)
+    {
         return None;
     }
     let constructors = instructions
@@ -311,6 +336,59 @@ fn recognize<'a>(
     let [(receiver_copy_index, inner_receiver_slot)] = receiver_copy.as_slice() else {
         return None;
     };
+    let inner_marker_slot = instructions
+        .get(destination_store + 2)
+        .and_then(stored_int_local)?;
+    if *receiver_copy_index != 8
+        || loaded_reference_local(instructions.get(*receiver_copy_index)?)
+            != Some(parameter_slots[receiver_parameter])
+        || stored_reference_local(instructions.get(*receiver_copy_index + 1)?)
+            != Some(*inner_receiver_slot)
+        || instructions
+            .get(destination_store + 1)
+            .and_then(integer_constant)
+            != Some(0)
+        || parameter_slots.contains(&inner_marker_slot)
+        || inner_marker_slot == *inner_receiver_slot
+        || inner_marker_slot == destination_slot
+    {
+        return None;
+    }
+
+    // The prepare chain is a real JVM stack chain: load the declaration's copied receiver once,
+    // then invoke each zero-argument member immediately on the prior result, and store only the
+    // final iterator. Merely collecting same-shaped calls by descriptor/order is insufficient — it
+    // could turn unrelated calls into a different chain during lowering.
+    let prepare_start = destination_store + 3;
+    let RecognizedTraversal::Iterator {
+        prepare,
+        has_next: traversal_has_next,
+        next: traversal_next,
+    } = &traversal
+    else {
+        return None;
+    };
+    if loaded_reference_local(instructions.get(prepare_start)?) != Some(*inner_receiver_slot) {
+        return None;
+    }
+    let mut prepare_cursor = prepare_start + 1;
+    for target in prepare {
+        if !matches!(
+            instructions.get(prepare_cursor),
+            Some(Insn::Plain {
+                op: 0xb6 | 0xb9,
+                ..
+            })
+        ) || inline::invoked_method(instructions.get(prepare_cursor)?, &body.source_cp)
+            != Some(*target)
+        {
+            return None;
+        }
+        prepare_cursor += 1;
+    }
+    let strict_iterator_slot = instructions
+        .get(prepare_cursor)
+        .and_then(stored_reference_local)?;
 
     // There is one element-producing call between hasNext and the lambda invocation. Its optional
     // cast and following store define the element local's exact physical descriptor.
@@ -417,13 +495,23 @@ fn recognize<'a>(
 
     let loop_head = has_next.checked_sub(1)?;
     let loop_back = append_index + 2;
-    if !matches!(
-        instructions.get(loop_back),
-        Some(Insn::Branch {
-            op: 0xa7,
-            target: BranchTarget::Internal(target),
-        }) if *target == loop_head
-    ) {
+    if prepare_cursor + 1 != loop_head
+        || loaded_reference_local(instructions.get(loop_head)?) != Some(strict_iterator_slot)
+        || inline::invoked_method(instructions.get(*has_next)?, &body.source_cp)
+            != Some(*traversal_has_next)
+        || next_index != *has_next + 3
+        || loaded_reference_local(instructions.get(next_index.checked_sub(1)?)?)
+            != Some(strict_iterator_slot)
+        || inline::invoked_method(instructions.get(next_index)?, &body.source_cp)
+            != Some(*traversal_next)
+        || !matches!(
+            instructions.get(loop_back),
+            Some(Insn::Branch {
+                op: 0xa7,
+                target: BranchTarget::Internal(target),
+            }) if *target == loop_head
+        )
+    {
         return None;
     }
     let exit = match instructions.get(has_next + 1)? {
@@ -433,6 +521,13 @@ fn recognize<'a>(
         } => *target,
         _ => return None,
     };
+    let exact_append_prefix = match append {
+        RecognizedAppend::Member(_) => element_store + 1 == invoke.checked_sub(3)?,
+        RecognizedAppend::Extension(_) => element_store + 1 == invoke.checked_sub(2)?,
+    };
+    if !exact_append_prefix || exit != loop_back + 1 {
+        return None;
+    }
     let result_class = class_name(instructions.get(exit + 1)?, &body.source_cp, 0xc0);
     let result_cast = usize::from(result_class.is_some());
     if instructions.get(exit).and_then(loaded_reference_local) != Some(destination_slot)
@@ -575,10 +670,10 @@ impl JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+    use crate::symbol_source::SymbolNamespace;
     use crate::types::type_name;
 
-    fn callable(libraries: &JvmLibraries) -> LibraryCallable {
+    fn callable(libraries: &JvmLibraries, descriptor: &str) -> LibraryCallable {
         libraries
             .symbols(
                 SymbolNamespace::Package(type_name("kotlin/collections")),
@@ -587,22 +682,21 @@ mod tests {
             .callables
             .functions()
             .iter()
-            .find(|function| {
-                function.callable.descriptor
-                    == "(Ljava/lang/Iterable;Lkotlin/jvm/functions/Function1;)Ljava/util/List;"
-            })
-            .expect("stdlib Iterable.map declaration")
+            .find(|function| function.callable.descriptor == descriptor)
+            .expect("stdlib map declaration")
             .callable
             .clone()
     }
 
-    fn raw_map() -> (LibraryCallable, String, MethodCode, Vec<Insn>) {
+    fn raw_map_with_descriptor(
+        expected_descriptor: &str,
+    ) -> (LibraryCallable, String, MethodCode, Vec<Insn>) {
         let stdlib = crate::toolchain::stdlib_jar()
             .expect("collection-transform decoder test requires the repository Kotlin stdlib");
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
         )));
-        let callable = callable(&libraries);
+        let callable = callable(&libraries, expected_descriptor);
         let descriptor = callable.descriptor.clone();
         let body = libraries
             .cp
@@ -610,6 +704,50 @@ mod tests {
             .expect("stdlib Iterable.map body");
         let instructions = inline::disassemble(&body.code).expect("valid Iterable.map bytecode");
         (callable, descriptor, body, instructions)
+    }
+
+    fn raw_map() -> (LibraryCallable, String, MethodCode, Vec<Insn>) {
+        raw_map_with_descriptor(
+            "(Ljava/lang/Iterable;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
+        )
+    }
+
+    fn shift_internal_targets(instructions: &mut [Insn], from: usize, amount: usize) {
+        for instruction in instructions {
+            match instruction {
+                Insn::Branch {
+                    target: BranchTarget::Internal(target),
+                    ..
+                }
+                | Insn::BranchW {
+                    target: BranchTarget::Internal(target),
+                    ..
+                } if *target >= from => *target += amount,
+                Insn::TableSwitch {
+                    default, targets, ..
+                } => {
+                    if *default >= from {
+                        *default += amount;
+                    }
+                    for target in targets {
+                        if *target >= from {
+                            *target += amount;
+                        }
+                    }
+                }
+                Insn::LookupSwitch { default, pairs } => {
+                    if *default >= from {
+                        *default += amount;
+                    }
+                    for (_, target) in pairs {
+                        if *target >= from {
+                            *target += amount;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn accepts(
@@ -684,14 +822,25 @@ mod tests {
 
     #[test]
     fn collection_transform_decoder_discovers_the_lambda_parameter_and_physical_slot() {
-        let (callable, descriptor, body, instructions) = raw_map();
+        let (callable, descriptor, mut body, instructions) = raw_map();
         let invoke = inline::function_invoke_sites(&instructions, &body.source_cp)[0];
         let mut moved_lambda_slot = instructions.clone();
-        moved_lambda_slot[invoke - 2] = Insn::Plain {
-            op: 0x2c,
-            operands: Vec::new(),
+        moved_lambda_slot[3] = Insn::Plain {
+            op: 0x19,
+            operands: vec![9],
         };
-        let moved = recognize(&callable, &descriptor, &[0, 2], &body, &moved_lambda_slot)
+        moved_lambda_slot[invoke - 2] = Insn::Plain {
+            op: 0x19,
+            operands: vec![9],
+        };
+        // The indexed loads are one byte wider than the fixture's compact `aload_1`; broaden the
+        // unchanged synthetic LVT so this test isolates parameter identity instead of failing on
+        // byte-offset drift introduced by the mutation.
+        for local in &mut body.locals {
+            local.start_pc = 0;
+            local.length = u16::MAX;
+        }
+        let moved = recognize(&callable, &descriptor, &[0, 9], &body, &moved_lambda_slot)
             .expect("the decoded parameter identity follows its physical slot");
         assert_eq!(moved.lambda_parameter, 1);
         assert!(recognize(&callable, &descriptor, &[0, 1], &body, &moved_lambda_slot,).is_none());
@@ -706,6 +855,61 @@ mod tests {
             &instructions,
         )
         .is_none());
+    }
+
+    #[test]
+    fn collection_transform_decoder_rejects_an_unmodeled_side_effect_invocation() {
+        let (callable, descriptor, body, instructions) = raw_map();
+        assert!(accepts(&callable, &descriptor, &body, &instructions));
+
+        // Inject a third, valid `checkNotNullParameter(receiver, <this>)` call. The old decoder
+        // filtered void/argument-taking calls out of its call inventory and silently omitted this
+        // throwing side effect from the published expansion.
+        let insertion = 6;
+        let mut with_side_effect = instructions.clone();
+        with_side_effect.splice(insertion..insertion, instructions[0..3].iter().cloned());
+        shift_internal_targets(&mut with_side_effect, insertion, 3);
+        assert!(!accepts(&callable, &descriptor, &body, &with_side_effect));
+    }
+
+    #[test]
+    fn collection_transform_decoder_requires_each_prepare_result_to_feed_the_next_receiver() {
+        let (callable, descriptor, mut body, instructions) = raw_map_with_descriptor(
+            "(Ljava/util/Map;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
+        );
+        let recognized = recognize(&callable, &descriptor, &[0, 1], &body, &instructions)
+            .expect("baseline Map transform body");
+        let RecognizedTraversal::Iterator { prepare, .. } = recognized.traversal else {
+            panic!("Map transform must use an iterator chain")
+        };
+        let [first, second] = prepare.as_slice() else {
+            panic!("Map transform must expose a two-step prepare chain")
+        };
+        let first_index = instructions
+            .iter()
+            .position(|instruction| {
+                inline::invoked_method(instruction, &body.source_cp) == Some(*first)
+            })
+            .expect("first Map traversal step");
+        assert_eq!(
+            inline::invoked_method(&instructions[first_index + 1], &body.source_cp),
+            Some(*second),
+            "the baseline declaration chains the second call directly on the first result"
+        );
+
+        // Put the original receiver back on the stack between the two calls. Both target identities
+        // and their order remain present, but the second call no longer consumes the first result.
+        let insertion = first_index + 1;
+        let mut broken_chain = instructions.clone();
+        broken_chain.insert(insertion, instructions[8].clone());
+        shift_internal_targets(&mut broken_chain, insertion, 1);
+        // Synthetic insertion changes instruction offsets; broaden debug-local ranges so rejection
+        // is attributable to the broken stack chain rather than incidental LVT coverage.
+        for local in &mut body.locals {
+            local.start_pc = 0;
+            local.length = u16::MAX;
+        }
+        assert!(!accepts(&callable, &descriptor, &body, &broken_chain));
     }
 
     #[test]

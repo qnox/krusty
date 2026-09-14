@@ -15,7 +15,6 @@ use crate::libraries::{
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
-
 mod call_argument;
 mod callable_shapes;
 mod candidate_access;
