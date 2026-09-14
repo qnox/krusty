@@ -28,10 +28,8 @@ fn assert_both_accept(user: &str, what: &str) {
         .iter()
         .map(|(name, source)| ((*name).into(), (*source).into()))
         .collect::<Vec<(String, String)>>();
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        eprintln!("skipping: javac unavailable");
-        return;
-    };
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must compile the overload fixture");
     let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
     let result = common::compiler_diagnostics(&[("Use.kt", user)], &classpath);
     assert_eq!(
@@ -101,12 +99,10 @@ fn a_concrete_candidate_still_wins_an_equally_specific_pair() {
          \x20 public static <T> String pick(Class<T> type) { return \"generic\"; }\n\
          \x20 public static String pick(Class<?> type) { return \"concrete\"; }\n\
          }\n"
-            .to_string(),
+        .to_string(),
     )];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        eprintln!("skipping: javac unavailable");
-        return;
-    };
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must compile the tie-break fixture");
     let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
     let result = common::compiler_diagnostics(
         &[(
@@ -144,12 +140,10 @@ fn an_incomparable_generic_candidate_still_loses_to_the_concrete_one() {
          \x20 public static String run(Executable e) { return \"plain\"; }\n\
          \x20 public static <T> T run(ThrowingSupplier<T> s) { return null; }\n\
          }\n"
-            .to_string(),
+        .to_string(),
     )];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        eprintln!("skipping: javac unavailable");
-        return;
-    };
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must compile the SAM fixture");
     let classpath = [library.clone(), common::stdlib_jar(), common::jdk_modules()];
     let result = common::compiler_diagnostics(
         &[(
