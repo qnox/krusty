@@ -22860,24 +22860,6 @@ impl<'a> Checker<'a> {
         Ok(None)
     }
 
-    /// The stable `Property` declaration of a class's `body_props[index]`.
-    ///
-    /// The active-declaration table binds each body property by the coordinate it was entered
-    /// under — the class's own parser id and its index among the BODY properties — so this is the
-    /// binding itself rather than something reconstructed from it. Reconstruction is where the
-    /// defect was: the legacy `SourceMember` coordinate numbers a class's constructor `val`
-    /// parameters before its body properties, and counting one as the other names a LATER
-    /// property, so in `class P(val n: Int) { val a = 1; val b = 2 }` every reference to `a` bound
-    /// to `b`.
-    fn class_body_property_declaration(
-        &self,
-        class: DeclId,
-        index: usize,
-    ) -> Option<crate::fir::DeclarationId> {
-        self.active_declarations?
-            .class_body_property_declaration(class, u32::try_from(index).ok()?)
-    }
-
     fn active_source_member_declaration(
         &self,
         source: crate::libraries::SourceMember,
@@ -69417,8 +69399,20 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: (cl.props.len() + property_index) as u32,
                     };
-                    let stable_declaration =
-                        self.class_body_property_declaration(d, property_index);
+                    // The active-declaration table binds each body property by the coordinate it
+                    // was entered under — the class's own parser id and its index among the BODY
+                    // properties — so this is the binding itself, not something reconstructed from
+                    // it. Reconstruction is where the defect was: the legacy `SourceMember`
+                    // coordinate numbers a class's constructor `val` parameters before its body
+                    // properties, and reading one as the other names a LATER property, so in
+                    // `class P(val n: Int) { val a = 1; val b = 2 }` every reference to `a` bound
+                    // to `b`.
+                    let stable_declaration = self.active_declarations.and_then(|active| {
+                        active.class_body_property_declaration(
+                            d,
+                            u32::try_from(property_index).expect("too many class properties"),
+                        )
+                    });
                     // An explicit or already-finalized property type does not need local
                     // inference, but its declaration still belongs to this body-local classifier
                     // and therefore is absent from the immutable provider used by member reads.
@@ -71165,7 +71159,20 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: source_property_index as u32,
                     };
-                    let stable_property = self.class_body_property_declaration(d, bp_index);
+                    // The active-declaration table binds each body property by the coordinate it
+                    // was entered under — the class's own parser id and its index among the BODY
+                    // properties — so this is the binding itself, not something reconstructed from
+                    // it. Reconstruction is where the defect was: the legacy `SourceMember`
+                    // coordinate numbers a class's constructor `val` parameters before its body
+                    // properties, and reading one as the other names a LATER property, so in
+                    // `class P(val n: Int) { val a = 1; val b = 2 }` every reference to `a` bound
+                    // to `b`.
+                    let stable_property = self.active_declarations.and_then(|active| {
+                        active.class_body_property_declaration(
+                            d,
+                            u32::try_from(bp_index).expect("too many class properties"),
+                        )
+                    });
                     let extension_receiver = bp
                         .receiver
                         .as_ref()

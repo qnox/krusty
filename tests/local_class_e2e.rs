@@ -109,6 +109,23 @@ fn a_local_classs_body_properties_keep_their_own_identities() {
     if (q.a != 100 || q.b != 101) return \"fail q=${q.a},${q.b}\"\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC).expect("local class should compile + run");
-    assert_eq!(out, "OK");
+    // Both compilers must ACCEPT it, and both must answer the same. A krusty-only run would have
+    // passed on the wrong numbering too, had the expected values been read off krusty instead of
+    // reasoned from the source.
+    let diagnostics = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);
+    assert_eq!(
+        diagnostics.reference_code, 0,
+        "kotlinc rejected the fixture: {}",
+        diagnostics.reference_stderr
+    );
+    assert_eq!(
+        diagnostics.krusty_code, 0,
+        "krusty rejected a kotlinc-valid fixture: {}{}",
+        diagnostics.krusty_stdout, diagnostics.krusty_stderr
+    );
+    assert_eq!(common::kotlinc_box_result(SRC), "OK");
+    // `expect_box_ok_with_stdlib` rather than a bare run: it is the one helper that also puts the
+    // same program through the NATIVE backend, where a wrong property identity has no verifier to
+    // catch it and simply answers with the wrong field.
+    common::expect_box_ok_with_stdlib(SRC, "LocalClassBodyPropertyIdentity");
 }
