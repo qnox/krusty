@@ -2065,3 +2065,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   duplicated `finally` target. Runtime coverage proves suspension, lambda operand mapping, close on
   exceptional exit, and suppression of a close failure onto the body exception.
   `tests/use_inline_finally_e2e.rs`.
+- **Inline fallback legality is a metadata declaration fact (fix).** A reified type parameter makes
+  an erased direct call illegal even when the declaration's JVM method is public; an ordinary
+  public non-reified inline method remains callable when its optional splice is declined. The JVM
+  provider now normalizes reification, inline status, and bytecode visibility into the one
+  `InlineKind` carried through selection. Emission consults only that checked capability: the
+  reified-substitution map supplies specialization operands but never decides whether fallback is
+  legal, and a public non-reified `$default` keeps its ABI mask dispatcher.
+  The runtime differential forces an owner-bridge splice decline through a kotlinc multifile facade,
+  asserts krusty emitted the exact legal facade call, and compares the same consumer's `box()` result
+  under kotlinc and krusty.
+  `tests/non_reified_inline_splice_fallback_e2e.rs`.
