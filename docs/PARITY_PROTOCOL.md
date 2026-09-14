@@ -2333,3 +2333,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_classpath_generic_member_uses_the_same_implicit_bound`,
   `a_top_level_generic_of_the_same_shape_still_works`, `an_explicit_type_argument_still_works`,
   `a_declared_non_null_bound_still_rejects_a_nullable_result`.
+- **A classpath classifier's annotations reach the plugins that ask (fix).** The serialization plugin
+  rewrites `decodeFromString<T>` / `encodeToString(v)` into their two-argument form, supplying
+  `T.serializer()` — but it could only see `T`'s `@Serializable` when the annotation was in the SOURCE
+  being checked. A type arriving on the classpath carries it in metadata, so the rewrite was skipped,
+  the reified inline call survived to the backend with an EMPTY reified substitution map, and
+  `splice_unified` declined it (`reified_inline=true reified_map_len=0`) — a per-FILE failure that
+  costs a module every class. The same declaration in the same file, or in a sibling file of the same
+  module, always worked, since both are source. The plugin context's annotation map is now completed
+  for exactly the classifiers the planned calls NAME, bounded by the call set rather than scanning the
+  classpath. Still unsupported and deliberately out of scope: a WRAPPING type argument
+  (`decodeFromString<List<T>>`), which needs a composed `ListSerializer(T.serializer())`.
+  `tests/classpath_serializable_round_trip_e2e.rs::a_classpath_serializable_type_round_trips_through_the_reified_helpers`,
+  `the_driver_accepts_a_classpath_serializable_round_trip`,
+  `same_file_and_sibling_file_declarations_still_round_trip`.
