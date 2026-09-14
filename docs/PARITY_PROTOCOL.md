@@ -2095,3 +2095,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   already carries this fact to its cloned call; the value-class clone now does too.
   `tests/reified_value_class_splice_e2e.rs::a_reified_nullable_value_class_result_still_splices`,
   `a_reified_non_null_value_class_result_still_splices`.
+- **A signature failure recovery cannot attribute is reported (fix).** A Pass-1 signature failure
+  puts the module into diagnostic recovery, whose job is to attribute the failure to the source that
+  caused it. When it attributed nothing the empty artifact list was returned with an empty diagnostic
+  sink, so the driver printed a successful run that wrote no class file at all — a module that failed
+  to compile was indistinguishable from one that compiled, both to a person reading the output and to
+  any harness counting diagnostics. Measured on a private corpus, eight whole modules were passing
+  this way.
+  `src/compiler.rs::tests::an_unattributed_signature_failure_is_reported_rather_than_silently_empty`.
