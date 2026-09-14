@@ -5,8 +5,10 @@
 
 mod inline_body_plan;
 mod inline_capability;
+mod mapped_builtin_member_status;
 
 use inline_capability::{metadata_inline, property_accessor_inline};
+use mapped_builtin_member_status::mapped_builtin_member_status;
 
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
@@ -2649,17 +2651,10 @@ impl JvmLibraries {
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
             if kotlin_scope_is_authoritative {
-                // Retain only the visible JVM signatures assigned to this Kotlin collection face.
+                // Retain only physical members admitted to this mapped Kotlin declaration by the
+                // provider-owned, versioned JVM-builtins policy.
                 members.retain(|member| {
-                    super::jvm_class_map::mapped_scope_keeps_jvm_method(
-                        internal_name,
-                        ci.this_class,
-                        member
-                            .physical_name
-                            .as_deref()
-                            .unwrap_or(member.name.as_str()),
-                        &member.descriptor,
-                    )
+                    mapped_builtin_member_status(internal_name, ci.this_class, member).is_visible()
                 });
             } else {
                 // A mapped JVM method and its Kotlin builtin entry describe one declaration. Prefer the

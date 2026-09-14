@@ -1,0 +1,28 @@
+# Collection-facing subset of Kotlin's
+# org.jetbrains.kotlin.builtins.jvm.JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES.
+# Verified identical with the supported Kotlin 2.4.0 and 2.4.10 toolchains.
+# This is checked-in policy data; it is not generated during the build.
+# Map.remove(Object,Object) is already declared by MutableMap builtins and is intentionally absent.
+# kotlin source face<TAB>physical JVM owner<TAB>physical method name<TAB>descriptor
+kotlin/collections/Iterator	java/util/Iterator	forEachRemaining	(Ljava/util/function/Consumer;)V
+kotlin/collections/Iterable	java/lang/Iterable	forEach	(Ljava/util/function/Consumer;)V
+kotlin/collections/Iterable	java/lang/Iterable	spliterator	()Ljava/util/Spliterator;
+kotlin/collections/Collection	java/util/Collection	spliterator	()Ljava/util/Spliterator;
+kotlin/collections/Collection	java/util/Collection	parallelStream	()Ljava/util/stream/Stream;
+kotlin/collections/Collection	java/util/Collection	stream	()Ljava/util/stream/Stream;
+kotlin/collections/MutableCollection	java/util/Collection	removeIf	(Ljava/util/function/Predicate;)Z
+kotlin/collections/MutableList	java/util/List	replaceAll	(Ljava/util/function/UnaryOperator;)V
+kotlin/collections/MutableList	java/util/List	addFirst	(Ljava/lang/Object;)V
+kotlin/collections/MutableList	java/util/List	addLast	(Ljava/lang/Object;)V
+kotlin/collections/MutableList	java/util/List	removeFirst	()Ljava/lang/Object;
+kotlin/collections/MutableList	java/util/List	removeLast	()Ljava/lang/Object;
+kotlin/collections/Map	java/util/Map	getOrDefault	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+kotlin/collections/Map	java/util/Map	forEach	(Ljava/util/function/BiConsumer;)V
+kotlin/collections/MutableMap	java/util/Map	computeIfAbsent	(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;
+kotlin/collections/MutableMap	java/util/Map	computeIfPresent	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+kotlin/collections/MutableMap	java/util/Map	compute	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+kotlin/collections/MutableMap	java/util/Map	merge	(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+kotlin/collections/MutableMap	java/util/Map	putIfAbsent	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+kotlin/collections/MutableMap	java/util/Map	replaceAll	(Ljava/util/function/BiFunction;)V
+kotlin/collections/MutableMap	java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+kotlin/collections/MutableMap	java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z
