@@ -211,8 +211,6 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
     let name = class.fq_name();
     let construct = if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
         "an enum class"
-    } else if !class.secondary_ctors.is_empty() {
-        "a secondary constructor"
     } else if ir
         .class_ctor_defaults_name(class.fq_name_id())
         .is_some_and(|defaults| defaults.iter().any(Option::is_some))

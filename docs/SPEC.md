@@ -4364,6 +4364,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
   `::an_override_that_needs_a_bridge_is_declined`).
 
+- **A secondary constructor delegates, then runs its own body.** `constructor(x) : this(x, x) { … }`
+  reaches another constructor of the same class, which runs the class's initializers; a
+  `super(…)`-delegating one belongs to a class with NO primary constructor, and common lowering has
+  already folded that class's initializers into this constructor's body, so running them again here
+  runs them twice. A delegation argument may call a companion member, so the companion is created
+  first, exactly as the primary constructor creates it (`src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::a_class_may_have_more_than_one_constructor`).
+
 - **A default argument is evaluated in the CALLEE's frame.** `fun f(a: Int, b: Int = a + 1)` writes
   its default in terms of a parameter, so the call site cannot compute it. Each omission shape gets
   a wrapper taking exactly the supplied arguments, which declares the callee's whole frame, fills

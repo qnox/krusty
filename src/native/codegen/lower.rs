@@ -971,7 +971,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ctor_params,
                 defaults,
                 ..
-            } => self.construction(internal, &args, ctor_params.is_some(), !defaults.is_empty()),
+            } => self.construction(
+                internal,
+                &args,
+                ctor_params.as_deref(),
+                !defaults.is_empty(),
+            ),
             IrExpr::MethodCall {
                 class,
                 index,

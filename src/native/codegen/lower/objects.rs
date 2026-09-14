@@ -37,10 +37,13 @@ const TYPE_OFFSET: i32 = 0;
 pub(super) struct ClassItems {
     /// Its `KType`.
     pub(super) descriptor: DataId,
-    /// `kt_<class>__init(this, args…)`.
-    constructor: FuncId,
+    /// `kt_<class>__init(this, args…)`, absent for a class with no primary constructor: every
+    /// `<init>` of one comes from its secondaries.
+    constructor: Option<FuncId>,
     /// For an `object` declaration: the static slot holding the instance, and its getter.
     singleton: Option<(DataId, FuncId)>,
+    /// One entry per `secondary_ctors` entry, in the same order.
+    secondaries: Vec<FuncId>,
 }
 
 /// `kotlin.Any`'s three members, by runtime symbol, with their signatures.
@@ -158,8 +161,30 @@ impl<'a> FileLowering<'a> {
                     ));
                 }
             }
-            let constructor =
-                self.declare_local_function(&format!("kt_{base}__init"), &params, Ty::Unit)?;
+            let constructor = self.ir.classes[class as usize]
+                .has_primary_ctor
+                .then(|| {
+                    self.declare_local_function(&format!("kt_{base}__init"), &params, Ty::Unit)
+                })
+                .transpose()?;
+            // Each `constructor(…)` beyond the primary is its own entry point: it delegates to
+            // another constructor and then runs its own body.
+            let mut secondaries = Vec::new();
+            for (ordinal, secondary) in self.ir.classes[class as usize]
+                .secondary_ctors
+                .clone()
+                .iter()
+                .enumerate()
+            {
+                let mut params = vec![any()];
+                params.extend(secondary.prefix_params.iter().copied());
+                params.extend(secondary.params.iter().copied());
+                secondaries.push(self.declare_local_function(
+                    &format!("kt_{base}__init_{ordinal}"),
+                    &params,
+                    Ty::Unit,
+                )?);
+            }
             let singleton = if self.ir.classes[class as usize].is_object {
                 let slot = self.declare_local_data(&format!("kt_singleton_{base}"), true)?;
                 let getter =
@@ -172,6 +197,7 @@ impl<'a> FileLowering<'a> {
                 descriptor,
                 constructor,
                 singleton,
+                secondaries,
             });
         }
 
@@ -240,7 +266,12 @@ impl<'a> FileLowering<'a> {
             self.define_accessor(&slot, id)?;
         }
         for class in 0..self.ir.classes.len() as ClassId {
-            self.define_constructor(class)?;
+            if self.classes[class as usize].constructor.is_some() {
+                self.define_constructor(class)?;
+            }
+            for ordinal in 0..self.classes[class as usize].secondaries.len() {
+                self.define_secondary_constructor(class, ordinal)?;
+            }
             if self.classes[class as usize].singleton.is_some() {
                 self.define_singleton_getter(class)?;
             }
@@ -419,6 +450,128 @@ impl<'a> FileLowering<'a> {
         )
     }
 
+    /// A `constructor(…)` other than the primary: delegate, then run this constructor's body.
+    ///
+    /// Kotlin's order is the one being realized. A `this(…)` delegation reaches another constructor
+    /// of the same class, which runs the class's initializers; a `super(…)` delegation reaches the
+    /// superclass and then runs THIS class's initializers here, because a class with no primary
+    /// constructor has nowhere else to run them. Either way this constructor's own body runs last.
+    fn define_secondary_constructor(
+        &mut self,
+        class: ClassId,
+        ordinal: usize,
+    ) -> Result<(), Unsupported> {
+        let declaration = self.ir.classes[class as usize].clone();
+        let secondary = declaration.secondary_ctors[ordinal].clone();
+        let id = self.classes[class as usize].secondaries[ordinal];
+        if !secondary.default_parameters.is_empty() {
+            return Err(format!(
+                "a secondary constructor delegating with omitted arguments (`{}`)",
+                declaration.fq_name()
+            ));
+        }
+        let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
+        slots.extend(secondary.prefix_params.iter().copied());
+        slots.extend(secondary.params.iter().copied());
+        let signature = self.signature_of(&slots, Ty::Unit)?;
+
+        // Which constructor the delegation reaches. The class's own initializers are not run from
+        // here in either case: a `this(…)` delegation reaches a constructor that runs them, and a
+        // `super(…)` one belongs to a class with no primary constructor, whose initializers common
+        // lowering has already folded into this constructor's body.
+        let (target, target_params) = match &secondary.delegate {
+            crate::ir::CtorDelegateTarget::This {
+                target_params,
+                to_primary,
+                ..
+            } => {
+                let target = if *to_primary {
+                    self.classes[class as usize].constructor.ok_or_else(|| {
+                        format!(
+                            "a delegation to a primary constructor the class does not have (`{}`)",
+                            declaration.fq_name()
+                        )
+                    })?
+                } else {
+                    let sibling = declaration
+                        .secondary_ctors
+                        .iter()
+                        .position(|candidate| candidate.params == *target_params)
+                        .ok_or_else(|| {
+                            format!(
+                                "a secondary constructor delegating to no known sibling (`{}`)",
+                                declaration.fq_name()
+                            )
+                        })?;
+                    self.classes[class as usize].secondaries[sibling]
+                };
+                (target, target_params.clone())
+            }
+            crate::ir::CtorDelegateTarget::Super {
+                owner,
+                target_params,
+                ..
+            } => {
+                let parent = self.ir.class_id_by_name(*owner).ok_or_else(|| {
+                    format!(
+                        "a secondary constructor delegating to a superclass outside this file (`{}`)",
+                        owner.render()
+                    )
+                })?;
+                let parent_constructor =
+                    self.classes[parent as usize].constructor.ok_or_else(|| {
+                        format!(
+                            "a delegation to a superclass with no primary constructor (`{}`)",
+                            owner.render()
+                        )
+                    })?;
+                (parent_constructor, target_params.clone())
+            }
+        };
+        // A delegation argument may call a companion member (`constructor() : this(foo() + prop)`),
+        // and those run before the primary constructor this delegates to would have created the
+        // companion. So this constructor asks for it too; the getter is idempotent.
+        let companion = declaration
+            .companion_class
+            .and_then(|companion| self.ir.class_id_by_name(companion))
+            .and_then(|companion| self.classes[companion as usize].singleton)
+            .map(|(_, getter)| getter);
+        let name = format!("{}.<init>#{ordinal}", declaration.fq_name());
+        let arguments = secondary.delegate_args.clone();
+        let prelude = secondary.delegate_prelude.clone();
+        let body_expression = secondary.body;
+        self.emit_function(id, signature, Carrier::Void, &name, &mut |body, params| {
+            for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
+                let variable = body.declare_value(slot as u32, *ty)?;
+                body.builder.def_var(variable, *value);
+            }
+            let this = params[0];
+            if let Some(getter) = companion {
+                let func_ref = body.func_ref(getter);
+                body.builder.ins().call(func_ref, &[]);
+            }
+            for &statement in &prelude {
+                body.statement(statement)?;
+            }
+            if arguments.len() != target_params.len() {
+                return Err("a constructor delegation of a different arity".to_string());
+            }
+            let mut operands = vec![this];
+            for (&argument, ty) in arguments.iter().zip(&target_params) {
+                let Some(value) = body.coerce(argument, *ty)? else {
+                    return Err("a `Unit` constructor delegation argument".to_string());
+                };
+                operands.push(value);
+            }
+            let func_ref = body.func_ref(target);
+            body.builder.ins().call(func_ref, &operands);
+            if let Some(own) = body_expression {
+                body.statement(own)?;
+            }
+            Ok(())
+        })
+    }
+
     /// A synthesized accessor: the field load or store an open property without a source
     /// accessor dispatches to.
     fn define_accessor(&mut self, slot: &Slot, id: FuncId) -> Result<(), Unsupported> {
@@ -573,7 +726,9 @@ impl<'a> FileLowering<'a> {
     fn define_constructor(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = self.ir.classes[class as usize].clone();
         let layout = self.model.layout(class).clone();
-        let id = self.classes[class as usize].constructor;
+        let id = self.classes[class as usize]
+            .constructor
+            .expect("a primary constructor is defined only where one was declared");
         let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
         slots.extend(declaration.ctor_args.iter().map(|argument| argument.ty));
         let signature = self.signature_of(&slots, Ty::Unit)?;
@@ -592,7 +747,14 @@ impl<'a> FileLowering<'a> {
                     .iter()
                     .map(|argument| argument.ty)
                     .collect();
-                Some((self.classes[parent as usize].constructor, params))
+                let parent_constructor =
+                    self.classes[parent as usize].constructor.ok_or_else(|| {
+                        format!(
+                            "a superclass with no primary constructor (`{}`)",
+                            parent_declaration.fq_name()
+                        )
+                    })?;
+                Some((parent_constructor, params))
             }
             None if !declaration.super_args.is_empty() => {
                 return Err(format!(
@@ -690,7 +852,12 @@ impl<'a> FileLowering<'a> {
             .singleton
             .expect("declared as an object");
         let descriptor = self.classes[class as usize].descriptor;
-        let constructor = self.classes[class as usize].constructor;
+        let constructor = self.classes[class as usize].constructor.ok_or_else(|| {
+            format!(
+                "an `object` with no primary constructor (`{}`)",
+                self.ir.classes[class as usize].fq_name()
+            )
+        })?;
         let size = self.model.layout(class).instance_size;
         let mut description = DataDescription::new();
         description.define_zeroinit(8);
@@ -866,13 +1033,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &mut self,
         internal: TypeName,
         args: &[u32],
-        secondary: bool,
+        selected: Option<&[Ty]>,
         defaulted: bool,
     ) -> Result<Option<Value>, Unsupported> {
         let name = internal.render();
-        if secondary {
-            return Err(format!("a secondary constructor call (`{name}`)"));
-        }
         if defaulted {
             return Err(format!("a constructor default argument (`{name}`)"));
         }
@@ -884,18 +1048,45 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if declaration.is_abstract || declaration.is_sealed {
             return Err(format!("construction of the abstract class `{name}`"));
         }
-        if args.len() != declaration.ctor_args.len() {
+        // `ctor_params` names a SECONDARY constructor by its parameter list; absent, the call is
+        // to the primary one.
+        let (constructor, params) = match selected {
+            Some(selected) => {
+                let ordinal = declaration
+                    .secondary_ctors
+                    .iter()
+                    .position(|candidate| candidate.params == selected)
+                    .ok_or_else(|| {
+                        format!("a call to an unknown secondary constructor (`{name}`)")
+                    })?;
+                let secondary = &declaration.secondary_ctors[ordinal];
+                if !secondary.prefix_params.is_empty() {
+                    return Err(format!(
+                        "a secondary constructor with compiler-supplied parameters (`{name}`)"
+                    ));
+                }
+                (
+                    self.file.classes[class as usize].secondaries[ordinal],
+                    secondary.params.clone(),
+                )
+            }
+            None => (
+                self.file.classes[class as usize]
+                    .constructor
+                    .ok_or_else(|| format!("a call to a primary constructor `{name}` lacks"))?,
+                declaration
+                    .ctor_args
+                    .iter()
+                    .map(|argument| argument.ty)
+                    .collect(),
+            ),
+        };
+        if args.len() != params.len() {
             return Err(format!(
                 "a constructor call with omitted arguments (`{name}`)"
             ));
         }
-        let params: Vec<Ty> = declaration
-            .ctor_args
-            .iter()
-            .map(|argument| argument.ty)
-            .collect();
         let descriptor = self.file.classes[class as usize].descriptor;
-        let constructor = self.file.classes[class as usize].constructor;
         let size = self.file.model.layout(class).instance_size;
 
         // Arguments first, then the allocation: an argument that allocates cannot then leave a

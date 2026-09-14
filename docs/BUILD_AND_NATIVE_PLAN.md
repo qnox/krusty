@@ -1238,6 +1238,9 @@ before:**
    no override table, so it took a slot of its own and a call through the base's type ran the base's
    body. krusty's JVM backend gets that right, so it was the native model's alone; the IR's own
    record of which declarations are FRESH is what makes resolving it by name sound.
+   Secondary constructors brought the lane to **1666 pass**: each is its own entry point that
+   delegates and then runs its body, including for a class with no primary constructor at all,
+   which then declares no primary `<init>` rather than declaring one nothing defines.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

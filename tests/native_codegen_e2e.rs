@@ -459,15 +459,15 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // A secondary constructor is not implemented. The contract is that the backend SAYS so:
-    // emitting a partial object that links and misbehaves would be far worse than refusing.
+    // `try`/`catch` is not implemented — it needs an unwinder the runtime does not have. The
+    // contract is that the backend SAYS so: emitting a partial object that links and misbehaves
+    // would be far worse than refusing.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
-            "class Point(val x: Int, val y: Int) {\n\
-             \x20   constructor(both: Int) : this(both, both)\n\
-             }\n\
-             fun main() { println(Point(3).y) }\n",
+            "fun main() {\n\
+             \x20   try { println(\"body\") } finally { println(\"cleanup\") }\n\
+             }\n",
         )],
         target,
     );
@@ -1721,5 +1721,40 @@ fn an_override_the_tables_do_not_record_still_dispatches() {
              \x20   println(render(Derived()))\n\
              }\n"),
         "base:x\nderived:x\n"
+    );
+}
+
+#[test]
+fn a_class_may_have_more_than_one_constructor() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A secondary constructor delegates and then runs its own body, and Kotlin's order is what is
+    // being realized: a `this(…)` delegation reaches another constructor of the same class, which
+    // runs the class's initializers, while a `super(…)` one runs them here — a class with no
+    // primary constructor has nowhere else to run them. A chain of secondaries is the same rule
+    // applied twice.
+    assert_eq!(
+        run("var order = \"\"\n\
+             class Point(val x: Int, val y: Int) {\n\
+             \x20   init { order += \"p\" }\n\
+             \x20   constructor(both: Int) : this(both, both) { order += \"s\" }\n\
+             \x20   constructor() : this(7) { order += \"t\" }\n\
+             }\n\
+             open class Base(val tag: String) { init { order += \"b\" } }\n\
+             class Sub : Base {\n\
+             \x20   init { order += \"i\" }\n\
+             \x20   constructor(n: Int) : super(\"s\" + n) { order += \"c\" }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val square = Point(3)\n\
+             \x20   println(square.x + square.y)\n\
+             \x20   println(Point().x)\n\
+             \x20   order = \"\"\n\
+             \x20   println(Sub(1).tag)\n\
+             \x20   println(order)\n\
+             }\n"),
+        "6\n7\ns1\nbic\n"
     );
 }
