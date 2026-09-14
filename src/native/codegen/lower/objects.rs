@@ -39,9 +39,9 @@ pub(super) struct ClassItems {
     pub(super) descriptor: DataId,
     /// `kt_<class>__init(this, args…)`, absent for a class with no primary constructor: every
     /// `<init>` of one comes from its secondaries.
-    constructor: Option<FuncId>,
+    pub(super) constructor: Option<FuncId>,
     /// For an `object` declaration: the static slot holding the instance, and its getter.
-    singleton: Option<(DataId, FuncId)>,
+    pub(super) singleton: Option<(DataId, FuncId)>,
     /// One entry per `secondary_ctors` entry, in the same order.
     secondaries: Vec<FuncId>,
 }
@@ -52,6 +52,7 @@ fn any_member(symbol: &str) -> Option<(Vec<Ty>, Ty)> {
         "kt_any_equals" => (vec![any(), any()], Ty::Boolean),
         "kt_any_hash_code" => (vec![any()], Ty::Int),
         "kt_any_to_string" => (vec![any()], any()),
+        "kt_enum_to_string" => (vec![any()], any()),
         _ => return None,
     })
 }
@@ -68,12 +69,12 @@ fn write_u32(bytes: &mut [u8], offset: u32, value: u32) {
 }
 
 impl<'a> FileLowering<'a> {
-    fn class_base(&self, class: ClassId) -> &str {
+    pub(super) fn class_base(&self, class: ClassId) -> &str {
         &self.symbols.classes[class as usize]
     }
 
     /// The in-file class a name denotes, or the decline for one declared elsewhere.
-    fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
+    pub(super) fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
         self.ir.class_id_by_name(internal).ok_or_else(|| {
             format!(
                 "{what} `{}`, which is not declared in this file",
@@ -772,8 +773,12 @@ impl<'a> FileLowering<'a> {
         // class's) and leaves a class nobody constructs untouched. Construction is the ONLY such
         // trigger the generator can see today; a class-static call, the JVM's other one, is
         // declined by name.
-        let companion = declaration
-            .companion_class
+        // An ENUM's companion is not created here: Kotlin builds every constant first and the
+        // companion after, and the enum's own initializer keeps that order. Triggering it from the
+        // constructor would run the companion's `init` in the middle of the first constant.
+        let companion = (!model::is_enum(&declaration))
+            .then_some(declaration.companion_class)
+            .flatten()
             .and_then(|companion| self.ir.class_id_by_name(companion))
             .and_then(|companion| self.classes[companion as usize].singleton)
             .map(|(_, getter)| getter);
@@ -866,9 +871,30 @@ impl<'a> FileLowering<'a> {
             .define_data(slot, &description)
             .map_err(|error| format!("defining the singleton slot ({error})"))?;
 
+        // A companion of an ENUM: touching it touches the enum, so the constants are built first.
+        // The enum's initializer calls this getter in turn, and its flag ends the recursion there.
+        let enclosing_enum = self
+            .ir
+            .classes
+            .iter()
+            .position(|candidate| {
+                candidate.companion_class == Some(self.ir.classes[class as usize].fq_name_id())
+                    && model::is_enum(candidate)
+            })
+            .map(|outer| outer as ClassId)
+            .and_then(|outer| {
+                self.enum_entries
+                    .get(&outer)
+                    .map(|items| items.initializer())
+            });
+
         let name = format!("{}.INSTANCE", self.ir.classes[class as usize].fq_name());
         let signature = self.signature_of(&[], any())?;
         self.emit_function(getter, signature, Carrier::Ref, &name, &mut |body, _| {
+            if let Some(initializer) = enclosing_enum {
+                let func_ref = body.func_ref(initializer);
+                body.builder.ins().call(func_ref, &[]);
+            }
             let slot_address = body.data_address(slot);
             let current = body
                 .builder
@@ -903,7 +929,7 @@ impl<'a> FileLowering<'a> {
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// `value == null`, as a Boolean.
-    fn is_null(&mut self, value: Value) -> Value {
+    pub(super) fn is_null(&mut self, value: Value) -> Value {
         let zero = self.builder.ins().iconst(types::I64, 0);
         self.builder.ins().icmp(IntCC::Equal, value, zero)
     }

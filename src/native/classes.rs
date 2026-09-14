@@ -81,6 +81,20 @@ pub(super) fn c_kind(ty: Ty) -> CKind {
     }
 }
 
+/// `kotlin.Enum`'s own storage, which every enum class carries ahead of its own fields: the
+/// constant's NAME and its position among the constants. Kotlin reads both through `name` and
+/// `ordinal`, and `toString` answers with the name. The enum's superclass is not a class in this
+/// file — it is the language's own — so these offsets are the one place the layout of that base is
+/// written down.
+pub(super) const ENUM_NAME_OFFSET: u32 = HEADER_SIZE;
+pub(super) const ENUM_ORDINAL_OFFSET: u32 = HEADER_SIZE + 8;
+pub(super) const ENUM_FIELDS_END: u32 = HEADER_SIZE + 12;
+
+/// Whether a class is an enum: it extends `kotlin.Enum`, which no file declares.
+pub(super) fn is_enum(class: &IrClass) -> bool {
+    class.superclass.matches("kotlin/Enum")
+}
+
 /// The size of an object header: one pointer to the type.
 pub(super) const HEADER_SIZE: u32 = 8;
 
@@ -209,9 +223,7 @@ fn any_slot_signature(slot: u32) -> (&'static [CKind], CKind) {
 /// Reject, by name, a class this step does not lower.
 pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
-    let construct = if !class.enum_entries.is_empty() || class.enum_entry_of.is_some() {
-        "an enum class"
-    } else if ir
+    let construct = if ir
         .class_ctor_defaults_name(class.fq_name_id())
         .is_some_and(|defaults| defaults.iter().any(Option::is_some))
         || class.ctor_args.iter().any(|argument| argument.has_default)
@@ -544,6 +556,7 @@ struct InterfaceMember {
 fn hierarchy_order(ir: &IrFile) -> Result<Vec<ClassId>, Unsupported> {
     for class in &ir.classes {
         if !class.superclass.matches("kotlin/Any")
+            && !class.superclass.matches("kotlin/Enum")
             && ir.class_id_by_name(class.superclass).is_none()
         {
             return Err(format!(
@@ -609,9 +622,27 @@ fn layout_class(
     let class = &ir.classes[id as usize];
 
     // ---- fields ----
-    let mut end = parent.map_or(HEADER_SIZE, |parent| parent.fields_end);
-    let mut reference_offsets =
-        parent.map_or_else(Vec::new, |parent| parent.reference_offsets.clone());
+    let mut end = parent.map_or_else(
+        || {
+            if is_enum(class) {
+                ENUM_FIELDS_END
+            } else {
+                HEADER_SIZE
+            }
+        },
+        |parent| parent.fields_end,
+    );
+    let mut reference_offsets = parent.map_or_else(
+        || {
+            // The constant's name is a reference the collector traces like any other.
+            if is_enum(class) {
+                vec![ENUM_NAME_OFFSET]
+            } else {
+                Vec::new()
+            }
+        },
+        |parent| parent.reference_offsets.clone(),
+    );
     let mut fields = Vec::with_capacity(class.fields.len());
     for field in &class.fields {
         let kind = c_kind(field.ty);
@@ -839,6 +870,12 @@ fn layout_class(
     // class to its underlying value entirely; here the object stays, and the three members are
     // synthesized instead. A value class that DECLARES one of them keeps its own: the loop above
     // has already replaced that slot, and only `kotlin.Any`'s own default is overwritten here.
+    // Kotlin's `Enum.toString()` is the constant's name, where `kotlin.Any`'s is its identity. The
+    // runtime answers it, because the storage it reads belongs to `kotlin.Enum` — a base no file
+    // declares — rather than to this class.
+    if is_enum(class) && matches!(vtable[2], Slot::Runtime(_)) {
+        vtable[2] = Slot::Runtime("kt_enum_to_string");
+    }
     if class.is_value {
         if class.fields.len() != 1 {
             return Err(format!(

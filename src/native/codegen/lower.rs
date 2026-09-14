@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 mod arrays;
 mod defaults;
+mod enums;
 mod functions;
 mod objects;
 mod scope;
@@ -174,6 +175,7 @@ pub fn lower_file(
         statics: Vec::new(),
         lambdas: HashMap::new(),
         default_wrappers: HashMap::new(),
+        enum_entries: HashMap::new(),
         holders: HashMap::new(),
     };
     lowering.declare_functions()?;
@@ -181,8 +183,10 @@ pub fn lower_file(
     lowering.declare_statics()?;
     lowering.declare_lambdas()?;
     lowering.declare_default_wrappers()?;
+    lowering.declare_enum_entries()?;
     lowering.define_classes()?;
     lowering.define_default_wrappers()?;
+    lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
@@ -237,6 +241,8 @@ struct FileLowering<'a> {
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// One wrapper per omission shape a call in this file uses.
     default_wrappers: HashMap<defaults::Omission, FuncId>,
+    /// Per enum class, its constants' static slots and getters, in declaration order.
+    enum_entries: HashMap<ClassId, enums::EnumItems>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
     holders: HashMap<String, DataId>,
 }
@@ -847,10 +853,28 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
         }
         if !has_else && !self.terminated {
-            if result.is_some() {
-                return Err("a `when` used as a value without an `else`".to_string());
+            match result {
+                // An exhaustive `when` over an enum or a sealed hierarchy has no `else`: the
+                // frontend proved one is unreachable. The proof is not repeated here — this
+                // generator does not know the hierarchy — so the fall-through is the runtime's
+                // loud failure, which is what Kotlin puts there too (`NoWhenBranchMatched`). It
+                // costs a few unreachable instructions and never a wrong answer.
+                Some(ty) => {
+                    self.runtime_call("kt_no_when_branch_matched", &[], Ty::Unit, &[])?;
+                    let clif = carrier(ty).clif().expect("non-void carrier");
+                    let unreachable = match clif {
+                        types::F32 => self.builder.ins().f32const(0.0),
+                        types::F64 => self.builder.ins().f64const(0.0),
+                        integer => self.builder.ins().iconst(integer, 0),
+                    };
+                    self.builder
+                        .ins()
+                        .jump(merge, &[BlockArg::Value(unreachable)]);
+                }
+                None => {
+                    self.builder.ins().jump(merge, &[]);
+                }
             }
-            self.builder.ins().jump(merge, &[]);
             reaches_merge = true;
         }
 
@@ -1010,9 +1034,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 elem,
                 value,
             } => self.ref_set(holder, elem, value),
+            IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
+            IrExpr::EnumValues { classifier } => self.enum_values(classifier),
+            IrExpr::EnumValueOf { classifier, arg } => self.enum_value_of(classifier, arg),
             IrExpr::EnclosingInstance {
                 receiver, inner, ..
             } => self.enclosing_instance(receiver, inner),
+            // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from the
+            // storage that base contributes.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.enum_member_name(target).is_some() => {
+                let member = self.enum_member_name(target).expect("checked by the guard");
+                self.enum_member(member, receiver)
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1193,7 +1230,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::New { internal, .. }
             | IrExpr::SingletonValue {
                 classifier: internal,
+            }
+            | IrExpr::EnumEntry {
+                classifier: internal,
+                ..
+            }
+            | IrExpr::EnumValueOf {
+                classifier: internal,
+                ..
             } => Ty::Obj(*internal, &[]),
+            IrExpr::EnumValues { classifier } => {
+                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
+            }
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
                 self.file.ir.functions[fid as usize].ret

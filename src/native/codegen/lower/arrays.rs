@@ -17,7 +17,7 @@ use super::*;
 
 /// `sizeof(KArray)`: the object header, the length, and the padding that keeps an 8-byte element
 /// aligned. Elements begin here, which is exactly what the descriptor tells the collector.
-const ELEMENTS: i64 = 16;
+pub(super) const ELEMENTS: i64 = 16;
 /// Where the length sits inside that header.
 const LENGTH: i32 = 8;
 
@@ -46,15 +46,15 @@ fn array_type(array: Ty) -> Result<(&'static str, u32), Unsupported> {
 /// references — boxed `Int`s — while an `IntArray` stores the `Int`s themselves, and the two have
 /// different strides and different carriers at every load and store. Conflating them reads four
 /// bytes out of an eight-byte slot.
-struct Shape {
-    descriptor: DataId,
-    stride: u32,
+pub(super) struct Shape {
+    pub(super) descriptor: DataId,
+    pub(super) stride: u32,
     /// The type a slot actually holds: `Any?` for a reference array, the element type otherwise.
-    stored: Ty,
+    pub(super) stored: Ty,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
-    fn array_shape(&mut self, array: Ty) -> Result<Shape, Unsupported> {
+    pub(super) fn array_shape(&mut self, array: Ty) -> Result<Shape, Unsupported> {
         let (symbol, stride) = array_type(array)?;
         let element = array
             .non_null()

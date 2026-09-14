@@ -1758,3 +1758,41 @@ fn a_class_may_have_more_than_one_constructor() {
         "6\n7\ns1\nbic\n"
     );
 }
+
+#[test]
+fn an_enum_class_is_built_whole_when_it_is_touched() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin initializes an enum as a whole: every constant in declaration order, then the
+    // companion — so a program that only ever mentions one constant still runs every constructor,
+    // and in that order. Each constant is a singleton, so identity answers as equality does;
+    // `toString` is the name, not the identity `kotlin.Any` would give; and `values()` hands back a
+    // fresh array each call.
+    assert_eq!(
+        run("var order = \"\"\n\
+             enum class Step(val weight: Int) {\n\
+             \x20   FIRST(1), SECOND(2);\n\
+             \x20   init { order += name + \"(\" + weight + \")\" }\n\
+             \x20   companion object { init { order += \"|companion\" } }\n\
+             }\n\
+             fun describe(step: Step) = when (step) {\n\
+             \x20   Step.FIRST -> \"one\"\n\
+             \x20   Step.SECOND -> \"two\"\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(Step.SECOND.name)\n\
+             \x20   println(order)\n\
+             \x20   println(Step.SECOND.ordinal)\n\
+             \x20   println(Step.FIRST.toString())\n\
+             \x20   println(Step.FIRST === Step.FIRST)\n\
+             \x20   println(Step.FIRST == Step.SECOND)\n\
+             \x20   println(describe(Step.SECOND))\n\
+             \x20   println(Step.values().size)\n\
+             \x20   println(Step.values()[0].weight)\n\
+             \x20   println(Step.valueOf(\"SECOND\").ordinal)\n\
+             }\n"),
+        "SECOND\nFIRST(1)SECOND(2)|companion\n1\nFIRST\ntrue\nfalse\ntwo\n2\n1\n1\n"
+    );
+}

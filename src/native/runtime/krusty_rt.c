@@ -91,6 +91,34 @@ void kt_index_out_of_bounds(kt_int index, kt_int size) {
     KT_FAIL("krusty: array index out of bounds\n");
 }
 
+/* `Color.valueOf("NOPE")` throws in Kotlin; a program without exceptions stops here instead. The
+   name is taken so the failure can say which one was asked for once strings can be rendered from
+   the runtime's own failure path. */
+/* `kotlin.Enum`'s own storage, which every enum class carries ahead of its own fields. The
+   generator writes both when it builds a constant; the layout is here because the base class is
+   the language's, not any file's. */
+typedef struct KEnum {
+    KObjectHeader header;
+    KRef name;
+    kt_int ordinal;
+} KEnum;
+
+/* Kotlin's `Enum.toString()` is the constant's name, and `kotlin.Any`'s identity rendering is not.
+   This sits in the `toString` slot of every enum class's table. */
+KRef kt_enum_to_string(KRef self) { return ((KEnum *)self)->name; }
+
+/* An exhaustive `when` used as a value has no `else` to fall into. Kotlin's own answer for the
+   case its exhaustiveness check missed is `NoWhenBranchMatchedException`; without exceptions, this
+   is the same statement, made loudly. */
+void kt_no_when_branch_matched(void) {
+    KT_FAIL("krusty: no branch of an exhaustive `when` matched\n");
+}
+
+void kt_no_such_enum_constant(KRef name) {
+    (void)name;
+    KT_FAIL("krusty: no enum constant of that name\n");
+}
+
 typedef KArray KByteArray;
 
 static char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }

@@ -1241,6 +1241,13 @@ before:**
    Secondary constructors brought the lane to **1666 pass**: each is its own entry point that
    delegates and then runs its body, including for a class with no primary constructor at all,
    which then declares no primary `<init>` rather than declaring one nothing defines.
+   Enums followed, for **1735 pass**. An enum reaches a backend almost bare — the checked IR keeps
+   the constants as names and leaves every realization open — so all of it is built here: a slot per
+   constant, one initializer that fills them in declaration order and then asks for the companion,
+   `values()` as a fresh array each call, `valueOf` as a chain of name comparisons, and `name`,
+   `ordinal` and `toString` read from the storage `kotlin.Enum` contributes ahead of the class's own
+   fields. The corpus was exact about the order and worth listening to twice: the companion comes
+   after every constant, and touching only a companion member still builds the constants first.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

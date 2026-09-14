@@ -4364,6 +4364,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
   `::an_override_that_needs_a_bridge_is_declined`).
 
+- **Touching an enum builds all of it, then its companion.** Kotlin initializes an enum class as a
+  whole: every constant in declaration order, and the companion object after — a program that only
+  ever mentions `E.Y` still runs `E.init(x)` first. So one initializer per enum fills every
+  constant's slot and then asks for the companion, and reading a constant, `values()`, `valueOf`
+  and a call to a companion member all run it. Its flag is set BEFORE the constants are built, so a
+  constant's own constructor reaching back into the enum finds the work under way rather than
+  starting it again, which is what the JVM's re-entrant class initialization does. An enum's
+  constructor deliberately does NOT create the companion, though every other class's does: that
+  would run the companion's `init` in the middle of the first constant
+  (`src/native/codegen/lower/enums.rs`,
+  `tests/native_codegen_e2e.rs::an_enum_class_is_built_whole_when_it_is_touched`).
+
+- **An enum constant's `name`, `ordinal` and `toString` come from `kotlin.Enum`'s own storage.**
+  The base is the language's, declared in no file, so the two fields sit at fixed offsets ahead of
+  the class's own and the runtime answers `toString` with the name — where `kotlin.Any` would
+  answer with the identity (`src/native/classes.rs`, `src/native/runtime/krusty_rt.c`).
+
+- **An exhaustive `when` needs no `else`, and gets a loud failure instead.** The frontend proves
+  exhaustiveness over an enum or a sealed hierarchy; the generator does not repeat the proof, so
+  the fall-through is the runtime's failure — which is what Kotlin puts there too
+  (`NoWhenBranchMatchedException`). It costs a few unreachable instructions and never a wrong
+  answer (`src/native/codegen/lower.rs`).
+
 - **A secondary constructor delegates, then runs its own body.** `constructor(x) : this(x, x) { … }`
   reaches another constructor of the same class, which runs the class's initializers; a
   `super(…)`-delegating one belongs to a class with NO primary constructor, and common lowering has

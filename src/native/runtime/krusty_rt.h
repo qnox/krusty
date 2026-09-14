@@ -129,6 +129,15 @@ KRef kt_array_new(const KType *type, kt_int length);
    machinery yet the honest realization is a diagnosable exit. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
 
+/* `Enum.toString()`: the constant's name, read from the storage `kotlin.Enum` contributes. */
+KRef kt_enum_to_string(KRef self);
+
+/* The failure an exhaustive `when` makes when none of its branches matched after all. */
+void kt_no_when_branch_matched(void);
+
+/* The failure `Color.valueOf` makes when no constant has that name. */
+void kt_no_such_enum_constant(KRef name);
+
 /* The array types, all runtime-owned: an array's descriptor depends on its element WIDTH, not on
    the element type a program wrote, so `Array<String>` and `Array<Foo>` share one. */
 extern const KType kt_type_array; /* Array<T>: references */

@@ -27,6 +27,7 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/lang/Comparable" => "kotlin/Comparable",
         "java/lang/Number" => "kotlin/Number",
         "java/lang/Throwable" => "kotlin/Throwable",
+        "java/lang/Enum" => "kotlin/Enum",
         other => other,
     }
 }
@@ -77,6 +78,23 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
                 ConsoleOperand::Unrenderable => None,
             }
         }
+        _ => None,
+    }
+}
+
+/// Which member of `kotlin.Enum` an accessor names, or `None` for anything else.
+///
+/// Every enum constant answers `name` and `ordinal` from the storage its base contributes, and the
+/// accessor reaches a backend spelled as the provider named it — `getName` on `java/lang/Enum`,
+/// since the signatures come from a JVM jar. Normalizing that here keeps the one place that knows
+/// the spelling the same one that knows every other.
+pub(super) fn enum_member(owner: &str, accessor: &str) -> Option<&'static str> {
+    if kotlin_owner(owner) != "kotlin/Enum" {
+        return None;
+    }
+    match accessor {
+        "getName" | "name" => Some("name"),
+        "getOrdinal" | "ordinal" => Some("ordinal"),
         _ => None,
     }
 }
