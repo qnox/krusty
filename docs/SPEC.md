@@ -7463,6 +7463,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     a read and wrong for a hand-off: it feeds the generated class's `Ref`-typed field a bare
     element. The `Captured` capture source now uses `captured_value_holder` when the capture is a
     shared cell.
+  The rule and the write analysis it rests on live in one place, `src/resolve/capture_storage.rs`:
+  four named facts about the binding (delegated, mutable, already a cell, written here) and the AST
+  walk that answers the last one. Named rather than positional, because three of the four are
+  booleans and swapping two of them is a silent miscompile rather than a type error.
   Either half alone still fails, in opposite directions — `Ref` into a `String` parameter, or
   `String` into a `Ref` parameter — and the JVM verifier names both. Tests:
   `tests/anon_object_capture_e2e.rs::an_anonymous_object_in_a_local_function_forwards_the_shared_cell`,
