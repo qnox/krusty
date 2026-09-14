@@ -2085,3 +2085,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the identical call at any other result type spliced fine.
   `tests/reified_unit_splice_e2e.rs::a_reified_unit_result_still_splices`,
   `a_reified_reference_result_still_splices`.
+- **A reified type argument survives the value-class wrapper (fix).** Value-class lowering moves a
+  call BELOW a representation wrapper, cloning it to a new expression. That clone carried the call's
+  physical/logical types and its suspension identity but NOT its reified type arguments, so the
+  splicer saw a call with none and declined — and a `MustInline` callee that declines bails the whole
+  FILE, costing a module every class it would have emitted.
+  Only a value class whose underlying is NULLABLE is wrapped this way, which is why the same call
+  spliced for every other result type, a non-nullable value class included. External-call realization
+  already moves this fact the same way when IT rewrites a call; the value-class clone now does too.
+   `tests/reified_value_class_splice_e2e.rs::a_reified_nullable_value_class_result_still_splices`,
+   `a_reified_non_null_value_class_result_still_splices`.

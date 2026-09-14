@@ -5581,6 +5581,14 @@ fn clone_expr_with_type_facts(ir: &mut IrFile, id: ExprId) -> ExprId {
     if let Some(result) = ir.intrinsic_suspension_points.remove(&id) {
         ir.intrinsic_suspension_points.insert(new_id, result);
     }
+    // The reified type arguments belong to the CALL, which is now the cloned node. Leaving them on
+    // the wrapper makes the splicer see a call with no reified arguments and decline — and a
+    // `MustInline` callee that declines bails the whole FILE. Only a value class whose underlying is
+    // NULLABLE gets wrapped here, which is why `resp.body<Wrapped>()` spliced for every other result
+    // type. External-call realization already moves this fact the same way when IT rewrites a call.
+    if let Some(substitutions) = ir.reified_call_subst.remove(&id) {
+        ir.reified_call_subst.insert(new_id, substitutions);
+    }
     new_id
 }
 
