@@ -4,8 +4,21 @@
 
 use super::common;
 
+/// Run `body` under krusty, and under the REFERENCE compiler when it is provisioned.
+///
+/// What a capture in a constructor prefix must read from is a claim about what kotlinc emits, so
+/// pin it against kotlinc rather than only against krusty. A missing reference compiler means this
+/// environment does not provision one; CI does.
 fn run_ok(stem: &str, body: &str) {
     common::expect_box_ok_with_stdlib(body, stem);
+    let Some(out) = common::kotlinc_library(body) else {
+        return;
+    };
+    assert_eq!(
+        common::run_box(&[], "LibKt", &[out, common::stdlib_jar()]).as_deref(),
+        Some("OK"),
+        "{stem}: reference compiler"
+    );
 }
 
 #[test]
