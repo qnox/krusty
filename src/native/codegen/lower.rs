@@ -175,6 +175,7 @@ pub fn lower_file(
         statics: Vec::new(),
         lambdas: HashMap::new(),
         default_wrappers: HashMap::new(),
+        default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
         holders: HashMap::new(),
     };
@@ -183,9 +184,11 @@ pub fn lower_file(
     lowering.declare_statics()?;
     lowering.declare_lambdas()?;
     lowering.declare_default_wrappers()?;
+    lowering.declare_default_constructors()?;
     lowering.declare_enum_entries()?;
     lowering.define_classes()?;
     lowering.define_default_wrappers()?;
+    lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
@@ -241,6 +244,8 @@ struct FileLowering<'a> {
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// One wrapper per omission shape a call in this file uses.
     default_wrappers: HashMap<defaults::Omission, FuncId>,
+    /// The same, for a CONSTRUCTION that leaves arguments out.
+    default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
     enum_entries: HashMap<ClassId, enums::EnumItems>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
@@ -1001,13 +1006,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 args,
                 ctor_params,
                 defaults,
+                default_prefix_count,
                 ..
-            } => self.construction(
-                internal,
-                &args,
-                ctor_params.as_deref(),
-                !defaults.is_empty(),
-            ),
+            } => {
+                // A construction's `defaults` name SOURCE-value ordinals, which begin after the
+                // compiler's leading operands; the generator works in the constructor's physical
+                // frame, so they are shifted once, here, rather than at each use.
+                let omitted: Vec<u32> = defaults
+                    .iter()
+                    .map(|ordinal| ordinal + default_prefix_count)
+                    .collect();
+                self.construction(
+                    internal,
+                    &args,
+                    ctor_params.as_deref(),
+                    (!omitted.is_empty()).then_some(omitted.as_slice()),
+                )
+            }
             IrExpr::MethodCall {
                 class,
                 index,

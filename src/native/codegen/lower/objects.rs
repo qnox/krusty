@@ -772,12 +772,6 @@ impl<'a> FileLowering<'a> {
         let parent = match layout.superclass {
             Some(parent) => {
                 let parent_declaration = &self.ir.classes[parent as usize];
-                if declaration.super_args.len() != parent_declaration.ctor_args.len() {
-                    return Err(format!(
-                        "a superclass constructor call with defaulted arguments (`{}`)",
-                        declaration.fq_name()
-                    ));
-                }
                 let params: Vec<Ty> = parent_declaration
                     .ctor_args
                     .iter()
@@ -786,14 +780,42 @@ impl<'a> FileLowering<'a> {
                         captures::physical_ty(self.ir, parent, index as u32, argument.ty)
                     })
                     .collect();
-                let parent_constructor =
+                if declaration.super_args.len() != params.len() {
+                    return Err(format!(
+                        "a superclass constructor call of a different arity (`{}`)",
+                        declaration.fq_name()
+                    ));
+                }
+                // `class B : A()` where `A` has a defaulted parameter still passes an operand for
+                // it — common IR fills the hole with a zero placeholder so that a target's own
+                // default ABI has something to put a mask against — and the ordinals it actually
+                // omitted are recorded beside the class. So the placeholders are DROPPED here and
+                // the call goes through the same wrapper an `A()` written as an expression would,
+                // because a default belongs to the callee's frame either way.
+                let omitted: Vec<u32> = self
+                    .omitted_super_arguments(class)
+                    .map(|(_, omitted)| omitted)
+                    .unwrap_or_default();
+                let parent_constructor = if omitted.is_empty() {
                     self.classes[parent as usize].constructor.ok_or_else(|| {
                         format!(
                             "a superclass with no primary constructor (`{}`)",
                             parent_declaration.fq_name()
                         )
-                    })?;
-                Some((parent_constructor, params))
+                    })?
+                } else {
+                    let key = defaults::CtorOmission {
+                        class: parent,
+                        omitted: omitted.clone(),
+                    };
+                    *self.default_constructors.get(&key).ok_or_else(|| {
+                        format!(
+                            "a superclass constructor call with defaulted arguments (`{}`)",
+                            declaration.fq_name()
+                        )
+                    })?
+                };
+                Some((parent_constructor, params, omitted))
             }
             None if !declaration.super_args.is_empty() => {
                 return Err(format!(
@@ -850,9 +872,14 @@ impl<'a> FileLowering<'a> {
                 let offset = body.file.model.layout(class).fields[field as usize].offset as i32;
                 body.builder.ins().store(trusted(), value, this, offset);
             }
-            if let Some((constructor, parent_params)) = &parent {
+            if let Some((constructor, parent_params, omitted)) = &parent {
                 let mut arguments = vec![this];
-                for (&argument, ty) in declaration.super_args.iter().zip(parent_params) {
+                for (ordinal, (&argument, ty)) in
+                    declaration.super_args.iter().zip(parent_params).enumerate()
+                {
+                    if omitted.contains(&(ordinal as u32)) {
+                        continue;
+                    }
                     let Some(value) = body.coerce(argument, *ty)? else {
                         return Err("a `Unit` superclass constructor argument".to_string());
                     };
@@ -1115,11 +1142,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         internal: TypeName,
         args: &[u32],
         selected: Option<&[Ty]>,
-        defaulted: bool,
+        defaulted: Option<&[u32]>,
     ) -> Result<Option<Value>, Unsupported> {
         let name = internal.render();
-        if defaulted {
-            return Err(format!("a constructor default argument (`{name}`)"));
+        if let Some(omitted) = defaulted {
+            return self.defaulted_construction(internal, args, selected, omitted);
         }
         // `Any()` is declared in no file and needs none: the root has no state and no constructor,
         // so the whole of constructing one is an object with its type and nothing after the

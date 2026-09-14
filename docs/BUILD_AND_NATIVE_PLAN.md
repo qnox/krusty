@@ -1301,6 +1301,19 @@ before:**
    survive. That rule now lives with the IR (`IrFile::is_elided_initializer_store`) rather than in
    the JVM backend, because every target krusty emits for clears an object's storage when it
    allocates and so there is one rule, not one per backend.
+   Constructor defaults took the lane to **2080 pass**. They are a function's defaults with the
+   object already in hand, and get the same answer: a wrapper per omission shape that declares the
+   constructor's whole frame, fills the missing slots in declaration order and calls the
+   constructor, with the allocation left at the call site because allocating is not a default's to
+   do. `class B : A()` reaches the same wrapper — a superclass delegation that leaves arguments out
+   is that call written without parentheses of its own — and needed one thing the corpus was clear
+   about: common IR fills an omitted super-constructor operand with a ZERO PLACEHOLDER, so that a
+   target's own default ABI has something to put a mask against, and records the ordinals it
+   actually omitted beside the class. Passing the placeholders through is how `object : A() {}`
+   answered `null` where `A`'s default said `"OK"`; dropping them at the coordinate the IR names is
+   the fix. One more corpus case is listed with evidence: a `var` initialized from a subclass keeps
+   that smart cast across the loop's own reassignment, and reduced to one file krusty's JVM backend
+   throws the identical `ClassCastException`.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

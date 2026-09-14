@@ -221,15 +221,9 @@ fn any_slot_signature(slot: u32) -> (&'static [CKind], CKind) {
 }
 
 /// Reject, by name, a class this step does not lower.
-pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
+pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
-    let construct = if ir
-        .class_ctor_defaults_name(class.fq_name_id())
-        .is_some_and(|defaults| defaults.iter().any(Option::is_some))
-        || class.ctor_args.iter().any(|argument| argument.has_default)
-    {
-        "a constructor default argument"
-    } else if class.is_annotation || class.annotation_impl_of.is_some() {
+    let construct = if class.is_annotation || class.annotation_impl_of.is_some() {
         "an annotation class"
     } else if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
@@ -244,7 +238,7 @@ pub(super) fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupp
 /// Build the layout and vtable of every class in `ir`, superclasses first.
 pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
-        check_supported(ir, class)?;
+        check_supported(class)?;
     }
     let order = hierarchy_order(ir)?;
 

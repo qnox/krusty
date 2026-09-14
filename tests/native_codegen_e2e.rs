@@ -2122,3 +2122,38 @@ fn a_declaration_that_stores_a_default_stores_nothing() {
         "true\n4\nset\n0\n"
     );
 }
+
+#[test]
+fn a_construction_may_leave_arguments_out() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A constructor's defaults are a function's problem with the object already in hand: a default
+    // may read an EARLIER parameter, so it has to be evaluated in the constructor's own frame. Each
+    // omission shape therefore gets a wrapper that declares that frame, fills the missing slots in
+    // declaration order and calls the constructor — the allocation stays at the call site, because
+    // allocating is not a default's to do. `class B : A()` reaches the same wrapper: a superclass
+    // delegation that leaves arguments out is the same call written without parentheses of its own.
+    assert_eq!(
+        run(
+            "open class Greeting(val name: String, val mark: String = \"!\", val full: String = name + mark)\n\
+             open class Base(val label: String = \"base\")\n\
+             class Derived : Base()\n\
+             var built = 0\n\
+             fun next(): String { built += 1; return built.toString() }\n\
+             class Counted(val tag: String = next())\n\
+             fun main() {\n\
+             \x20   val one = Greeting(\"k\")\n\
+             \x20   println(one.name + one.mark + one.full)\n\
+             \x20   val two = Greeting(\"k\", \"?\")\n\
+             \x20   println(two.full)\n\
+             \x20   println(Greeting(\"k\", \"?\", \"given\").full)\n\
+             \x20   println(Derived().label)\n\
+             \x20   println(object : Base() {}.label)\n\
+             \x20   println(Counted().tag + Counted().tag)\n\
+             }\n"
+        ),
+        "k!k!\nk?\ngiven\nbase\nbase\n12\n"
+    );
+}
