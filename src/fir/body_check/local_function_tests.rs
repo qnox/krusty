@@ -274,10 +274,10 @@ fn inapplicable_inner_local_overload_falls_through_to_enclosing_rung() {
                         && capture.enclosing_depth == 1
                         && capture.shared_cell
                 });
-                let forwards_foo = body
-                    .captures()
-                    .iter()
-                    .any(|capture| capture.source == crate::fir::FirCaptureSource::Value(foo_value) && capture.enclosing_depth == 1);
+                let forwards_foo = body.captures().iter().any(|capture| {
+                    capture.source == crate::fir::FirCaptureSource::Value(foo_value)
+                        && capture.enclosing_depth == 1
+                });
                 if forwards_result && forwards_foo {
                     return true;
                 }

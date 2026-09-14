@@ -701,15 +701,12 @@ impl BodyLowering<'_> {
                     }
                 }
                 let slot = if depth == 0 {
-                    self.value_slot(
-                        capture
-                            .source
-                            .value()
-                            .ok_or(FirLoweringFailure::MissingCapture {
-                                enclosing_depth: depth,
-                                source: capture.source,
-                            })?,
-                    )
+                    self.value_slot(capture.source.value().ok_or(
+                        FirLoweringFailure::MissingCapture {
+                            enclosing_depth: depth,
+                            source: capture.source,
+                        },
+                    )?)
                 } else {
                     self.capture_slots
                         .get(&(depth - 1, capture.source))
