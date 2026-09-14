@@ -1796,3 +1796,40 @@ fn an_enum_class_is_built_whole_when_it_is_touched() {
         "SECOND\nFIRST(1)SECOND(2)|companion\n1\nFIRST\ntrue\nfalse\ntwo\n2\n1\n1\n"
     );
 }
+
+#[test]
+fn an_adapted_callable_reference_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A reference is ADAPTED when the function it names does not match the type it is used as: an
+    // argument left to its default, a `vararg` given one element, a result discarded because the
+    // expected type returns `Unit`. The checked lowering builds an adapter for each, and the
+    // adapter is an ordinary function — so these need nothing of the generator beyond what any
+    // reference needs, which is what removing the decline showed.
+    assert_eq!(
+        run(
+            "fun greet(name: String, mark: String = \"!\"): String = name + mark\n\
+             fun join(vararg parts: String): String {\n\
+             \x20   var joined = \"\"\n\
+             \x20   for (part in parts) joined += part\n\
+             \x20   return joined\n\
+             }\n\
+             var counted = 0\n\
+             fun count(): Int { counted = counted + 1; return counted }\n\
+             class Box(val n: Int) { fun plus(extra: Int = 5): Int = n + extra }\n\
+             fun apply(f: (String) -> String) = f(\"k\")\n\
+             fun run(f: () -> Unit) { f() }\n\
+             fun value(f: () -> Int) = f()\n\
+             fun main() {\n\
+             \x20   println(apply(::greet))\n\
+             \x20   println(apply(::join))\n\
+             \x20   run(::count)\n\
+             \x20   println(counted)\n\
+             \x20   println(value(Box(10)::plus))\n\
+             }\n"
+        ),
+        "k!\nk\n1\n15\n"
+    );
+}

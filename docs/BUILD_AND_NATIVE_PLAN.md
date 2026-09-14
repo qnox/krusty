@@ -1248,6 +1248,12 @@ before:**
    `ordinal` and `toString` read from the storage `kotlin.Enum` contributes ahead of the class's own
    fields. The corpus was exact about the order and worth listening to twice: the companion comes
    after every constant, and touching only a companion member still builds the constants first.
+   Then one line came out and the lane went to **1767 pass**. "An adapted callable reference" had
+   been declined on the assumption that an adaptation — a defaulted argument, a `vararg` given one
+   element, a result discarded for a `Unit` expectation — was work the generator owed. It is not:
+   the checked lowering builds an adapter function for each, and an adapter is an ordinary
+   function. That is three declines this session that were guesses about work someone else had
+   already done, which is why probing one before building for it has become the first step.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

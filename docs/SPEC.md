@@ -4364,6 +4364,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
   `::an_override_that_needs_a_bridge_is_declined`).
 
+- **An adapted callable reference needs no adapting here.** A reference is adapted when the
+  function it names does not match the type it is used as: an argument left to its default, a
+  `vararg` given one element, a result discarded for a `Unit`-returning expectation. The checked
+  lowering builds an adapter function for each, and that adapter is an ordinary function, so the
+  reference is an ordinary function value. The decline that said otherwise was a guess about work
+  someone else had already done (`src/native/codegen/lower/functions.rs`,
+  `tests/native_codegen_e2e.rs::an_adapted_callable_reference_runs`).
+
 - **Touching an enum builds all of it, then its companion.** Kotlin initializes an enum class as a
   whole: every constant in declaration order, and the companion object after — a program that only
   ever mentions `E.Y` still runs `E.init(x)` first. So one initializer per enum fills every

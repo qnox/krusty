@@ -57,11 +57,7 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
             captures: captures.clone(),
             sam: sam.clone(),
         })),
-        IrExpr::CallableReference(reference) => Some(if reference.adaptation.is_some() {
-            // A reference adapted on the way in — a vararg spread, a defaulted parameter, a result
-            // coerced to `Unit`. The adapter describes work the generator does not do yet.
-            Err("an adapted callable reference".to_string())
-        } else if reference.declaration_suspend {
+        IrExpr::CallableReference(reference) => Some(if reference.declaration_suspend {
             Err("a suspend callable reference".to_string())
         } else {
             Ok(Site {
