@@ -4828,6 +4828,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments.len(),
                 trailing_lambda,
             );
+            // A file-private declaration is a candidate only in its OWN file. The body checker
+            // filters these (`Checker::source_callable_visible`); the signature pass did not, so two
+            // sibling files each declaring `private fun Ep.toInfo()` produced a two-candidate family
+            // here and the call read as ambiguous — reported as "none of the following candidates is
+            // applicable" listing both. A candidate's file comes from its declaration ANCHOR:
+            // `source_key` is unset for these, which is why filtering on it alone changes nothing.
+            functions
+                .overloads
+                .retain(|candidate| self.candidate_visible_from(scope, candidate));
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let (argument_kinds, argument_types) =
                 Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;

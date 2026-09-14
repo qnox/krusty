@@ -1720,6 +1720,29 @@ impl ProductionSignatureSemantics<'_> {
     /// source argument list. Argument mapping is candidate-owned: a mapping contributed by one
     /// overload must never make a structurally inapplicable sibling participate in type-based
     /// selection (most visibly, a trailing lambda cannot be supplied to a final vararg).
+    /// Whether a candidate's own visibility admits a call from `scope`'s file. Only file-private
+    /// source declarations are restricted here: everything else is either visible module-wide or
+    /// already filtered by the resolver that produced the candidate.
+    fn candidate_visible_from(
+        &self,
+        scope: crate::fir::SignatureScope,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        if candidate.visibility != crate::types::Visibility::Private {
+            return true;
+        }
+        let Some(declaration) = candidate.stable_declaration else {
+            return true;
+        };
+        let Some(anchor) = self.headers.declarations.anchor(declaration) else {
+            return true;
+        };
+        // A private MEMBER is scoped to its classifier, not its file, and the receiver-based lookup
+        // that produced it has already applied that rule. Only a file-level declaration — one whose
+        // anchor has no owning declaration — is restricted to its own source here.
+        anchor.owner.is_some() || anchor.source == scope.source
+    }
+
     fn structurally_applicable_call_candidates(
         candidates: impl IntoIterator<Item = crate::libraries::FunctionInfo>,
         names: &[Option<String>],

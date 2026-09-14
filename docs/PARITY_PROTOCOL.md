@@ -2065,3 +2065,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   duplicated `finally` target. Runtime coverage proves suspension, lambda operand mapping, close on
   exceptional exit, and suppression of a close failure onto the body exception.
   `tests/use_inline_finally_e2e.rs`.
+- **A file-private extension is a candidate only in its own file (fix).** Two sibling files in one
+  package may each declare `private fun Ep.toInfo()`. The body checker filters those by the calling
+  file (`Checker::source_callable_visible`), but the SIGNATURE pass did not, so a call saw a
+  two-candidate family and reported "none of the following candidates is applicable" listing both —
+  the file's OWN declaration as `<not determined>` (its inferred return is unsolved at that point)
+  and the sibling's explicit one.
+  Filtering the sibling out leaves a single candidate, and the ordinary same-file forward reference
+  resolves it; no separate fix for the unsolved return is needed. A candidate's file comes from its
+  declaration ANCHOR — `source_key` is unset for these, which is why filtering on it alone changes
+  nothing — and only a FILE-level declaration is restricted: a private member is scoped to its
+  classifier, and the receiver-based lookup that produced it has already applied that rule.
+  `tests/file_private_extension_scope_e2e.rs::a_sibling_files_private_extension_is_not_a_candidate`,
+  `each_file_reaches_its_own_private_extension`.
