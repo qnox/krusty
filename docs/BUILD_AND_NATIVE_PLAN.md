@@ -1475,6 +1475,16 @@ before:**
    signed ones finish the separation, which is what the JVM's cross-check caught first: a boxed
    `UInt` that the runtime's structural equality did not recognize compared unequal to itself.
 
+   **Top-level delegated properties came free with a smaller reading, for 2411.** A property
+   reference was reaching a top-level property through its slot, so a property that HAS no slot —
+   one with source-written accessors, one delegated — had no reference at all, and a top-level
+   delegated property needs one before any `::` is written, since the metadata handed to
+   `getValue(thisRef, property)` is that object. The extension case had already built the right
+   path (reach the value through the accessor pair, not through storage) and had been written down
+   as a fact about extensions; it is really a fact about properties whose value is not in a slot,
+   and the only thing extensions add is that their accessor leads with a receiver. Saying that
+   instead — one flag, no new mechanism — took 47 declined files to 30.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

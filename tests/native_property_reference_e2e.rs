@@ -289,3 +289,57 @@ fn a_mutable_extension_property_reference_writes_through_its_setter() {
         "OK",
     );
 }
+
+#[test]
+fn a_top_level_property_with_accessors_is_referenced_through_them() {
+    // A reference names a property, not a slot, and a property with its own accessors has no slot
+    // to name: its value is computed. The reference reaches it the only way anything does — by
+    // calling the accessor — and the accessor here takes NO receiver, which is what separates this
+    // from the extension case above rather than a receiver it could pass and does not have.
+    expect_native_box(
+        "var stored = \"a\"\n\
+         var computed: String\n\
+         \x20   get() = stored + \"!\"\n\
+         \x20   set(value) {\n\
+         \x20       stored = value + \"?\"\n\
+         \x20   }\n\
+         fun box(): String {\n\
+         \x20   val reference = ::computed\n\
+         \x20   if (reference.get() != \"a!\") return \"fail get: \" + reference.get()\n\
+         \x20   if (reference.name != \"computed\") return \"fail name: \" + reference.name\n\
+         \x20   reference.set(\"b\")\n\
+         \x20   if (stored != \"b?\") return \"fail set: \" + stored\n\
+         \x20   return if (reference.get() == \"b?!\") \"OK\" else \"fail read back\"\n\
+         }\n",
+        "TopLevelAccessorPropertyReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_top_level_delegated_property_asks_its_delegate_through_a_reference() {
+    // The metadata object `getValue(thisRef, property)` is handed is the same reference `::prop`
+    // is, so a top-level delegated property needs one whether or not the program writes `::`. Its
+    // value lives in the delegate rather than in a slot, which is why the reference has to reach
+    // it through the accessor the delegation built.
+    expect_native_box(
+        "import kotlin.reflect.KProperty\n\
+         class Delegate(private var held: String) {\n\
+         \x20   operator fun getValue(owner: Any?, property: KProperty<*>): String =\n\
+         \x20       held + \"/\" + property.name\n\
+         \x20   operator fun setValue(owner: Any?, property: KProperty<*>, value: String) {\n\
+         \x20       held = value\n\
+         \x20   }\n\
+         }\n\
+         val fixed: String by Delegate(\"one\")\n\
+         var moving: String by Delegate(\"two\")\n\
+         fun box(): String {\n\
+         \x20   if (fixed != \"one/fixed\") return \"fail val: $fixed\"\n\
+         \x20   if (moving != \"two/moving\") return \"fail var: $moving\"\n\
+         \x20   moving = \"three\"\n\
+         \x20   return if (moving == \"three/moving\") \"OK\" else \"fail write: $moving\"\n\
+         }\n",
+        "TopLevelDelegatedProperty",
+        "OK",
+    );
+}

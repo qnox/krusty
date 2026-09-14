@@ -1954,6 +1954,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the reference node's `extension_receiver` flag, which is a fact about the accessor's parameter list
   and not about this object.
   Tests: `tests/native_property_reference_e2e.rs`.
+
+- **A reference names a property, not a slot.** A top-level property with source-written accessors,
+  or a delegated one, has no slot for a reference to read: its value is computed or lives in the
+  delegate. The reference reaches it the only way anything does — through the accessor pair the
+  checked lowering built — which is the same path an extension property's reference takes, and the
+  only difference between them is whether that accessor leads with a receiver. A site with none has
+  none to pass, bound or unbound. This is also what a TOP-LEVEL delegated property needs before any
+  `::` is written: the metadata its `getValue(thisRef, property)` is handed is that same reference
+  object.
+  Tests: `tests/native_property_reference_e2e.rs`
+  (`a_top_level_property_with_accessors_is_referenced_through_them`,
+  `a_top_level_delegated_property_asks_its_delegate_through_a_reference`).
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that

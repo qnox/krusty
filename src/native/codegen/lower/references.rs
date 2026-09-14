@@ -12,10 +12,11 @@
 //! reference CHECKED — it names the property and says whether a receiver is bound, and nothing
 //! more — precisely so that each target may choose its own representation.
 //!
-//! What is realized: a property of this file, top-level or a class member, bound or not. A
-//! reference to a DEPENDENCY property (`"kotlin"::length`), to an extension property, or to one
-//! with context parameters declines by name: each needs a receiver shape this object does not
-//! carry, and answering it wrongly would be worse than skipping the program.
+//! What is realized: a property of this file, top-level or a class member, bound or not, and
+//! however its value is reached — a slot, a source-written accessor pair, or a delegate. A
+//! reference to a DEPENDENCY property (`"kotlin"::length`), to a MEMBER extension property, or to
+//! one with context parameters declines by name: each wants more operands than the one receiver
+//! this object has room for, and answering it wrongly would be worse than skipping the program.
 
 use super::*;
 use crate::fir::FirPropertyReferenceTarget;
@@ -43,12 +44,15 @@ enum Access {
     TopLevel,
     /// A member of a class of this file, read and written through the receiver.
     Member { class: ClassId, index: usize },
-    /// A top-level EXTENSION property. There is no storage — an extension property has no object
-    /// of its own to keep a field in — so both directions are calls to the accessor the checked
-    /// lowering built, with the receiver as its leading argument.
-    Extension {
+    /// A top-level property reached through its ACCESSOR pair rather than through a slot: an
+    /// extension property, which has no object of its own to keep a field in, and a delegated or
+    /// custom-accessor property, whose value is not in any slot this reference could name. The two
+    /// differ only in whether the accessor leads with a receiver, so that is what `receiver` says
+    /// — and a site that has none has none to pass, bound or not.
+    Accessor {
         getter: FunId,
         setter: Option<FunId>,
+        receiver: bool,
     },
 }
 
@@ -224,14 +228,15 @@ impl<'a> FileLowering<'a> {
             Some(IrLocalPropertyLayout::TopLevelAccessor {
                 getter,
                 setter,
-                receiver: Some(_),
+                receiver,
                 context_parameters,
-            }) if context_parameters.is_empty() => Access::Extension {
+            }) if context_parameters.is_empty() => Access::Accessor {
                 getter: *getter,
                 setter: *setter,
+                receiver: receiver.is_some(),
             },
-            // A MEMBER extension property, or one with context parameters: its accessor takes
-            // operands this object does not carry, so the site is left to decline by name.
+            // A property with context parameters, or a MEMBER extension property: its accessor
+            // takes operands this object does not carry, so the site is left to decline by name.
             Some(IrLocalPropertyLayout::TopLevelAccessor { .. })
             | Some(IrLocalPropertyLayout::MemberExtension { .. }) => return None,
             _ => match checked.class {
@@ -445,8 +450,13 @@ impl<'a> FileLowering<'a> {
                         body.null_check(object)?;
                         body.property_read_of(class, index, object)?
                     }
-                    Access::Extension { getter, .. } => {
-                        let object = receiver(body, params, receiver_offset);
+                    Access::Accessor {
+                        getter,
+                        receiver: takes_receiver,
+                        ..
+                    } => {
+                        let object =
+                            takes_receiver.then(|| receiver(body, params, receiver_offset));
                         body.accessor_of(getter, object, None)?
                     }
                 };
@@ -498,10 +508,15 @@ impl<'a> FileLowering<'a> {
                         };
                         body.property_write_of(class, index, object, value)?;
                     }
-                    Access::Extension { setter, .. } => {
+                    Access::Accessor {
+                        setter,
+                        receiver: takes_receiver,
+                        ..
+                    } => {
                         let setter =
                             setter.ok_or_else(|| format!("a write to the read-only `{name}`"))?;
-                        let object = receiver(body, params, receiver_offset);
+                        let object =
+                            takes_receiver.then(|| receiver(body, params, receiver_offset));
                         body.accessor_of(setter, object, Some(params[2]))?;
                     }
                 }
@@ -626,20 +641,20 @@ impl BodyLowering<'_, '_, '_> {
     pub(super) fn accessor_of(
         &mut self,
         accessor: FunId,
-        object: Value,
+        object: Option<Value>,
         value: Option<Value>,
     ) -> Result<Option<Value>, Unsupported> {
         let params = self.file.ir.functions[accessor as usize].params.clone();
         let mut arguments = Vec::with_capacity(params.len());
-        for (operand, ty) in std::iter::once(object).chain(value).zip(&params) {
+        for (operand, ty) in object.into_iter().chain(value).zip(&params) {
             let Some(argument) = self.convert(operand, Some(any()), *ty)? else {
-                return Err("a `Unit` operand of an extension accessor".to_string());
+                return Err("a `Unit` operand of a property accessor".to_string());
             };
             arguments.push(argument);
         }
         if arguments.len() != params.len() {
             return Err(format!(
-                "an extension accessor taking {} operands for {} parameters",
+                "a property accessor taking {} operands for {} parameters",
                 arguments.len(),
                 params.len()
             ));
