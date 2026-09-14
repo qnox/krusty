@@ -65405,22 +65405,28 @@ impl<'a> Checker<'a> {
             if local.has_unstable_delegated_read() {
                 return None;
             }
-            // A bare own-member read (`label`) is an alias for a dispatch-property read
-            // (`this.label`), not a captured immutable slot. Route it through the segmented path
-            // so custom/delegated/open getters receive exactly the same stability decision as the
-            // qualified spelling. This also declines an enclosing-instance property in an inner
-            // class: bare lookup may find it, but the current `this` is not that property's receiver.
-            if path.segments.is_empty()
-                && matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
-            {
-                return self.stable_path_ty(
-                    scope,
-                    &NarrowPath {
-                        root: "this".to_string(),
-                        segments: vec![path.root.clone()],
-                    },
-                    site,
-                );
+            // A bare own-member read (`label`) is an alias for a dispatch-property read, not a
+            // captured immutable slot. Route it through the member-read decision so
+            // custom/delegated/open getters receive exactly the same stability answer as the
+            // qualified spelling. The receiver that owns the property is NOT always the innermost
+            // `this`: inside a lambda typed `Other.() -> R` the enclosing class's rung is still on
+            // the stack and the member is still read through it. The binding records which rung
+            // that is, so decide against that receiver rather than against whatever `this` happens
+            // to mean at the proof site. A binding naming no live rung — an enclosing-instance
+            // property reached from a nested classifier — has no receiver to read through and
+            // declines here.
+            if path.segments.is_empty() {
+                if let ReceiverFnValueOrigin::DispatchProperty {
+                    receiver_identity, ..
+                } = local.origin
+                {
+                    let receiver = self
+                        .implicit_receivers(scope)
+                        .into_iter()
+                        .find(|candidate| candidate.identity == receiver_identity)?
+                        .ty;
+                    return self.stable_member_read_ty(receiver, &path.root);
+                }
             }
             // A member/top-level property as the ROOT of a longer path re-reads through its
             // accessor each time; only a plain local/`val` slot is a stable root there. (For a
@@ -65432,47 +65438,55 @@ impl<'a> Checker<'a> {
             local.ty
         };
         for segment in &path.segments {
-            let recv = ty.non_null();
-            let internal = recv.obj_internal()?;
-            let class = self.resolver().classifier(internal)?;
-            if let Some(index) = self.resolved_index {
-                let source = self.fed_source();
-                let callables =
-                    crate::symbol_resolver::members_in_hierarchy(&source, recv, segment);
-                let property = callables
-                    .properties()
-                    .iter()
-                    .find(|property| property.kind == crate::libraries::PropKind::Member)?;
-                let flags = index
-                    .declaration_header(property.stable_declaration?)?
-                    .flags;
-                if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-                    || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-                    || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-                    || (flags.has(crate::fir::DeclarationFlags::OPEN) && !class.is_final())
-                    || property.context_count != 0
-                {
-                    return None;
-                }
-                ty = property.ty.projection_read_ty();
-                continue;
-            }
-            let symbols = self.module.legacy_symbols()?;
-            let (owner, property) = symbols.declared_member_prop(internal, segment)?;
-            if property.setter_name.is_some()
-                || property.has_custom_getter
-                || (property.is_open && !class.is_final())
-                || !property.context_params.is_empty()
+            ty = self.stable_member_read_ty(ty, segment)?;
+        }
+        Some(ty)
+    }
+
+    /// Read type of one member property through `receiver`, or `None` when reading it twice may
+    /// yield different values. A `var`, a custom getter, a delegate, an `open` property on a
+    /// non-final class and a context-parameterized property are all re-entered per read, so no
+    /// flow proof about the first read describes the second.
+    fn stable_member_read_ty(&self, receiver: Ty, name: &str) -> Option<Ty> {
+        let recv = receiver.non_null();
+        let internal = recv.obj_internal()?;
+        let class = self.resolver().classifier(internal)?;
+        if let Some(index) = self.resolved_index {
+            let source = self.fed_source();
+            let callables = crate::symbol_resolver::members_in_hierarchy(&source, recv, name);
+            let property = callables
+                .properties()
+                .iter()
+                .find(|property| property.kind == crate::libraries::PropKind::Member)?;
+            let flags = index
+                .declaration_header(property.stable_declaration?)?
+                .flags;
+            if flags.has(crate::fir::DeclarationFlags::MUTABLE)
+                || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
+                || flags.has(crate::fir::DeclarationFlags::DELEGATED)
+                || (flags.has(crate::fir::DeclarationFlags::OPEN) && !class.is_final())
+                || property.context_count != 0
             {
                 return None;
             }
-            // Use the same generic-property instantiation as ordinary member reads and probes; a
-            // path proof is sound only when its declared and read-time types are identical.
-            ty = symbols
-                .applied_declared_member_prop_ty(recv, owner, segment, property.ty)
-                .projection_read_ty();
+            return Some(property.ty.projection_read_ty());
         }
-        Some(ty)
+        let symbols = self.module.legacy_symbols()?;
+        let (owner, property) = symbols.declared_member_prop(internal, name)?;
+        if property.setter_name.is_some()
+            || property.has_custom_getter
+            || (property.is_open && !class.is_final())
+            || !property.context_params.is_empty()
+        {
+            return None;
+        }
+        // Use the same generic-property instantiation as ordinary member reads and probes; a
+        // path proof is sound only when its declared and read-time types are identical.
+        Some(
+            symbols
+                .applied_declared_member_prop_ty(recv, owner, name, property.ty)
+                .projection_read_ty(),
+        )
     }
 
     /// The one stability failure kotlinc reports as SMARTCAST_IMPOSSIBLE: the path's root is a
