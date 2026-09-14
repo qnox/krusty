@@ -1304,6 +1304,7 @@ impl BodyFirChecker<'_> {
         &mut self,
         statement: StmtId,
         dec: bool,
+        prefix: bool,
     ) -> Result<Option<FirExprKind>, BodyCheckFailure> {
         let selected = self.info.stmt_lowers.get(&statement).cloned();
         let span = self.file.stmt_spans.get(statement.0 as usize).copied();
@@ -1318,6 +1319,7 @@ impl BodyFirChecker<'_> {
                 return self.property_inc_dec_write(
                     statement,
                     dec,
+                    prefix,
                     span,
                     cause,
                     access.property.stable_declaration,
@@ -1396,6 +1398,7 @@ impl BodyFirChecker<'_> {
         self.property_inc_dec_write(
             statement,
             dec,
+            prefix,
             span,
             cause,
             declaration,
@@ -1414,6 +1417,7 @@ impl BodyFirChecker<'_> {
         &mut self,
         statement: StmtId,
         dec: bool,
+        prefix: bool,
         span: Option<Span>,
         cause: OriginId,
         declaration: Option<DeclarationId>,
@@ -1448,7 +1452,7 @@ impl BodyFirChecker<'_> {
             origin,
             ty: self.resolved_type(span, resolution.receiver_ty)?,
             kind: FirExprKind::PropertyRead {
-                target: read_target,
+                target: read_target.clone(),
                 dispatch_receiver,
                 extension_receiver,
                 context_arguments: context_arguments.clone(),
@@ -1478,7 +1482,7 @@ impl BodyFirChecker<'_> {
             ty: updated_ty,
             kind: updated_kind,
         });
-        Ok(Some(FirExprKind::PropertyWrite {
+        let write = FirExprKind::PropertyWrite {
             target: write_target,
             dispatch_receiver,
             extension_receiver,
@@ -1486,6 +1490,39 @@ impl BodyFirChecker<'_> {
             value: updated,
             conversion: None,
             substitutions: Box::new([]),
+        };
+        if !prefix {
+            return Ok(Some(write));
+        }
+        // `++p` is `p = p.inc()` and THEN the value of `p`, which for a property is a fresh read
+        // through its getter. The value is discarded in statement position, but the read is not
+        // discardable: a custom getter is a call, and how many times it runs is observable
+        // (`codegen/box/intrinsics/prefixIncDec.kt`, `codegen/box/statics/incInObject.kt`). The
+        // postfix form above keeps the OLD value and so reads once, which is why only this arm
+        // reads again.
+        let write = self.body.add_expr(FirExpr {
+            origin,
+            ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+            kind: write,
+        });
+        let statements = Box::new([self.body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(write),
+        })]);
+        let reread = self.body.add_expr(FirExpr {
+            origin,
+            ty: updated_ty,
+            kind: FirExprKind::PropertyRead {
+                target: read_target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments: Box::new([]),
+                substitutions: Box::new([]),
+            },
+        });
+        Ok(Some(FirExprKind::Block {
+            statements,
+            result: Some(reread),
         }))
     }
 
