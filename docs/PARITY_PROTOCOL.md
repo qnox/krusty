@@ -2076,3 +2076,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   asserts krusty emitted the exact legal facade call, and compares the same consumer's `box()` result
   under kotlinc and krusty.
   `tests/non_reified_inline_splice_fallback_e2e.rs`.
+- **A custom serializer can serialize an ELEMENT, and can be generic (fix).** A class-level
+  `@Serializable(with = X::class)` names the serializer outright, so it takes precedence over
+  anything derived from the type itself — exactly as it does for a property of that type. The element
+  path had no custom-serializer branch at all, so a field whose type carries one, and any collection
+  over that type, was underivable. The plugin then leaves a residual placeholder rather than emit a
+  silently incomplete serializer, and `jvm_can_emit` declines the whole FILE with "this construct is
+  not yet supported by the IR backend" — one such field cost a module every class it would have
+  emitted.
+  `X` may itself be generic (`class BoxSerializer<T>(inner: KSerializer<T>)`), so the plan carries one
+  argument serializer per type parameter, derived recursively — the same derivation the generic
+  `$serializer` branch already performed, now shared. A generic element whose serializer came from an
+  explicit `with =` is constructible directly (`X(<argument serializer>…)`) and needs none of the
+  companion ABI a GENERATED generic serializer would, which is why only the latter still declines.
+  `tests/serialization_krusty_only_e2e.rs::generic_custom_serializer_element_round_trips_entirely_in_krusty`.

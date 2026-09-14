@@ -123,6 +123,47 @@ fun box(): String {
 }
 
 #[test]
+fn generic_custom_serializer_element_round_trips_entirely_in_krusty() {
+    // A class-level `@Serializable(with = X::class)` names the serializer outright, and `X` may be
+    // GENERIC — `BoxSerializer<T>(inner: KSerializer<T>)`. The element path had no custom-serializer
+    // branch at all, so a field of such a type (and any collection over it) was underivable: the
+    // plugin left a residual placeholder and the whole FILE was declined with "this construct is not
+    // yet supported by the IR backend".
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.Json
+@Serializable(with = BoxSerializer::class)
+class Box<out T>(val item: T)
+class BoxSerializer<T>(private val inner: KSerializer<T>) : KSerializer<Box<T>> {
+    override val descriptor: SerialDescriptor = inner.descriptor
+    override fun serialize(encoder: Encoder, value: Box<T>) = inner.serialize(encoder, value.item)
+    override fun deserialize(decoder: Decoder): Box<T> = Box(inner.deserialize(decoder))
+}
+@Serializable
+data class Leaf(val v: String)
+@Serializable
+data class Holder(val direct: Box<Leaf>, val mapped: Map<String, Box<Leaf>>)
+fun box(): String {
+    val value = Holder(Box(Leaf("a")), mapOf("k" to Box(Leaf("b"))))
+    val j = Json.encodeToString(Holder.serializer(), value)
+    val back = Json.decodeFromString(Holder.serializer(), j)
+    return back.direct.item.v + back.mapped.getValue("k").item.v
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerCustomGeneric") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "ab",
+        "generic custom-serializer element round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
 fn serial_name_overrides_json_key_entirely_in_krusty() {
     // `@SerialName("…")` on a constructor property renames its descriptor element (and thus its JSON
     // key) — including a const-folded value (`@SerialName("$prefix.bar")` with `const val prefix`).

@@ -2,8 +2,8 @@
 
 use super::{
     build_contextual_serializer, build_polymorphic_serializer, builtin_element_serializer,
-    class_ty, collection_serializer_builder, generated_serializer_accessor, is_nullable,
-    kserializer_of, serializer_of_name, type_is_contextual, wrap_nullable_serializer,
+    class_ty, collection_serializer_builder, custom_serializer_of, generated_serializer_accessor,
+    is_nullable, kserializer_of, serializer_of_name, type_is_contextual, wrap_nullable_serializer,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -21,6 +21,14 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
+    /// A serializer named by a class-level `@Serializable(with = X::class)`, constructed with one
+    /// serializer per type parameter it declares. `X` may itself be generic
+    /// (`class BoxSerializer<T>(inner: KSerializer<T>)`), which is why this carries arguments rather
+    /// than reducing to a singleton.
+    Custom {
+        serializer: TypeName,
+        arguments: Vec<ElementSerializerPlan>,
+    },
     Contextual(TypeName),
     Polymorphic(TypeName),
     LocalSingleton(ClassId),
@@ -30,6 +38,33 @@ pub(super) enum ElementSerializerPlan {
 
 /// Select one complete serializer plan without mutating IR. Applicability checks and expression
 /// construction consume this same decision, so they cannot drift into parallel overload systems.
+/// One serializer plan per declared type parameter, derived recursively from the applied arguments.
+///
+/// A star projection carries its checked readable upper bound separately from an explicit `out`
+/// projection, so the semantic read type is consumed directly. An in-projection has no readable
+/// element type from which a serializer can be derived, and neither has a type applied to fewer
+/// arguments than the declaration takes.
+fn serializer_plan_arguments(
+    ir: &IrFile,
+    ctx: &PluginContext,
+    type_args: &[Ty],
+    arity: usize,
+) -> Option<Vec<ElementSerializerPlan>> {
+    if type_args.len() < arity {
+        return None;
+    }
+    let mut arguments = Vec::with_capacity(arity);
+    for argument in type_args.iter().take(arity) {
+        let readable = match argument {
+            Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
+            Ty::InProjection(_) => return None,
+            _ => *argument,
+        };
+        arguments.push(element_serializer_plan(ir, ctx, &readable)?);
+    }
+    Some(arguments)
+}
+
 pub(super) fn element_serializer_plan(
     ir: &IrFile,
     ctx: &PluginContext,
@@ -41,6 +76,27 @@ pub(super) fn element_serializer_plan(
     // The old `obj_internal()` guard returned `None` for them, leaving a null child serializer → runtime NPE.
     let fq_name = ty.kotlin_class_internal()?;
     let type_args = nn.type_args();
+    // A class-level `@Serializable(with = X::class)` names the serializer outright, so it takes
+    // precedence over anything derived from the type itself — exactly as it does for a property of
+    // that type. Without this an element carrying one was underivable and the plugin left a residual
+    // placeholder, declining the whole FILE.
+    if let Some(class_id) = ir.classes.iter().position(|c| c.fq_name_id() == fq_name) {
+        if let Some(serializer) = custom_serializer_of(ctx, ir, class_id as ClassId) {
+            // The serializer takes one `KSerializer` per type parameter it declares, and the
+            // arguments come from the ELEMENT's applied type arguments.
+            let arity = ir
+                .classes
+                .iter()
+                .find(|c| c.fq_name_id() == serializer)
+                .map(|c| c.type_params.len())
+                .unwrap_or(0);
+            let arguments = serializer_plan_arguments(ir, ctx, type_args, arity)?;
+            return Some(ElementSerializerPlan::Custom {
+                serializer,
+                arguments,
+            });
+        }
+    }
     // A sealed `@Serializable` class has NO `$serializer` (its `serializer()` returns a runtime
     // `SealedClassSerializer`); a field of that type uses `Class.serializer()` directly. Requires the
     // generated `serializer()` accessor (i.e. the class IS `@Serializable`) — else a plain sealed type
@@ -148,18 +204,7 @@ pub(super) fn element_serializer_plan(
         // recursively. A star projection carries its checked readable upper bound separately from
         // an explicit `out` projection, so consume that semantic read type directly.
         // An in-projection has no readable element type from which a serializer can be derived.
-        let mut arguments = Vec::with_capacity(n_tp);
-        for argument in type_args.iter().take(n_tp) {
-            let readable = match argument {
-                Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
-                Ty::InProjection(_) => return None,
-                _ => *argument,
-            };
-            arguments.push(element_serializer_plan(ir, ctx, &readable)?);
-        }
-        if arguments.len() != n_tp {
-            return None;
-        }
+        let arguments = serializer_plan_arguments(ir, ctx, type_args, n_tp)?;
         return Some(ElementSerializerPlan::Generated {
             classifier: fq_name,
             arguments,
@@ -172,9 +217,21 @@ pub(super) fn element_serializer_plan(
     // Scope: the non-generic shape. A generic dependency serializer is built through
     // `Foo.Companion.serializer(<argument serializers>)`, which needs the companion's ABI read back
     // from the classpath; until then such a field stays underivable and the caller bails cleanly.
-    if type_args.is_empty() {
-        if let Some(serializer) = ctx.external_serializer(fq_name) {
+    if let Some(serializer) = ctx.external_serializer(fq_name) {
+        if type_args.is_empty() {
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
+        }
+        // A GENERIC element whose serializer was named by an explicit `@Serializable(with = X)` is
+        // constructible right here: `X(<argument serializer>…)`, one per type argument, exactly as
+        // kotlinc builds it. That needs none of the companion ABI a GENERATED generic serializer
+        // would — which is reached through `Foo.Companion.serializer(…)` and stays underivable, so
+        // it keeps declining below.
+        if serializer != fq_name.nested_child("$serializer") {
+            let arguments = serializer_plan_arguments(ir, ctx, type_args, type_args.len())?;
+            return Some(ElementSerializerPlan::Custom {
+                serializer,
+                arguments,
+            });
         }
     }
     if let Some(ser) = builtin_element_serializer(ty) {
@@ -223,6 +280,18 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
         ElementSerializerPlan::Nullable(inner) => {
             let inner = emit_element_serializer(ir, *inner);
             wrap_nullable_serializer(ir, inner)
+        }
+        ElementSerializerPlan::Custom {
+            serializer,
+            arguments,
+        } => {
+            let arity = arguments.len();
+            let arguments = arguments
+                .into_iter()
+                .map(|argument| emit_element_serializer(ir, argument))
+                .collect();
+            let parameters = "Lkotlinx/serialization/KSerializer;".repeat(arity);
+            ir.new_external(&serializer.render(), format!("({parameters})V"), arguments)
         }
         ElementSerializerPlan::Contextual(classifier) => {
             build_contextual_serializer(ir, classifier)
