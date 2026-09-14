@@ -40,13 +40,22 @@ impl ProductionSignatureSemantics<'_> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let package = self.qualified_package(qualifier, &module)?;
         let packages = [package];
+        let access_package = self
+            .headers
+            .sources
+            .get(scope.source)
+            .ok_or_else(Self::failure)?
+            .package;
         let resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
             self.table.libraries.as_ref(),
             &module,
             &packages,
+        )
+        .with_access_context(access_package, scope.source.raw(), Vec::new());
+        let candidates = self.implicit_context_candidates(
+            scope,
+            resolver.accessible_top_level_candidates(name).into_iter(),
         );
-        let candidates = self
-            .implicit_context_candidates(scope, resolver.top_level_candidates(name).into_iter());
         let (selected_arguments, selected_argument_types) =
             Self::mapped_call_arguments(&candidates, arguments, trailing_lambda)
                 .ok_or_else(Self::failure)?;
@@ -111,13 +120,22 @@ impl ProductionSignatureSemantics<'_> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let package = self.qualified_package(qualifier, &module)?;
         let packages = [package];
+        let access_package = self
+            .headers
+            .sources
+            .get(scope.source)
+            .ok_or_else(Self::failure)?
+            .package;
         let resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
             self.table.libraries.as_ref(),
             &module,
             &packages,
+        )
+        .with_access_context(access_package, scope.source.raw(), Vec::new());
+        let candidates = self.implicit_context_candidates(
+            scope,
+            resolver.accessible_top_level_candidates(name).into_iter(),
         );
-        let candidates = self
-            .implicit_context_candidates(scope, resolver.top_level_candidates(name).into_iter());
         let (kinds, _slots) = Self::probe_call_arguments(&candidates, arguments, trailing_lambda)
             .ok_or_else(Self::failure)?;
         let type_arguments = type_arguments

@@ -54,6 +54,45 @@ fn generic_cast_is_accepted_by_both_frontends() {
 }
 
 #[test]
+fn inaccessible_extension_precedes_incompatible_callable_reference_shape() {
+    let declaration = "package app\n\
+                       \n\
+                       class Record\n\
+                       \n\
+                       private fun Record.label(value: Int): String = value.toString()\n";
+    let use_site = "package app\n\
+                    \n\
+                    fun expose(record: Record): (String) -> String = record::label\n";
+    let result = common::compiler_diagnostics(
+        &[("Decl.kt", declaration), ("Use.kt", use_site)],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(
+        krusty,
+        vec![ObservedError {
+            file: "Use.kt".to_string(),
+            line: 3,
+            column: 58,
+            message: "cannot access 'label': it is private in its file".to_string(),
+        }]
+    );
+    assert_eq!(
+        errors(&result.reference_stderr),
+        vec![ObservedError {
+            file: "Use.kt".to_string(),
+            line: 3,
+            column: 58,
+            message: "cannot access 'fun Record.label(value: Int): String': it is private in file."
+                .to_string(),
+        }]
+    );
+}
+
+#[test]
 fn anonymous_objects_do_not_restore_cut_outer_type_parameters() {
     let companion = "class CompanionOuter<T> {\n\
                      \x20   companion object {\n\
