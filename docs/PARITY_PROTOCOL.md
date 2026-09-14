@@ -2297,3 +2297,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `src/resolve/type_join.rs::tests::an_exact_platform_pair_keeps_the_flexible_operand_in_both_orders`,
   `nested_platform_and_genuine_nullable_differences_are_not_outer_pairs`,
   `tests/try_expected_type_join_e2e.rs::a_try_expression_joins_its_branches_against_the_expected_type`.
+- **A spliced lambda's result is boxed from the carrier its own block declares (fix).** A stdlib
+  `inline fun` is spliced as bytecode with its lambda emitted inline at the `FunctionN.invoke` site it
+  replaces; that `invoke` returns `Object`, so a primitive result must be boxed on the way out. A
+  lambda holding a labelled `return@map` carries its result through a local its own block declares,
+  and value indices are numbered PER BODY — so resolving that local through the ambient slot and
+  variable tables answered with whichever body last claimed the number, the enclosing caller, since
+  the lambda is emitted into a scratch frame. An `Int` body reported `Iterable`, the scalar test
+  failed, and the box was skipped entirely: the method emitted
+  `iload N; invokeinterface Collection.add:(Ljava/lang/Object;)Z` and the class failed verification
+  while krusty reported SUCCESS. The block now answers for the local it declares.
+  The carrier must stay PHYSICAL: `semantic_scalar_adapter` treats it as the authority for whether a
+  value is physically scalar, and an unsigned value class is semantically unsigned but physically
+  `int` — replacing it with the checked type instead compiles the repro and breaks the unsigned
+  splice tests, which are the oracle for that distinction.
+  `tests/inline_lambda_result_boxing_e2e.rs::a_labeled_return_in_map_boxes_a_primitive_result`,
+  `every_primitive_element_carrier_is_boxed`, `an_unsigned_element_keeps_its_semantic_box`,
+  `non_local_returns_and_reference_elements_are_unchanged`.

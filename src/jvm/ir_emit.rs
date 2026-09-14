@@ -20054,7 +20054,31 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::BottomValue { .. } => Ty::Nothing,
-            IrExpr::Block { value, .. } => value.map(|v| self.value_ty(v)).unwrap_or(Ty::Unit),
+            IrExpr::Block { stmts, value } => {
+                let Some(value) = *value else {
+                    return Ty::Unit;
+                };
+                // A block that carries its result through a local it DECLARES answers for that
+                // local itself. Value indices are numbered per body, so asking the ambient slot and
+                // variable tables for one resolves whichever body last claimed that number — the
+                // enclosing caller, when this block is a lambda template emitted into a scratch
+                // frame. The declaration is right here and is not ambiguous.
+                if let IrExpr::GetValue(index) = self.ir.expr(value) {
+                    for &statement in stmts {
+                        if let IrExpr::Variable {
+                            index: declared,
+                            ty,
+                            ..
+                        } = self.ir.expr(statement)
+                        {
+                            if declared == index {
+                                return *ty;
+                            }
+                        }
+                    }
+                }
+                self.value_ty(value)
+            }
             IrExpr::TypeOp {
                 op, type_operand, ..
             } => match op {
