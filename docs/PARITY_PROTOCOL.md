@@ -2164,3 +2164,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/labeled_lambda_return_expected_e2e.rs::a_labeled_return_infers_from_the_lambdas_expected_result`,
   `a_labeled_return_from_a_receiver_lambda_infers_the_same_way`,
   `the_other_lambda_exit_spellings_still_infer`, `a_labeled_return_of_the_wrong_type_is_still_rejected`.
+- **One physical callable contributed by multiple classpath entries is one candidate (fix).** Scoped
+  package lookup used to append each entry's normalized declarations directly. The same library at
+  two distinct paths therefore manufactured an ambiguous overload set from one JVM callable. The
+  provider now unions both top-level and extension results by the stable physical identity `owner +
+  name + descriptor`, preserving declaration order and retaining genuine overloads and distinct
+  owners. No library or member spelling participates in the decision.
+  `tests/classpath_candidate_union_e2e.rs::copied_classpath_entry_keeps_indexed_iteration_unambiguous`.
