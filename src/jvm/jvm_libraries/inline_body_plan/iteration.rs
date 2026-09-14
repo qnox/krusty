@@ -110,7 +110,12 @@ impl JvmLibraries {
                 )
             }
         };
-        let traversal = self.normalize_iteration_traversal(traversal)?;
+        let Some(traversal) = self.normalize_iteration_traversal(traversal) else {
+            // A dependency may be temporarily unavailable while another provider record is being
+            // assembled. Do not turn that state into a process-global negative plan cache entry.
+            *decode_unavailable = true;
+            return None;
+        };
         Some(InlineBodyPlan::Iteration {
             lambda_parameter,
             index,
@@ -1312,7 +1317,7 @@ mod tests {
                 "map",
                 "(Ljava/util/Map;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
                 &[
-                    ("getEntries", "()Ljava/util/Set;"),
+                    ("entrySet", "()Ljava/util/Set;"),
                     ("iterator", "()Ljava/util/Iterator;"),
                 ][..],
                 "(I)V",

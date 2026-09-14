@@ -122,16 +122,10 @@ fn only_invocation<'a>(
     calls.next().is_none().then_some(call)
 }
 
-fn recognize<'a>(
+fn collection_transform_lambda_parameter(
     callable: &LibraryCallable,
-    body_descriptor: &str,
     parameter_slots: &[u16],
-    body: &'a MethodCode,
-    instructions: &[Insn],
-) -> Option<RecognizedCollectionTransform<'a>> {
-    // This decoder's bytecode template has exactly one extension receiver and one function
-    // argument. Their indices are still discovered from the normalized signature below; the
-    // cardinality guard prevents a different body shape from being partially decoded.
+) -> Option<usize> {
     if !callable.inline.can_inline()
         || callable.suspend
         || callable.context_count != 0
@@ -142,40 +136,54 @@ fn recognize<'a>(
             .iter()
             .enumerate()
             .any(|(index, slot)| parameter_slots[..index].contains(slot))
-        || !body.handlers.is_empty()
     {
-        return None;
-    }
-    let receiver_parameter = callable.context_count;
-    let mut action_parameters =
-        callable
-            .params
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(parameter, ty)| {
-                (parameter != receiver_parameter)
-                    .then_some(ty)
-                    .and_then(|ty| match ty {
-                        Ty::Fun(action)
-                            if !action.suspend
-                                && action.context_count == 0
-                                && !action.has_receiver
-                                && action.params.len() == 1 =>
-                        {
-                            Some((parameter, action))
-                        }
-                        _ => None,
-                    })
-            });
-    let (lambda_parameter, _action) = action_parameters.next()?;
-    if action_parameters.next().is_some() {
         return None;
     }
     let generic = callable.generic_sig.as_deref()?;
     if generic.ret.type_args().len() != 1 || generic.receiver.is_none() {
         return None;
     }
+    callable
+        .params
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(parameter, ty)| {
+            (parameter != callable.context_count)
+                .then_some(ty)
+                .and_then(|ty| match ty {
+                    Ty::Fun(action)
+                        if !action.suspend
+                            && action.context_count == 0
+                            && !action.has_receiver
+                            && action.params.len() == 1 =>
+                    {
+                        Some(parameter)
+                    }
+                    _ => None,
+                })
+        })
+        .next()
+}
+
+fn recognize<'a>(
+    callable: &LibraryCallable,
+    body_descriptor: &str,
+    parameter_slots: &[u16],
+    body: &'a MethodCode,
+    instructions: &[Insn],
+) -> Option<RecognizedCollectionTransform<'a>> {
+    // This decoder's bytecode template has exactly one extension receiver and one function
+    // argument. Their indices are still discovered from the normalized signature below; the
+    // cardinality guard prevents a different body shape from being partially decoded.
+    let Some(lambda_parameter) = collection_transform_lambda_parameter(callable, parameter_slots)
+    else {
+        return None;
+    };
+    if !body.handlers.is_empty() {
+        return None;
+    }
+    let receiver_parameter = callable.context_count;
     let (physical_parameters, physical_result) =
         crate::jvm::names::parse_method_descriptor(body_descriptor)?;
     if physical_parameters.len() != callable.physical_params.len() {
@@ -598,6 +606,12 @@ impl JvmLibraries {
         body_descriptor: &str,
         parameter_slots: &[u16],
     ) -> CollectionTransformDecode {
+        // Reject the overwhelmingly common non-transform inline declaration before touching its
+        // classfile body. The structural recognizer repeats this guard so direct tests cannot call
+        // it with an ineligible view.
+        if collection_transform_lambda_parameter(callable, parameter_slots).is_none() {
+            return CollectionTransformDecode::NotRecognized;
+        }
         let owner = callable.owner.render();
         let Some(body) = self.cp.method_code(&owner, &callable.name, body_descriptor) else {
             return CollectionTransformDecode::Unavailable;
@@ -615,7 +629,9 @@ impl JvmLibraries {
             return CollectionTransformDecode::NotRecognized;
         };
         let Some(traversal) = self.normalize_iteration_traversal(recognized.traversal) else {
-            return CollectionTransformDecode::Rejected;
+            // Member normalization can observe an unavailable provider dependency. A negative plan
+            // for that transient state must not escape into the process-global declaration cache.
+            return CollectionTransformDecode::Unavailable;
         };
         let Some((_, factory)) = self.inline_plan_constructor(recognized.factory) else {
             return CollectionTransformDecode::Unavailable;

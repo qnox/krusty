@@ -724,6 +724,10 @@ impl JvmLibraries {
                 realization.descriptor.as_str(),
             )
         });
+        let generic_signature = callable
+            .generic_sig
+            .as_deref()
+            .map(|signature| (signature.receiver, signature.ret));
         if let Some(plan) = self.cp.cached_inline_plan(
             callable.owner,
             &callable.name,
@@ -732,6 +736,9 @@ impl JvmLibraries {
             callable.context_count,
             callable.source_receiver,
             &callable.params,
+            callable.ret,
+            callable.suspend,
+            generic_signature,
             default_target,
         ) {
             return plan.map(|boxed| *boxed);
@@ -754,6 +761,9 @@ impl JvmLibraries {
                 callable.context_count,
                 callable.source_receiver,
                 &callable.params,
+                callable.ret,
+                callable.suspend,
+                generic_signature,
                 default_target,
                 plan.clone().map(Box::new),
             );

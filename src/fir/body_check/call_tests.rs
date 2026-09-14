@@ -3872,7 +3872,10 @@ fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
     };
     assert_eq!(
         entries.receiver.get(),
-        Ty::obj_args("kotlin/collections/Map", &[Ty::String, Ty::Int])
+        Ty::obj_args(
+            "kotlin/collections/Map",
+            &[Ty::out_projection(Ty::String), Ty::Int],
+        )
     );
     assert_eq!(entries.parameters.as_ref(), []);
     assert_eq!(iterator.receiver, entries.result);

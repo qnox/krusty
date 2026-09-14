@@ -5,18 +5,22 @@ use crate::types::{Ty, TypeName};
 use std::collections::HashMap;
 
 /// The full input set a plan decode reads. The same physical method can surface through distinct
-/// provider views whose semantic receiver, parameter slots, and default target differ, so every
-/// decoder input participates in the key.
-pub(super) type PlanKey = (
-    TypeName,
-    String,
-    String,
-    Vec<u16>,
-    usize,
-    Option<Ty>,
-    Vec<Ty>,
-    Option<(TypeName, String, String)>,
-);
+/// provider views whose semantic receiver, result, generic signature, parameter slots, suspend
+/// shape, and default target differ, so every decoder input participates in the key.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct PlanKey {
+    owner: TypeName,
+    name: String,
+    body_descriptor: String,
+    parameter_slots: Vec<u16>,
+    context_count: usize,
+    source_receiver: Option<Ty>,
+    semantic_parameters: Vec<Ty>,
+    semantic_result: Ty,
+    suspend: bool,
+    generic_signature: Option<(Option<Ty>, Ty)>,
+    default_target: Option<(TypeName, String, String)>,
+}
 type PlanMap = HashMap<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>;
 pub(super) type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMap>>;
 
@@ -47,6 +51,9 @@ impl Classpath {
         context_count: usize,
         source_receiver: Option<Ty>,
         semantic_parameters: &[Ty],
+        semantic_result: Ty,
+        suspend: bool,
+        generic_signature: Option<(Option<Ty>, Ty)>,
         default_target: Option<(TypeName, &str, &str)>,
     ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
         if !self.plan_is_cacheable() {
@@ -61,6 +68,9 @@ impl Classpath {
             context_count,
             source_receiver,
             semantic_parameters,
+            semantic_result,
+            suspend,
+            generic_signature,
             default_target,
         );
         if let Some(hit) = self.inline_plans.borrow_mut().get(&key) {
@@ -88,6 +98,9 @@ impl Classpath {
         context_count: usize,
         source_receiver: Option<Ty>,
         semantic_parameters: &[Ty],
+        semantic_result: Ty,
+        suspend: bool,
+        generic_signature: Option<(Option<Ty>, Ty)>,
         default_target: Option<(TypeName, &str, &str)>,
         plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     ) {
@@ -102,6 +115,9 @@ impl Classpath {
             context_count,
             source_receiver,
             semantic_parameters,
+            semantic_result,
+            suspend,
+            generic_signature,
             default_target,
         );
         if let Some(global) = self.shared_inline_plans.as_ref() {
@@ -123,17 +139,150 @@ fn plan_key(
     context_count: usize,
     source_receiver: Option<Ty>,
     semantic_parameters: &[Ty],
+    semantic_result: Ty,
+    suspend: bool,
+    generic_signature: Option<(Option<Ty>, Ty)>,
     default_target: Option<(TypeName, &str, &str)>,
 ) -> PlanKey {
-    (
+    PlanKey {
         owner,
-        name.to_owned(),
-        body_descriptor.to_owned(),
-        parameter_slots.to_vec(),
+        name: name.to_owned(),
+        body_descriptor: body_descriptor.to_owned(),
+        parameter_slots: parameter_slots.to_vec(),
         context_count,
         source_receiver,
-        semantic_parameters.to_vec(),
-        default_target
+        semantic_parameters: semantic_parameters.to_vec(),
+        semantic_result,
+        suspend,
+        generic_signature,
+        default_target: default_target
             .map(|(owner, name, descriptor)| (owner, name.to_owned(), descriptor.to_owned())),
-    )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::type_name;
+
+    type GenericShape = Option<(Option<Ty>, Ty)>;
+
+    fn cached(
+        cp: &Classpath,
+        owner: TypeName,
+        context_count: usize,
+        result: Ty,
+        suspend: bool,
+        generic: GenericShape,
+        default: Option<(TypeName, &str, &str)>,
+    ) -> Option<Option<Box<crate::libraries::InlineBodyPlan>>> {
+        cp.cached_inline_plan(
+            owner,
+            "run",
+            "()V",
+            &[0],
+            context_count,
+            None,
+            &[],
+            result,
+            suspend,
+            generic,
+            default,
+        )
+    }
+
+    #[test]
+    fn plan_memo_is_scoped_to_the_complete_semantic_view_and_overlay() {
+        let owner = type_name("p/Widget");
+        let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            lambda_parameter: 0,
+            arguments: Vec::new(),
+            prologue: Vec::new(),
+            cleanup: Vec::new(),
+            cause: None,
+            recovery: None,
+            defaults: Vec::new(),
+            result: None,
+        };
+        let cp = Classpath::new(vec![]);
+        cp.memoize_inline_plan(
+            owner,
+            "run",
+            "()V",
+            &[0],
+            0,
+            None,
+            &[],
+            Ty::Unit,
+            false,
+            Some((None, Ty::Unit)),
+            None,
+            Some(Box::new(plan)),
+        );
+        assert!(cached(&cp, owner, 0, Ty::Unit, false, Some((None, Ty::Unit)), None,).is_some());
+        for (context, result, suspend, generic, default) in [
+            (1, Ty::Unit, false, Some((None, Ty::Unit)), None),
+            (0, Ty::String, false, Some((None, Ty::Unit)), None),
+            (0, Ty::Unit, true, Some((None, Ty::Unit)), None),
+            (
+                0,
+                Ty::Unit,
+                false,
+                Some((Some(Ty::String), Ty::String)),
+                None,
+            ),
+            (
+                0,
+                Ty::Unit,
+                false,
+                Some((None, Ty::Unit)),
+                Some((owner, "run$default", "()V")),
+            ),
+        ] {
+            assert!(
+                cached(&cp, owner, context, result, suspend, generic, default).is_none(),
+                "a distinct semantic callable view must not reuse another view's plan"
+            );
+        }
+
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[("W.java".into(), "package p; public class Widget {}".into())],
+            crate::jvm::java_stub::StubMode::Lenient,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("stub");
+        cp.set_stub_overlay(stubs);
+        assert!(cached(&cp, owner, 0, Ty::Unit, false, Some((None, Ty::Unit)), None,).is_none());
+        cp.memoize_inline_plan(
+            owner,
+            "unrelated",
+            "()V",
+            &[0],
+            0,
+            None,
+            &[],
+            Ty::Unit,
+            false,
+            None,
+            None,
+            None,
+        );
+        cp.clear_stub_overlay();
+        assert!(cp
+            .cached_inline_plan(
+                owner,
+                "unrelated",
+                "()V",
+                &[0],
+                0,
+                None,
+                &[],
+                Ty::Unit,
+                false,
+                None,
+                None,
+            )
+            .is_none());
+        assert!(cached(&cp, owner, 0, Ty::Unit, false, Some((None, Ty::Unit)), None,).is_some());
+    }
 }
