@@ -49,6 +49,9 @@ pub struct Options {
     /// `-jvm-default <mode>` (or legacy `-Xjvm-default <mode>`): how an interface's members with
     /// bodies are realized on the JVM.
     pub jvm_default: JvmDefaultMode,
+    /// `-java-parameters`: write a `MethodParameters` attribute naming each declared parameter, so a
+    /// reflection-driven framework can read the names without a debug table.
+    pub java_parameters: bool,
     /// Independently selected `-Xlambdas` / `-Xsam-conversions` strategies.
     pub lambda_modes: LambdaModes,
     /// `-Xno-param-assertions`: omit the `Intrinsics.checkNotNullParameter` guards kotlinc emits at
@@ -82,6 +85,7 @@ impl Default for Options {
             no_jdk: false,
             jvm_target_major: None,
             jvm_default: JvmDefaultMode::default(),
+            java_parameters: false,
             lambda_modes: LambdaModes::default(),
             no_param_assertions: false,
             no_call_assertions: false,
@@ -124,7 +128,6 @@ const IGNORED_FLAGS: &[&str] = &[
     "-Werror",
     "-progressive",
     "-script",
-    "-java-parameters",
     "-Xuse-ir",
 ];
 
@@ -290,6 +293,7 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // accept, warn, change nothing. Deliberately scoped to this one flag; other `-Xwasm-*`
             // flags keep falling through to `ignored` until each is measured.
             flag @ "-Xwasm-kclass-fqn" => opts.unsupported_flag_warnings.push(flag.to_string()),
+            "-java-parameters" => opts.java_parameters = true,
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
             flag if IGNORED_WITH_VALUE.contains(&flag) => {
@@ -751,6 +755,14 @@ mod tests {
         assert_eq!(bad.jvm_target_major, None);
         assert!(bad.ignored.contains(&"-jvm-target banana".to_string()));
         assert_eq!(bad.sources, vec!["f.kt".to_string()]);
+    }
+
+    #[test]
+    fn java_parameters_is_an_active_backend_option() {
+        let options = parse_args(&["-java-parameters", "f.kt"]);
+        assert!(options.java_parameters);
+        assert!(options.ignored.is_empty(), "{:?}", options.ignored);
+        assert_eq!(options.sources, vec!["f.kt".to_string()]);
     }
 
     #[test]

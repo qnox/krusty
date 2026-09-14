@@ -770,6 +770,14 @@ impl BodyLowering<'_> {
             .get();
         let params = local_function_parameters(body);
         let mut param_checks = vec![None; params.len()];
+        let receiver_parameter = body.receiver_type().map(|_| {
+            u32::try_from(
+                body.captures().len()
+                    + body.implicit_receiver_captures().len()
+                    + body.context_receiver_types().len(),
+            )
+            .expect("too many lambda receiver parameters")
+        });
         if body.is_source_lambda()
             && body.receiver_type().is_some_and(|receiver| {
                 receiver.get().is_reference() && !receiver.get().is_nullable()
@@ -903,6 +911,7 @@ impl BodyLowering<'_> {
                     ordinal,
                     implementation_name,
                     implementation_ordinal,
+                    receiver_parameter,
                 },
             );
             assert!(previous.is_none(), "one FIR lambda has one semantic origin");

@@ -1,5 +1,6 @@
 //! Translation of checker-selected calls into stable checked FIR call nodes.
 
+use super::inline_body_plan::publish as publish_inline_body_plan;
 use super::*;
 
 pub(super) struct MemberExtensionFirTarget {
@@ -46,80 +47,6 @@ impl SelectedOperatorTarget {
     }
 }
 
-pub(super) fn fir_inline_body_plan(
-    plan: Option<&crate::libraries::InlineBodyPlan>,
-    receiver_parameter: Option<usize>,
-) -> Option<Box<crate::fir::FirInlineBodyPlan>> {
-    let map_value = |parameter: usize| {
-        if receiver_parameter == Some(parameter) {
-            crate::fir::FirInlineValue::Receiver
-        } else {
-            let parameter = parameter
-                .checked_sub(usize::from(
-                    receiver_parameter.is_some_and(|receiver| parameter > receiver),
-                ))
-                .expect("inline receiver remapping underflow");
-            crate::fir::FirInlineValue::Parameter(
-                u32::try_from(parameter)
-                    .expect("inline plan parameter ordinal exceeds packed FIR range"),
-            )
-        }
-    };
-    let map_parameter = |parameter| match map_value(parameter) {
-        crate::fir::FirInlineValue::Parameter(parameter) => Some(parameter),
-        crate::fir::FirInlineValue::Receiver => None,
-    };
-    let member_call = |member: &crate::libraries::LibraryMember| {
-        Some(crate::fir::FirInlineMemberCall {
-            declaration: member.external_identity?,
-            parameters: member
-                .params
-                .iter()
-                .copied()
-                .map(ResolvedTy::new)
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?
-                .into_boxed_slice(),
-            result: ResolvedTy::new(member.ret).ok()?,
-            suspend: member.suspend(),
-        })
-    };
-    Some(Box::new(match plan? {
-        crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            argument_parameters,
-            return_parameter,
-        } => crate::fir::FirInlineBodyPlan::InvokeLambda {
-            lambda_parameter: map_parameter(*lambda_parameter)?,
-            arguments: argument_parameters
-                .iter()
-                .copied()
-                .map(map_value)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            result: return_parameter.map(map_value),
-        },
-        crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter,
-            state_parameter,
-            state_default,
-            enter,
-            cleanup,
-        } => crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter: map_parameter(*lambda_parameter)?,
-            state_parameter: map_parameter(*state_parameter)?,
-            state_default: match state_default {
-                crate::libraries::DefaultValue::Null => crate::fir::FirInlineDefaultValue::Null,
-                _ => return None,
-            },
-            enter: member_call(enter)?,
-            cleanup: member_call(cleanup)?,
-        },
-        // This plan also needs the call-site-selected iterator protocol and applied element type.
-        // `selected_extension_call` publishes the complete checked variant below.
-        crate::libraries::InlineBodyPlan::CollectionTransform { .. } => return None,
-    }))
-}
 use crate::resolve::ResolvedCall;
 
 fn selected_extension_intrinsic(
@@ -175,8 +102,6 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
         | crate::libraries::CompilerIntrinsic::EnumValues
         | crate::libraries::CompilerIntrinsic::EnumValueOf
-        | crate::libraries::CompilerIntrinsic::ForEach
-        | crate::libraries::CompilerIntrinsic::ForEachIndexed
         | crate::libraries::CompilerIntrinsic::Map
         | crate::libraries::CompilerIntrinsic::FlatMap
         | crate::libraries::CompilerIntrinsic::IsEmpty
@@ -774,22 +699,45 @@ impl BodyFirChecker<'_> {
         let parameters =
             self.selected_call_parameters(expression, extension.stable_declaration, &parameters)?;
         let (mut target, substitutions) = self.extension_call_target(expression, &extension)?;
-        if matches!(
-            extension.callable.compiler_intrinsic,
-            Some(
-                crate::libraries::CompilerIntrinsic::ForEach
-                    | crate::libraries::CompilerIntrinsic::Map
-                    | crate::libraries::CompilerIntrinsic::FlatMap
+        if let Some(body_plan @ crate::libraries::InlineBodyPlan::Iteration { .. }) =
+            extension.callable.inline_body_plan.as_deref()
+        {
+            let span = self.file.expr_span(expression);
+            let FirCallTarget::External {
+                receiver: Some(receiver),
+                parameters: target_parameters,
+                inline_plan,
+                ..
+            } = &mut target
+            else {
+                return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
+            };
+            let published = super::inline_body_plan::publish_extension_iteration(
+                body_plan,
+                context_count,
+                *receiver,
+                target_parameters,
             )
+            .map_err(|error| {
+                crate::trace_compiler!(
+                    "fir",
+                    "inline iteration publication failed expression={expression:?} receiver={receiver:?} parameters={target_parameters:?} context_count={context_count} plan={body_plan:?} error={error:?}",
+                );
+                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+            })?;
+            *inline_plan = Some(Box::new(published));
+        }
+        if matches!(
+            extension.callable.inline_body_plan.as_deref(),
+            Some(crate::libraries::InlineBodyPlan::CollectionTransform { .. })
         ) {
             // Explicit receivers carry the protocol on their source expression. An implicit
             // receiver has no synthetic AST node, so resolution keys the same selected protocol
             // by the call expression. Both forms are consumed here and embedded into checked FIR.
             let protocol_source = source_receiver.unwrap_or(expression);
-            // The resolver records the declaration-scoped iterator protocol only when this call can
-            // actually splice a lambda body. A callable-reference argument is an ordinary function
-            // value: keep the already-selected external `forEach` call and do not invent iterator
-            // convention decisions during FIR construction.
+            // Only a lambda literal uses the checked structural plan; callable references remain
+            // ordinary calls. Resolution must publish the declaration-scoped iterator protocol for
+            // every literal call before FIR construction reaches this boundary.
             if let Some(protocol) = self.info.iterator_protocol(protocol_source) {
                 let span = self.file.expr_span(expression);
                 let origin = self.expression_origin(expression)?;
@@ -801,37 +749,22 @@ impl BodyFirChecker<'_> {
                 let has_next =
                     Box::new(self.iterator_protocol_call(span, origin, &protocol.has_next)?);
                 let next = Box::new(self.iterator_protocol_call(span, origin, &protocol.next)?);
-                let plan = match extension.callable.compiler_intrinsic {
-                    Some(crate::libraries::CompilerIntrinsic::ForEach) => {
-                        FirInlineBodyPlan::ForEach {
-                            lambda_parameter: u32::try_from(context_count).map_err(|_| {
-                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                            })?,
-                            iterator_ty,
-                            iterator,
-                            has_next,
-                            next,
-                        }
-                    }
-                    Some(
-                        intrinsic @ (crate::libraries::CompilerIntrinsic::Map
-                        | crate::libraries::CompilerIntrinsic::FlatMap),
-                    ) => {
-                        let Some(crate::libraries::InlineBodyPlan::CollectionTransform {
-                            lambda_parameter,
-                            flatten,
-                            factory,
-                            append,
-                        }) = extension.callable.inline_body_plan.as_deref()
-                        else {
-                            return Err(
-                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                            );
-                        };
-                        debug_assert_eq!(
-                            *flatten,
-                            intrinsic == crate::libraries::CompilerIntrinsic::FlatMap
-                        );
+                let body_plan =
+                    extension
+                        .callable
+                        .inline_body_plan
+                        .as_deref()
+                        .ok_or_else(|| {
+                            self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                        })?;
+                let plan = match body_plan {
+                    crate::libraries::InlineBodyPlan::CollectionTransform {
+                        lambda_parameter,
+                        flatten,
+                        local_names,
+                        factory,
+                        append,
+                    } => {
                         let receiver_parameter = context_count;
                         let lambda_parameter = lambda_parameter
                             .checked_sub(usize::from(*lambda_parameter > receiver_parameter))
@@ -865,6 +798,7 @@ impl BodyFirChecker<'_> {
                                 self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                             })?,
                             flatten: *flatten,
+                            local_names: local_names.into(),
                             iterator_ty,
                             iterator,
                             has_next,
@@ -896,12 +830,23 @@ impl BodyFirChecker<'_> {
                             append_result: ResolvedTy::new(Ty::Boolean).expect("resolved Boolean"),
                         }
                     }
-                    _ => unreachable!("matched collection iteration intrinsic"),
+                    crate::libraries::InlineBodyPlan::InvokeLambda { .. }
+                    | crate::libraries::InlineBodyPlan::Iteration { .. } => {
+                        return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
                 };
                 let FirCallTarget::External { inline_plan, .. } = &mut target else {
                     return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
                 };
                 *inline_plan = Some(Box::new(plan));
+            } else if arguments
+                .iter()
+                .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. }))
+            {
+                return Err(self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::MissingStableCallTarget,
+                ));
             }
         }
         let extension_parameter = match &target {
@@ -942,6 +887,21 @@ impl BodyFirChecker<'_> {
         extension: &crate::resolve::ResolvedExtensionCall,
     ) -> Result<(FirCallTarget, Box<[FirTypeSubstitution]>), BodyCheckFailure> {
         let selected_intrinsic = selected_extension_intrinsic(extension);
+        // Iteration plans are completed by `selected_extension_call` with the call-site-selected
+        // iterator protocol. Every other provider plan must convert successfully before an
+        // external target can be published.
+        let deferred_iteration_plan = matches!(
+            extension.callable.inline_body_plan.as_deref(),
+            Some(
+                crate::libraries::InlineBodyPlan::Iteration { .. }
+                    | crate::libraries::InlineBodyPlan::CollectionTransform { .. }
+            )
+        );
+        let inline_plan = if deferred_iteration_plan {
+            None
+        } else {
+            extension.callable.inline_body_plan.as_deref()
+        };
         if matches!(
             selected_intrinsic,
             Some(
@@ -1041,7 +1001,7 @@ impl BodyFirChecker<'_> {
                         declared_result: extension.callable.declared_ret,
                         suspend: extension.callable.suspend,
                         can_inline: extension.callable.inline.can_inline(),
-                        inline_plan: extension.callable.inline_body_plan.as_deref(),
+                        inline_plan,
                         inline_receiver_parameter: None,
                     },
                 )?;
@@ -1067,6 +1027,7 @@ impl BodyFirChecker<'_> {
                     Some(extension.receiver),
                     parameters,
                     Some(context_count),
+                    inline_plan,
                 )
             }
         }
@@ -1230,10 +1191,13 @@ impl BodyFirChecker<'_> {
                         declared_result: selected.member.declared_ret.map(resolved).transpose()?,
                         suspend: selected.member.suspend(),
                         can_inline: selected.member.inline.can_inline(),
-                        inline_plan: fir_inline_body_plan(
+                        inline_plan: publish_inline_body_plan(
                             selected.member.inline_body_plan.as_deref(),
                             None,
-                        ),
+                        )
+                        .map_err(|_| {
+                            self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                        })?,
                         extension_receiver_parameter: None,
                     }
                 };
@@ -1302,10 +1266,13 @@ impl BodyFirChecker<'_> {
                             .transpose()?,
                         suspend: selected.callable.suspend,
                         can_inline: selected.callable.inline.can_inline(),
-                        inline_plan: fir_inline_body_plan(
+                        inline_plan: publish_inline_body_plan(
                             selected.callable.inline_body_plan.as_deref(),
                             Some(context_count),
-                        ),
+                        )
+                        .map_err(|_| {
+                            self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                        })?,
                         extension_receiver_parameter: None,
                     }
                 };
@@ -1385,7 +1352,10 @@ impl BodyFirChecker<'_> {
                         declared_result: declared_ret.map(resolved).transpose()?,
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
-                        inline_plan: fir_inline_body_plan(inline_body_plan.as_deref(), None),
+                        inline_plan: publish_inline_body_plan(inline_body_plan.as_deref(), None)
+                            .map_err(|_| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })?,
                         extension_receiver_parameter: Some(extension_parameter),
                     }
                 };
@@ -1491,6 +1461,7 @@ impl BodyFirChecker<'_> {
         receiver: Option<Ty>,
         parameters: impl IntoIterator<Item = Ty>,
         inline_receiver_parameter: Option<usize>,
+        inline_plan: Option<&crate::libraries::InlineBodyPlan>,
     ) -> Result<(FirCallTarget, Box<[FirTypeSubstitution]>), BodyCheckFailure> {
         let declaration = callable.external_identity.ok_or_else(|| {
             self.failure(
@@ -1509,7 +1480,7 @@ impl BodyFirChecker<'_> {
                 declared_result: callable.declared_ret,
                 suspend: callable.suspend,
                 can_inline: callable.inline.can_inline(),
-                inline_plan: callable.inline_body_plan.as_deref(),
+                inline_plan,
                 inline_receiver_parameter,
             },
         )?;
@@ -1767,7 +1738,13 @@ impl BodyFirChecker<'_> {
                 declared_result: declared_result.map(resolved).transpose()?,
                 suspend,
                 can_inline,
-                inline_plan: fir_inline_body_plan(inline_plan, inline_receiver_parameter),
+                inline_plan: publish_inline_body_plan(inline_plan, inline_receiver_parameter)
+                    .map_err(|_| {
+                        self.failure(
+                            self.file.expr_span(expression),
+                            BodyCheckFailureKind::UnsupportedCallShape,
+                        )
+                    })?,
                 extension_receiver_parameter: None,
             },
             substitutions.into_boxed_slice(),
@@ -1936,6 +1913,7 @@ impl BodyFirChecker<'_> {
                     dispatch_ty,
                     selected.callable.params.iter().copied(),
                     None,
+                    selected.callable.inline_body_plan.as_deref(),
                 )?
             };
         let parameters = self.selected_call_parameters(

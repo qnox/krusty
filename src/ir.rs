@@ -2355,69 +2355,6 @@ impl IrStatic {
     }
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct FnParamInfo {
-    pub names: Vec<String>,
-    pub defaults: Option<Vec<Option<ExprId>>>,
-    /// The registered `defaults` serve only the `$default` STUB (which re-emits them inside the
-    /// stub's own frame) — a CALL SITE must not reuse them to fill an omitted argument. Set for an
-    /// EXTENSION whose defaults are not all constant: kotlinc still emits `name$default` for it (the
-    /// cross-module ABI), while krusty's same-module omitted-arg lowering — which inlines only
-    /// checker-recorded constant defaults — keeps bailing exactly as before the defaults were
-    /// registered (skip, never miscompile).
-    pub stub_only: bool,
-}
-
-impl FnParamInfo {
-    pub fn names(names: Vec<String>) -> Self {
-        Self {
-            names,
-            defaults: None,
-            stub_only: false,
-        }
-    }
-
-    pub fn defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
-        Self {
-            names,
-            defaults: Some(defaults),
-            stub_only: false,
-        }
-    }
-
-    /// [`Self::defaults`] with the stub-only marker set — see [`Self::stub_only`].
-    pub fn stub_only_defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
-        Self {
-            names,
-            defaults: Some(defaults),
-            stub_only: true,
-        }
-    }
-}
-
-/// Stable source identity and lexical naming context for one lowered lambda implementation. A
-/// source lambda can be lowered more than once (for example into multiple constructors); every such
-/// implementation carries the same origin so a backend can realize one closure artifact without
-/// recovering identity from generated method names or scanning unrelated expression/value tables.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IrLambdaOrigin {
-    /// File-local semantic identity assigned while a checked source lambda is consumed. It is not
-    /// an AST id, text offset, or body locator.
-    pub identity: u32,
-    /// Semantic classifier whose lexical code container owns the implementation, or `None` for the
-    /// package facade. Physical method placement may still be changed by a backend pass.
-    pub lexical_owner: Option<TypeName>,
-    pub enclosing_name: String,
-    pub binding_name: Option<String>,
-    /// Source-lambda ordinal for class-mode naming within the rendered lexical context.
-    pub ordinal: u32,
-    /// Backend-neutral source naming stem of the containing executable declaration. A target owns
-    /// the separators and complete physical implementation spelling.
-    pub implementation_name: String,
-    /// Source-lambda implementation ordinal within the enclosing callable name.
-    pub implementation_ordinal: u32,
-}
-
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2603,6 +2540,9 @@ pub struct IrFile {
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,
+    /// Sparse inline origin for debug-visible local declarations. Source spelling remains in
+    /// `value_names`; target-specific decoration is deliberately deferred to the backend.
+    debug_local_provenance: std::collections::HashMap<ExprId, IrDebugLocalProvenance>,
     /// Lifted lambda implementation id → stable source origin and lexical binding context.
     pub lambda_origins: std::collections::HashMap<u32, IrLambdaOrigin>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
@@ -3752,6 +3692,19 @@ impl IrFile {
     pub fn param_names(&self, fid: u32) -> Option<&[String]> {
         Some(&self.fn_params.get(&fid)?.names)
     }
+    pub(crate) fn set_debug_local_provenance(
+        &mut self,
+        declaration: ExprId,
+        provenance: IrDebugLocalProvenance,
+    ) {
+        self.debug_local_provenance.insert(declaration, provenance);
+    }
+    pub(crate) fn debug_local_provenance(
+        &self,
+        declaration: ExprId,
+    ) -> Option<IrDebugLocalProvenance> {
+        self.debug_local_provenance.get(&declaration).copied()
+    }
     pub fn expr(&self, id: ExprId) -> &IrExpr {
         &self.exprs[id as usize]
     }
@@ -3780,6 +3733,11 @@ impl IrFile {
     }
 }
 
+mod debug_locals;
+pub use debug_locals::IrLambdaOrigin;
+pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+mod function_parameters;
+pub use function_parameters::FnParamInfo;
 mod traversal;
 pub use traversal::*;
 mod clone;

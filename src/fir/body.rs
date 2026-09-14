@@ -11,6 +11,8 @@ use super::header::{
     OriginId, PropertyId, SourceFileId, TypeParameterId,
 };
 use super::identities::ExternalCallableId;
+use super::inline_body::FirInlineBodyPlan;
+use super::local_class_capture::FirLocalClassCapture;
 use super::signature::ResolvedTy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -266,74 +268,6 @@ pub enum FirClassifierCallable {
     EnumValueOf,
     ArrayConstructor { element: ResolvedTy },
     SamConstructor { conversion: Box<FirSamConversion> },
-}
-
-/// Source-independent control flow decoded from the exact selected inline declaration. Parameter
-/// ordinals refer to the checked call's semantic parameter list; no callable spelling or backend
-/// linkage is retained here.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirInlineValue {
-    Receiver,
-    Parameter(u32),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirInlineBodyPlan {
-    InvokeLambda {
-        lambda_parameter: u32,
-        arguments: Box<[FirInlineValue]>,
-        result: Option<FirInlineValue>,
-    },
-    /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
-    /// All three convention calls were selected by the checker at the call site; lowering only
-    /// splices the checked lambda body into the resulting loop.
-    ForEach {
-        lambda_parameter: u32,
-        iterator_ty: ResolvedTy,
-        iterator: Box<FirIteratorCall>,
-        has_next: Box<FirIteratorCall>,
-        next: Box<FirIteratorCall>,
-    },
-    /// Checked structural expansion of an exact collection inline declaration. Iterator convention
-    /// calls were selected in the declaration's lookup scope; factory/append are opaque provider
-    /// identities. Common lowering therefore performs no library lookup or target-ABI reasoning.
-    CollectionTransform {
-        lambda_parameter: u32,
-        flatten: bool,
-        iterator_ty: ResolvedTy,
-        iterator: Box<FirIteratorCall>,
-        has_next: Box<FirIteratorCall>,
-        next: Box<FirIteratorCall>,
-        factory: ExternalCallableId,
-        factory_classifier: crate::types::TypeName,
-        append: ExternalCallableId,
-        accumulator: ResolvedTy,
-        append_parameter: ResolvedTy,
-        append_result: ResolvedTy,
-    },
-    /// Inline a declaration whose checked body enters a suspending region, invokes a zero-argument
-    /// lambda, and leaves the region from `finally`. The selected member identities are opaque;
-    /// target-specific owners, descriptors, and invocation opcodes remain provider/backend data.
-    SuspendBeforeLambdaFinally {
-        lambda_parameter: u32,
-        state_parameter: u32,
-        state_default: FirInlineDefaultValue,
-        enter: FirInlineMemberCall,
-        cleanup: FirInlineMemberCall,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirInlineDefaultValue {
-    Null,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirInlineMemberCall {
-    pub declaration: ExternalCallableId,
-    pub parameters: Box<[ResolvedTy]>,
-    pub result: ResolvedTy,
-    pub suspend: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -982,72 +916,6 @@ pub struct FirImplicitReceiverCapture {
     /// capture site; nested forwarding retains it unchanged and never repeats classifier lookup.
     pub path: Box<[DeclarationId]>,
     pub ty: ResolvedTy,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirLocalClassCaptureSource {
-    Value(LocalValueId),
-    Captured {
-        enclosing_depth: u32,
-        source: LocalValueId,
-    },
-    ClassStorage {
-        owner: DeclarationId,
-        enclosing_depth: u32,
-        field: u32,
-    },
-    CapturedClassStorage {
-        owner: DeclarationId,
-        receiver: FirExprId,
-        path: Box<[DeclarationId]>,
-        field: u32,
-    },
-    DispatchReceiver,
-    /// Exact `inner`-classifier edges from the construction body's dispatch receiver to the
-    /// enclosing instance being captured. A semantic receiver depth is not a value-slot address;
-    /// publishing the declaration path here keeps common lowering mechanical.
-    EnclosingReceiver {
-        path: Box<[DeclarationId]>,
-    },
-    /// A receiver owned by an enclosing callable frame and explicitly captured by the current
-    /// local callable. The coordinate is the same checked capture identity carried by
-    /// [`FirBody::implicit_receiver_captures`]; lowering reads that exact lifted parameter slot.
-    CapturedImplicitReceiver {
-        enclosing_depth: u32,
-        current: bool,
-        depth: u32,
-        path: Box<[DeclarationId]>,
-    },
-    ImplicitReceiver {
-        current: bool,
-        depth: u32,
-    },
-}
-
-impl FirLocalClassCaptureSource {
-    fn storage_payload_bytes(&self) -> usize {
-        match self {
-            Self::CapturedClassStorage { path, .. }
-            | Self::EnclosingReceiver { path }
-            | Self::CapturedImplicitReceiver { path, .. } => {
-                path.len() * std::mem::size_of::<DeclarationId>()
-            }
-            Self::Value(_)
-            | Self::Captured { .. }
-            | Self::ClassStorage { .. }
-            | Self::DispatchReceiver
-            | Self::ImplicitReceiver { .. } => 0,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirLocalClassCapture {
-    pub origin: OriginId,
-    pub name: Box<str>,
-    pub ty: ResolvedTy,
-    pub shared_cell: bool,
-    pub source: FirLocalClassCaptureSource,
 }
 
 /// One checked interface-delegate value evaluated at an anonymous-object construction site. The
@@ -2069,9 +1937,10 @@ pub struct FirBody {
     debug_name: Option<Box<str>>,
     source_lambda: bool,
     debug_binding_name: Option<Box<str>>,
+    /// Checked execution-scope fact; nested callable bodies own their own value.
+    pub(super) direct_suspension: bool,
     debug_value_names: HashMap<LocalValueId, Box<str>>,
-    /// Total physical source lines for debug metadata. This scalar output fact cannot locate or
-    /// reparse text and is discarded with ordinary FIR after its common-IR consumer runs.
+    /// Physical source-line count for debug output; it carries no source lookup capability.
     source_line_count: u32,
     expression_debug_lines: Vec<FirExpressionDebugLines>,
     statement_debug_lines: Vec<u32>,
@@ -2089,14 +1958,9 @@ pub struct FirBody {
     roots: Vec<FirStatementId>,
     local_value_count: u32,
     local_callable_count: u32,
-    /// Checked bodies of declarations lexically contained by this retained inline body (for
-    /// example an anonymous object's constructor and member methods). They are part of the inline
-    /// payload, not independently retained ordinary module bodies, and are consumed only when this
-    /// inline body is materialized in a caller.
+    /// Checked nested declarations retained only as part of this inline payload.
     inline_nested_declaration_bodies: Vec<FirBody>,
-    /// Closure environments of local classifiers declared by this checked fragment. This field is
-    /// populated only as part of constructing the FIR body itself. Consequently it survives Pass 1
-    /// only when the surrounding body is retained for inline/default semantics.
+    /// Local-class closure environments retained with inline/default bodies.
     class_body_contexts: HashMap<DeclarationId, ClassBodyContext>,
 }
 
@@ -2125,6 +1989,7 @@ impl FirBody {
             debug_name: None,
             source_lambda: false,
             debug_binding_name: None,
+            direct_suspension: false,
             debug_value_names: HashMap::new(),
             source_line_count: 0,
             expression_debug_lines: Vec::new(),

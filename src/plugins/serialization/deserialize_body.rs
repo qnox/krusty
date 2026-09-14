@@ -1,10 +1,9 @@
 //! Checked generation of a serializer's `deserialize` body.
 
 use super::{
-    builtin_element_serializer, can_derive_element_serializer, class_ty,
-    collection_serializer_builder, contextual_serializer_for, decode_element_method,
-    element_serializer_expr, inline_prim_methods, is_nullable, property_is_contextual, slot_width,
-    value_class_underlying, virtual_iface,
+    builtin_element_serializer, class_ty, collection_serializer_builder, contextual_serializer_for,
+    decode_element_method, element_serializer_expr, element_serializer_plan, inline_prim_methods,
+    is_nullable, property_is_contextual, slot_width, value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -116,7 +115,7 @@ impl DeserializeBody<'_> {
             // actually derivable (a generic field with an un-derivable type arg is not) —
             // else deserialize stubs cleanly rather than emit a `null` element serializer.
             if nested[i].is_some() {
-                return can_derive_element_serializer(ir, t);
+                return element_serializer_plan(ir, ctx, t).is_some();
             }
             // A standard collection field decodes through its builtin collection serializer
             // (via the `element_serializer_expr` fallback below) when its elements derive.
@@ -125,12 +124,17 @@ impl DeserializeBody<'_> {
                 .and_then(collection_serializer_builder)
                 .is_some()
             {
-                return can_derive_element_serializer(ir, t);
+                return element_serializer_plan(ir, ctx, t).is_some();
             }
-            if is_nullable(t) {
-                return builtin_element_serializer(t).is_some();
+            // Everything else decodes either as a PRIMITIVE through its own `decode<T>Element`, or
+            // through an element serializer — the same one `serialize` and `childSerializers` use. A
+            // nullable element always takes the serializer path
+            // (`decodeNullableSerializableElement`), which is why its builtin is not the only way to
+            // decode it: a nullable nested class, enum or collection has no builtin at all.
+            if !is_nullable(t) && decode_element_method(t).is_some() {
+                return true;
             }
-            decode_element_method(t).is_some()
+            element_serializer_plan(ir, ctx, t).is_some()
         });
         if !decodable {
             let message = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
@@ -340,19 +344,13 @@ impl DeserializeBody<'_> {
                         arg: raw,
                         type_operand: *ty,
                     })
-                } else if nested[k].is_some()
-                    || ty
-                        .non_null()
-                        .obj_internal()
-                        .and_then(collection_serializer_builder)
-                        .is_some()
-                {
+                } else if is_nullable(ty) || decode_element_method(ty).is_none() {
                     // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
                     // <element serializer>, null) — the nested `$serializer.INSTANCE`
                     // (non-generic) / `Foo.serializer(A_ser)` (generic) / `ListSerializer(…)`
                     // (collection). Same descriptor; the nullable variant yields null for a
                     // JSON-null element.
-                    let inst = element_serializer_expr(ir, ty)
+                    let inst = element_serializer_expr(ir, ctx, ty)
                         .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
                     let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
                     let method = if is_nullable(ty) {

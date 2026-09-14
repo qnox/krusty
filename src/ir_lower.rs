@@ -41,6 +41,7 @@ use crate::types::{
 
 mod classifier_hierarchy;
 mod compound_assignments;
+mod inline_body_legacy_bridge;
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
@@ -10785,6 +10786,8 @@ impl<'a> Lower<'a> {
             (ty_to_ir(method_ret), b, inline)
         };
         let seq = self.next_synthetic_seq();
+        let own_params_from =
+            u32::try_from(captures.len()).expect("too many lambda capture parameters");
         let lambda_origin = if let Some(origin) = self.lambda_origin_by_source.get(&e.0) {
             origin.clone()
         } else {
@@ -10797,8 +10800,7 @@ impl<'a> Lower<'a> {
                         None,
                     )
                 });
-            // Mirror the backend's name rendering (empty segments dropped) so the counter key IS
-            // the rendered prefix — see the field's comment for the collision this prevents.
+            // Match the backend's empty-segment handling so the counter key is the rendered prefix.
             let rendered_prefix = [Some(enclosing_name.as_str()), binding_name.as_deref()]
                 .into_iter()
                 .flatten()
@@ -10826,14 +10828,13 @@ impl<'a> Lower<'a> {
                 ordinal,
                 implementation_name: self.cur_fn.source_name.clone(),
                 implementation_ordinal: seq,
+                receiver_parameter: sig.has_receiver.then_some(own_params_from),
             };
             self.lambda_origin_by_source.insert(e.0, origin.clone());
             origin
         };
         let impl_name = format!("{}$lambda${}", self.cur_fn.source_name, seq);
-        // Impl parameters: captured variables first, then the lambda's own parameters.
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
-        let own_params_from = params_ir.len() as u32;
         params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
         let params_len = params_ir.len() as u32;
         // kotlinc guards a RECEIVER lambda's non-null reference receiver in the static impl with
@@ -12709,16 +12710,6 @@ impl<'a> Lower<'a> {
             .get(&lambda.0)
             .cloned()
             .unwrap_or_else(|| callee.to_string())
-    }
-
-    fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
-        let [arg] = args else {
-            return None;
-        };
-        let Expr::Lambda { params, body } = self.afile.expr(*arg).clone() else {
-            return None;
-        };
-        Some((*arg, params, body))
     }
 
     /// The internal name of an explicit serializer `X` from `@Serializable(with = X::class)` on class
@@ -16813,19 +16804,13 @@ impl<'a> Lower<'a> {
         callable: &crate::libraries::LibraryCallable,
         plan: &crate::libraries::InlineBodyPlan,
     ) -> Option<u32> {
-        let crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            argument_parameters,
-            return_parameter,
-        } = plan
-        else {
-            return None;
-        };
+        let (lambda_parameter, argument_parameters, return_parameter) =
+            inline_body_legacy_bridge::plain_invoke_lambda(plan)?;
         let slots = self.info.resolved_call_arg_slots.get(&call)?;
         if slots.len() != callable.params.len() {
             return None;
         }
-        let lambda = slots.get(*lambda_parameter).copied().flatten()?;
+        let lambda = slots.get(lambda_parameter).copied().flatten()?;
         if !matches!(self.afile.expr(lambda), Expr::Lambda { .. }) {
             return None;
         }
@@ -20992,138 +20977,17 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let parameters =
             self.extension_plan_arguments(call, receiver, args, callable.params.len())?;
-        match plan {
-            crate::libraries::InlineBodyPlan::InvokeLambda {
-                lambda_parameter,
-                argument_parameters,
-                return_parameter,
-            } => {
-                let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
-                let arguments = argument_parameters
-                    .iter()
-                    .map(|parameter| parameters.get(*parameter).copied().flatten())
-                    .collect::<Option<Vec<_>>>()?;
-                let label = self.lambda_label(lambda, source_label);
-                let returned = return_parameter
-                    .and_then(|parameter| parameters.get(parameter).copied().flatten());
-                self.lower_invoke_lambda_plan(lambda, &arguments, label, returned)
-            }
-            crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-                lambda_parameter,
-                state_parameter,
-                state_default,
-                enter,
-                cleanup,
-            } => {
-                if !self.cur_fn_suspend {
-                    return self.bail("selected inline body plan requires a suspend function");
-                }
-                let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
-                let Expr::Lambda { body, .. } = self.afile.expr(lambda).clone() else {
-                    return self.bail("selected inline body plan requires a lambda literal");
-                };
-                let Ty::Fun(lambda_signature) = self.info.ty(lambda) else {
-                    return self.bail("selected inline body plan has no lambda signature");
-                };
-                if !lambda_signature.params.is_empty()
-                    || lambda_signature.context_count != 0
-                    || lambda_info(self.info, lambda).receiver.is_some()
-                {
-                    return self.bail("selected inline body plan requires a zero-argument lambda");
-                }
-                let receiver_ty = self.info.ty(receiver);
-                let receiver_value = self.expr(receiver)?;
-                let receiver_slot = self.fresh_value();
-                let receiver_var = self.emit_named_variable(
-                    receiver_slot,
-                    ty_to_ir(receiver_ty),
-                    Some(receiver_value),
-                );
-                let state_ty = *callable.params.get(*state_parameter)?;
-                let state_value = if let Some(expression) =
-                    parameters.get(*state_parameter).copied().flatten()
-                {
-                    self.lower_arg(expression, &ty_to_ir(state_ty))?
-                } else {
-                    match state_default {
-                        crate::libraries::DefaultValue::Null => self.emit_const(IrConst::Null),
-                        _ => return self.bail("selected inline body plan has unsupported default"),
-                    }
-                };
-                let state_slot = self.fresh_value();
-                let state_var =
-                    self.emit_variable(state_slot, ty_to_ir(state_ty), Some(state_value));
-                let enter_receiver = self.emit_get_value(receiver_slot);
-                let enter_state = self.emit_get_value(state_slot);
-                let enter_owner = enter.owner?;
-                let enter_call = self.emit_virtual_call(
-                    enter_owner,
-                    enter.name.clone(),
-                    enter.descriptor.clone(),
-                    enter.is_interface(),
-                    enter_receiver,
-                    vec![enter_state],
-                );
-                self.ir
-                    .suspend_calls
-                    .insert(enter_call, ty_to_ir(enter.ret));
-
-                let result_ty = self.info.ty(call);
-                let result_slot = self.fresh_value();
-                let result_default = self.emit_zero_value(result_ty);
-                let result_var =
-                    self.emit_variable(result_slot, ty_to_ir(result_ty), Some(result_default));
-                let break_label = format!("$inline_plan${}", self.fresh_value());
-                let lambda_label = self.lambda_label(lambda, source_label);
-                let function_tail = self.fn_body_tail == Some(call) && result_ty == self.cur_ret_ty;
-                self.inline_lambda_ret.push((
-                    lambda_label,
-                    result_slot,
-                    break_label.clone(),
-                    result_ty,
-                    function_tail,
-                ));
-                let depth = self.scope.len();
-                let body_value = self.expr(body);
-                self.inline_lambda_ret.pop();
-                self.scope.truncate(depth);
-                let body_value = body_value?;
-                let mut body_statements = Vec::new();
-                if self.info.ty(body) == Ty::Nothing {
-                    body_statements.push(body_value);
-                } else {
-                    body_statements.push(self.emit_set_value(result_slot, body_value));
-                }
-                let break_statement = self.emit_break(Some(break_label.clone()));
-                body_statements.push(break_statement);
-                let loop_body = self.emit_block(body_statements, None);
-                let condition = self.emit_const(IrConst::Boolean(true));
-                let body_loop =
-                    self.emit_while(condition, loop_body, None, false, Some(break_label));
-                let cleanup_receiver = self.emit_get_value(receiver_slot);
-                let cleanup_state = self.emit_get_value(state_slot);
-                let cleanup_owner = cleanup.owner?;
-                let cleanup_call = self.emit_virtual_call(
-                    cleanup_owner,
-                    cleanup.name.clone(),
-                    cleanup.descriptor.clone(),
-                    cleanup.is_interface(),
-                    cleanup_receiver,
-                    vec![cleanup_state],
-                );
-                let try_body = self.emit_block(vec![body_loop], None);
-                let finally = self.emit_block(vec![cleanup_call], None);
-                let guarded = self.emit_try(try_body, Vec::new(), Some(finally), Ty::Unit);
-                let result = self.emit_get_value(result_slot);
-                Some(self.emit_block(
-                    vec![receiver_var, state_var, enter_call, result_var, guarded],
-                    Some(result),
-                ))
-            }
-            // The production checked-FIR path consumes this provider plan. The legacy lowerer has
-            // its pre-existing suspend-only collection expansion earlier in expression lowering.
-            crate::libraries::InlineBodyPlan::CollectionTransform { .. } => None,
-        }
+        let (lambda_parameter, argument_parameters, return_parameter) =
+            inline_body_legacy_bridge::plain_invoke_lambda(plan)?;
+        let lambda = parameters.get(lambda_parameter).copied().flatten()?;
+        let arguments = argument_parameters
+            .iter()
+            .map(|parameter| parameters.get(*parameter).copied().flatten())
+            .collect::<Option<Vec<_>>>()?;
+        let label = self.lambda_label(lambda, source_label);
+        let returned =
+            return_parameter.and_then(|parameter| parameters.get(parameter).copied().flatten());
+        self.lower_invoke_lambda_plan(lambda, &arguments, label, returned)
     }
 
     fn lower_for_each(
@@ -26298,8 +26162,6 @@ impl<'a> Lower<'a> {
                         return crate::synthetics::lower_enum_values(self, &call);
                     }
                     crate::libraries::CompilerIntrinsic::ArrayFactory(_)
-                    | crate::libraries::CompilerIntrinsic::ForEach
-                    | crate::libraries::CompilerIntrinsic::ForEachIndexed
                     | crate::libraries::CompilerIntrinsic::Assert
                     | crate::libraries::CompilerIntrinsic::AssertFailsWith
                     | crate::libraries::CompilerIntrinsic::Print
@@ -26921,43 +26783,6 @@ impl<'a> Lower<'a> {
                     });
                 }
             }
-            // `iterable.forEach { x -> body }` is the stdlib `inline fun` whose body is
-            // `for (x in this) body` — inline it to a for-each loop (no closure), so a mutable
-            // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
-            // receiver being iterable (so a user `forEach` on a non-iterable falls through).
-            let one_lambda_arg = self.single_lambda_arg(&args);
-            let iteration_intrinsic = self
-                .info
-                .resolved_extension(e)
-                .and_then(|callable| callable.compiler_intrinsic);
-            if let (
-                Some(crate::libraries::CompilerIntrinsic::ForEach),
-                Some((arg, params, lbody)),
-            ) = (iteration_intrinsic, one_lambda_arg.as_ref())
-            {
-                let rty = self.info.ty(receiver);
-                // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
-                // by `lower_for_each` (and the checker element-types the lambda parameter).
-                let iterable = rty.array_elem().is_some()
-                    || rty == Ty::String
-                    || rty.obj_internal().map_or(false, |i| {
-                        self.runtime.counted_loop_info_name(i).is_some()
-                            || self.info.iterator_protocol(receiver).is_some()
-                    });
-                if iterable {
-                    let param = ast::first_lambda_param_or_it(params);
-                    // A `return@forEach` (or `return@<explicit label>`) in the body is a local return
-                    // from the lambda — the spliced loop's `continue`. Label the loop and register the
-                    // splice so the return lowering can find it.
-                    let source_label = self.lambda_label(*arg, "forEach");
-                    let loop_label = format!("$foreach${}", self.fresh_value());
-                    self.foreach_splice.push((source_label, loop_label.clone()));
-                    let lowered =
-                        self.lower_for_each(&param, receiver, *lbody, Some(loop_label), true);
-                    self.foreach_splice.pop();
-                    return lowered;
-                }
-            }
             // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
             // lowers its lambda to a `FunctionN` impl that can't suspend, so inline it into an
             // accumulating loop (kotlinc's own inline expansion) — putting the suspension in an
@@ -26970,7 +26795,11 @@ impl<'a> Lower<'a> {
             // facade; gating on the `List` result type + a resolved stdlib-collections extension
             // excludes them, so we never hand back an `ArrayList` where the static type is
             // `Sequence`/`Set` (→ VerifyError / ClassCastException).
-            let suspend_list_hof = match iteration_intrinsic {
+            let collection_intrinsic = self
+                .info
+                .resolved_extension(e)
+                .and_then(|callable| callable.compiler_intrinsic);
+            let suspend_list_hof = match collection_intrinsic {
                 Some(crate::libraries::CompilerIntrinsic::Map) => Some(false),
                 Some(crate::libraries::CompilerIntrinsic::FlatMap) => Some(true),
                 _ => None,
@@ -26999,33 +26828,6 @@ impl<'a> Lower<'a> {
                             return Some(v);
                         }
                     }
-                }
-            }
-            // `iterable.forEachIndexed { i, x -> body }` — the inline `forEachIndexed`, whose
-            // body is `var i = 0; for (x in this) { action(i, x); i++ }`. Inline it via the
-            // iterator path with an index counter (Obj iterables only, same as `forEach`).
-            if let (
-                Some(crate::libraries::CompilerIntrinsic::ForEachIndexed),
-                Some((_, params, lbody)),
-            ) = (iteration_intrinsic, one_lambda_arg.as_ref())
-            {
-                let rty = self.info.ty(receiver);
-                let iterable =
-                    rty.obj_internal().is_some() && self.info.iterator_protocol(receiver).is_some();
-                if iterable && params.len() == 2 {
-                    let idx = params[0].clone();
-                    let elem = params[1].clone();
-                    return self.lower_foreach_iterator(
-                        &elem,
-                        receiver,
-                        *lbody,
-                        rty,
-                        ForeachOpts {
-                            index: Some(&idx),
-                            label: None,
-                            hof_splice: true,
-                        },
-                    );
                 }
             }
             // A user `inline fun <recv>.name(args)` — expand it here (kotlinc's inliner) with the
@@ -27366,16 +27168,15 @@ impl<'a> Lower<'a> {
                     return Some(r);
                 }
                 let member = resolved.member;
-                if let Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                    lambda_parameter,
-                    argument_parameters,
-                    return_parameter,
-                }) = member.inline_body_plan.as_deref()
+                if let Some((lambda_parameter, argument_parameters, return_parameter)) = member
+                    .inline_body_plan
+                    .as_deref()
+                    .and_then(inline_body_legacy_bridge::plain_invoke_lambda)
                 {
                     let parameters = std::iter::once(Some(receiver))
                         .chain(args.iter().copied().map(Some))
                         .collect::<Vec<_>>();
-                    let lambda = parameters.get(*lambda_parameter).copied().flatten()?;
+                    let lambda = parameters.get(lambda_parameter).copied().flatten()?;
                     let arguments = argument_parameters
                         .iter()
                         .map(|parameter| parameters.get(*parameter).copied().flatten())

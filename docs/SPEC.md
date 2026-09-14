@@ -7982,3 +7982,21 @@ and behavior is checked by RUNNING the emitted program.
   than rejecting the shape, because it hands the lambda its own receiver as a value parameter and one
   parameter too many.
   Tests: `tests/context_function_type_e2e.rs`.
+
+- **A super-constructor argument's captures come from the constructor's synthetic prefix
+  parameters, however deeply the argument nests them.** A local class lifts each captured local
+  into a constructor prefix parameter and stores it into a field, but the super-constructor call
+  runs BEFORE that store — before the instance exists at all. Reading such a capture directly was
+  already routed to the prefix parameter (`ConstructorCaptureRead`); handing it to an anonymous
+  object nested inside the argument was not, and the nested object's capture was materialized as
+  `ClassStorage` — `getfield` on `uninitializedThis`, which the JVM verifier rejects outright
+  (`Type uninitializedThis is not assignable to 'box$Local'`) and which a target without a verifier
+  would answer with a zero. The checked capture source now carries `ConstructorCapture`, the
+  passed-on counterpart of `ConstructorCaptureRead`, chosen by the same checked predicate
+  (`reads_constructor_prefix_capture`) that the direct read uses, so one rule covers both. Bytes
+  for every other shape are unchanged. Tests:
+  `tests/anon_object_capture_e2e.rs::anonymous_object_in_a_super_constructor_argument_reads_the_constructor_capture`
+  and `::nested_anonymous_objects_in_a_super_constructor_argument_read_the_constructor_capture`
+  (the second pins the transitive case: an anonymous object inside an anonymous object inside the
+  argument). Corpus: `closures/captureInSuperConstructorCall/localCapturedInAnonymousObjectInLocalClass.kt`
+  and `…2.kt`.

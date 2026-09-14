@@ -76,9 +76,18 @@ pub fn run_backend_passes(
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
 ) -> Result<(), SkipReason> {
     let mut discard = crate::jvm::suspend::ContinuationMetadataMap::default();
-    run_backend_passes_with_metadata(ir, facade, module_name, syms, classpath, &mut discard)
+    run_backend_passes_with_metadata(
+        ir,
+        facade,
+        module_name,
+        syms,
+        classpath,
+        classifiers,
+        &mut discard,
+    )
 }
 
 /// Run the JVM pass pipeline and retain continuation metadata for class emission.
@@ -88,9 +97,10 @@ pub fn run_backend_passes_with_metadata(
     module_name: &str,
     syms: &FrontendSymbols,
     classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
     let module_value_classes: std::collections::HashMap<_, _> = syms
         .classes
         .values()
@@ -124,7 +134,7 @@ pub fn run_backend_passes_with_checked_metadata(
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: &[String],
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor);
+    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
     run_backend_passes_after_plugins(
         ir,
         facade,
@@ -352,6 +362,7 @@ pub struct JvmBackend {
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
+    java_parameters: bool,
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
@@ -367,6 +378,7 @@ impl JvmBackend {
             cp,
             class_major: None,
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
+            java_parameters: false,
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             param_assertions: true,
             call_assertions: true,
@@ -389,6 +401,12 @@ impl JvmBackend {
     /// `-jvm-default`: which JVM shape an interface's members with bodies are compiled into.
     pub fn with_jvm_default(mut self, mode: crate::jvm::ir_emit::JvmDefaultMode) -> JvmBackend {
         self.jvm_default = mode;
+        self
+    }
+
+    /// `-java-parameters`: write a `MethodParameters` attribute naming each declared parameter.
+    pub fn with_java_parameters(mut self, enabled: bool) -> JvmBackend {
+        self.java_parameters = enabled;
         self
     }
 
@@ -435,6 +453,7 @@ pub fn shipping_emit_options(
         module_name: (module_name != "main").then(|| module_name.to_string()),
         // Per-invocation strategies; the CLI overrides them on the backend.
         lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
+        java_parameters: false,
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
         // second compilation sees no constructor/member parameter names (named arguments) and no
@@ -703,6 +722,7 @@ impl JvmBackend {
         mut ir: crate::ir::IrFile,
         checked: &CheckedFile<'_>,
         stem: &str,
+        classifiers: &dyn crate::types::ClassifierAnnotationSource,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -719,6 +739,7 @@ impl JvmBackend {
             module_name,
             syms,
             &self.cp,
+            classifiers,
             &mut continuation_metadata,
         ) {
             report_backend_pass_failure(reason, diags);
@@ -831,7 +852,8 @@ impl JvmBackend {
             shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
                 .with_jvm_default(self.jvm_default)
                 .with_lambda_modes(self.lambda_modes)
-                .with_param_assertions(self.param_assertions);
+                .with_param_assertions(self.param_assertions)
+                .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
         let emit_metadata = crate::jvm::ir_emit::EmitMetadata {
@@ -954,7 +976,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         };
-        self.emit_legacy_ir(ir, &checked, stem, state, diags)
+        self.emit_legacy_ir(ir, &checked, stem, &runtime, state, diags)
     }
 
     fn lower_ir_file(

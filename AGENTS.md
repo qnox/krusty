@@ -85,6 +85,13 @@ review explanation tied to an active migration plan.
 - Backends own representation: JVM owners/descriptors, boxing/storage, value-class representation,
   bridges, platform supertypes, and platform-specific emitted helpers. These facts must not affect
   source resolution unless Kotlin semantics explicitly expose them.
+- Common FIR/IR lowering records debug-local source identity, semantic role, and inline-frame
+  provenance. It must not format JVM/kotlinc synthetic local spellings such as `$iv`, `_u24`, or a
+  `$lambda$N` implementation name; the JVM debug-info boundary owns those conventions.
+- Common IR records parameter source identities and compiler-generated provenance. A backend may
+  format those identities for its ABI (`$completion`, capture prefixes, synthetic/mandated flags),
+  but must not reconstruct them from a descriptor, invent `pN` reflection names, or silently omit an
+  enabled parameter-metadata attribute when the recorded identity and physical arity disagree.
 - Kotlin metadata is authoritative for Kotlin declarations. Complete missing metadata decoding
   instead of adding stdlib/class-name/member-name exceptions. Java/classfile facts are used only for
   declarations that do not have Kotlin metadata.
@@ -133,6 +140,7 @@ Useful audit commands:
 rg -n '\.render\(\)' src
 rg -n 'resolve_|get_class|classpath|fallback|or_else' src/ir_lower.rs
 rg -n '#\[allow\(dead_code\)\]' src
+rg -n '\$iv|_u24' src/fir_lower
 rg --pcre2 -n -U '(front_end_diagnostics|compiler_diagnostics|krusty_(stderr|stdout|errors)|\bdiags?\b|\bdiagnostics\b)[\s\S]{0,240}(contains|starts_with|ends_with|\.(any|all|sort|sort_by|sort_by_key)\()' tests
 ```
 

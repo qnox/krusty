@@ -1819,3 +1819,279 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   The `continuation_metadata_uses_returned_expression_end_line` fixture was an `if` whose arms are TAIL
   suspend calls — kotlinc emits no continuation class for it at all, so its pinned `nl` had no ground
   truth. The arms now feed a later expression, and the test compares `l`/`nl` against kotlinc's own.
+- **An explicit import outranks the current package (fix).** Kotlin's classifier scope tower ranks
+  explicit (non-star) imports ABOVE the file's own package, which in turn outranks star imports.
+  krusty's `import_levels` already encoded package-vs-star correctly, but `select_classifier_binding`
+  asked the same-package declaration BEFORE it ever reached the explicit-import map, so a file that
+  imported `other.Widget` while a sibling file in its own package also declared `Widget` bound every
+  mention to the sibling.
+  The failure is silent at the type level and loud at the call: the wrong class supplies the
+  constructor, so named arguments that exist only on the imported class report
+  `no parameter with name 'x' found` — one such shadowing pair produced eight errors in one file, and
+  a module with any error emits nothing.
+  `tests/explicit_import_shadows_same_package_e2e.rs::explicit_import_wins_over_same_package_class`.
+- **A spliced stdlib `map`/`flatMap` spills its inline locals (fix).** kotlinc's expansion is TWO
+  inline frames deep (`map` → `mapTo`, `flatMap` → `flatMapTo`), and a suspension inside the lambda
+  runs with every local that expansion introduced live. kotlinc spills each under its inline name —
+  `$this$map$iv` / `$this$flatMap$iv`, `$this$mapTo$iv$iv` / `$this$flatMapTo$iv$iv`,
+  `destination$iv$iv`, the loop element (`item$iv$iv` for `map`, `element$iv$iv` for `flatMap`), and
+  the lambda's own parameter under its source name; the iterator keeps a spill POSITION with no name.
+  krusty's expansion bound only an accumulator, an iterator and the lambda's formal, none of them
+  named, so the continuation came out short on both fields and `s`/`n` entries.
+  It also COPIED every lambda capture into a fresh temp. A capture that is already a plain local read
+  is now used in place — the copy was a second live value on the same data at every suspension, one
+  more spill field than kotlinc allocates.
+  `tests/suspend_inline_collection_spill_e2e.rs`.
+- **A spliced inline body names the locals it materializes (fix).** Every local an inline expansion
+  introduces — the callee's own parameters and its body locals — is in scope at a suspension inside
+  the spliced body, and kotlinc spills each under the callee's SOURCE name with one `$iv` per
+  expansion depth (`urlString$iv`, `builder$iv`, `builder$iv$iv` one frame deeper), escaping a `$`
+  inside the name itself as `_u24`. krusty lost both halves: the callee's parameters became unnamed
+  temps, and the cloned body declarations lost the names their originals carried, so a continuation's
+  `@DebugMetadata` held only the caller's own locals and the fields came out short.
+  The inline LAMBDA receiver retains its stable implementation identity and parameter coordinate;
+  the JVM boundary renders the matching `$this$<fn>_u24lambda_u24<n>` local without common lowering
+  learning that spelling. Classpath inline functions splice as BYTECODE (`src/jvm/inline.rs`) and
+  remain a separate provider-side local-table migration.
+   `tests/suspend_inline_splice_names_e2e.rs`.
+- **`-java-parameters` writes a `MethodParameters` attribute (feature).** The flag was on krusty's
+  IGNORED list, so a module built with it differed on EVERY class. kotlinc names each DECLARED
+  parameter — the source names, `$this$<fn>` for an extension receiver, `$completion` for the
+  continuation a `suspend fun` appends — and writes the attribute AFTER the annotation attributes.
+  A method with no parameters gets none, and neither does a compiler-manufactured one: a `$default`
+  bridge, `copy$default`, or the `DefaultConstructorMarker` constructor. A parameter the compiler
+  introduces carries a flag instead of a source name (`this$0` is `mandated`, an enum constructor's
+  `$enum$name`/`$enum$ordinal` are `synthetic`).
+  Typed source/provenance records cover declared functions (including `suspend`), primary and
+  secondary constructors, inner/local/anonymous captures, enums, data/value-class generated members,
+  continuations, and `$DefaultImpls` forwards; mismatched physical arity fails explicitly.
+  A parameter NAME interns with the method HEADER — ASM visits `visitParameter` before
+  `visitParameterAnnotation` and before the code, so the name precedes both the `@NotNull`/`@Nullable`
+  parameter descriptors and every constant the body introduces.
+  `tests/java_parameters_attribute_e2e.rs`.
+- **An element typed by a CLASSPATH `@Serializable` class uses that class's own serializer (fix).**
+  The plugin derived an element serializer only from a `$serializer` declared in the SAME IR file, so a
+  field whose type comes from a dependency had none. That first showed as a `null` child serializer
+  (an NPE at decode); once the plugin made the gap explicit, the whole file was declined — and since a
+  file that fails emits nothing, a single such field cost a module every class it had. Every generated
+  API client is shaped that way, which is how three corpus modules and 10687 byte-identical classes
+  went missing at once.
+  kotlinc reads the dependency's generated serializer (`getstatic dep/Inner$$serializer.INSTANCE`),
+  and so does krusty now. The plugin asks the provider-neutral `CheckedBackendClassifiers` view: its
+  one classifier record covers both frozen module declarations and dependency metadata, with no
+  classpath/module branch in the plugin or checked backend path.
+  Scope: the non-generic shape. A generic dependency serializer is built through
+  `Foo.Companion.serializer(<argument serializers>)`, and a library type with a hand-written
+  serializer (`JsonObject` → `JsonObjectSerializer.INSTANCE`) is named by its own typed
+  `@Serializable(with = …)` application. Both non-generic forms are covered; an unsupported generic
+  dependency still declines cleanly.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_classpath_serializable_class_uses_its_serializer`.
+- **An element declared in ANOTHER FILE of the module uses its serializer (fix).** krusty compiles a
+  file at a time, so a sibling `@Serializable` class's `$serializer` is neither in this file's IR nor
+  yet on the classpath — it is generated as that other file compiles. The plugin therefore could not
+  derive an element serializer for it and declined the file, which is the shape every generated API
+  client has: one declaration per file, each storing its siblings.
+  The classifier's resolved `@Serializable` annotation is the fact that settles it. Frozen module
+  facts and dependency records publish the same `ResolvedAnnotation` shape, so the plugin does not
+  know which provider supplied the declaration.
+  With this and the classpath half, the kubernetes httpclient module compiles again (1 error → 0).
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_declared_in_another_file_of_the_module_uses_its_serializer`.
+- **An element typed by a `@Serializable` ENUM uses the enum's own accessor (fix).** An enum has no
+  `$serializer` class: its accessor builds the serializer at run time
+  (`createSimpleEnumSerializer`/`createAnnotatedEnumSerializer`), which is why kotlinc reaches an enum
+  element through `Level.Companion.serializer()` and caches the result in `$childSerializers`. krusty
+  had a branch for every other element shape — sealed, collection, polymorphic, a generated
+  `$serializer` — but none for an enum, so it derived nothing and declined the file. Generated API
+  clients are full of enum-typed fields.
+  The generated accessor selected in the shared serializer plan proves that the enum is
+  `@Serializable`; a plain enum still bails.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_typed_by_a_serializable_enum_uses_its_accessor`.
+- **A contextual element INSIDE a collection is derivable (fix).**
+  `@file:UseContextualSerialization(T::class)` makes every `T` in the file serialize through a
+  `ContextualSerializer`, and krusty applied that rule to a PROPERTY of type `T` only. A
+  `List<T>` names no such property, so the collection's element serializer was underivable and the
+  file was declined — the shape generated clients use to carry loosely-typed JSON maps.
+  The same file annotation now answers for an element type, which is what the recursive element
+  derivation needed. With the classpath, sibling-file and enum shapes, the digitalocean and kubernetes
+  httpclient modules compile again.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_contextual_element_inside_a_collection_is_derivable`.
+- **An element whose class NAMES its own serializer reads that class (fix).**
+  `@Serializable(with = JsonObjectSerializer::class)` is how kotlinx's own types are serialized:
+  there is no generated `$serializer` to find, and a consumer storing such a type reads the named
+  class's singleton (`getstatic kotlinx/serialization/json/JsonObjectSerializer.INSTANCE`).
+  krusty could not see the annotation's ARGUMENT — dependency classifier records carried no applied
+  values — so the element was underivable and the file was declined. The class reader now decodes
+  every class-level application generically into resolved identities and typed values. The plugin
+  selects `@Serializable` and its `with` class literal from that common record; the reader contains
+  no kotlinx-specific branch.
+  With the four shapes before it, all four corpus modules the strict bail knocked out compile again:
+  rover, and the github (15915 classes), digitalocean (5209) and kubernetes (3226) httpclients.
+  `tests/serialization_companion_byte_parity_e2e.rs::an_element_whose_class_names_its_own_serializer_reads_that_class`.
+- **A nullable `@Serializable` element is actually decoded (fix).** `deserialize` demanded a BUILTIN
+  serializer for any NULLABLE element, so a nullable nested class, enum or collection made the whole
+  method undecodable — and krusty then emitted a stub that DEFAULT-CONSTRUCTS the class and ignores
+  the input. `serialize` and `childSerializers` derived the very same element without trouble; only
+  this gate disagreed with them.
+  Applicability and IR construction now consume one immutable `ElementSerializerPlan`; there is no
+  mirrored `can_derive` algorithm to drift. A non-nullable primitive decodes through its own
+  `decode<T>Element`, and everything else through the selected element serializer — which is how
+  kotlinc decodes a nullable element too (`decodeNullableSerializableElement` with the same
+  serializer). On the corpus this is 2406 `$serializer` classes whose deserialization was silently
+  empty.
+  krusty still emits no `decodeSequentially` fast path, so its decoder-call set is kotlinc's minus
+  that one — the remaining difference in this method.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_nullable_serializable_element_is_actually_decoded`.
+- **A serialization-only use in one file reaches a sibling declaration's serializer (fix).**
+  `Row.serializer()` is checked to a plugin placeholder carrying `Row`'s stable classifier identity.
+  A file that declared no `@Serializable` class skipped the plugin entirely, so that placeholder
+  survived and the JVM backend rejected the whole file. The plugin trigger now recognizes its own
+  checked placeholders, and the same provider-backed `ElementSerializerPlan` used for fields turns
+  the recorded sibling capability into `Row$$serializer.INSTANCE`; there is no accessor-name lookup
+  or backend retry.
+  `tests/serialization_companion_byte_parity_e2e.rs::a_sibling_files_generated_serializer_accessor_matches_kotlinc`.
+- **A lambda parameter's declared result decides its body's POSITION (fix).** A lambda whose declared
+  result is `Unit` ends in statement position, which is what makes a trailing `when` with no `else`
+  legal — the shape every Kotlin builder DSL is written around.
+  The expectation krusty builds for a functional argument carried the context types, the receiver and
+  the value parameters, but not the result, and the channel that consumes it hardcoded "a value is
+  required". A classpath TOP-LEVEL function was unaffected (a different channel reads its signature),
+  so the same block was accepted at top level and rejected on a member — with
+  `'when' expression must be exhaustive`, on source kotlinc accepts, taking the whole module's output
+  with it.
+  Still open, and deliberately not covered: a generic member EXTENSION
+  (`fun <T : Cfg> Holder<T>.engine(block: T.() -> Unit)`) reaches a plan whose `expected_types` entry
+  is `None`, so the result is unknown there for a different reason.
+  `tests/classpath_member_lambda_unit_e2e.rs::a_classpath_member_receiver_lambda_is_a_statement_position`.
+- **A decomposed lambda shape still needs its declared result (fix).** Once a functional parameter's
+  shape is decomposed into context types, a receiver and value parameters, nothing left in it says
+  whether the body ends in statement position — and only the declared result does. Three carriers
+  reach the same decomposed fall-through, and each had to be taught to keep it: the member-extension
+  plan (which recorded no expected type at all), the extension lambda shape (which had the
+  instantiated `Ty::Fun` and never read it), and the provider expectation.
+  The visible failure is a builder block: `h.configure { when { … } }` against
+  `fun configure(block: T.() -> Unit)` judged the trailing `when` in value position and reported it
+  non-exhaustive, on source kotlinc accepts. The body is checked TWICE — once on the decomposed
+  carrier and once with the result known — and the first pass's diagnostic was never retracted, so
+  the later correct pass could not save it.
+  `tests/generic_member_extension_lambda_result_e2e.rs::a_member_lambda_typed_by_a_class_type_parameter_is_a_statement_position`.
+- **A fixed result also CONTEXTUALIZES the lambda body (fix).** The declared result decides more than
+  statement-vs-expression position: it is the expected type the body's tail is checked against, and
+  for a bare generic call there that is the only evidence its type argument can have.
+  `m.onErrorResume { Mono.empty() }` — the reactive fallback shape — left the body at `Mono<T>` with
+  `T` unsolved, and the argument was then reported as `(Throwable!) -> Mono<T>!` against
+  `Function<Throwable!, Mono<Auth>!>!`. A result still mentioning a callee formal is deliberately NOT
+  pushed; overload inference owns it until it is fixed.
+  This also corrects a diagnostic that had diverged: `NumericApi.supply { "wrong" }` reported
+  "unresolved Java static" because the body was never checked against the interface's result at all.
+  kotlinc 2.4.10 reports a body mismatch there, and krusty now does too —
+  `tests/classpath_jdk_static_e2e.rs::incomparable_literal_overloads_are_ambiguous` was asserting the
+  krusty-only outcome and is updated with the measured reference wording.
+  `tests/sam_lambda_expected_result_e2e.rs::a_reactive_chain_binds_its_element_type_through_to_the_fallback`.
+- **A branch written as a block rebinds like an expression branch (fix).** `if (c) A() else B()` lets
+  an under-constrained branch take its type arguments from its sibling — that is how
+  `if (found) Mono.just(auth) else Mono.empty()` gives `Mono.empty()` its element type. The rebinding
+  asked the BRANCH expression for the generic signature to re-solve, and a block is not a call, so
+  putting either branch in braces silently disabled it: the branch stayed at its unconstrained result
+  and the join collapsed to `Mono<Any>`.
+  Braces around a branch are not a semantic choice, and a multi-statement branch has no other
+  spelling, so this made an ordinary reactive body unrepresentable. The signature lookup now walks a
+  block to the trailing expression that actually produces the branch's value; a block with no
+  trailing expression still produces `Unit` and is still rejected against an incompatible sibling.
+  `tests/conditional_block_branch_rebind_e2e.rs::a_multi_statement_branch_rebinds_against_its_sibling`.
+- **A nullable formal absorbs a projected actual (fix).** `List<*>` reads as `List<out Any?>`, so an
+  extension receiver `Iterable<T?>` with `T : Any` binds `T = Any` — the `?` in the FORMAL carries
+  the star's nullability. krusty's nullable-formal step called `non_null()` on an actual still
+  wrapped in its projection, so the star survived, the variable arm below opened it to `Any?`, and
+  the `T : Any` bound then rejected the very receiver that produced it.
+  The whole `<T : Any> Iterable<T?>` stdlib family — `filterNotNull`, `mapNotNull`,
+  `requireNoNulls` — was unusable on any starred collection. A NON-nullable formal `Iterable<T>` with
+  the same bound still rejects `List<*>`, matching kotlinc.
+  `tests/star_projection_nullable_receiver_e2e.rs::a_star_projection_satisfies_a_nullable_formal_receiver`.
+- **A `try` expression joins its branches against the expected type (fix).** `if` and `when` in value
+  position join through `join_conditional`, which consults the EXPECTATION before falling back to a
+  structural join; `try` used the blind join. Two generic branches then produced an out-projection
+  (`R<out Any!>`), which no INVARIANT declared type can take — so an expression-bodied
+  `try { f() } catch (…) { g().body(x) }` returning `R<Any>` was rejected where kotlinc infers each
+  branch's type parameter FROM that expectation and accepts.
+  One such file cost its whole module every class.
+  `tests/try_expected_type_join_e2e.rs`.
+- **`T : R` is a lower bound on `R` (fix).** A formal declared as another formal's upper bound gets a
+  constraint from every binding that reaches it: `<R, T : R> Box<T>.orElse(fallback: () -> R): R`
+  binds `T` from the receiver, and that binding is a LOWER bound on `R`.
+  krusty propagated the edge only when `R` occurred in NO value parameter, on the theory that a
+  formal an argument can reach has its own evidence. That holds only when the argument actually
+  answers: `runCatching { xs.toSet() }.getOrElse { emptySet() }` with no expected type leaves `R` at
+  the symbolic `Set<T>` the empty-collection call produced, and the receiver's `Set<String>` was
+  never consulted — the call was reported inapplicable against a receiver erased to `Result<Any>`.
+  The edge now also applies when the argument-derived binding is absent, agrees, or still mentions a
+  type parameter; a real, disagreeing argument binding joins with the receiver evidence.
+  `tests/tparam_bounded_by_tparam_e2e.rs::get_or_else_infers_from_the_receiver_without_an_expected_type`.
+- **A safe-call result proves its receiver non-null (fix).** `x?.let { … }` evaluates to null
+  whenever `x` is, so `val y = x?.let { … }` carries an implication its own type cannot express:
+  proving `y` non-null proves `x` non-null. The direct spelling already narrowed —
+  `if (x?.foo != null) x.bar` walks the chain to its root — but the version that stores the
+  intermediate result in a `val`, which is how the shape is written whenever the result is needed
+  twice, lost it entirely.
+  The origin is attached to the immutable lexical binding by identity, so shadowing and nested
+  control-flow scopes cannot redirect or leak the fact. The implication is followed transitively
+   through stable immutable roots only.
+   `tests/safe_call_origin_narrowing_e2e.rs::a_safe_call_result_proves_its_receiver_non_null`.
+- **An enter/lambda/finally inline body needs no state argument (fix).** krusty expands a RECOGNIZED
+  classpath inline body at IR level, which is what lets a suspension inside the lambda join the
+  CALLER's state machine. The recogniser for the enter/lambda/finally shape read the enter call's
+  receiver from a fixed operand position, which silently assumed exactly one state argument:
+  `Mutex.withLock` passes its `owner` to `lock`/`unlock` and decoded, while `Semaphore.withPermit`
+  passes nothing to `acquire`/`release` and did not.
+  How many operands the enter call takes is a fact of that member's own descriptor, so read it there.
+  Intervening non-load instructions are skipped — kotlinc emits `InlineMarker.mark` between the
+  operands and the call in the `$$forInline` body, which is why a backward scan that stopped at the
+  first non-load found nothing at all.
+  Without a plan the call keeps its lambda as a real function object, a suspend call inside it never
+  receives a continuation, and emission fails with "call arity mismatch" — which bails the whole
+   FILE, so one `withPermit` cost a module every class it would have emitted.
+   `tests/suspend_inline_stateless_finally_e2e.rs::with_permit_hosts_a_suspension_in_its_lambda`.
+- **Inline lambda regions use one checked body-plan contract (fix).** The provider previously
+  published separate plan variants for an unguarded lambda invocation and an
+  enter/lambda/finally region. That closed model could not describe `Closeable.use`: its lambda
+  receives the extension receiver, its `finally` cleanup consumes both that receiver and the
+  throwable which left the lambda, and it has no prologue.
+  `InvokeLambda` now carries parameter-relative invocation operands, optional checked prologue and
+  cleanup calls, declaration defaults, an optional recorded cause, and an optional returned
+  parameter. Each nested call carries its metadata-normalized callable identity and semantic
+  dispatch-versus-extension receiver role; bytecode is used only to recognize the exact control-flow
+  template and physical target. Checked FIR publishes that complete contract, and common lowering
+  treats it as an obligation rather than retrying an ordinary dependency call.
+  The exact recognizer rejects extra effects, altered handler ranges, or a cleanup other than the
+  duplicated `finally` target. Runtime coverage proves suspension, lambda operand mapping, close on
+  exceptional exit, and suppression of a close failure onto the body exception.
+  `tests/use_inline_finally_e2e.rs`.
+- **Inline fallback legality is a metadata declaration fact (fix).** A reified type parameter makes
+  an erased direct call illegal even when the declaration's JVM method is public; an ordinary
+  public non-reified inline method remains callable when its optional splice is declined. The JVM
+  provider now normalizes reification, inline status, and bytecode visibility into the one
+  `InlineKind` carried through selection. Emission consults only that checked capability: the
+  reified-substitution map supplies specialization operands but never decides whether fallback is
+  legal, and a public non-reified `$default` keeps its ABI mask dispatcher.
+  The runtime differential forces an owner-bridge splice decline through a kotlinc multifile facade,
+  asserts krusty emitted the exact legal facade call, and compares the same consumer's `box()` result
+  under kotlinc and krusty.
+  `tests/non_reified_inline_splice_fallback_e2e.rs`.
+- **A reified type argument of `Unit` reaches the splicer (fix).** A reified `inline fun` is spliced
+  by specializing its `reifiedOperationMarker` against the call's type arguments; with none to
+  specialize the splice declines, and a `MustInline` callee then bails the whole FILE. That map was
+  built by asking each argument for its class name, and `Unit` — unlike `Int` or `String` — has no
+  `Obj` spelling, so it was silently dropped and the map went EMPTY, which reads as "this call
+  supplied no reified arguments". `suspend fun f(): Unit = response.body()` therefore failed while
+  the identical call at any other result type spliced fine.
+  `tests/reified_unit_splice_e2e.rs::a_reified_unit_result_still_splices`,
+  `a_reified_reference_result_still_splices`.
+- **A reified type argument survives the value-class wrapper (fix).** Value-class lowering moves a
+  call BELOW a representation wrapper, cloning it to a new expression. That clone carried the call's
+  physical/logical types and its suspension identity but NOT its reified type arguments, so the
+  splicer saw a call with none and declined — and a `MustInline` callee that declines bails the whole
+  FILE, costing a module every class it would have emitted.
+  Only a value class whose underlying is NULLABLE is wrapped this way, which is why the same call
+  spliced for every other result type, a non-nullable value class included. External-call realization
+  already carries this fact to its cloned call; the value-class clone now does too.
+  `tests/reified_value_class_splice_e2e.rs::a_reified_nullable_value_class_result_still_splices`,
+  `a_reified_non_null_value_class_result_still_splices`.

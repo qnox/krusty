@@ -234,6 +234,8 @@ mod classpath_is_smartcast_e2e;
 mod classpath_jdk_static_e2e;
 #[path = "classpath_jvmstatic_object_property_e2e.rs"]
 mod classpath_jvmstatic_object_property_e2e;
+#[path = "classpath_member_lambda_unit_e2e.rs"]
+mod classpath_member_lambda_unit_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
 #[path = "classpath_member_mutable_collection_e2e.rs"]
@@ -362,6 +364,8 @@ mod compound_member_assign_lhs_caching_e2e;
 mod computed_prop_e2e;
 #[path = "computed_prop_generic_return_e2e.rs"]
 mod computed_prop_generic_return_e2e;
+#[path = "conditional_block_branch_rebind_e2e.rs"]
+mod conditional_block_branch_rebind_e2e;
 #[path = "conditional_branch_inference_e2e.rs"]
 mod conditional_branch_inference_e2e;
 #[path = "consistent_copy_visibility_e2e.rs"]
@@ -540,6 +544,8 @@ mod expected_return_invariant_binding_e2e;
 mod expected_type_propagation_e2e;
 #[path = "explicit_backing_field_e2e.rs"]
 mod explicit_backing_field_e2e;
+#[path = "explicit_import_shadows_same_package_e2e.rs"]
+mod explicit_import_shadows_same_package_e2e;
 #[path = "expr_completeness_e2e.rs"]
 mod expr_completeness_e2e;
 #[path = "expression_compound_assignment_e2e.rs"]
@@ -622,6 +628,8 @@ mod for_iterable_elvis_e2e;
 mod for_typed_loop_var_e2e;
 #[path = "foreach_convention_e2e.rs"]
 mod foreach_convention_e2e;
+#[path = "foreach_indexed_inline_e2e.rs"]
+mod foreach_indexed_inline_e2e;
 #[path = "fq_ctor_call_e2e.rs"]
 mod fq_ctor_call_e2e;
 #[path = "fq_generic_ctor_property_inference_e2e.rs"]
@@ -672,6 +680,8 @@ mod generic_hof_vc_binding_e2e;
 mod generic_inferred_primitive_return_e2e;
 #[path = "generic_inferred_return_e2e.rs"]
 mod generic_inferred_return_e2e;
+#[path = "generic_member_extension_lambda_result_e2e.rs"]
+mod generic_member_extension_lambda_result_e2e;
 #[path = "generic_return_inference_e2e.rs"]
 mod generic_return_inference_e2e;
 #[path = "generic_signature_e2e.rs"]
@@ -792,6 +802,8 @@ mod java_instance_e2e;
 mod java_interface_mutable_collection_face_e2e;
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
+#[path = "java_parameters_attribute_e2e.rs"]
+mod java_parameters_attribute_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 #[path = "java_static_field_e2e.rs"]
@@ -1012,6 +1024,8 @@ mod no_jdk_builtin_emit_e2e;
 mod non_field_ctor_metadata_e2e;
 #[path = "non_generic_overload_wins_e2e.rs"]
 mod non_generic_overload_wins_e2e;
+#[path = "non_reified_inline_splice_fallback_e2e.rs"]
+mod non_reified_inline_splice_fallback_e2e;
 #[path = "not_null_assert_e2e.rs"]
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]
@@ -1199,6 +1213,8 @@ mod safe_call_generic_field_e2e;
 mod safe_call_let_destructure_e2e;
 #[path = "safe_call_member_on_generic_result_e2e.rs"]
 mod safe_call_member_on_generic_result_e2e;
+#[path = "safe_call_origin_narrowing_e2e.rs"]
+mod safe_call_origin_narrowing_e2e;
 #[path = "safe_call_prim_intrinsic_e2e.rs"]
 mod safe_call_prim_intrinsic_e2e;
 #[path = "safe_call_primitive_e2e.rs"]
@@ -1213,6 +1229,8 @@ mod sam_classpath_e2e;
 mod sam_conversion_e2e;
 #[path = "sam_generic_lambda_param_e2e.rs"]
 mod sam_generic_lambda_param_e2e;
+#[path = "sam_lambda_expected_result_e2e.rs"]
+mod sam_lambda_expected_result_e2e;
 #[path = "same_package_classpath_e2e.rs"]
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
@@ -1259,6 +1277,8 @@ mod spread_in_annotation_e2e;
 mod spread_operator_e2e;
 #[path = "star_projection_member_read_e2e.rs"]
 mod star_projection_member_read_e2e;
+#[path = "star_projection_nullable_receiver_e2e.rs"]
+mod star_projection_nullable_receiver_e2e;
 #[path = "star_projection_wildcard_e2e.rs"]
 mod star_projection_wildcard_e2e;
 #[path = "static_member_import_e2e.rs"]
@@ -1310,8 +1330,14 @@ mod suspend_e2e;
 mod suspend_fun_interface_e2e;
 #[path = "suspend_in_try_body_hoist_e2e.rs"]
 mod suspend_in_try_body_hoist_e2e;
+#[path = "suspend_inline_collection_spill_e2e.rs"]
+mod suspend_inline_collection_spill_e2e;
 #[path = "suspend_inline_hof_suspending_lambda_reject_e2e.rs"]
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
+#[path = "suspend_inline_splice_names_e2e.rs"]
+mod suspend_inline_splice_names_e2e;
+#[path = "suspend_inline_stateless_finally_e2e.rs"]
+mod suspend_inline_stateless_finally_e2e;
 #[path = "suspend_inline_statementless_block_e2e.rs"]
 mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_interface_delegation_e2e.rs"]
@@ -1388,6 +1414,8 @@ mod toplevel_property_inference_e2e;
 mod toplevel_property_ref_e2e;
 #[path = "tparam_bound_member_e2e.rs"]
 mod tparam_bound_member_e2e;
+#[path = "tparam_bounded_by_tparam_e2e.rs"]
+mod tparam_bounded_by_tparam_e2e;
 #[path = "trailing_lambda_default_e2e.rs"]
 mod trailing_lambda_default_e2e;
 #[path = "trailing_lambda_middle_default_e2e.rs"]
@@ -1404,6 +1432,8 @@ mod try_catch_e2e;
 mod try_catch_expr_generic_merge_e2e;
 #[path = "try_catch_expr_nullable_merge_e2e.rs"]
 mod try_catch_expr_nullable_merge_e2e;
+#[path = "try_expected_type_join_e2e.rs"]
+mod try_expected_type_join_e2e;
 #[path = "type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
@@ -1448,6 +1478,8 @@ mod unsigned_ext_e2e;
 mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
+#[path = "use_inline_finally_e2e.rs"]
+mod use_inline_finally_e2e;
 #[path = "use_site_variance_e2e.rs"]
 mod use_site_variance_e2e;
 #[path = "utf16_string_constant_e2e.rs"]
@@ -1512,3 +1544,8 @@ mod when_statement_value_arm_e2e;
 mod when_throwing_branch_e2e;
 #[path = "wrapped_param_type_e2e.rs"]
 mod wrapped_param_type_e2e;
+
+#[path = "reified_unit_splice_e2e.rs"]
+mod reified_unit_splice_e2e;
+#[path = "reified_value_class_splice_e2e.rs"]
+mod reified_value_class_splice_e2e;

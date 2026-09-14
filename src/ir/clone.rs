@@ -303,6 +303,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(expr_lines);
     copy_map!(expr_source_lines);
     copy_map!(expr_end_lines);
+    copy_map!(value_names);
     copy_map!(logical_types);
     copy_map!(exhaustive_whens);
     copy_map!(physical_types);
@@ -313,6 +314,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(suspend_calls);
     copy_map!(value_class_suspend_calls);
     copy_map!(intrinsic_suspension_points);
+    if let Some(provenance) = ir.debug_local_provenance(source) {
+        ir.set_debug_local_provenance(target, provenance);
+    }
     if ir.property_initializer_stores.contains(&source) {
         ir.property_initializer_stores.insert(target);
     }

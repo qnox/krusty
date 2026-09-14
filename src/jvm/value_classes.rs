@@ -23,6 +23,11 @@ use crate::libraries::InlineKind;
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use std::collections::{HashMap, HashSet};
 
+mod descriptor_parameters;
+mod operation_relocation;
+
+use operation_relocation::clone_below_representation_wrapper;
+
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
 /// to the erasure map and are skipped when probing referenced classes.
@@ -1243,6 +1248,9 @@ pub fn lower_value_classes(
                 }
             }
         }
+    }
+    for function in lowered_value_members.iter().copied() {
+        super::method_parameters::prepend_compiler_generated(ir, function, "arg0");
     }
     // `(class, method-index)` → the value class a member's RETURN keeps BOXED. A user value-class member
     // runs on / returns the boxed object (the erasure loop above left its VC return un-erased), so its
@@ -3851,8 +3859,8 @@ pub fn lower_value_classes(
                 if vc_owned && name == "box-impl" {
                     continue;
                 }
-                let refs = descriptor_param_refs(descriptor);
-                let ptypes = descriptor_param_types(descriptor);
+                let refs = descriptor_parameters::references(descriptor);
+                let ptypes = descriptor_parameters::types(descriptor);
                 #[cfg(feature = "trace")]
                 if crate::trace::enabled("value_classes") {
                     if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
@@ -5525,7 +5533,7 @@ fn repr(
 
 /// Replace the expr at `id` with `(X)<orig>.unbox-impl()` — checkcast then unbox a boxed `X`.
 fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let new_id = clone_expr_with_type_facts(ir, id);
+    let new_id = clone_below_representation_wrapper(ir, id);
     let cast = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
@@ -5551,37 +5559,9 @@ fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
     ir.physical_types.insert(id, u);
 }
 
-/// Preserve the expression's physical/logical facts while moving it below a representation wrapper.
-fn clone_expr_with_type_facts(ir: &mut IrFile, id: ExprId) -> ExprId {
-    let new_id = ir.exprs.len() as ExprId;
-    ir.exprs.push(ir.exprs[id as usize].clone());
-    if let Some(ty) = ir.physical_types.get(&id).copied() {
-        ir.physical_types.insert(new_id, ty);
-    }
-    if let Some(ty) = ir.logical_types.get(&id).copied() {
-        ir.logical_types.insert(new_id, ty);
-    }
-    if let Some(ty) = ir.property_declaration_types.get(&id).copied() {
-        ir.property_declaration_types.insert(new_id, ty);
-    }
-    // The representation wrapper is not itself the selected suspension. Move that identity to the
-    // cloned original so CPS appends the continuation to the call, then realizes the wrapper around
-    // the call's synchronous/resumed result.
-    if let Some(result) = ir.suspend_calls.remove(&id) {
-        ir.suspend_calls.insert(new_id, result);
-    }
-    if let Some(result) = ir.value_class_suspend_calls.remove(&id) {
-        ir.value_class_suspend_calls.insert(new_id, result);
-    }
-    if let Some(result) = ir.intrinsic_suspension_points.remove(&id) {
-        ir.intrinsic_suspension_points.insert(new_id, result);
-    }
-    new_id
-}
-
 /// Replace an erased-reference expression with an explicit cast to its known boxed value class.
 fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
-    let arg = clone_expr_with_type_facts(ir, id);
+    let arg = clone_below_representation_wrapper(ir, id);
     ir.exprs[id as usize] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
         arg,
@@ -5590,7 +5570,7 @@ fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
 }
 
 fn unbox_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let orig_id = clone_expr_with_type_facts(ir, id);
+    let orig_id = clone_below_representation_wrapper(ir, id);
     let boxed_ty = Ty::nullable(Ty::obj_name(x));
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
@@ -6237,7 +6217,7 @@ fn box_nullable_vc_tail(
 
 /// Replace the expr at `id` with `box-impl(<original expr at id>)`.
 fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
-    let new_id = clone_expr_with_type_facts(ir, id);
+    let new_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let d = desc(&u);
     let owner_rendered = x.render();
@@ -6257,7 +6237,7 @@ fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
 /// Null-safe box: replace the expr at `id` with `{ tmp = <orig>; if (tmp == null) null else box-impl(tmp) }`
 /// — boxing a nullable (reference-underlying) value class without hitting the ctor null-check on `null`.
 fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, slot: u32) {
-    let orig_id = clone_expr_with_type_facts(ir, id);
+    let orig_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let var = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Variable {
@@ -6435,76 +6415,6 @@ fn is_ref(t: &Ty) -> bool {
     }
 }
 
-/// Each parameter type of a JVM method descriptor `(…)ret` as its descriptor string (`I`, `LZ1;`,
-/// `[Ljava/lang/String;`, …) — used to box an unboxed value class only at a `Lx;`-typed parameter.
-fn descriptor_param_types(descriptor: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = descriptor.as_bytes();
-    let Some(end) = descriptor.find(')') else {
-        return out;
-    };
-    let mut i = 1;
-    while i < end {
-        let start = i;
-        while i < end && bytes[i] == b'[' {
-            i += 1;
-        }
-        if i < end && bytes[i] == b'L' {
-            while i < end && bytes[i] != b';' {
-                i += 1;
-            }
-            i += 1;
-        } else {
-            i += 1;
-        }
-        out.push(descriptor[start..i].to_string());
-    }
-    out
-}
-
-/// Whether each parameter of a JVM method descriptor `(…)ret` is a reference type (`L…;` or `[…`).
-fn descriptor_param_refs(descriptor: &str) -> Vec<bool> {
-    let mut out = Vec::new();
-    let bytes = descriptor.as_bytes();
-    let Some(end) = descriptor.find(')') else {
-        return out;
-    };
-    let mut i = 1;
-    while i < end {
-        match bytes[i] {
-            b'[' => {
-                out.push(true);
-                i += 1;
-                while i < end && bytes[i] == b'[' {
-                    i += 1;
-                }
-                if i < end && bytes[i] == b'L' {
-                    while i < end && bytes[i] != b';' {
-                        i += 1;
-                    }
-                }
-                i += 1;
-            }
-            b'L' => {
-                out.push(true);
-                while i < end && bytes[i] != b';' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            b'J' | b'D' => {
-                out.push(false);
-                i += 1;
-            }
-            _ => {
-                out.push(false);
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, NOT `ir_lower`): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
@@ -6565,6 +6475,7 @@ fn synth_value_members(
                 function.is_static = true;
                 function.ret
             };
+            super::method_parameters::prepend_compiler_generated(ir, getter, "arg0");
             ir.classes[class_id as usize].properties[property_index].getter_jvm_name =
                 Some(jvm_name.clone());
             // The static `getX-impl(U)` is how an unboxed value calls its accessor. If the property
@@ -6612,10 +6523,13 @@ fn synth_value_members(
                 "{}-impl",
                 crate::names::property_setter_name(&property_name)
             );
-            let function = &mut ir.functions[setter as usize];
-            function.name.clone_from(&jvm_name);
-            function.params.insert(0, u_ir);
-            function.is_static = true;
+            {
+                let function = &mut ir.functions[setter as usize];
+                function.name.clone_from(&jvm_name);
+                function.params.insert(0, u_ir);
+                function.is_static = true;
+            }
+            super::method_parameters::prepend_compiler_generated(ir, setter, "arg0");
             ir.classes[class_id as usize].properties[property_index].setter_jvm_name =
                 Some(jvm_name);
         }
@@ -6628,6 +6542,7 @@ fn synth_value_members(
     let mut custom_equals = false;
     let mut custom_hash_code = false;
     let mut custom_to_string = false;
+    let mut custom_carrier_functions = Vec::new();
     for &fid in &ir.classes[class_id as usize].methods.clone() {
         let Some(function) = ir.functions.get_mut(fid as usize) else {
             continue;
@@ -6651,7 +6566,11 @@ fn synth_value_members(
             function.name = name.to_string();
             function.params.insert(0, u_ir);
             function.is_static = true;
+            custom_carrier_functions.push(fid);
         }
+    }
+    for function in custom_carrier_functions {
+        super::method_parameters::prepend_compiler_generated(ir, function, "arg0");
     }
 
     let add_static = |ir: &mut IrFile, name: &str, params: Vec<Ty>, ret: Ty, body: ExprId| -> u32 {
@@ -6776,6 +6695,7 @@ fn synth_value_members(
         stmts.push(ir.add_expr(IrExpr::Return(Some(arg))));
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
+        super::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
         // owner marker here would make the default-stub emitter exclude the parameter from Kotlin's
@@ -6839,7 +6759,8 @@ fn synth_value_members(
             vc_underlying_eq(ir, a, b, is_ref_under, &final_fq)
         };
         let body = ret_block(ir, cmp);
-        add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
+        let function = add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
+        super::method_parameters::record_function(ir, function, &["p1", "p2"], &[]);
     }
     // kotlinc emits the logic in a static `<name>-impl(U)` operating on the unboxed value, and the
     // instance method delegates to it (`toString()` → `toString-impl(this.field)`). The instance methods
@@ -6860,6 +6781,7 @@ fn synth_value_members(
             let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, v, close]));
             let sbody = ret_block(ir, acc);
             let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
+            super::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
         }
         let fv = this_field(ir);
@@ -6897,6 +6819,7 @@ fn synth_value_members(
             let h = field_hash_ir(ir, v, &final_fq, nonnull_ref_owner.as_deref());
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
+            super::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
         }
         let fv = this_field(ir);
@@ -6960,6 +6883,7 @@ fn synth_value_members(
             stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
             let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
             let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
+            super::method_parameters::record_function(ir, impl_fid, &["arg0", "other"], &[0]);
             ir.open_methods.insert(impl_fid);
         }
         // instance equals(other) → return equals-impl(this.field, other)
@@ -6977,6 +6901,7 @@ fn synth_value_members(
         });
         let ibody = ret_block(ir, call);
         if let Some(fid) = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody) {
+            super::method_parameters::record_function(ir, fid, &["other"], &[]);
             ir.open_methods.insert(fid);
         }
     }
@@ -7083,6 +7008,12 @@ fn synth_value_members(
             stmts.push(ir.add_expr(IrExpr::Return(Some(result))));
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             let constructor = add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            let names = sc
+                .named_params
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>();
+            super::method_parameters::record_function(ir, constructor, &names, &[]);
             ir.fn_source_order.insert(constructor, sc.source_order);
         }
     }

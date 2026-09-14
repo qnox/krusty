@@ -3,7 +3,7 @@ use super::test_support::{
     checked_function_body_with_platform, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
-use crate::fir::{FirInlineBodyPlan, FirInlineDefaultValue};
+use crate::fir::FirInlineBodyPlan;
 
 #[test]
 fn legacy_context_receiver_supplies_an_unqualified_extension_call() {
@@ -1310,6 +1310,31 @@ fn postponed_generic_result_inside_an_input_projection_is_fully_solved() {
         panic!("the nested call must publish its completed type argument")
     };
     assert_eq!(element.value.get(), Ty::Nothing);
+}
+
+#[test]
+fn postponed_result_completion_preserves_an_input_owned_type_argument() {
+    let (body, index) = checked_function_body(
+        "class Inv<T>\n\
+         fun <T : V, U : V, V> accept(x: T, y: Inv<in U>) {}\n\
+         fun <A, E> materialize(value: A): Inv<in Inv<E>?> = Inv()\n\
+         fun test(inv: Inv<Int>) { accept(inv, materialize(\"kept\")) }\n",
+        "test",
+    );
+    let materialize = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target)? == "materialize").then_some(call)
+        })
+        .expect("postponed nested call");
+    let [input, result] = materialize.substitutions.as_ref() else {
+        panic!("the nested call must publish both declaration-owned type arguments")
+    };
+    assert_eq!(input.value.get(), Ty::String);
+    assert_eq!(result.value.get(), Ty::Nothing);
 }
 
 #[test]
@@ -3747,6 +3772,55 @@ fn foreach_with_callable_reference_keeps_the_selected_external_call_without_spli
 }
 
 #[test]
+fn ordinary_map_literal_keeps_the_selected_external_call_without_splice_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun read(values: List<Int>): List<Int> = values.map { it + 1 }\n",
+        "read",
+        jvm_stdlib_semantics(),
+    );
+
+    let map = (0..body.expression_count()).find_map(|raw| {
+        let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+            return None;
+        };
+        let FirCallTarget::External { inline_plan, .. } = &call.target else {
+            return None;
+        };
+        call.arguments
+            .iter()
+            .any(|argument| {
+                matches!(
+                    argument,
+                    FirCallArgument::Expression { value, .. }
+                        if matches!(
+                            body.expr(*value).map(|expression| &expression.kind),
+                            Some(FirExprKind::Lambda { .. })
+                        )
+                )
+            })
+            .then_some(inline_plan)
+    });
+    assert!(matches!(map, Some(None)));
+}
+
+#[test]
+fn inline_function_value_keeps_the_selected_external_call_without_splice_plan() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun read(block: (String) -> Int): Int = \"value\".let(block)\n",
+        "read",
+        jvm_stdlib_semantics(),
+    );
+    let root = body.expr(root_expression(&body)).expect("root call");
+    let FirExprKind::Call(call) = &root.kind else {
+        panic!("let must remain a checked call")
+    };
+    let FirCallTarget::External { inline_plan, .. } = &call.target else {
+        panic!("stdlib let must retain its selected external identity")
+    };
+    assert!(inline_plan.is_none());
+}
+
+#[test]
 fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
     let (body, _) = checked_function_body_with_platform(
         "operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\
@@ -3797,21 +3871,17 @@ fn suspending_map_publishes_a_complete_declaration_scoped_collection_plan() {
 }
 
 #[test]
-fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
-    let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ));
+fn safe_suspend_function_property_in_map_keeps_the_checked_collection_plan() {
     let (body, _) = checked_function_body_with_platform(
-        "import kotlinx.coroutines.sync.Mutex\n\
-         import kotlinx.coroutines.sync.withLock\n\
-         suspend fun read(mutex: Mutex): String = mutex.withLock { \"OK\" }\n",
-        "read",
-        platform,
+        "class Holder(val callback: suspend () -> String)\n\
+         suspend fun collect(values: List<Int>, holder: Holder?): List<String> =\n\
+             values.map { holder?.callback() ?: \"none\" }\n",
+        "collect",
+        jvm_stdlib_semantics(),
     );
+
     let plan = (0..body.expression_count()).find_map(|raw| {
-        let expression = body.expr(FirExprId::from_raw(raw as u32))?;
-        let FirExprKind::Call(call) = &expression.kind else {
+        let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
             return None;
         };
         let FirCallTarget::External {
@@ -3821,29 +3891,9 @@ fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         else {
             return None;
         };
-        matches!(
-            plan.as_ref(),
-            FirInlineBodyPlan::SuspendBeforeLambdaFinally { .. }
-        )
-        .then_some(plan.as_ref())
+        matches!(plan.as_ref(), FirInlineBodyPlan::CollectionTransform { .. }).then_some(())
     });
-    let Some(FirInlineBodyPlan::SuspendBeforeLambdaFinally {
-        lambda_parameter,
-        state_parameter,
-        state_default,
-        enter,
-        cleanup,
-    }) = plan
-    else {
-        panic!("withLock must publish its selected structural plan in checked FIR")
-    };
-    assert_eq!((*lambda_parameter, *state_parameter), (1, 0));
-    assert_eq!(*state_default, FirInlineDefaultValue::Null);
-    assert_eq!(enter.parameters.len(), 1);
-    assert_eq!(cleanup.parameters.len(), 1);
-    assert!(enter.suspend);
-    assert!(!cleanup.suspend);
-    assert_ne!(enter.declaration, cleanup.declaration);
+    assert_eq!(plan, Some(()));
 }
 
 #[test]

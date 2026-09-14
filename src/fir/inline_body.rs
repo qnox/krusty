@@ -1,0 +1,132 @@
+//! Checked, source-independent inline expansion contracts.
+
+use super::body::FirIteratorCall;
+use super::identities::ExternalCallableId;
+use super::signature::ResolvedTy;
+
+/// Parameter-relative value selected by a checked inline plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirInlineValue {
+    Receiver,
+    Parameter(u32),
+    /// Throwable escaping the lambda, or `null` on its normal exit.
+    Cause,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirInlineCallReceiver {
+    Dispatch(FirInlineValue),
+    Extension(FirInlineValue),
+}
+
+/// Checked index behavior of a declaration-owned iteration body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirInlineIterationIndex {
+    Unchecked,
+    Checked { overflow: Box<FirInlineCall> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineIterationMemberCall {
+    pub declaration: ExternalCallableId,
+    pub receiver: ResolvedTy,
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirInlineIterationTraversal {
+    Iterator {
+        prepare: Box<[FirInlineIterationMemberCall]>,
+        has_next: Box<FirInlineIterationMemberCall>,
+        next: Box<FirInlineIterationMemberCall>,
+    },
+    Array,
+    Counted {
+        size: Box<FirInlineIterationMemberCall>,
+        get: Box<FirInlineIterationMemberCall>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineCall {
+    pub declaration: ExternalCallableId,
+    /// Context and source value parameters. An extension receiver remains the explicit semantic
+    /// receiver above and is not duplicated in this list.
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
+    pub suspend: bool,
+    pub receiver: Option<FirInlineCallReceiver>,
+    pub arguments: Box<[FirInlineValue]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirInlineDefault {
+    pub parameter: u32,
+    pub value: FirInlineDefaultValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirInlineBodyPlan {
+    InvokeLambda {
+        lambda_parameter: u32,
+        arguments: Box<[FirInlineValue]>,
+        prologue: Box<[FirInlineCall]>,
+        cleanup: Box<[FirInlineCall]>,
+        /// Nullable semantic throwable type recorded by the checked catch template.
+        cause: Option<ResolvedTy>,
+        defaults: Box<[FirInlineDefault]>,
+        result: Option<FirInlineValue>,
+    },
+    /// Declaration-scoped iterator expansion for the exact selected inline `forEach` declaration.
+    /// All three convention calls were selected by the checker at the call site; lowering only
+    /// splices the checked lambda body into the resulting loop.
+    Iteration {
+        lambda_parameter: u32,
+        element: ResolvedTy,
+        index: Option<FirInlineIterationIndex>,
+        traversal: FirInlineIterationTraversal,
+    },
+    /// Checked structural expansion of an exact collection inline declaration. Iterator convention
+    /// calls were selected in the declaration's lookup scope; factory/append are opaque provider
+    /// identities. Common lowering therefore performs no library lookup or target-ABI reasoning.
+    CollectionTransform {
+        lambda_parameter: u32,
+        flatten: bool,
+        local_names: FirInlineCollectionLocalNames,
+        iterator_ty: ResolvedTy,
+        iterator: Box<FirIteratorCall>,
+        has_next: Box<FirIteratorCall>,
+        next: Box<FirIteratorCall>,
+        factory: ExternalCallableId,
+        factory_classifier: crate::types::TypeName,
+        append: ExternalCallableId,
+        accumulator: ResolvedTy,
+        append_parameter: ResolvedTy,
+        append_result: ResolvedTy,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineCollectionLocalNames {
+    pub outer_receiver: Box<str>,
+    pub inner_receiver: Box<str>,
+    pub destination: Box<str>,
+    pub element: Box<str>,
+}
+
+impl From<&crate::libraries::InlineCollectionLocalNames> for FirInlineCollectionLocalNames {
+    fn from(names: &crate::libraries::InlineCollectionLocalNames) -> Self {
+        Self {
+            outer_receiver: names.outer_receiver.clone(),
+            inner_receiver: names.inner_receiver.clone(),
+            destination: names.destination.clone(),
+            element: names.element.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FirInlineDefaultValue {
+    Null,
+}

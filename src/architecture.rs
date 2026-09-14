@@ -269,6 +269,28 @@ mod tests {
     }
 
     #[test]
+    fn method_parameter_identity_has_one_typed_boundary() {
+        for path in [
+            "src/ir/function_parameters.rs",
+            "src/jvm/method_parameters.rs",
+            "src/jvm/classfile/method_parameters.rs",
+        ] {
+            assert!(
+                source_path(path).is_file(),
+                "missing ownership module {path}"
+            );
+        }
+        let emitter =
+            fs::read_to_string(source_path("src/jvm/ir_emit.rs")).expect("read JVM emitter facade");
+        assert!(!emitter.contains("fn declared_method_parameters"));
+        assert!(!emitter.contains("fn declared_constructor_parameters"));
+        assert!(!emitter.contains("internal.render() == \"kotlin/coroutines/Continuation\""));
+        let classfile =
+            fs::read_to_string(source_path("src/jvm/classfile.rs")).expect("read classfile facade");
+        assert!(!classfile.contains("pub fn set_method_parameters"));
+    }
+
+    #[test]
     fn jvm_backend_adapter_uses_only_frontend_handoff_and_jvm_dependencies() {
         assert_allowed_crate_modules(
             "src/jvm/backend.rs",
@@ -477,6 +499,20 @@ mod tests {
                     !text.contains(forbidden),
                     "{} must consume checked FIR selections, not use '{forbidden}'",
                     path.display(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_fir_lowering_does_not_format_jvm_inline_debug_names() {
+        for path in rust_files_under("src/fir_lower") {
+            let text = fs::read_to_string(&path).expect("read checked FIR lowerer");
+            for forbidden in ["$iv", "_u24"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} must retain typed inline-local provenance; the JVM boundary owns `{forbidden}` formatting",
+                    path.display()
                 );
             }
         }

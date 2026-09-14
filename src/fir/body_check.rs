@@ -29,6 +29,7 @@ mod destructure_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod inline_body_plan;
 #[cfg(test)]
 mod invoke_tests;
 mod invokes;
@@ -2953,13 +2954,9 @@ impl BodyFirChecker<'_> {
                     } else {
                         selector_ty?
                     };
-                    let selector_origin = self.expression_origin(expression)?;
                     let selector_ty = self.resolved_type(span, selector_ty)?;
-                    let selector = self.body.add_expr(FirExpr {
-                        origin: selector_origin,
-                        ty: selector_ty,
-                        kind: selector_kind,
-                    });
+                    let selector =
+                        self.add_expression_with_type(expression, selector_ty, selector_kind)?;
                     let kind = FirExprKind::SafeCall {
                         receiver: guarded_receiver,
                         selector,
@@ -3131,6 +3128,9 @@ impl BodyFirChecker<'_> {
     }
 
     fn statement(&mut self, statement: StmtId) -> Result<FirStatementId, BodyCheckFailure> {
+        if self.info.convention_stmt_suspends(statement) {
+            self.body.direct_suspension = true;
+        }
         let origin = self.statement_origin(statement)?;
         if let Some(StmtLowering::PlusAssign(target)) =
             self.info.stmt_lowers.get(&statement).cloned()

@@ -105,6 +105,11 @@ pub struct FrontendClassContext<'a> {
 pub struct PluginContext {
     pub class_annotations: HashMap<ClassId, Vec<TypeName>>,
     target_type_descriptor: fn(Ty) -> Option<String>,
+    /// Types this compilation does NOT declare, mapped to the serializer that already exists for
+    /// them: another file's or a dependency's generated `$serializer`, or the one a class names for
+    /// itself with `@Serializable(with = …)`. A plugin can only DERIVE a serializer for what this
+    /// file declares; for everything else only the target knows where the serializer is.
+    external_serializers: std::collections::HashMap<TypeName, TypeName>,
 }
 
 impl Default for PluginContext {
@@ -112,6 +117,7 @@ impl Default for PluginContext {
         Self {
             class_annotations: HashMap::new(),
             target_type_descriptor: no_target_type_descriptor,
+            external_serializers: std::collections::HashMap::new(),
         }
     }
 }
@@ -121,6 +127,7 @@ impl Clone for PluginContext {
         Self {
             class_annotations: self.class_annotations.clone(),
             target_type_descriptor: self.target_type_descriptor,
+            external_serializers: self.external_serializers.clone(),
         }
     }
 }
@@ -133,6 +140,21 @@ impl PluginContext {
 
     pub fn target_type_descriptor(&self, ty: Ty) -> Option<String> {
         (self.target_type_descriptor)(ty)
+    }
+
+    /// Record the serializer that exists outside this compilation for each type that has one.
+    pub fn with_external_serializers(
+        mut self,
+        serializers: std::collections::HashMap<TypeName, TypeName>,
+    ) -> Self {
+        self.external_serializers = serializers;
+        self
+    }
+
+    /// The serializer class (a JVM internal name) the target can reference for `internal`, when one
+    /// already exists outside this file.
+    pub fn external_serializer(&self, classifier: TypeName) -> Option<TypeName> {
+        self.external_serializers.get(&classifier).copied()
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -176,12 +198,12 @@ impl PluginContext {
             .find(|application| application.internal == annotation)
     }
 
-    pub fn class_annotation_class_literal_internal(
+    pub fn class_annotation_class_literal(
         &self,
         ir: &IrFile,
         class: ClassId,
         annotation: TypeName,
-    ) -> Option<String> {
+    ) -> Option<TypeName> {
         let value = ir
             .classes
             .get(class as usize)
@@ -189,25 +211,25 @@ impl PluginContext {
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)?;
         match value {
-            crate::ir::AnnoValue::Class(classifier) => Some(classifier.render()),
+            crate::ir::AnnoValue::Class(classifier) => Some(*classifier),
             _ => None,
         }
     }
 
-    pub fn property_annotation_class_literal_internal(
+    pub fn property_annotation_class_literal(
         &self,
         ir: &IrFile,
         class: ClassId,
         property: &str,
         annotation: TypeName,
-    ) -> Option<String> {
+    ) -> Option<TypeName> {
         let value = self
             .ir_property_annotations(ir, class, property)
             .and_then(|annotations| Self::annotation_named(annotations, annotation))
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)?;
         match value {
-            crate::ir::AnnoValue::Class(classifier) => Some(classifier.render()),
+            crate::ir::AnnoValue::Class(classifier) => Some(*classifier),
             _ => None,
         }
     }
@@ -350,15 +372,101 @@ pub fn run_enabled(
     ir: &mut IrFile,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
 ) {
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
-    if ctx
-        .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
-        .is_empty()
+    let uses_serialization = ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            crate::ir::IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                ..
+            }
+        )
+    });
+    if !uses_serialization
+        && ctx
+            .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
+            .is_empty()
     {
         return;
     }
+    let ctx = ctx.with_external_serializers(external_serializers(ir, classifiers));
     enabled_plugins(module_name).run(ir, &ctx);
+}
+
+/// Field classifiers this file does not declare, normalized through the single checked provider.
+fn external_serializers(
+    ir: &IrFile,
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
+) -> std::collections::HashMap<TypeName, TypeName> {
+    let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
+    external_classifier_candidates(ir)
+        .filter_map(|classifier| {
+            let annotations = classifiers.classifier_annotations(classifier)?;
+            let application = annotations
+                .iter()
+                .find(|annotation| annotation.annotation == serializable);
+            let custom = application.and_then(|annotation| {
+                annotation.arguments.iter().find_map(|(name, value)| {
+                    (name == "with")
+                        .then_some(value)
+                        .and_then(|value| match value {
+                            crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
+                            _ => None,
+                        })
+                })
+            });
+            custom
+                .or_else(|| application.map(|_| classifier.nested_child("$serializer")))
+                .or_else(|| {
+                    let generated = classifier.nested_child("$serializer");
+                    classifiers
+                        .classifier_annotations(generated)
+                        .map(|_| generated)
+                })
+                .map(|serializer| (classifier, serializer))
+        })
+        .collect()
+}
+
+fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName> + '_ {
+    let declared: std::collections::HashSet<TypeName> =
+        ir.classes.iter().map(|class| class.fq_name_id()).collect();
+    let mut candidates: Vec<Ty> = ir
+        .classes
+        .iter()
+        .flat_map(|class| class.fields.iter().map(|field| field.ty))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut external = Vec::new();
+    for expression in &ir.exprs {
+        let crate::ir::IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            data,
+            ..
+        } = expression
+        else {
+            continue;
+        };
+        for &classifier in data {
+            if seen.insert(classifier) && !declared.contains(&classifier) {
+                external.push(classifier);
+            }
+        }
+    }
+    while let Some(ty) = candidates.pop() {
+        // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
+        candidates.extend(ty.non_null().type_args().iter().copied());
+        let Some(classifier) = ty.kotlin_class_internal() else {
+            continue;
+        };
+        if !seen.insert(classifier) || declared.contains(&classifier) {
+            continue;
+        }
+        external.push(classifier);
+    }
+    external.into_iter()
 }
 
 pub(crate) fn enabled_plugins(module_name: &str) -> PluginHost {

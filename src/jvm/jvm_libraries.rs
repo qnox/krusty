@@ -3,12 +3,18 @@
 //! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
+mod inline_body_plan;
+mod inline_capability;
+
+use inline_capability::{metadata_inline, property_accessor_inline};
+
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
+use crate::jvm::names::same_mapped_virtual_name;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
@@ -23,13 +29,6 @@ use crate::runtime::{
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{existing_type_name, type_name, Ty, TypeName, TypeNameList};
-
-/// A semantically visible Kotlin property whose exact classfile accessor is non-public is an inline
-/// body container, not a callable fallback. Normalize that declaration capability identically for
-/// package, classifier, and object-import views of the same property.
-fn property_accessor_inline(bytecode_public: bool) -> InlineKind {
-    InlineKind::from_flags(!bytecode_public, !bytecode_public)
-}
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -777,7 +776,7 @@ impl JvmLibraries {
                     *parameter = *declared;
                 }
             }
-            let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
+            let inline_kind = metadata_inline(inline, meta.has_reified_type_params, c.public);
             let generic_sig_for_callable = meta.generic_sig.clone().or_else(|| {
                 self.callable_generic_sig(
                     c.owner,
@@ -1044,9 +1043,10 @@ impl JvmLibraries {
             let Some(bytecode_public) = bytecode_public(&function.jvm_name, desc) else {
                 continue;
             };
-            let function_inline = InlineKind::from_flags(
+            let function_inline = metadata_inline(
                 function.is_inline(),
-                function.is_inline() && !bytecode_public,
+                function.has_reified_type_params(),
+                bytecode_public,
             );
             let Some((params, physical_ret)) = parse_method_desc(desc) else {
                 continue;
@@ -1913,9 +1913,10 @@ impl JvmLibraries {
                     member.set_ret_nullable(declaration.ret_nullable());
                     member.set_suspend(declaration.is_suspend());
                     member.context_count = declaration.context_count();
-                    member.inline = InlineKind::from_flags(
+                    member.inline = metadata_inline(
                         declaration.is_inline(),
-                        declaration.is_inline() && !m.is_public(),
+                        declaration.has_reified_type_params(),
+                        m.is_public(),
                     );
                     member.reified = declaration.has_reified_type_params();
                     member.annotations = declaration.annotations.clone();
@@ -2661,9 +2662,8 @@ impl JvmLibraries {
                     )
                 });
             } else {
-                // A mapped JVM method and its Kotlin builtin entry are two descriptions of one
-                // declaration, not two overloads. Prefer the builtin: it carries Kotlin-only facts such
-                // as `operator`, source names, and nullability while retaining the same physical target.
+                // A mapped JVM method and its Kotlin builtin entry describe one declaration. Prefer the
+                // builtin's Kotlin-only facts while retaining the same physical target.
                 members.retain(|member| {
                     !builtin_members.iter().any(|builtin| {
                         let member_physical = member
@@ -2674,7 +2674,7 @@ impl JvmLibraries {
                             .physical_name
                             .as_deref()
                             .unwrap_or(builtin.name.as_str());
-                        member_physical == builtin_physical
+                        same_mapped_virtual_name(internal, member_physical, builtin_physical)
                             && member.descriptor == builtin.descriptor
                     })
                 });
@@ -2775,6 +2775,7 @@ impl JvmLibraries {
                 enum_entries,
                 enum_entries_accessor,
                 named_parameter_lists,
+                annotations: ci.annotations.clone(),
                 // JLS default: an annotation declaration without `@Retention` has CLASS retention.
                 // Normalize that provider fact here so common checking never branches on declaration
                 // origin or tries to interpret an absent classfile attribute.
@@ -3551,6 +3552,7 @@ fn mapped_builtin_signature(internal: &str) -> Option<LibraryType> {
         enum_entries: Vec::new(),
         enum_entries_accessor: None,
         named_parameter_lists: Vec::new(),
+        annotations: Vec::new(),
         retention: None,
         annotation_targets: None,
     })
@@ -3625,6 +3627,7 @@ fn builtin_library_type(
         enum_entries: Vec::new(),
         enum_entries_accessor: None,
         named_parameter_lists: Vec::new(),
+        annotations: Vec::new(),
         retention: None,
         annotation_targets: None,
     }
@@ -3750,91 +3753,6 @@ fn interface_holder_method(
         .then_some((holder, descriptor))
 }
 
-fn inline_body_descriptor(callable: &LibraryCallable) -> Option<String> {
-    if !callable.suspend {
-        return Some(callable.descriptor.clone());
-    }
-    let close = callable.descriptor.rfind(')')?;
-    Some(format!(
-        "({}{}){}",
-        &callable.descriptor[1..close],
-        CONTINUATION_PARAM_DESCRIPTOR,
-        &callable.descriptor[close + 1..]
-    ))
-}
-
-fn callable_parameter_slots(parameters: &[Ty]) -> Vec<u16> {
-    let mut next = 0u16;
-    parameters
-        .iter()
-        .map(|parameter| {
-            let slot = next;
-            next += u16::from(matches!(*parameter, Ty::Long | Ty::Double)) + 1;
-            slot
-        })
-        .collect()
-}
-
-fn inline_plan_member(target: (&str, &str, &str, bool), suspend: bool) -> Option<LibraryMember> {
-    let (owner, name, descriptor, interface) = target;
-    let logical_descriptor = if suspend {
-        strip_continuation_param(descriptor)
-    } else {
-        descriptor.to_string()
-    };
-    let (params, ret) = parse_method_desc(&logical_descriptor)?;
-    let mut member = LibraryMember::new(name.to_string(), params, ret, logical_descriptor);
-    member.owner = Some(type_name(owner));
-    member.physical_ret = parse_method_desc(descriptor)?.1;
-    member.set_is_interface(interface);
-    member.set_suspend(suspend);
-    Some(member)
-}
-
-/// Structural dependencies of the exact stdlib collection `map`/`flatMap` inline declarations.
-/// They are registered as opaque external identities before checked FIR is built; common lowering
-/// never sees these JVM owners or descriptors.
-fn collection_transform_inline_plan(flatten: bool) -> InlineBodyPlan {
-    let any = Ty::nullable(Ty::obj("kotlin/Any"));
-    let mut factory = LibraryMember::new(
-        "<init>".to_string(),
-        Vec::new(),
-        Ty::Unit,
-        "()V".to_string(),
-    );
-    factory.owner = Some(type_name("java/util/ArrayList"));
-
-    let append_parameter = if flatten {
-        Ty::obj_args("kotlin/collections/Collection", &[any])
-    } else {
-        any
-    };
-    let mut append = LibraryMember::new(
-        if flatten { "addAll" } else { "add" }.to_string(),
-        vec![append_parameter],
-        Ty::Boolean,
-        if flatten {
-            "(Ljava/util/Collection;)Z".to_string()
-        } else {
-            "(Ljava/lang/Object;)Z".to_string()
-        },
-    );
-    append.owner = Some(type_name("java/util/List"));
-    append.physical_params = vec![if flatten {
-        Ty::obj("kotlin/collections/Collection")
-    } else {
-        any
-    }];
-    append.set_is_interface(true);
-
-    InlineBodyPlan::CollectionTransform {
-        lambda_parameter: 1,
-        flatten,
-        factory: Box::new(factory),
-        append: Box::new(append),
-    }
-}
-
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
@@ -3926,22 +3844,7 @@ impl JvmLibraries {
             return;
         }
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
-            match plan {
-                InlineBodyPlan::SuspendBeforeLambdaFinally { enter, cleanup, .. } => {
-                    self.register_external_inline_member(enter);
-                    self.register_external_inline_member(cleanup);
-                }
-                InlineBodyPlan::CollectionTransform {
-                    factory, append, ..
-                } => {
-                    let owner = factory
-                        .owner
-                        .expect("collection inline factory must name its classifier");
-                    self.register_external_constructor(owner, factory);
-                    self.register_external_inline_member(append);
-                }
-                InlineBodyPlan::InvokeLambda { .. } => {}
-            }
+            self.register_inline_body_plan_dependencies(plan);
         }
         if let Some(identity) = callable.external_identity {
             self.cp.enrich_external_callable(identity, callable);
@@ -5068,9 +4971,11 @@ impl JvmLibraries {
                     None => None,
                     _ => Some(receiver),
                 };
-                // `@InlineOnly` (`inline` + bytecode-non-public) MUST be spliced; a plain `inline` MAY be.
-                let inline =
-                    InlineKind::from_flags(mf.is_inline(), mf.is_inline() && !bytecode_public);
+                let inline = metadata_inline(
+                    mf.is_inline(),
+                    mf.has_reified_type_params(),
+                    bytecode_public,
+                );
                 let declared_ret = (!mf.ret_nullable() && !mf.is_suspend())
                     .then(|| {
                         generic_sig
@@ -5173,7 +5078,7 @@ impl JvmLibraries {
                 };
                 let Some(getter_method) =
                     self.cp
-                        .facade_static(&facade_rendered, &getter_sig.name, &getter_sig.desc)
+                        .facade_static(facade, &getter_sig.name, &getter_sig.desc)
                 else {
                     crate::trace_compiler!(
                         "metadata_properties",
@@ -5248,11 +5153,9 @@ impl JvmLibraries {
                     if sparams.len() != context_count + receiver_params + 1 || sret != Ty::Unit {
                         return None;
                     }
-                    let setter_method = self.cp.facade_static(
-                        &facade_rendered,
-                        &setter_sig.name,
-                        &setter_sig.desc,
-                    )?;
+                    let setter_method =
+                        self.cp
+                            .facade_static(facade, &setter_sig.name, &setter_sig.desc)?;
                     if !setter_method.public {
                         return None;
                     }
@@ -5368,8 +5271,6 @@ impl JvmLibraries {
                 if package.matches("kotlin/collections") || package.matches("kotlin/text") =>
             {
                 match name {
-                    "forEach" => Some(crate::libraries::CompilerIntrinsic::ForEach),
-                    "forEachIndexed" => Some(crate::libraries::CompilerIntrinsic::ForEachIndexed),
                     "map" if package.matches("kotlin/collections") => {
                         Some(crate::libraries::CompilerIntrinsic::Map)
                     }
@@ -5429,9 +5330,7 @@ impl JvmLibraries {
                     | crate::libraries::CompilerIntrinsic::BooleanNot
                     | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
                     | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_) => continue,
-                    crate::libraries::CompilerIntrinsic::ForEach
-                    | crate::libraries::CompilerIntrinsic::ForEachIndexed
-                    | crate::libraries::CompilerIntrinsic::StartCoroutine
+                    crate::libraries::CompilerIntrinsic::StartCoroutine
                     | crate::libraries::CompilerIntrinsic::Map
                     | crate::libraries::CompilerIntrinsic::FlatMap
                     | crate::libraries::CompilerIntrinsic::IsEmpty
@@ -5449,21 +5348,32 @@ impl JvmLibraries {
                         crate::libraries::CompilerIntrinsic::Map
                             | crate::libraries::CompilerIntrinsic::FlatMap
                     ) {
-                        overload.callable.inline_body_plan =
-                            Some(Box::new(collection_transform_inline_plan(
+                        overload.callable.inline_body_plan = Some(Box::new(
+                            super::collection_inline_plan::collection_transform(
                                 intrinsic == crate::libraries::CompilerIntrinsic::FlatMap,
-                            )));
+                            ),
+                        ));
                     }
                     if matches!(
                         intrinsic,
-                        crate::libraries::CompilerIntrinsic::ForEach
-                            | crate::libraries::CompilerIntrinsic::ForEachIndexed
-                            | crate::libraries::CompilerIntrinsic::Map
+                        crate::libraries::CompilerIntrinsic::Map
                             | crate::libraries::CompilerIntrinsic::FlatMap
                     ) {
                         overload.iterator_protocol_scope =
                             declaration_package.into_iter().collect();
                     }
+                }
+            }
+        }
+        if let SymbolNamespace::Package(package) = namespace {
+            for overload in &mut overloads {
+                if overload.kind == FnKind::Extension
+                    && matches!(
+                        overload.callable.inline_body_plan.as_deref(),
+                        Some(InlineBodyPlan::CollectionTransform { .. })
+                    )
+                {
+                    overload.iterator_protocol_scope = vec![package];
                 }
             }
         }
@@ -5544,206 +5454,16 @@ impl SymbolSource for JvmLibraries {
     }
 }
 
+impl crate::types::ClassifierAnnotationSource for JvmLibraries {
+    fn classifier_annotations(
+        &self,
+        classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        SymbolSource::classifier(self, classifier).map(|shape| shape.annotations.clone())
+    }
+}
+
 impl JvmLibraries {
-    fn inline_body_plan(&self, callable: &LibraryCallable) -> Option<InlineBodyPlan> {
-        if !callable.inline.can_inline() {
-            return None;
-        }
-        let body_descriptor = inline_body_descriptor(callable)?;
-        // Every candidate overload the provider builds computes a plan, so the decode below —
-        // body read, disassembly, invoke-site analysis — is memoized per declaration. The key must
-        // carry EVERY input the decode reads: besides the bytecode locator, the callable's
-        // physical slot layout and `$default` bridge — the same JVM method surfaces through
-        // several provider channels (plain, suspend facade, extension) whose plans differ in
-        // exactly those parameter indexes.
-        let parameter_slots = callable_parameter_slots(&callable.physical_params);
-        let default_descriptor = callable
-            .default_realization
-            .as_deref()
-            .map(|realization| realization.descriptor.as_str());
-        if let Some(plan) = self.cp.cached_inline_plan(
-            callable.owner,
-            &callable.name,
-            &body_descriptor,
-            &parameter_slots,
-            default_descriptor,
-        ) {
-            return plan.map(|boxed| *boxed);
-        }
-        let mut body_unavailable = false;
-        let plan = self.inline_body_plan_uncached(
-            callable,
-            &body_descriptor,
-            &parameter_slots,
-            &mut body_unavailable,
-        );
-        // "No plan" is only a memoizable FACT when it was decoded from bytes actually read. A
-        // failed body read (archive open/read error under load, a jar changing mid-run) must stay
-        // transient — publishing it into the per-entry global map would suppress the plan for
-        // every later compile sharing the jar (the body cache guards the same hazard one level
-        // down: "only a SUCCESSFUL read may populate the process-global cache").
-        if !body_unavailable {
-            self.cp.memoize_inline_plan(
-                callable.owner,
-                &callable.name,
-                &body_descriptor,
-                &parameter_slots,
-                default_descriptor,
-                plan.clone().map(Box::new),
-            );
-        }
-        plan
-    }
-
-    /// Decode one callable's inline-body plan from bytecode. `body_unavailable` is set (and `None`
-    /// returned) when a body READ failed — the caller must not memoize that answer; a `None` with
-    /// the flag clear is a decoded "no expandable shape", which is a stable fact of the bytes.
-    fn inline_body_plan_uncached(
-        &self,
-        callable: &LibraryCallable,
-        body_descriptor: &str,
-        parameter_slots: &[u16],
-        body_unavailable: &mut bool,
-    ) -> Option<InlineBodyPlan> {
-        let owner = callable.owner.render();
-        let inline_name = format!("{}$$forInline", callable.name);
-        let Some(body) = self
-            .cp
-            .method_code(&owner, &inline_name, body_descriptor)
-            .or_else(|| self.cp.method_code(&owner, &callable.name, body_descriptor))
-        else {
-            *body_unavailable = true;
-            return None;
-        };
-        let instructions = crate::jvm::inline::disassemble(&body.code)?;
-        let parameter_at = |slot: u16| {
-            parameter_slots
-                .iter()
-                .position(|candidate| *candidate == slot)
-        };
-        let invoke_sites =
-            crate::jvm::inline::function_invoke_sites(&instructions, &body.source_cp);
-        let [invoke] = invoke_sites.as_slice() else {
-            return None;
-        };
-        let invoke_loads = instructions[..*invoke]
-            .iter()
-            .rev()
-            .map_while(crate::jvm::inline::loaded_local)
-            .collect::<Vec<_>>();
-        // JVM invocation operands are loaded receiver-first. Walking backward therefore sees
-        // arguments first and the function object last.
-        let (&lambda_slot, invoke_argument_slots) = invoke_loads.split_last()?;
-        let lambda_parameter = parameter_at(lambda_slot)?;
-
-        let calls = instructions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, instruction)| {
-                let target = crate::jvm::inline::invoked_method(instruction, &body.source_cp)?;
-                (!target.0.starts_with("kotlin/jvm/internal/")
-                    && !target.0.starts_with("kotlin/jvm/functions/"))
-                .then_some((index, target))
-            })
-            .collect::<Vec<_>>();
-        let enter = calls.iter().find(|(index, target)| {
-            *index < *invoke && target.2.contains("Lkotlin/coroutines/Continuation;")
-        });
-        if enter.is_none() {
-            if !calls.is_empty() {
-                return None;
-            }
-            let argument_parameters = invoke_argument_slots
-                .iter()
-                .rev()
-                .map(|slot| parameter_at(*slot))
-                .collect::<Option<Vec<_>>>()?;
-            let return_parameter = instructions
-                .iter()
-                .rev()
-                .nth(1)
-                .and_then(crate::jvm::inline::loaded_local)
-                .and_then(parameter_at);
-            return Some(InlineBodyPlan::InvokeLambda {
-                lambda_parameter,
-                argument_parameters,
-                return_parameter,
-            });
-        }
-        let enter = enter?;
-        let cleanup_calls = calls
-            .iter()
-            .filter(|(index, target)| *index > *invoke && *target != enter.1)
-            .collect::<Vec<_>>();
-        let [cleanup, repeated] = cleanup_calls.as_slice() else {
-            return None;
-        };
-        if cleanup.1 != repeated.1 {
-            return None;
-        }
-        let receiver_slot = instructions[..enter.0]
-            .iter()
-            .rev()
-            .filter_map(crate::jvm::inline::loaded_local)
-            .nth(2)?;
-        if parameter_at(receiver_slot)? != 0 {
-            return None;
-        }
-        let state_slot = instructions[..enter.0]
-            .iter()
-            .rev()
-            .filter_map(crate::jvm::inline::loaded_local)
-            .nth(1)?;
-        let state_parameter = parameter_at(state_slot)?;
-        match self.inline_default_is_null(callable, parameter_slots, state_parameter) {
-            None => {
-                *body_unavailable = true;
-                return None;
-            }
-            Some(false) => return None,
-            Some(true) => {}
-        }
-        let enter = inline_plan_member(enter.1, true)?;
-        let cleanup = inline_plan_member(cleanup.1, false)?;
-        Some(InlineBodyPlan::SuspendBeforeLambdaFinally {
-            lambda_parameter,
-            state_parameter,
-            state_default: crate::libraries::DefaultValue::Null,
-            enter: Box::new(enter),
-            cleanup: Box::new(cleanup),
-        })
-    }
-
-    /// Whether the `$default` bridge stores `null` into `parameter`'s slot. `None` means the bridge
-    /// body could not be READ (a transient failure the caller must not memoize); `Some(false)`
-    /// covers every decoded negative, including "the callable has no `$default` bridge at all"
-    /// (stable — the bridge descriptor is part of the plan cache key).
-    fn inline_default_is_null(
-        &self,
-        callable: &LibraryCallable,
-        parameter_slots: &[u16],
-        parameter: usize,
-    ) -> Option<bool> {
-        let Some(realization) = callable.default_realization.as_deref() else {
-            return Some(false);
-        };
-        let owner = realization.declaration_owner.render();
-        // A failed bridge-body READ is the transient case the caller must not memoize.
-        let body = self
-            .cp
-            .method_code(&owner, &realization.name, &realization.descriptor)?;
-        let Some(instructions) = crate::jvm::inline::disassemble(&body.code) else {
-            return Some(false);
-        };
-        let Some(slot) = parameter_slots.get(parameter).copied() else {
-            return Some(false);
-        };
-        Some(instructions.windows(2).any(|window| {
-            matches!(window[0], crate::jvm::inline::Insn::Plain { op: 0x01, .. })
-                && crate::jvm::inline::stored_local(&window[1]) == Some(slot)
-        }))
-    }
-
     fn top_level_default_realization(
         &self,
         callable: &LibraryCallable,
@@ -7709,72 +7429,6 @@ mod tests {
             ),
             Some(Ty::fun(vec![Ty::String], Ty::Int)),
         );
-    }
-
-    #[test]
-    fn metadata_inline_bodies_decode_parameter_roles_without_source_dispatch() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "let");
-        let decoded = symbols
-            .callables
-            .functions()
-            .iter()
-            .map(|function| {
-                (
-                    function.callable.owner,
-                    function.callable.descriptor.as_str(),
-                    function.callable.inline,
-                    function.callable.inline_body_plan.as_deref(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            symbols.callables.functions().iter().any(|function| {
-                matches!(
-                    function.callable.inline_body_plan.as_deref(),
-                    Some(crate::libraries::InlineBodyPlan::InvokeLambda {
-                        lambda_parameter: 1,
-                        argument_parameters,
-                        ..
-                    }) if argument_parameters.as_slice() == [0]
-                )
-            }),
-            "decoded declarations: {decoded:?}"
-        );
-    }
-
-    #[test]
-    fn suspend_finally_inline_body_decodes_exact_member_handles() {
-        let (Some(stdlib), Some(coroutines)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::coroutines_jar(),
-        ) else {
-            return;
-        };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, coroutines]),
-        ));
-        let symbols = libraries.symbols(
-            SymbolNamespace::Package(type_name("kotlinx/coroutines/sync")),
-            "withLock",
-        );
-        assert!(symbols.callables.functions().iter().any(|function| {
-            matches!(
-                function.callable.inline_body_plan.as_deref(),
-                Some(crate::libraries::InlineBodyPlan::SuspendBeforeLambdaFinally {
-                    lambda_parameter: 2,
-                    state_parameter: 1,
-                    enter,
-                    cleanup,
-                    ..
-                }) if enter.suspend() && !cleanup.suspend()
-            )
-        }));
     }
 
     #[test]

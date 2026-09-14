@@ -4,12 +4,16 @@ use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,
 };
-use crate::ir::{Callee, ExprId, IrCheckedArgument, IrConst, IrExpr, IrTypeOp};
+use crate::ir::{
+    Callee, ExprId, IrCheckedArgument, IrConst, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole,
+    IrTypeOp,
+};
 use crate::types::Ty;
 
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
+use super::inline_body::ExternalInlineCallRequest;
 use super::BodyLowering;
 
 #[derive(Clone, Copy)]
@@ -84,16 +88,6 @@ pub(super) struct ModuleConstructorRequest<'a> {
     pub(super) outer_receiver: Option<ExprId>,
     pub(super) external_capture_arguments: Option<&'a [(ExprId, Ty)]>,
     pub(super) arguments: &'a [IrCheckedArgument],
-}
-
-struct ExternalInlineCallRequest<'a> {
-    plan: &'a crate::fir::FirInlineBodyPlan,
-    receiver_ty: Option<ResolvedTy>,
-    parameter_types: &'a [Ty],
-    result: ResolvedTy,
-    dispatch_receiver: Option<ExprId>,
-    extension_receiver: Option<ExprId>,
-    arguments: &'a [IrCheckedArgument],
 }
 
 /// Whether the checked source-order operand stream is already in selected parameter order. Missing
@@ -368,7 +362,10 @@ impl BodyLowering<'_> {
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
         if let Some(plan) = inline_plan {
-            if let Some(expanded) = self.external_inline_call(ExternalInlineCallRequest {
+            // A checked plan is an obligation, not an optimization hint. If its already-validated
+            // operands cannot be materialized, propagate failure to `checked_call` as an unsupported
+            // external call; never retry the same source as an ordinary dependency invocation.
+            let expanded = self.external_inline_call(ExternalInlineCallRequest {
                 plan,
                 receiver_ty,
                 parameter_types: &parameter_types,
@@ -376,10 +373,9 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
-            }) {
-                self.ir.inline_regions.insert(expanded);
-                return Some(expanded);
-            }
+            })?;
+            self.ir.inline_regions.insert(expanded);
+            return Some(expanded);
         }
         let (statements, receiver, args, mut defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
@@ -446,402 +442,16 @@ impl BodyLowering<'_> {
         Some(region)
     }
 
-    fn external_inline_call(&mut self, request: ExternalInlineCallRequest<'_>) -> Option<ExprId> {
-        let ExternalInlineCallRequest {
-            plan,
-            receiver_ty,
-            parameter_types,
-            result,
-            dispatch_receiver,
-            extension_receiver,
-            arguments,
-        } = request;
-        let (lambda_parameter, invocation_arguments, returned_value) = match plan {
-            crate::fir::FirInlineBodyPlan::ForEach {
-                lambda_parameter,
-                iterator_ty,
-                iterator,
-                has_next,
-                next,
-            } => {
-                return self.external_inline_for_each(
-                    *lambda_parameter,
-                    *iterator_ty,
-                    iterator,
-                    has_next,
-                    next,
-                    receiver_ty,
-                    parameter_types,
-                    dispatch_receiver,
-                    extension_receiver,
-                    arguments,
-                );
-            }
-            crate::fir::FirInlineBodyPlan::CollectionTransform {
-                lambda_parameter,
-                flatten,
-                iterator_ty,
-                iterator,
-                has_next,
-                next,
-                factory,
-                factory_classifier,
-                append,
-                accumulator,
-                append_parameter,
-                append_result,
-            } => {
-                return self.external_inline_collection_transform(
-                    *lambda_parameter,
-                    *flatten,
-                    *iterator_ty,
-                    iterator,
-                    has_next,
-                    next,
-                    *factory,
-                    *factory_classifier,
-                    *append,
-                    *accumulator,
-                    *append_parameter,
-                    *append_result,
-                    receiver_ty,
-                    parameter_types,
-                    dispatch_receiver,
-                    extension_receiver,
-                    arguments,
-                );
-            }
-            crate::fir::FirInlineBodyPlan::SuspendBeforeLambdaFinally {
-                lambda_parameter,
-                state_parameter,
-                state_default,
-                enter,
-                cleanup,
-            } => {
-                return self.external_suspend_finally_inline_call(
-                    *lambda_parameter,
-                    *state_parameter,
-                    *state_default,
-                    enter,
-                    cleanup,
-                    receiver_ty,
-                    parameter_types,
-                    result,
-                    dispatch_receiver,
-                    extension_receiver,
-                    arguments,
-                );
-            }
-            crate::fir::FirInlineBodyPlan::InvokeLambda {
-                lambda_parameter,
-                arguments,
-                result,
-            } => (*lambda_parameter, arguments, *result),
-        };
-        let lambda_parameter = lambda_parameter as usize;
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
-        debug_assert!(defaults.is_empty());
-        let invocation_operands = invocation_arguments
-            .iter()
-            .map(|operand| {
-                Some(match operand {
-                    crate::fir::FirInlineValue::Receiver => (receiver?, receiver_ty?.get()),
-                    crate::fir::FirInlineValue::Parameter(parameter) => (
-                        *args.get(*parameter as usize)?,
-                        *parameter_types.get(*parameter as usize)?,
-                    ),
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let inline_body = self.materialize_external_inline_lambda(
-            &mut statements,
-            &args,
-            lambda_parameter,
-            &invocation_operands,
-        )?;
-
-        if let Some(returned_value) = returned_value {
-            statements.push(inline_body);
-            let value = match returned_value {
-                crate::fir::FirInlineValue::Receiver => receiver?,
-                crate::fir::FirInlineValue::Parameter(parameter) => {
-                    *args.get(parameter as usize)?
-                }
-            };
-            return Some(self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(value),
-            }));
-        }
-        Some(if statements.is_empty() {
-            inline_body
-        } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(inline_body),
-            })
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn external_suspend_finally_inline_call(
-        &mut self,
-        lambda_parameter: u32,
-        state_parameter: u32,
-        state_default: crate::fir::FirInlineDefaultValue,
-        enter: &crate::fir::FirInlineMemberCall,
-        cleanup: &crate::fir::FirInlineMemberCall,
-        receiver_ty: Option<ResolvedTy>,
-        parameter_types: &[Ty],
-        result: ResolvedTy,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> Option<ExprId> {
-        let receiver_ty = receiver_ty?.get();
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty: ResolvedTy::new(receiver_ty).ok(),
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Materialize,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
-        let receiver = receiver?;
-        let state_parameter = state_parameter as usize;
-        if defaults
-            .iter()
-            .any(|default| *default as usize != state_parameter)
-        {
-            return None;
-        }
-        let state_ty = *parameter_types.get(state_parameter)?;
-        let state_value = if defaults
-            .iter()
-            .any(|default| *default as usize == state_parameter)
-        {
-            match state_default {
-                crate::fir::FirInlineDefaultValue::Null => {
-                    self.ir.add_expr(IrExpr::Const(IrConst::Null))
-                }
-            }
-        } else {
-            *args.get(state_parameter)?
-        };
-        let state_slot = self.allocate_temporary();
-        statements.push(self.ir.add_expr(IrExpr::Variable {
-            index: state_slot,
-            ty: state_ty,
-            init: Some(state_value),
-            named: false,
-        }));
-        let inline_body = self.materialize_external_inline_lambda(
-            &mut statements,
-            &args,
-            lambda_parameter as usize,
-            &[],
-        )?;
-
-        let enter_state = self.ir.add_expr(IrExpr::GetValue(state_slot));
-        let enter_call =
-            self.external_inline_member_call(enter, receiver, receiver_ty, vec![enter_state])?;
-        statements.push(enter_call);
-
-        let result_ty = result.get();
-        let result_slot = self.allocate_temporary();
-        let initial = self
-            .ir
-            .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
-        statements.push(self.ir.add_expr(IrExpr::Variable {
-            index: result_slot,
-            ty: result_ty,
-            init: Some(initial),
-            named: false,
-        }));
-        let store_result = self.ir.add_expr(IrExpr::SetValue {
-            var: result_slot,
-            value: inline_body,
-        });
-        let try_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![store_result],
-            value: None,
-        });
-        let cleanup_state = self.ir.add_expr(IrExpr::GetValue(state_slot));
-        let cleanup_call =
-            self.external_inline_member_call(cleanup, receiver, receiver_ty, vec![cleanup_state])?;
-        let finally = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![cleanup_call],
-            value: None,
-        });
-        statements.push(self.ir.add_expr(IrExpr::Try {
-            body: try_body,
-            catches: Vec::new(),
-            finally: Some(finally),
-            result: Ty::Unit,
-        }));
-        let value = self.ir.add_expr(IrExpr::GetValue(result_slot));
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: statements,
-            value: Some(value),
-        }))
-    }
-
-    fn external_inline_member_call(
-        &mut self,
-        plan: &crate::fir::FirInlineMemberCall,
-        receiver: ExprId,
-        receiver_ty: Ty,
-        args: Vec<ExprId>,
-    ) -> Option<ExprId> {
-        if plan.parameters.len() != args.len() {
-            return None;
-        }
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External {
-                target: plan.declaration,
-                default_provider: None,
-                params: plan
-                    .parameters
-                    .iter()
-                    .map(|parameter| parameter.get())
-                    .collect(),
-                ret: plan.result.get(),
-                substitutions: Vec::new(),
-                defaults: Vec::new(),
-                extension_receiver_parameter: None,
-            },
-            dispatch_receiver: Some(receiver),
-            args,
-        });
-        self.ir.ext_call_source_receiver.insert(call, receiver_ty);
-        if plan.suspend {
-            self.ir.suspend_calls.insert(call, plan.result.get());
-        }
-        Some(call)
-    }
-
-    /// Replace one already-evaluated lambda operand with its checked inline-body template. Capture
-    /// evaluation stays at the lambda's source position, and every external inline shape shares this
-    /// single local-slot rebasing path.
-    fn materialize_external_inline_lambda(
-        &mut self,
-        statements: &mut Vec<ExprId>,
-        args: &[ExprId],
-        lambda_parameter: usize,
-        invocation_operands: &[(ExprId, Ty)],
-    ) -> Option<ExprId> {
-        let lambda_slot = match self.ir.expr(*args.get(lambda_parameter)?) {
-            IrExpr::GetValue(slot) => *slot,
-            _ => return None,
-        };
-        let declaration_position = statements.iter().position(|statement| {
-            matches!(
-                self.ir.expr(*statement),
-                IrExpr::Variable { index, .. } if *index == lambda_slot
-            )
-        })?;
-        let lambda = match self.ir.expr(statements[declaration_position]).clone() {
-            IrExpr::Variable {
-                init: Some(lambda), ..
-            } => lambda,
-            _ => return None,
-        };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
-        if invocation_operands.len() != arity {
-            return None;
-        }
-
-        statements.remove(declaration_position);
-        let mut capture_declarations = Vec::with_capacity(captures.len());
-        let mut formal_slots = Vec::with_capacity(captures.len() + arity);
-        for (capture_ordinal, capture) in captures.into_iter().enumerate() {
-            if self.ir.shared_capture_parameters.contains_key(&(
-                implementation,
-                u32::try_from(capture_ordinal).expect("too many inline captures"),
-            )) {
-                let IrExpr::GetValue(slot) = self.ir.expr(capture) else {
-                    return None;
-                };
-                formal_slots.push(*slot);
-                continue;
-            }
-            let slot = self.allocate_temporary();
-            let ty = *self
-                .ir
-                .functions
-                .get(implementation as usize)?
-                .params
-                .get(capture_ordinal)?;
-            capture_declarations.push(self.ir.add_expr(IrExpr::Variable {
-                index: slot,
-                ty,
-                init: Some(capture),
-                named: false,
-            }));
-            formal_slots.push(slot);
-        }
-        statements.splice(
-            declaration_position..declaration_position,
-            capture_declarations,
-        );
-        for &(value, ty) in invocation_operands {
-            let slot = match self.ir.expr(value) {
-                IrExpr::GetValue(slot) => *slot,
-                _ => {
-                    let slot = self.allocate_temporary();
-                    statements.push(self.ir.add_expr(IrExpr::Variable {
-                        index: slot,
-                        ty,
-                        init: Some(value),
-                        named: false,
-                    }));
-                    slot
-                }
-            };
-            formal_slots.push(slot);
-        }
-
-        let local_base = self.next_temporary;
-        let local_count =
-            rehome_inline_body_values(self.ir, inline_body, &formal_slots, local_base)?;
-        self.next_temporary = local_base.checked_add(local_count)?;
-        self.ir.functions[implementation as usize].body = None;
-        self.ir.inline_only_fns.insert(implementation);
-        Some(inline_body)
-    }
-
     /// Expand the checked structural body of an exact collection `map`/`flatMap` declaration only
-    /// when its inline lambda contains a suspension. Ordinary calls retain the library invocation;
-    /// a suspending body must join the enclosing function before target coroutine lowering.
+    /// The checker attaches this plan only when the selected argument is a source lambda whose
+    /// body suspends. Common lowering consumes that decision without inspecting callable or body
+    /// semantics again.
     #[allow(clippy::too_many_arguments)]
-    fn external_inline_collection_transform(
+    pub(super) fn external_inline_collection_transform(
         &mut self,
         lambda_parameter: u32,
         flatten: bool,
+        local_names: &crate::fir::FirInlineCollectionLocalNames,
         iterator_ty: ResolvedTy,
         iterator: &crate::fir::FirIteratorCall,
         has_next: &crate::fir::FirIteratorCall,
@@ -852,215 +462,6 @@ impl BodyLowering<'_> {
         accumulator_ty: ResolvedTy,
         append_parameter: ResolvedTy,
         append_result: ResolvedTy,
-        receiver_ty: Option<ResolvedTy>,
-        parameter_types: &[Ty],
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> Option<ExprId> {
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
-        debug_assert!(defaults.is_empty());
-        let iterable = receiver?;
-        let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
-            IrExpr::GetValue(slot) => *slot,
-            _ => return None,
-        };
-        let declaration_position = statements.iter().position(|statement| {
-            matches!(
-                self.ir.expr(*statement),
-                IrExpr::Variable { index, .. } if *index == lambda_slot
-            )
-        })?;
-        let lambda = match self.ir.expr(statements[declaration_position]).clone() {
-            IrExpr::Variable {
-                init: Some(lambda), ..
-            } => lambda,
-            _ => return None,
-        };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
-        if arity != 1 || !self.operand_suspends(inline_body) {
-            return None;
-        }
-
-        statements.remove(declaration_position);
-        let mut capture_declarations = Vec::with_capacity(captures.len());
-        let mut formal_slots = Vec::with_capacity(captures.len() + 1);
-        for (capture_ordinal, capture) in captures.into_iter().enumerate() {
-            if self.ir.shared_capture_parameters.contains_key(&(
-                implementation,
-                u32::try_from(capture_ordinal).expect("too many inline captures"),
-            )) {
-                let IrExpr::GetValue(slot) = self.ir.expr(capture) else {
-                    return None;
-                };
-                formal_slots.push(*slot);
-                continue;
-            }
-            let slot = self.allocate_temporary();
-            let ty = *self
-                .ir
-                .functions
-                .get(implementation as usize)?
-                .params
-                .get(capture_ordinal)?;
-            capture_declarations.push(self.ir.add_expr(IrExpr::Variable {
-                index: slot,
-                ty,
-                init: Some(capture),
-                named: false,
-            }));
-            formal_slots.push(slot);
-        }
-        statements.splice(
-            declaration_position..declaration_position,
-            capture_declarations,
-        );
-
-        let element_ty = *self
-            .ir
-            .functions
-            .get(implementation as usize)?
-            .params
-            .get(formal_slots.len())?;
-        let part_ty = self.ir.functions.get(implementation as usize)?.ret;
-        let element_slot = self.allocate_temporary();
-        formal_slots.push(element_slot);
-        let local_base = self.next_temporary;
-        let local_count =
-            rehome_inline_body_values(self.ir, inline_body, &formal_slots, local_base)?;
-        self.next_temporary = local_base.checked_add(local_count)?;
-        self.ir.functions[implementation as usize].body = None;
-        self.ir.inline_only_fns.insert(implementation);
-
-        let factory_call = self.ir.add_expr(IrExpr::New {
-            internal: factory_classifier,
-            args: Vec::new(),
-            ctor_params: Some(Vec::new()),
-            ctor_desc: None,
-            external_target: Some(factory),
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        });
-        let accumulator_slot = self.allocate_temporary();
-        statements.push(self.ir.add_expr(IrExpr::Variable {
-            index: accumulator_slot,
-            ty: accumulator_ty.get(),
-            init: Some(factory_call),
-            named: true,
-        }));
-
-        let iterator_value = self.iterator_call(iterator, iterable).ok()?;
-        let iterator_slot = self.allocate_temporary();
-        statements.push(self.ir.add_expr(IrExpr::Variable {
-            index: iterator_slot,
-            ty: iterator_ty.get(),
-            init: Some(iterator_value),
-            named: true,
-        }));
-        let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-        let condition = self.iterator_call(has_next, iterator_read).ok()?;
-        let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-        let element = self.iterator_call(next, iterator_read).ok()?;
-        let element_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: element_slot,
-            ty: element_ty,
-            init: Some(element),
-            named: true,
-        });
-
-        let (mut body_statements, body_value) = match self.ir.expr(inline_body).clone() {
-            IrExpr::Block {
-                stmts,
-                value: Some(value),
-            } => (stmts, value),
-            IrExpr::Block { value: None, .. } => return None,
-            _ => (Vec::new(), inline_body),
-        };
-        let part_slot = self.allocate_temporary();
-        body_statements.push(self.ir.add_expr(IrExpr::Variable {
-            index: part_slot,
-            ty: part_ty,
-            init: Some(body_value),
-            named: false,
-        }));
-        let part = self.ir.add_expr(IrExpr::GetValue(part_slot));
-        let append_argument = if flatten {
-            part
-        } else {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: part,
-                type_operand: append_parameter.get(),
-            })
-        };
-        let accumulator = self.ir.add_expr(IrExpr::GetValue(accumulator_slot));
-        let append_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External {
-                target: append,
-                default_provider: None,
-                params: vec![append_parameter.get()],
-                ret: append_result.get(),
-                substitutions: Vec::new(),
-                defaults: Vec::new(),
-                extension_receiver_parameter: None,
-            },
-            dispatch_receiver: Some(accumulator),
-            args: vec![append_argument],
-        });
-        self.ir
-            .ext_call_source_receiver
-            .insert(append_call, accumulator_ty.get());
-        body_statements.push(append_call);
-        let mut loop_statements = Vec::with_capacity(body_statements.len() + 1);
-        loop_statements.push(element_declaration);
-        loop_statements.extend(body_statements);
-        let loop_body = self.ir.add_expr(IrExpr::Block {
-            stmts: loop_statements,
-            value: None,
-        });
-        let loop_label = format!("$fir_inline_collect_{iterator_slot}");
-        statements.push(self.ir.add_expr(IrExpr::While {
-            cond: condition,
-            body: loop_body,
-            update: None,
-            post_test: false,
-            label: Some(loop_label),
-        }));
-        let result = self.ir.add_expr(IrExpr::GetValue(accumulator_slot));
-        Some(self.ir.add_expr(IrExpr::Block {
-            stmts: statements,
-            value: Some(result),
-        }))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn external_inline_for_each(
-        &mut self,
-        lambda_parameter: u32,
-        iterator_ty: ResolvedTy,
-        iterator: &crate::fir::FirIteratorCall,
-        has_next: &crate::fir::FirIteratorCall,
-        next: &crate::fir::FirIteratorCall,
         receiver_ty: Option<ResolvedTy>,
         parameter_types: &[Ty],
         dispatch_receiver: Option<ExprId>,
@@ -1125,6 +526,14 @@ impl BodyLowering<'_> {
                 formal_slots.push(*slot);
                 continue;
             }
+            // A capture that is already a plain local READ needs no copy: the spliced body can read
+            // that local directly, exactly as kotlinc's inlining does. Copying it would put a second
+            // live value on the same data at every suspension in the lambda — an extra spill field
+            // kotlinc never allocates.
+            if let IrExpr::GetValue(slot) = self.ir.expr(capture) {
+                formal_slots.push(*slot);
+                continue;
+            }
             let slot = self.allocate_temporary();
             let ty = *self
                 .ir
@@ -1144,12 +553,14 @@ impl BodyLowering<'_> {
             declaration_position..declaration_position,
             capture_declarations,
         );
-        let element_type = *self
+
+        let element_ty = *self
             .ir
             .functions
             .get(implementation as usize)?
             .params
             .get(formal_slots.len())?;
+        let part_ty = self.ir.functions.get(implementation as usize)?.ret;
         let element_slot = self.allocate_temporary();
         formal_slots.push(element_slot);
         let local_base = self.next_temporary;
@@ -1159,41 +570,175 @@ impl BodyLowering<'_> {
         self.ir.functions[implementation as usize].body = None;
         self.ir.inline_only_fns.insert(implementation);
 
+        // Preserve the provider-recorded inline frame locals as source names plus typed
+        // role/depth. The JVM backend owns their eventual debug spelling.
+        let receiver_ty = receiver_ty.map_or_else(|| accumulator_ty.get(), ResolvedTy::get);
+        let outer_slot = self.allocate_temporary();
+        let outer_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: outer_slot,
+            ty: receiver_ty,
+            init: Some(iterable),
+            named: true,
+        });
+        self.ir
+            .value_names
+            .insert(outer_declaration, local_names.outer_receiver.to_string());
+        self.ir.set_debug_local_provenance(
+            outer_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 1),
+        );
+        statements.push(outer_declaration);
+        let outer_read = self.ir.add_expr(IrExpr::GetValue(outer_slot));
+        let inner_slot = self.allocate_temporary();
+        let inner_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: inner_slot,
+            ty: receiver_ty,
+            init: Some(outer_read),
+            named: true,
+        });
+        self.ir
+            .value_names
+            .insert(inner_declaration, local_names.inner_receiver.to_string());
+        self.ir.set_debug_local_provenance(
+            inner_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 2),
+        );
+        statements.push(inner_declaration);
+
+        let factory_call = self.ir.add_expr(IrExpr::New {
+            internal: factory_classifier,
+            args: Vec::new(),
+            ctor_params: Some(Vec::new()),
+            ctor_desc: None,
+            external_target: Some(factory),
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        });
+        let accumulator_slot = self.allocate_temporary();
+        let accumulator_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: accumulator_slot,
+            ty: accumulator_ty.get(),
+            init: Some(factory_call),
+            named: true,
+        });
+        self.ir
+            .value_names
+            .insert(accumulator_declaration, local_names.destination.to_string());
+        self.ir.set_debug_local_provenance(
+            accumulator_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 2),
+        );
+        statements.push(accumulator_declaration);
+
+        let iterable = self.ir.add_expr(IrExpr::GetValue(inner_slot));
         let iterator_value = self.iterator_call(iterator, iterable).ok()?;
         let iterator_slot = self.allocate_temporary();
-        let loop_label = format!("$fir_inline_foreach_{iterator_slot}");
         statements.push(self.ir.add_expr(IrExpr::Variable {
             index: iterator_slot,
             ty: iterator_ty.get(),
             init: Some(iterator_value),
-            named: false,
+            named: true,
         }));
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
         let condition = self.iterator_call(has_next, iterator_read).ok()?;
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
         let element = self.iterator_call(next, iterator_read).ok()?;
-        let element_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: element_slot,
-            ty: element_type,
+        // The expansion's provider-recorded loop element and the lambda's own parameter are
+        // separate locals. Both are live at a suspension in the lambda body, so preserve both
+        // source/debug identities; the target decides their rendered names.
+        let element_iv_slot = self.allocate_temporary();
+        let element_iv_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: element_iv_slot,
+            ty: element_ty,
             init: Some(element),
             named: true,
         });
+        self.ir
+            .value_names
+            .insert(element_iv_declaration, local_names.element.to_string());
+        self.ir.set_debug_local_provenance(
+            element_iv_declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 2),
+        );
+        let element_read = self.ir.add_expr(IrExpr::GetValue(element_iv_slot));
+        let element_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: element_slot,
+            ty: element_ty,
+            init: Some(element_read),
+            named: true,
+        });
+        if let Some(name) = self
+            .ir
+            .param_names(implementation)
+            .and_then(|names| names.get(formal_slots.len() - 1))
+            .cloned()
+        {
+            self.ir.value_names.insert(element_declaration, name);
+        }
+
+        let (mut body_statements, body_value) = match self.ir.expr(inline_body).clone() {
+            IrExpr::Block {
+                stmts,
+                value: Some(value),
+            } => (stmts, value),
+            IrExpr::Block { value: None, .. } => return None,
+            _ => (Vec::new(), inline_body),
+        };
+        let part_slot = self.allocate_temporary();
+        body_statements.push(self.ir.add_expr(IrExpr::Variable {
+            index: part_slot,
+            ty: part_ty,
+            init: Some(body_value),
+            named: false,
+        }));
+        let part = self.ir.add_expr(IrExpr::GetValue(part_slot));
+        let append_argument = if flatten {
+            part
+        } else {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: part,
+                type_operand: append_parameter.get(),
+            })
+        };
+        let accumulator = self.ir.add_expr(IrExpr::GetValue(accumulator_slot));
+        let append_call = self.ir.add_expr(IrExpr::Call {
+            callee: Callee::External {
+                target: append,
+                default_provider: None,
+                params: vec![append_parameter.get()],
+                ret: append_result.get(),
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: None,
+            },
+            dispatch_receiver: Some(accumulator),
+            args: vec![append_argument],
+        });
+        self.ir
+            .ext_call_source_receiver
+            .insert(append_call, accumulator_ty.get());
+        body_statements.push(append_call);
+        let mut loop_statements = Vec::with_capacity(body_statements.len() + 2);
+        loop_statements.push(element_iv_declaration);
+        loop_statements.push(element_declaration);
+        loop_statements.extend(body_statements);
         let loop_body = self.ir.add_expr(IrExpr::Block {
-            stmts: vec![element_declaration, inline_body],
+            stmts: loop_statements,
             value: None,
         });
-        let loop_expression = self.ir.add_expr(IrExpr::While {
+        let loop_label = format!("$fir_inline_collect_{iterator_slot}");
+        statements.push(self.ir.add_expr(IrExpr::While {
             cond: condition,
             body: loop_body,
             update: None,
             post_test: false,
             label: Some(loop_label),
-        });
-        statements.push(loop_expression);
-        let unit = self.ir.add_expr(IrExpr::UnitInstance);
+        }));
+        let result = self.ir.add_expr(IrExpr::GetValue(accumulator_slot));
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: statements,
-            value: Some(unit),
+            value: Some(result),
         }))
     }
 

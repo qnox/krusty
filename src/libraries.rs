@@ -1,11 +1,15 @@
 //! Library metadata shared by symbol sources.
 
 mod array_factories;
-
-pub(crate) use array_factories::kotlin_array_factory_kind;
+mod inline_body;
 
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
+pub(crate) use array_factories::kotlin_array_factory_kind;
+pub use inline_body::{InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan};
+pub use inline_body::{
+    InlineBodyValue, InlineCollectionLocalNames, InlineIterationIndex, InlineIterationTraversal,
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
@@ -472,8 +476,6 @@ pub enum CompilerIntrinsic {
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
-    ForEach,
-    ForEachIndexed,
     Map,
     FlatMap,
     IsEmpty,
@@ -496,41 +498,6 @@ pub enum PrimitiveBinaryIntrinsic {
 pub enum PrimitiveUnaryIntrinsic {
     Identity,
     Negate,
-}
-
-/// A declaration-defined inline body whose source-independent control-flow shape must be expanded
-/// before backend coroutine lowering. Providers decode this from the exact selected declaration's
-/// compiled inline body; source spelling never participates.
-#[derive(Clone, Debug)]
-pub enum InlineBodyPlan {
-    /// Invoke one function-typed parameter with values loaded from other callable parameters and return
-    /// the invocation result.
-    InvokeLambda {
-        lambda_parameter: usize,
-        argument_parameters: Vec<usize>,
-        /// A callable parameter returned after the invocation (`apply` returns its receiver). `None`
-        /// means the invocation result itself is returned (`let`, `run`, `with`).
-        return_parameter: Option<usize>,
-    },
-    /// Invoke a suspending member on the extension receiver, invoke one lambda parameter, and invoke a
-    /// cleanup member with the same state argument on normal and exceptional exits.
-    SuspendBeforeLambdaFinally {
-        lambda_parameter: usize,
-        state_parameter: usize,
-        state_default: DefaultValue,
-        enter: Box<LibraryMember>,
-        cleanup: Box<LibraryMember>,
-    },
-    /// Iterate the extension receiver, invoke one lambda for each element, and append its result to
-    /// a fresh collection. The provider owns the exact factory and append declarations; consumers
-    /// see only their stable identities after selection. `flatten` chooses one-element append versus
-    /// append-all, matching the selected declaration's compiled inline body.
-    CollectionTransform {
-        lambda_parameter: usize,
-        flatten: bool,
-        factory: Box<LibraryMember>,
-        append: Box<LibraryMember>,
-    },
 }
 
 /// Opaque compiler-plugin implementation identity attached to one declared callable.
@@ -2707,6 +2674,9 @@ pub struct LibraryType {
     /// [`ParamList::annotation`] = `None`; a declaration format without a constructor can publish
     /// its annotation element list with the application policy attached.
     pub named_parameter_lists: Vec<ParamList>,
+    /// Resolved annotations applied to this classifier. Providers normalize classfile or source
+    /// representations into this common semantic shape at their boundary.
+    pub annotations: Vec<crate::types::ResolvedAnnotation>,
     /// For a classpath annotation type: the `java.lang.annotation.RetentionPolicy` constant name of its
     /// `@Retention` (`"RUNTIME"` / `"CLASS"` / `"SOURCE"`), or `None` if absent. Drives whether a use of
     /// the annotation is emitted `RuntimeVisibleAnnotations` (RUNTIME) / `RuntimeInvisibleAnnotations`
@@ -2820,6 +2790,7 @@ impl LibraryType {
             enum_entries: Vec::new(),
             enum_entries_accessor: None,
             named_parameter_lists: Vec::new(),
+            annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
         }
@@ -2980,6 +2951,15 @@ pub struct LibraryConst {
 /// classpath. Kotlin's language-level builtin classifiers still exist: this provider publishes their
 /// common hierarchy and `Any` declarations so the resolver never needs a builtin-name fallback.
 pub struct EmptySymbolSource;
+
+impl crate::types::ClassifierAnnotationSource for EmptySymbolSource {
+    fn classifier_annotations(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        None
+    }
+}
 
 pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner: TypeName) {
     fn member_function(
@@ -3634,6 +3614,7 @@ mod tests {
             enum_entries: vec![],
             enum_entries_accessor: None,
             named_parameter_lists: vec![],
+            annotations: Vec::new(),
             retention: None,
             annotation_targets: None,
         };
