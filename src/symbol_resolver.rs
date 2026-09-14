@@ -3896,8 +3896,6 @@ impl<'a> SymbolResolver<'a> {
         Some(selected.member_with_return(ret))
     }
 
-    /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the resolver's
-    /// scope). The [`SymRecv::TopLevel`] arm of [`Self::resolve_symbol`] uses this to fill `top_level_call`.
     fn pick_top_level(
         &self,
         name: &str,
@@ -3908,12 +3906,6 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<LibraryCallable> {
         self.pick_top_level_with_visibility(name, fs, args, type_args, expected, false)
             .map(|(_, callable)| callable)
-    }
-
-    fn top_level_callable_accessible(&self, candidate: &FunctionInfo) -> bool {
-        candidate.visibility == Visibility::Public
-            || (candidate.visibility == Visibility::Internal
-                && self.lib.internal_accessible(candidate.callable.owner))
     }
 
     fn pick_top_level_with_visibility(
@@ -3929,7 +3921,15 @@ impl<'a> SymbolResolver<'a> {
         let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
         let mut parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty, GSigBinds)> = fs
             .top_level()
-            .filter(|candidate| include_invisible || self.top_level_callable_accessible(candidate))
+            .filter(|candidate| {
+                include_invisible
+                    || crate::callable_access::source_callable_accessible(
+                        candidate.visibility,
+                        candidate.source_file,
+                        self.access_file,
+                        || self.lib.internal_accessible(candidate.callable.owner),
+                    )
+            })
             .filter(|o| top_level_exact_parameters_admit(o, args, type_args))
             .filter_map(|o| {
                 let semantic = o.semantic_signature();
