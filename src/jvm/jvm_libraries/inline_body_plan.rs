@@ -3,12 +3,13 @@
 //! Bytecode is used only to recognize the physical control-flow and exact call targets. Semantic
 //! member signatures come from the Kotlin classifier model built from metadata.
 
+use super::inline_capability::metadata_inline;
 use super::{JvmLibraries, CONTINUATION_PARAM_DESCRIPTOR};
 use crate::jvm::classreader::{ExcEntry, C};
 use crate::jvm::inline::{self, Insn};
 use crate::libraries::{
     FnKind, InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan,
-    InlineBodyValue, InlineKind, LibraryCallable, LibraryMember,
+    InlineBodyValue, LibraryCallable, LibraryMember,
 };
 use crate::types::{type_name, Ty};
 
@@ -1211,7 +1212,11 @@ impl JvmLibraries {
         }
         let ret = facts.declared_ret.unwrap_or(signature.ret);
         let mut callable = LibraryCallable {
-            inline: InlineKind::from_flags(facts.is_inline, facts.is_inline && !candidate.public),
+            inline: metadata_inline(
+                facts.is_inline,
+                facts.has_reified_type_params,
+                candidate.public,
+            ),
             suspend: facts.suspend,
             source_receiver: (!receiver.is_ty_param()).then_some(receiver),
             declared_ret: facts.declared_ret,
