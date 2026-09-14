@@ -262,6 +262,11 @@ kt_int kt_compare_int(kt_int a, kt_int b);
 kt_int kt_compare_long(kt_long a, kt_long b);
 kt_int kt_compare_char(kt_char a, kt_char b);
 kt_int kt_compare_boolean(kt_boolean a, kt_boolean b);
+/* `a % b` on floating point — IEEE's remainder truncated toward zero, which is what Kotlin's `%`
+   means and what no instruction on some targets provides. Defined in `krusty_fp.c`. */
+kt_float  kt_rem_float(kt_float a, kt_float b);
+kt_double kt_rem_double(kt_double a, kt_double b);
+
 kt_int kt_compare_float(kt_float a, kt_float b);
 kt_int kt_compare_double(kt_double a, kt_double b);
 

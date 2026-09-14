@@ -1306,7 +1306,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `NaN` equals itself and a boxed `0.0` does not equal `-0.0`, each the opposite of the unboxed
   answer. The native runtime computes the digits with exact integer arithmetic
   (`src/native/runtime/krusty_fp.c`), verified against the JVM's own rendering over a million
-  values. Tests: `tests/float_rendering_e2e.rs`.
+  values. `%` on two of them is IEEE's remainder TRUNCATED toward zero — the sign of the left
+  operand and a magnitude below the right one's — which the native runtime computes exactly on the
+  significands, since no instruction provides it on every target.
+  Tests: `tests/float_rendering_e2e.rs`.
   `length` counts those same UTF-16 code units, which is not free for a runtime that stores UTF-8:
   the native runtime walks the bytes (`kt_string_length`), counting each byte that is not a
   continuation byte and adding one more for each four-byte sequence, because a code point above

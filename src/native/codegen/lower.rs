@@ -1608,7 +1608,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 IrBinOp::Sub => self.builder.ins().fsub(left, right),
                 IrBinOp::Mul => self.builder.ins().fmul(left, right),
                 IrBinOp::Div => self.builder.ins().fdiv(left, right),
-                IrBinOp::Rem => return Err("`%` on floating-point operands".to_string()),
+                // No instruction: `%` on floating point is IEEE's remainder truncated toward
+                // zero, which the runtime computes exactly on the significands.
+                IrBinOp::Rem => {
+                    let suffix = if ty == types::F32 { "float" } else { "double" };
+                    let operand = if ty == types::F32 {
+                        Ty::Float
+                    } else {
+                        Ty::Double
+                    };
+                    let Some(value) = self.runtime_call(
+                        &format!("kt_rem_{suffix}"),
+                        &[operand, operand],
+                        operand,
+                        &[left, right],
+                    )?
+                    else {
+                        return Err("a `%` on floating point that yields no value".to_string());
+                    };
+                    value
+                }
                 IrBinOp::Lt
                 | IrBinOp::Le
                 | IrBinOp::Gt

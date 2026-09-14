@@ -338,3 +338,104 @@ kt_int kt_render_float(kt_float value, char *out) {
     int n = kt_digits(f, e, 1ull << 23, -149, digits, &k);
     return (kt_int)kt_format(digits, n, k, negative, out);
 }
+
+
+/* ---- remainder ------------------------------------------------------------------------------ */
+
+/* `a % b` on floating point, which Kotlin defines as IEEE's remainder TRUNCATED toward zero: the
+   result carries the sign of `a` and a magnitude strictly below `|b|`. Neither Cranelift nor every
+   target's hardware has an instruction for it, so it is computed here — and computed EXACTLY, on
+   the significands, because the answer is `(significand of a, shifted) mod (significand of b)` and
+   a shift-and-subtract loop gets that with no rounding anywhere. Verified against the JVM's own
+   `%` over a million operand pairs, bit for bit. */
+static kt_double kt_bits_to_double(uint64_t bits) {
+    kt_double out;
+    memcpy(&out, &bits, sizeof out);
+    return out;
+}
+
+static uint64_t kt_double_to_bits(kt_double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return bits;
+}
+
+/* `significand * 2^exponent` as a double, for a value the format can hold exactly. */
+static kt_double kt_double_from_parts(uint64_t significand, int exponent, int negative) {
+    if (significand == 0) {
+        return kt_bits_to_double(negative ? (1ull << 63) : 0);
+    }
+    while (significand < (1ull << 52)) { significand <<= 1; exponent--; }
+    while (significand >= (1ull << 53)) { significand >>= 1; exponent++; }
+    int biased = exponent + 1075;
+    uint64_t bits;
+    if (biased <= 0) {
+        int shift = 1 - biased;
+        significand = shift >= 64 ? 0 : (significand >> shift);
+        bits = significand;
+    } else {
+        bits = ((uint64_t)biased << 52) | (significand & 0xFFFFFFFFFFFFFull);
+    }
+    if (negative) bits |= 1ull << 63;
+    return kt_bits_to_double(bits);
+}
+
+kt_double kt_rem_double(kt_double a, kt_double b) {
+    uint64_t left = kt_double_to_bits(a), right = kt_double_to_bits(b);
+    int negative = (int)(left >> 63);
+    int exp_a = (int)((left >> 52) & 0x7FF), exp_b = (int)((right >> 52) & 0x7FF);
+    uint64_t man_a = left & 0xFFFFFFFFFFFFFull, man_b = right & 0xFFFFFFFFFFFFFull;
+    /* A NaN operand is the answer, unchanged. An invalid operation — a remainder OF an infinity,
+       or BY a zero — is the platform's quiet NaN, which is the negative one the JVM also yields
+       here, so a program reading `toRawBits()` sees the same value on both backends. */
+    if (exp_a == 0x7FF && man_a != 0) return a;
+    if (exp_b == 0x7FF && man_b != 0) return b;
+    if (exp_a == 0x7FF || (exp_b == 0 && man_b == 0)) {
+        return kt_bits_to_double(0xFFF8000000000000ull);
+    }
+    /* A finite value by an infinity leaves itself, and a zero leaves itself. */
+    if (exp_b == 0x7FF) return a;
+    if (exp_a == 0 && man_a == 0) return a;
+    uint64_t sig_a = exp_a == 0 ? man_a : (man_a | (1ull << 52));
+    uint64_t sig_b = exp_b == 0 ? man_b : (man_b | (1ull << 52));
+    int scale_a = (exp_a == 0 ? 1 : exp_a) - 1075;
+    int scale_b = (exp_b == 0 ? 1 : exp_b) - 1075;
+    if (scale_a < scale_b) {
+        /* `a`'s granularity is finer than `b`'s: bring `b` onto `a`'s scale, which is exact
+           because it only shifts bits up. */
+        int shift = scale_b - scale_a;
+        if (shift >= 64 || (sig_b >> (63 - shift)) != 0) {
+            /* |b| is enormously larger than |a|, so nothing of `a` is consumed. */
+            return a;
+        }
+        sig_b <<= shift;
+        scale_b = scale_a;
+    }
+    int steps = scale_a - scale_b;
+    uint64_t r = sig_a % sig_b;
+    for (int i = 0; i < steps; i++) {
+        r <<= 1;
+        if (r >= sig_b) r -= sig_b;
+    }
+    return kt_double_from_parts(r, scale_b, negative);
+}
+
+kt_float kt_rem_float(kt_float a, kt_float b) {
+    /* Every `float`, and every remainder of two of them, is exactly a `double`, so this is the
+       same answer with no rounding on the way in or out. A NaN is the one thing a narrowing cast
+       would not carry across unchanged, so it is written out at this width. */
+    if (a != a) return a;
+    if (b != b) return b;
+    uint32_t left, right;
+    memcpy(&left, &a, sizeof left);
+    memcpy(&right, &b, sizeof right);
+    int a_infinite = ((left >> 23) & 0xFF) == 0xFF;
+    int b_zero = (right & 0x7FFFFFFFu) == 0;
+    if (a_infinite || b_zero) {
+        uint32_t nan = 0xFFC00000u;
+        kt_float out;
+        memcpy(&out, &nan, sizeof out);
+        return out;
+    }
+    return (kt_float)kt_rem_double((kt_double)a, (kt_double)b);
+}

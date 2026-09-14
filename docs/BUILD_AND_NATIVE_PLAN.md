@@ -1342,7 +1342,10 @@ before:**
    (which is why `Double.MIN_VALUE` is `4.9E-324` and not the shorter, equally round-tripping
    `5E-324`), and `equals` on a boxed value compares BITS where `==` on two `Double`s compares
    numbers — so a boxed `NaN` equals itself and a boxed `0.0` does not equal `-0.0`, each the
-   opposite of the unboxed answer.
+   opposite of the unboxed answer. `%` came with it, for **2158 pass**: Kotlin's is IEEE's
+   remainder truncated toward zero, no instruction provides it on every target, and it is computed
+   on the significands with a shift-and-subtract loop — exactly, so `1.0E16 % 3.0` and a pair of
+   subnormals come out right where anything reaching for division would not.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
