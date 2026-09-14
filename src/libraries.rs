@@ -6,7 +6,9 @@ mod inline_body;
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use inline_body::{InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan};
+pub use inline_body::{
+    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan, InlineBodyRecovery,
+};
 pub use inline_body::{
     InlineBodyValue, InlineCollectionLocalNames, InlineIterationIndex, InlineIterationTraversal,
 };

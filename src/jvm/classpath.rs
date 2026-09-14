@@ -8400,6 +8400,7 @@ mod fq_tests {
             prologue: Vec::new(),
             cleanup: Vec::new(),
             cause: None,
+            recovery: None,
             defaults: Vec::new(),
             result: None,
         };

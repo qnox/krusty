@@ -36,6 +36,19 @@ pub struct InlineBodyDefault {
     pub value: DefaultValue,
 }
 
+/// Typed exceptional arm of an exact declaration-owned inline body. Both dependencies are
+/// metadata-normalized declarations; a backend remains solely responsible for how the result
+/// classifier and its constructor are represented physically.
+#[derive(Clone, Debug)]
+pub struct InlineBodyRecovery {
+    /// Exact classifier caught by the declaration's exception table.
+    pub caught: crate::types::Ty,
+    /// Semantic constructor wrapping both the normal lambda value and the failure payload.
+    pub constructor: Box<LibraryMember>,
+    /// Exact declaration that converts the caught value into the constructor's failure payload.
+    pub failure: Box<InlineBodyCall>,
+}
+
 /// How an exact declaration advances the index supplied to its iteration lambda.
 #[derive(Clone, Debug)]
 pub enum InlineIterationIndex {
@@ -81,6 +94,9 @@ pub enum InlineBodyPlan {
         /// Semantic type of the throwable local recorded by the exact catch template. `None` when
         /// the lambda is not wrapped in such a catch.
         cause: Option<crate::types::Ty>,
+        /// Typed value-producing catch arm. This is distinct from `cause`, which records and
+        /// rethrows solely to implement a `finally` cleanup contract.
+        recovery: Option<Box<InlineBodyRecovery>>,
         defaults: Vec<InlineBodyDefault>,
         /// A declaration parameter returned instead of the invocation result (`apply`/`also`).
         result: Option<InlineBodyValue>,

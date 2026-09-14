@@ -849,11 +849,19 @@ fn visit_default_realization(realization: &DefaultCallRealization, visit: &mut i
 
 fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
     if let InlineBodyPlan::InvokeLambda {
-        prologue, cleanup, ..
+        prologue,
+        cleanup,
+        recovery,
+        ..
     } = plan
     {
         for call in prologue.iter().chain(cleanup) {
             visit_callable(&call.callable, &mut *visit);
+        }
+        if let Some(recovery) = recovery {
+            visit(recovery.caught);
+            visit_member(&recovery.constructor, &mut *visit);
+            visit_callable(&recovery.failure.callable, &mut *visit);
         }
     }
 }
@@ -915,6 +923,7 @@ mod tests {
             prologue: Vec::new(),
             cleanup: Vec::new(),
             cause: None,
+            recovery: None,
             defaults: Vec::new(),
             result: None,
         }));
