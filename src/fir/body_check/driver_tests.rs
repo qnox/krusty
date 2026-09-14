@@ -1325,6 +1325,7 @@ fn nested_anonymous_super_argument_retains_its_enclosing_instance_receiver() {
                                 (counts.0 + 1, counts.1)
                             }
                             FirLocalClassCaptureSource::ClassStorage { .. }
+                            | FirLocalClassCaptureSource::ConstructorCapture { .. }
                             | FirLocalClassCaptureSource::CapturedClassStorage { .. } => {
                                 (counts.0, counts.1 + 1)
                             }

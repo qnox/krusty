@@ -929,6 +929,15 @@ pub enum FirLocalClassCaptureSource {
         enclosing_depth: u32,
         field: u32,
     },
+    /// The same capture, read from the current constructor's synthetic prefix PARAMETER rather
+    /// than from its storage. A superclass or sibling-constructor argument runs before the
+    /// instance exists, so a capture it hands to a nested lambda or anonymous object cannot come
+    /// off `this` — the counterpart of [`FirExprKind::ConstructorCaptureRead`] for a capture that
+    /// is passed on rather than read.
+    ConstructorCapture {
+        owner: DeclarationId,
+        field: u32,
+    },
     CapturedClassStorage {
         owner: DeclarationId,
         receiver: FirExprId,
@@ -968,6 +977,7 @@ impl FirLocalClassCaptureSource {
             Self::Value(_)
             | Self::Captured { .. }
             | Self::ClassStorage { .. }
+            | Self::ConstructorCapture { .. }
             | Self::DispatchReceiver
             | Self::ImplicitReceiver { .. } => 0,
         }

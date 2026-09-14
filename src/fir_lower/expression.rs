@@ -1735,7 +1735,7 @@ impl BodyLowering<'_> {
         }))
     }
 
-    fn constructor_capture_parameter(
+    pub(super) fn constructor_capture_parameter(
         &mut self,
         owner: crate::fir::DeclarationId,
         field: u32,
