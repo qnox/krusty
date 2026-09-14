@@ -3080,6 +3080,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/interface_delegation_e2e.rs::forwarders_follow_interface_declaration_order`,
   `…::forwarder_emission_is_byte_deterministic`.
 
+- **A delegated implementation beats a super-interface's redeclared default.** `class Impl : Base2,
+  Base by Delegate()` where `interface Base2 : Base` redeclares `test()` with a body answers the
+  DELEGATE, not `Base2`'s default: the forwarder synthesized for `by Delegate()` is an
+  implementation the class supplies, and an implementation always wins over an inherited default.
+  `Base` and `Base2` name the SAME member, so a dispatch model that numbers members per declaring
+  classifier has to number both spellings together — giving `Base2.test` a number of its own makes
+  a class that registered its forwarder under `Base.test` look like it supplies nothing, and it
+  silently takes the default. krusty's native target numbers interface members program-wide and
+  groups every spelling of one vtable entry into a single number for exactly this reason; the JVM
+  target gets it from `invokeinterface`. Corpus:
+  `codegen/box/delegation/hiddenSuperOverrideIn1.0.kt`. Tests:
+  `tests/native_delegation_e2e.rs::a_delegated_member_beats_a_redeclaring_interfaces_default`,
+  `…::an_anonymous_object_delegates_one_of_its_supertypes`.
+
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
   AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,

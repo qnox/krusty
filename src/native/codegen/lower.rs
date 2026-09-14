@@ -1824,6 +1824,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 self.direct_call(*owner, name, *source, Some(params), receiver, args)
             }
+            Callee::Virtual {
+                owner,
+                name,
+                params,
+                ..
+            } => {
+                let Some(receiver) = dispatch_receiver else {
+                    return Err(format!("a virtual call without a receiver (`{name}`)"));
+                };
+                self.virtual_call(*owner, name, params.as_ref(), receiver, args)
+            }
             Callee::Special {
                 owner,
                 name,

@@ -1712,7 +1712,7 @@ fn also_run_natively(src: &str, stem: &str, expected: &str) {
         return;
     }
     match native_box_outcome(src, stem, target) {
-        NativeBox::Declined => {}
+        NativeBox::Declined(_) | NativeBox::Unavailable => {}
         NativeBox::Answered(answer) if answer == expected => {}
         NativeBox::Answered(answer) => panic!(
             "{stem}: the native backend answered {answer:?} where the JVM answered {expected:?}"
@@ -1721,12 +1721,40 @@ fn also_run_natively(src: &str, stem: &str, expected: &str) {
     }
 }
 
+/// Require the native backend to LOWER `src` and answer `expected`: a decline fails the test.
+///
+/// [`cross_check_backends`] treats a decline as a skip, which is right for the suite at large — a
+/// young backend must not turn every JVM-side test into its to-do list. A test written FOR a native
+/// construct wants the opposite: it exists to pin that the construct is lowered, so "not supported
+/// yet" is the failure it is meant to catch. Skips only when this build cannot reach the target.
+#[allow(dead_code)]
+pub fn expect_native_box(src: &str, stem: &str, expected: &str) {
+    let Some(target) = krusty::native::NativeTarget::host() else {
+        return;
+    };
+    if !krusty::native::can_link(target) {
+        return;
+    }
+    match native_box_outcome(src, stem, target) {
+        NativeBox::Unavailable => {}
+        NativeBox::Answered(answer) => assert_eq!(answer, expected, "{stem}"),
+        NativeBox::Declined(reason) => {
+            panic!("{stem}: the native backend must lower this program — {reason}")
+        }
+        NativeBox::Failed(reason) => panic!("{stem}: the native backend ran it wrong — {reason}"),
+    }
+}
+
 enum NativeBox {
     /// What `box()` returned. The JVM's answer for the same program is the oracle.
     Answered(String),
     /// Declined by the generator, or refused by the frontend before it — neither is the native
-    /// backend running a program wrong.
-    Declined,
+    /// backend running a program wrong. Carries what said so, for the directed tests that require
+    /// a construct to be lowered rather than skipped.
+    Declined(String),
+    /// This build cannot reach the native target at all: no host target, no linker, no stdlib jar.
+    /// Every native check is a skip, not a verdict.
+    Unavailable,
     Failed(String),
 }
 
@@ -1738,7 +1766,7 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     use krusty::source::SourceInput;
 
     let Some(jar) = krusty::toolchain::stdlib_jar() else {
-        return NativeBox::Declined;
+        return NativeBox::Unavailable;
     };
     let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
@@ -1752,23 +1780,23 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    if !diags.diags.is_empty() {
-        return NativeBox::Declined;
+    if let Some(refusal) = diags.diags.first() {
+        return NativeBox::Declined(format!("the frontend refused it: {}", refusal.msg));
     }
     let backend = CraneliftBackend::new(classpath, target).with_entry(Entry::Box);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, stem, &mut diags);
-    if diags
+    if let Some(decline) = diags
         .diags
         .iter()
-        .any(|diagnostic| diagnostic.msg.starts_with(NATIVE_DECLINE))
+        .find(|diagnostic| diagnostic.msg.starts_with(NATIVE_DECLINE))
     {
-        return NativeBox::Declined;
+        return NativeBox::Declined(decline.msg.clone());
     }
-    if !diags.diags.is_empty() {
-        return NativeBox::Declined;
+    if let Some(refusal) = diags.diags.first() {
+        return NativeBox::Declined(refusal.msg.clone());
     }
     let Some((_, object)) = artifacts.into_iter().next() else {
-        return NativeBox::Declined;
+        return NativeBox::Declined("the backend emitted nothing".to_string());
     };
     let image = match krusty::native::link_program(&[&object], target) {
         Ok(image) => image,
@@ -1780,7 +1808,7 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
         std::thread::current().id()
     ));
     if std::fs::create_dir_all(&directory).is_err() {
-        return NativeBox::Declined;
+        return NativeBox::Unavailable;
     }
     let executable = directory.join(stem);
     if let Err(error) = std::fs::write(&executable, &image) {

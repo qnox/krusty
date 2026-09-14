@@ -1356,6 +1356,24 @@ before:**
    `Char.minus(Int)` are declared to return `Char` and only `Char.minus(Char)` returns `Int`. The
    result is now narrowed back to `Char`, the same `i2c` kotlinc emits after its `iadd`.
 
+   **Interface delegation — `class C(d: I) : I by d` — took the lane to 2214 pass.** The forwarder
+   the compiler synthesizes for each delegated member calls the delegate through the STATIC type
+   `I`, and that is the one call shape that reaches the generator as `Callee::Virtual`: the
+   receiver's own class is unknown at the call, so the slot has to be the interface's number rather
+   than any implementation's. The number was already there — `place_interface_slots` gives every
+   interface member one number that means the same thing in every implementation — so the call is
+   the slot looked up on the DECLARING classifier and the vtable indexed on the receiver, which is
+   a single indexed load like every other dispatch here. The 33 cases it was declining are almost
+   all `delegation/` and `classDelegation/`, and lowering them exposed a second, older defect in
+   the numbering itself: one vtable entry can be named by SEVERAL keys — `interface Base2 : Base`
+   redeclaring `test` registers both its own spelling and `Base`'s at the same slot — and numbering
+   them one at a time gave the second spelling a number of its own. A class that registered its
+   implementation under the first then looked like it supplied nothing and silently took the
+   interface's default: `hiddenSuperOverrideIn1.0.kt` answered `base 2fail` where the delegate
+   answers `OK`. Members are now numbered by slot, all spellings of one entry together, which also
+   makes the numbering independent of the map's iteration order — sorting by slot alone did not,
+   because two keys sharing a slot compared equal.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

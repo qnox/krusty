@@ -336,6 +336,12 @@ What a cross-checked run means:
 The native target needs a prebuilt runtime for the host, the same condition the native tests carry;
 without one it simply does not run.
 
+A test written FOR a native construct wants the opposite of that third rule: it exists to pin that
+the construct is lowered, so "not supported yet" is the failure it is meant to catch.
+`common::expect_native_box(src, stem, expected)` is that claim — it runs the program on the native
+target alone and FAILS on a decline, naming what declined. Use it for a directed native test
+(`tests/native_delegation_e2e.rs`), never for a semantics test that belongs in the shared suite.
+
 ## Environment Overrides
 
 The harness usually sets these itself through `just`. Override them only when testing a specific local

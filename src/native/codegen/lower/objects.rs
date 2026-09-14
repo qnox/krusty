@@ -1557,6 +1557,60 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(self.builder.inst_results(call)[0]))
     }
 
+    /// A call dispatched on the receiver's own type, named by the STATIC type it is made through:
+    /// `Callee::Virtual`. The class or interface that declares the member fixes the slot number —
+    /// `place_interface_slots` gives an interface member one number that means the same thing in
+    /// every implementation — so the slot is looked up on the DECLARING classifier and the vtable
+    /// it indexes is the receiver's. That is what makes `class C(a: I) : I by a` work: the
+    /// forwarder synthesized on `C` knows only `I`.
+    pub(super) fn virtual_call(
+        &mut self,
+        owner: TypeName,
+        name: &str,
+        params: Option<&(Vec<Ty>, Ty)>,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let class = self.file.class_of(owner, "a virtual call to a member of")?;
+        let ir = self.file.ir;
+        let declared = params.map(|(params, _)| params.as_slice());
+        let fid = ir.classes[class as usize]
+            .methods
+            .iter()
+            .copied()
+            .find(|&fid| {
+                let function = &ir.functions[fid as usize];
+                function.name == name && declared.is_none_or(|params| function.params == params)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "a virtual call to an unknown member (`{}.{name}`)",
+                    owner.render().replace('/', ".")
+                )
+            })?;
+        let function = &ir.functions[fid as usize];
+        if function.dispatch_receiver.is_none() {
+            return Err(format!("a virtual call to the static member `{name}`"));
+        }
+        let key = model::function_key(ir, class, fid);
+        let Some(slot) = self.file.model.slot(class, &key) else {
+            return Err(format!("a virtual call with no dispatch slot (`{name}`)"));
+        };
+        // The ABI is the DECLARATION's, not the call site's: every override fills this slot with a
+        // body compiled to the declaration's carriers, so an argument whose checked type is narrower
+        // still crosses as what the slot expects.
+        let carried = super::functions::carried_parameters(ir, function);
+        let ret = function.ret;
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(args, &carried)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch(object, slot, &carried, ret, &arguments)
+    }
+
     /// A non-virtual call to the named class's own implementation: `super.f()`.
     pub(super) fn direct_call(
         &mut self,

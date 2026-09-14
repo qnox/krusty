@@ -357,11 +357,17 @@ fn place_interface_slots(
             }
         }
         let layout = &layouts[id as usize];
-        // The provisional layout numbered this interface's members as if they were a class's; the
-        // ORDER it used is the declaration order, which is all that is wanted here.
-        let mut provisional: Vec<(&SlotKey, &u32)> = layout.slots.iter().collect();
-        provisional.sort_by_key(|(_, slot)| **slot);
-        for (key, slot) in provisional {
+        // The provisional layout numbered this interface's members as if they were a class's, and
+        // ONE of its entries can be named by several keys: `interface Base2 : Base` redeclaring
+        // `test` registers both its own spelling and `Base`'s at the same slot. They are one
+        // member, so they are numbered together — numbering them one by one would give `Base2`'s
+        // spelling a second number, which every implementor that registered `Base`'s would then
+        // miss, silently taking the interface's default over its own implementation. Grouping by
+        // slot also makes the numbering independent of the map's iteration order, which sorting by
+        // slot alone did not: two keys sharing a slot compared equal.
+        let mut groups: std::collections::BTreeMap<u32, Vec<SlotKey>> =
+            std::collections::BTreeMap::new();
+        for (key, slot) in &layout.slots {
             // A member occupying one of `kotlin.Any`'s slots is already numbered, and numbered the
             // same way for every object there is: a `fun interface` that overrides `toString`
             // wants slot 2, which is where the runtime's own rendering looks. Numbering it again in
@@ -371,40 +377,64 @@ fn place_interface_slots(
             if *slot < ANY_SLOTS {
                 continue;
             }
-            let inherited = interfaces[id as usize]
+            groups.entry(*slot).or_default().push(key.clone());
+        }
+        for (slot, mut keys) in groups {
+            keys.sort_by_key(key_order);
+            let entry = layout.vtable[slot as usize].clone();
+            // What each key is already numbered as, through some base. A key with none is a
+            // spelling this interface introduced for a member a sibling key already names, so it
+            // joins that number instead of taking one of its own. `interface D : A, B` overriding a
+            // member BOTH declare is why each key keeps its own number when it has one: `A.f` and
+            // `B.f` are two members of the program that one entry happens to fill, and an
+            // implementor has to fill both numbers.
+            let inherited: Vec<Option<u32>> = keys
                 .iter()
-                .find_map(|&base| relative[base as usize].get(key).copied());
-            let entry = layout.vtable[*slot as usize].clone();
-            match inherited {
-                Some(slot) => {
-                    own.insert(key.clone(), slot);
-                    // A class implementing `Both : Named` registers what it overrides under the
-                    // key the override names, and that can be either interface's spelling of the
-                    // same member — a property's key carries its declaring class. So the member
-                    // records the extending interface's spelling too, and the class is looked up
-                    // by any of them.
-                    if let Some(alias) = alias_key(key, id) {
-                        let aliases = &mut members[slot as usize].aliases;
-                        if !aliases.contains(&alias) {
-                            aliases.push(alias);
-                        }
-                    }
-                    // An interface redeclaring an inherited member with a body replaces what the
-                    // base supplied, for classes that implement neither themselves.
-                    if !matches!(entry, Slot::Abstract) {
-                        members[slot as usize].default = entry;
-                    }
-                }
+                .map(|key| {
+                    interfaces[id as usize]
+                        .iter()
+                        .find_map(|&base| relative[base as usize].get(key).copied())
+                })
+                .collect();
+            let joined = match inherited.iter().flatten().next() {
+                Some(&number) => number,
                 None => {
                     let assigned = members.len() as u32;
                     members.push(InterfaceMember {
                         interface: id,
-                        key: key.clone(),
+                        key: keys.first().expect("a group has a key").clone(),
                         aliases: Vec::new(),
-                        default: entry,
+                        default: entry.clone(),
                     });
-                    own.insert(key.clone(), assigned);
+                    assigned
                 }
+            };
+            let numbered: Vec<u32> = inherited
+                .iter()
+                .map(|number| number.unwrap_or(joined))
+                .collect();
+            for (key, &number) in keys.iter().zip(&numbered) {
+                // An interface redeclaring an inherited member with a body replaces what the base
+                // supplied, for classes that implement neither themselves.
+                if !matches!(entry, Slot::Abstract) {
+                    members[number as usize].default = entry.clone();
+                }
+                // A class implementing `Both : Named` registers what it overrides under the key the
+                // override names, and that can be ANY interface's spelling of the same member — a
+                // property's key carries its declaring class, and a method's carries the declaring
+                // interface's own `FunId`. So the member records every spelling that shares its
+                // number, and the class is looked up by all of them.
+                for (alias, _) in keys
+                    .iter()
+                    .zip(&numbered)
+                    .filter(|(_, &other)| other == number)
+                {
+                    let member = &mut members[number as usize];
+                    if *alias != member.key && !member.aliases.contains(alias) {
+                        member.aliases.push(alias.clone());
+                    }
+                }
+                own.insert(key.clone(), number);
             }
         }
         relative[id as usize] = own;
@@ -513,12 +543,14 @@ fn member_name(ir: &IrFile, member: &InterfaceMember) -> String {
     format!("{interface}.{name}")
 }
 
-/// The same member spelled as a member of `interface`, for a key that carries its declaring class.
-fn alias_key(key: &SlotKey, interface: ClassId) -> Option<SlotKey> {
+/// A total order over slot keys, so an interface's members are numbered the same way on every
+/// run — the map they come from has no order of its own.
+fn key_order(key: &SlotKey) -> (u8, u32, String) {
     match key {
-        SlotKey::Getter(_, name) => Some(SlotKey::Getter(interface, name.clone())),
-        SlotKey::Setter(_, name) => Some(SlotKey::Setter(interface, name.clone())),
-        SlotKey::Function(_) | SlotKey::Any(_) => None,
+        SlotKey::Any(slot) => (0, *slot, String::new()),
+        SlotKey::Function(fid) => (1, *fid, String::new()),
+        SlotKey::Getter(class, name) => (2, *class, name.clone()),
+        SlotKey::Setter(class, name) => (3, *class, name.clone()),
     }
 }
 
