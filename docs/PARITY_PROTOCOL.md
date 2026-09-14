@@ -2258,3 +2258,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   diagnostics inside the lambda argument spans and returns the rest to the sink at the capture mark,
   preserving source order.
   `tests/qualified_call_receiver_lambda_e2e.rs::an_unresolved_ordinary_argument_survives_lambda_shaping`.
+- **A lambda's labelled returns and its tail join through the symbol source (fix).** A lambda leaves
+  through its labelled returns AND its tail, and those exits can carry different but related types:
+  `flatMap` expects `Iterable<T>` while a tail that built a list produced `List<T>`; `joinToString`
+  expects `CharSequence` while a tail produced `String`. The exits were merged by TYPE IDENTITY
+  alone, so any pair that was not equal (modulo nullability) collapsed to `Any` — which then failed
+  against the very expectation that produced one of the exits
+  (`inferred type is Any but Iterable<Item> was expected`). `map` was unaffected because both of its
+  exits are the element type itself and were therefore equal, which is what kept the gap narrow. The
+  surrounding inference already joins through the symbol source, where a subtype yields its
+  supertype; this exit join now uses the same merge. Exits with no useful common supertype still join
+  to `Any` and are still rejected.
+  `tests/lambda_exit_join_e2e.rs::a_labeled_return_and_a_tail_join_to_their_supertype`,
+  `a_char_sequence_expectation_joins_with_a_string_tail`, `the_equal_exit_shapes_still_infer`,
+  `unrelated_exits_are_still_rejected`.

@@ -85202,7 +85202,20 @@ impl<'a> Checker<'a> {
                 None => bret,
                 Some(returned) if bret == Ty::Nothing => returned,
                 Some(_) if bret == Ty::Error => Ty::Error,
-                Some(returned) => crate::symbol_resolver::merge_inferred_ty(Some(returned), bret),
+                // A lambda leaves through its labelled returns AND its tail, and those exits can
+                // have different but related types: `flatMap`'s expected `Iterable<T>` against a
+                // tail that produced `List<T>`. The type-only merge falls straight to `Any` for any
+                // pair that is not equal, which then fails against the very expectation that
+                // produced one of them. Join them through the symbol source so a subtype yields its
+                // supertype, exactly as the surrounding inference already does.
+                Some(returned) => {
+                    let source = self.fed_source();
+                    crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                        Some(&source),
+                        returned,
+                        bret,
+                    )
+                }
             },
         }
     }
