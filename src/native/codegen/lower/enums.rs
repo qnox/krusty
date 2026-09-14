@@ -48,13 +48,6 @@ impl<'a> FileLowering<'a> {
             let base = self.class_base(class).to_string();
             let mut slots = Vec::new();
             for entry in self.ir.classes[class as usize].enum_entries.clone() {
-                if entry.subclass.is_some() {
-                    return Err(format!(
-                        "an enum constant with a body (`{}.{}`)",
-                        self.ir.classes[class as usize].fq_name(),
-                        entry.name
-                    ));
-                }
                 let symbol = format!("{base}_{}", model::c_identifier(&entry.name));
                 slots.push(self.declare_local_data(&format!("kt_enum_{symbol}"), true)?);
             }
@@ -84,14 +77,29 @@ impl<'a> FileLowering<'a> {
     fn define_enum_initializer(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = self.ir.classes[class as usize].clone();
         let items = self.enum_entries[&class].clone();
-        let descriptor = self.classes[class as usize].descriptor;
-        let size = self.model.layout(class).instance_size;
-        let constructor = self.classes[class as usize].constructor.ok_or_else(|| {
-            format!(
-                "an enum class with no primary constructor (`{}`)",
-                declaration.fq_name()
-            )
-        })?;
+        // A constant with a BODY is an instance of a synthesized subclass of the enum — that is
+        // how it can override a member — so its own type, size and constructor are the ones used.
+        // The subclass declares no fields of its own and delegates to the enum's constructor with
+        // the same arguments, so nothing else about the constant changes.
+        let mut shapes = Vec::with_capacity(declaration.enum_entries.len());
+        for entry in &declaration.enum_entries {
+            let owner = match entry.subclass {
+                Some(subclass) => self.class_of(subclass, "the body of the enum constant")?,
+                None => class,
+            };
+            let constructor = self.classes[owner as usize].constructor.ok_or_else(|| {
+                format!(
+                    "an enum constant whose class has no primary constructor (`{}.{}`)",
+                    declaration.fq_name(),
+                    entry.name
+                )
+            })?;
+            shapes.push((
+                self.classes[owner as usize].descriptor,
+                self.model.layout(owner).instance_size,
+                constructor,
+            ));
+        }
         for (slot, entry) in items.slots.iter().zip(&declaration.enum_entries) {
             if !entry.default_parameters.is_empty() {
                 return Err(format!(
@@ -145,6 +153,7 @@ impl<'a> FileLowering<'a> {
                 let one = body.builder.ins().iconst(types::I64, 1);
                 body.builder.ins().store(trusted(), one, flag_address, 0);
                 for (ordinal, entry) in entries.iter().enumerate() {
+                    let (descriptor, size, constructor) = shapes[ordinal];
                     let slot_address = body.data_address(items.slots[ordinal]);
                     body.runtime_call(
                         "kt_gc_add_global_root",

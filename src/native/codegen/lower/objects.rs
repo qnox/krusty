@@ -69,6 +69,27 @@ fn write_u32(bytes: &mut [u8], offset: u32, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+/// The parameters a class's primary constructor takes, beyond `this`.
+///
+/// Normally its `ctor_args`. A synthesized ENUM-ENTRY SUBCLASS is the exception: `Op.ADD { … }` is
+/// an instance of `Op$ADD`, which declares no constructor parameters of its own because the JVM's
+/// enum ABI gives it `(String name, int ordinal, <user>)` — a realization, not a Kotlin fact, which
+/// is why common IR records only the user types (`IrClass::enum_entry_of`). This generator stores
+/// the name and ordinal itself, at the layout `kotlin.Enum` contributes, so the subclass's
+/// constructor takes exactly those user parameters and passes them to the enum's.
+pub(super) fn constructor_parameters(ir: &IrFile, class: ClassId) -> Vec<Ty> {
+    let declaration = &ir.classes[class as usize];
+    if let Some(user) = &declaration.enum_entry_of {
+        return user.clone();
+    }
+    declaration
+        .ctor_args
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| captures::physical_ty(ir, class, index as u32, argument.ty))
+        .collect()
+}
+
 impl<'a> FileLowering<'a> {
     pub(super) fn class_base(&self, class: ClassId) -> &str {
         &self.symbols.classes[class as usize]
@@ -148,15 +169,7 @@ impl<'a> FileLowering<'a> {
             let base = self.class_base(class).to_string();
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
             let params: Vec<Ty> = std::iter::once(any())
-                .chain(
-                    self.ir.classes[class as usize]
-                        .ctor_args
-                        .iter()
-                        .enumerate()
-                        .map(|(index, argument)| {
-                            captures::physical_ty(self.ir, class, index as u32, argument.ty)
-                        }),
-                )
+                .chain(constructor_parameters(self.ir, class))
                 .collect();
             for argument in &params[1..] {
                 if carrier(*argument) == Carrier::Void {
@@ -758,29 +771,18 @@ impl<'a> FileLowering<'a> {
             .constructor
             .expect("a primary constructor is defined only where one was declared");
         let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
-        slots.extend(
-            declaration
-                .ctor_args
-                .iter()
-                .enumerate()
-                .map(|(index, argument)| {
-                    captures::physical_ty(self.ir, class, index as u32, argument.ty)
-                }),
-        );
+        slots.extend(constructor_parameters(self.ir, class));
         let signature = self.signature_of(&slots, Ty::Unit)?;
+        // An enum-entry subclass has no `super(…)` written anywhere: it passes on exactly the
+        // parameters it was given, which is the whole of what its constructor does beyond running
+        // the constant's own body.
+        let forwards_to_parent = declaration.enum_entry_of.is_some();
 
         let parent = match layout.superclass {
             Some(parent) => {
                 let parent_declaration = &self.ir.classes[parent as usize];
-                let params: Vec<Ty> = parent_declaration
-                    .ctor_args
-                    .iter()
-                    .enumerate()
-                    .map(|(index, argument)| {
-                        captures::physical_ty(self.ir, parent, index as u32, argument.ty)
-                    })
-                    .collect();
-                if declaration.super_args.len() != params.len() {
+                let params: Vec<Ty> = constructor_parameters(self.ir, parent);
+                if !forwards_to_parent && declaration.super_args.len() != params.len() {
                     return Err(format!(
                         "a superclass constructor call of a different arity (`{}`)",
                         declaration.fq_name()
@@ -874,16 +876,20 @@ impl<'a> FileLowering<'a> {
             }
             if let Some((constructor, parent_params, omitted)) = &parent {
                 let mut arguments = vec![this];
-                for (ordinal, (&argument, ty)) in
-                    declaration.super_args.iter().zip(parent_params).enumerate()
-                {
-                    if omitted.contains(&(ordinal as u32)) {
-                        continue;
+                if forwards_to_parent {
+                    arguments.extend_from_slice(&params[1..]);
+                } else {
+                    for (ordinal, (&argument, ty)) in
+                        declaration.super_args.iter().zip(parent_params).enumerate()
+                    {
+                        if omitted.contains(&(ordinal as u32)) {
+                            continue;
+                        }
+                        let Some(value) = body.coerce(argument, *ty)? else {
+                            return Err("a `Unit` superclass constructor argument".to_string());
+                        };
+                        arguments.push(value);
                     }
-                    let Some(value) = body.coerce(argument, *ty)? else {
-                        return Err("a `Unit` superclass constructor argument".to_string());
-                    };
-                    arguments.push(value);
                 }
                 let func_ref = body.func_ref(*constructor);
                 body.builder.ins().call(func_ref, &arguments);

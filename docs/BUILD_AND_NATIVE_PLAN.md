@@ -1314,6 +1314,16 @@ before:**
    the fix. One more corpus case is listed with evidence: a `var` initialized from a subclass keeps
    that smart cast across the loop's own reassignment, and reduced to one file krusty's JVM backend
    throws the identical `ClassCastException`.
+   Enum constants with a body followed, for **2107 pass**. `ADD { … }` is not the enum: it is an
+   instance of a synthesized subclass, which is how it overrides a member and how it can declare
+   state. Common IR names that subclass on the entry and records only the USER parameter types on
+   it, because the JVM's enum ABI gives its constructor a leading `(String name, int ordinal)` that
+   is a realization rather than a Kotlin fact. This generator stores the name and ordinal itself,
+   so the subclass's constructor takes exactly those user parameters and passes them on, and
+   everything else about a constant — `values()`, `valueOf`, `toString`, `is` — is unchanged
+   because the subclass inherits the enum's whole layout and table. It found one gap in passing:
+   `name` and `ordinal` belong to `kotlin.Enum`, which no file declares, so the checked property
+   table had nothing to say about their types and a concatenation of one could not be typed.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

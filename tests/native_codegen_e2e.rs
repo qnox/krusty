@@ -2157,3 +2157,45 @@ fn a_construction_may_leave_arguments_out() {
         "k!k!\nk?\ngiven\nbase\nbase\n12\n"
     );
 }
+
+#[test]
+fn an_enum_constant_may_have_a_body() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `ADD { … }` is not the enum: it is an instance of a synthesized subclass, which is how it
+    // overrides a member and how it can declare state of its own. Common IR names that subclass on
+    // the entry and records only the USER parameter types on it, because the JVM's enum ABI gives
+    // its constructor a leading `(String name, int ordinal)` that is a realization rather than a
+    // Kotlin fact. This generator stores the name and ordinal itself, so the subclass's
+    // constructor takes exactly those user parameters and passes them to the enum's — and
+    // everything else about a constant, `values()`, `valueOf`, `toString`, `is`, is unchanged,
+    // because the subclass inherits the enum's whole layout and table.
+    //
+    // `Plain.B.name + Plain.B.ordinal` is here for a gap this found in passing: `name` and
+    // `ordinal` belong to `kotlin.Enum`, which no file declares, so the checked property table had
+    // nothing to say about their types and a concatenation of one could not be typed.
+    assert_eq!(
+        run("enum class Op(val tag: String) {\n\
+             \x20   ADD(\"+\") { override fun apply(a: Int, b: Int) = a + b },\n\
+             \x20   MUL(\"*\") {\n\
+             \x20       val scale = 2\n\
+             \x20       override fun apply(a: Int, b: Int) = a * b * scale\n\
+             \x20   };\n\
+             \x20   abstract fun apply(a: Int, b: Int): Int\n\
+             \x20   fun described(): String = tag + name + ordinal\n\
+             }\n\
+             enum class Plain { A, B }\n\
+             fun main() {\n\
+             \x20   println(Op.ADD.apply(2, 3))\n\
+             \x20   println(Op.MUL.apply(2, 3))\n\
+             \x20   println(Op.MUL.described())\n\
+             \x20   println(Op.valueOf(\"ADD\").apply(1, 1))\n\
+             \x20   for (op in Op.values()) println(op.toString())\n\
+             \x20   println(Op.ADD is Op)\n\
+             \x20   println(Plain.B.name + Plain.B.ordinal)\n\
+             }\n"),
+        "5\n12\n*MUL1\n2\nADD\nMUL\ntrue\nB1\n"
+    );
+}

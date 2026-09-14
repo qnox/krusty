@@ -1283,6 +1283,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // on it recognisable as one between function values.
             IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
+            // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
+            // checked property table has nothing to say about them; their types are the language's
+            // and are stated where the read itself is recognized.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
+                match self.enum_member_name(*target)? {
+                    "name" => Ty::String,
+                    _ => Ty::Int,
+                }
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
                 self.file.ir.checked_properties.get(target)?.ty
             }
