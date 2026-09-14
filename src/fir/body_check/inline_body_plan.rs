@@ -96,6 +96,42 @@ fn map_call(
     })
 }
 
+fn map_recovery(
+    recovery: &crate::libraries::InlineBodyRecovery,
+    receiver_parameter: Option<usize>,
+) -> Result<Box<crate::fir::FirInlineRecovery>, MappingFailure> {
+    let caught = crate::fir::ResolvedTy::new(recovery.caught)
+        .map_err(|_| MappingFailure::UnsupportedPlan)?;
+    if caught.get().is_nullable() || caught.get().obj_internal().is_none() {
+        return Err(MappingFailure::UnsupportedPlan);
+    }
+    let constructor = &recovery.constructor;
+    let classifier = constructor.owner.ok_or(MappingFailure::UnsupportedPlan)?;
+    let [constructor_parameter] = constructor.params.as_slice() else {
+        return Err(MappingFailure::UnsupportedPlan);
+    };
+    let failure = map_call(&recovery.failure, receiver_parameter)?;
+    if failure.receiver.is_some()
+        || failure.suspend
+        || failure.arguments.as_ref() != [crate::fir::FirInlineValue::Cause]
+        || failure.parameters.as_ref() != [caught]
+        || (failure.result.get() != *constructor_parameter
+            && failure.result.get() != constructor_parameter.non_null())
+    {
+        return Err(MappingFailure::UnsupportedPlan);
+    }
+    Ok(Box::new(crate::fir::FirInlineRecovery {
+        caught,
+        constructor: constructor
+            .external_identity
+            .ok_or(MappingFailure::UnsupportedPlan)?,
+        classifier,
+        constructor_parameters: Box::new([crate::fir::ResolvedTy::new(*constructor_parameter)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?]),
+        failure: Box::new(failure),
+    }))
+}
+
 pub(super) fn publish(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
@@ -110,49 +146,65 @@ pub(super) fn publish(
             prologue,
             cleanup,
             cause,
+            recovery,
             defaults,
             result,
-        } => crate::fir::FirInlineBodyPlan::InvokeLambda {
-            lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
-            arguments: arguments
-                .iter()
-                .copied()
-                .map(|value| map_value(value, receiver_parameter))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            prologue: prologue
-                .iter()
-                .map(|call| map_call(call, receiver_parameter))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            cleanup: cleanup
-                .iter()
-                .map(|call| map_call(call, receiver_parameter))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            cause: cause
-                .map(crate::fir::ResolvedTy::new)
-                .transpose()
-                .map_err(|_| MappingFailure::UnsupportedPlan)?,
-            defaults: defaults
-                .iter()
-                .map(|default| {
-                    Ok(crate::fir::FirInlineDefault {
-                        parameter: map_parameter(default.parameter, receiver_parameter)?,
-                        value: match default.value {
-                            crate::libraries::DefaultValue::Null => {
-                                crate::fir::FirInlineDefaultValue::Null
-                            }
-                            _ => return Err(MappingFailure::UnsupportedPlan),
-                        },
+        } => {
+            if recovery.is_some()
+                && (cause.is_some()
+                    || !prologue.is_empty()
+                    || !cleanup.is_empty()
+                    || !defaults.is_empty()
+                    || result.is_some())
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineBodyPlan::InvokeLambda {
+                lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
+                arguments: arguments
+                    .iter()
+                    .copied()
+                    .map(|value| map_value(value, receiver_parameter))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                prologue: prologue
+                    .iter()
+                    .map(|call| map_call(call, receiver_parameter))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                cleanup: cleanup
+                    .iter()
+                    .map(|call| map_call(call, receiver_parameter))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                cause: cause
+                    .map(crate::fir::ResolvedTy::new)
+                    .transpose()
+                    .map_err(|_| MappingFailure::UnsupportedPlan)?,
+                recovery: recovery
+                    .as_deref()
+                    .map(|recovery| map_recovery(recovery, receiver_parameter))
+                    .transpose()?,
+                defaults: defaults
+                    .iter()
+                    .map(|default| {
+                        Ok(crate::fir::FirInlineDefault {
+                            parameter: map_parameter(default.parameter, receiver_parameter)?,
+                            value: match default.value {
+                                crate::libraries::DefaultValue::Null => {
+                                    crate::fir::FirInlineDefaultValue::Null
+                                }
+                                _ => return Err(MappingFailure::UnsupportedPlan),
+                            },
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            result: result
-                .map(|value| map_value(value, receiver_parameter))
-                .transpose()?,
-        },
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                result: result
+                    .map(|value| map_value(value, receiver_parameter))
+                    .transpose()?,
+            }
+        }
         crate::libraries::InlineBodyPlan::Iteration { .. } => {
             return Err(MappingFailure::IterationNeedsCallSiteProtocol)
         }
@@ -545,6 +597,7 @@ mod tests {
             prologue,
             cleanup,
             cause,
+            recovery: None,
             defaults,
             result,
         }) = plan
@@ -618,6 +671,7 @@ mod tests {
             prologue,
             cleanup,
             cause,
+            recovery: None,
             defaults,
             result,
         }) = plan
@@ -675,6 +729,7 @@ mod tests {
             }],
             cleanup: Vec::new(),
             cause: None,
+            recovery: None,
             defaults: Vec::new(),
             result: None,
         };
@@ -711,6 +766,7 @@ mod tests {
                 arguments: vec![crate::libraries::InlineBodyValue::Cause],
             }],
             cause: Some(Ty::nullable(Ty::obj("kotlin/Throwable"))),
+            recovery: None,
             defaults: Vec::new(),
             result: None,
         };

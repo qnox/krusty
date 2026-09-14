@@ -5,6 +5,7 @@
 
 mod dependencies;
 mod iteration;
+mod recovery;
 
 use super::inline_capability::metadata_inline;
 use super::{JvmLibraries, CONTINUATION_PARAM_DESCRIPTOR};
@@ -268,82 +269,6 @@ fn exact_marker_one(instructions: &[Insn], source_cp: &[C], name: &str) -> bool 
                     && descriptor == "(I)V"
             },
         )
-}
-
-/// Match the complete `try { lambda(receiver) } catch { cause = t; throw t } finally {
-/// receiver.cleanup(cause) }` template emitted for `Closeable.use`. The cleanup is physically
-/// static, but its semantic extension kind is recovered separately from Kotlin metadata.
-fn exact_cause_finally_cleanup<'a>(
-    instructions: &'a [Insn],
-    source_cp: &'a [C],
-    offsets: &[usize],
-    handlers: &[ExcEntry],
-    receiver_slot: u16,
-    lambda_slot: u16,
-    first_local_slot: u16,
-    invoke: usize,
-) -> Option<(MethodTarget<'a>, &'a str)> {
-    let cause_slot = first_local_slot;
-    let result_slot = cause_slot.checked_add(1)?;
-    let exception_slot = result_slot.checked_add(1)?;
-    if invoke != 8 || instructions.len() != 34 || handlers.len() != 4 {
-        return None;
-    }
-    if !exact_parameter_null_check(&instructions[..3], source_cp, lambda_slot)
-        || !exact_plain(&instructions[3], 0x01)
-        || stored_reference_local(&instructions[4]) != Some(cause_slot)
-        || !exact_plain(&instructions[5], 0x00)
-        || loaded_reference_local(&instructions[6]) != Some(lambda_slot)
-        || loaded_reference_local(&instructions[7]) != Some(receiver_slot)
-        || stored_reference_local(&instructions[9]) != Some(result_slot)
-        || !exact_marker_one(&instructions[10..12], source_cp, "finallyStart")
-        || loaded_reference_local(&instructions[12]) != Some(receiver_slot)
-        || loaded_reference_local(&instructions[13]) != Some(cause_slot)
-        || !exact_marker_one(&instructions[15..17], source_cp, "finallyEnd")
-        || loaded_reference_local(&instructions[17]) != Some(result_slot)
-        || !exact_plain(&instructions[18], 0xb0)
-        || stored_reference_local(&instructions[19]) != Some(exception_slot)
-        || loaded_reference_local(&instructions[20]) != Some(exception_slot)
-        || stored_reference_local(&instructions[21]) != Some(cause_slot)
-        || loaded_reference_local(&instructions[22]) != Some(exception_slot)
-        || !exact_plain(&instructions[23], 0xbf)
-        || stored_reference_local(&instructions[24]) != Some(exception_slot)
-        || !exact_marker_one(&instructions[25..27], source_cp, "finallyStart")
-        || loaded_reference_local(&instructions[27]) != Some(receiver_slot)
-        || loaded_reference_local(&instructions[28]) != Some(cause_slot)
-        || !exact_marker_one(&instructions[30..32], source_cp, "finallyEnd")
-        || loaded_reference_local(&instructions[32]) != Some(exception_slot)
-        || !exact_plain(&instructions[33], 0xbf)
-    {
-        return None;
-    }
-    let cleanup = inline::invoked_method(&instructions[14], source_cp)?;
-    let repeated = inline::invoked_method(&instructions[29], source_cp)?;
-    if cleanup != repeated
-        || !matches!(instructions[14], Insn::Plain { op: 0xb8, .. })
-        || !matches!(instructions[29], Insn::Plain { op: 0xb8, .. })
-    {
-        return None;
-    }
-    let pc = |index: usize| u16::try_from(*offsets.get(index)?).ok();
-    let expected = [
-        (pc(5)?, pc(10)?, pc(19)?, Some("java/lang/Throwable")),
-        (pc(5)?, pc(10)?, pc(24)?, None),
-        (pc(19)?, pc(24)?, pc(24)?, None),
-        (pc(24)?, pc(25)?, pc(24)?, None),
-    ];
-    let matches_handlers =
-        handlers
-            .iter()
-            .zip(expected)
-            .all(|(handler, (start, end, target, caught))| {
-                handler.start_pc == start
-                    && handler.end_pc == end
-                    && handler.handler_pc == target
-                    && inline::caught_class(source_cp, handler.catch_type) == caught
-            });
-    let caught = inline::caught_class(source_cp, handlers.first()?.catch_type)?;
-    (matches_handlers && caught == "java/lang/Throwable").then_some((cleanup, caught))
 }
 
 fn instruction_index(offsets: &[usize], byte_offset: u16) -> Option<usize> {
@@ -687,7 +612,10 @@ impl JvmLibraries {
     pub(super) fn register_inline_body_plan_dependencies(&self, plan: &mut InlineBodyPlan) {
         match plan {
             InlineBodyPlan::InvokeLambda {
-                prologue, cleanup, ..
+                prologue,
+                cleanup,
+                recovery,
+                ..
             } => {
                 for call in prologue.iter_mut().chain(cleanup) {
                     let kind = match call.receiver {
@@ -696,6 +624,17 @@ impl JvmLibraries {
                         None => FnKind::TopLevel,
                     };
                     self.register_external_callable(&mut call.callable, kind);
+                }
+                if let Some(recovery) = recovery {
+                    let owner = recovery
+                        .constructor
+                        .owner
+                        .expect("inline recovery constructor must name its classifier");
+                    self.register_external_constructor(owner, &mut recovery.constructor);
+                    self.register_external_callable(
+                        &mut recovery.failure.callable,
+                        FnKind::TopLevel,
+                    );
                 }
             }
             InlineBodyPlan::Iteration {
@@ -853,6 +792,28 @@ impl JvmLibraries {
             callable.params.get(lambda_parameter).copied(),
             Some(Ty::Fun(lambda)) if lambda.params.len() == invoke_argument_slots.len()
         );
+        if semantic_lambda_matches {
+            if let Some(decoded) = recovery::decode(
+                &instructions,
+                &body.source_cp,
+                &offsets,
+                &body.handlers,
+                *invoke,
+                lambda_slot,
+                invoke_argument_slots,
+                parameter_slots,
+            ) {
+                return recovery::normalize(
+                    self,
+                    callable,
+                    decoded,
+                    lambda_parameter,
+                    invoke_argument_slots,
+                    parameter_slots,
+                    decode_unavailable,
+                );
+            }
+        }
         if exact_operands
             && exact_prelude
             && semantic_lambda_matches
@@ -870,6 +831,7 @@ impl JvmLibraries {
                     prologue: Vec::new(),
                     cleanup: Vec::new(),
                     cause: None,
+                    recovery: None,
                     defaults: Vec::new(),
                     result: return_parameter.map(InlineBodyValue::Parameter),
                 });
@@ -899,7 +861,7 @@ impl JvmLibraries {
             let Some(first_local) = slot_after_parameters(&callable.physical_params) else {
                 return None;
             };
-            if let Some((target, caught)) = exact_cause_finally_cleanup(
+            if let Some((target, caught)) = recovery::decode_cause_finally_cleanup(
                 &instructions,
                 &body.source_cp,
                 &offsets,
@@ -943,6 +905,7 @@ impl JvmLibraries {
                     cause: Some(Ty::nullable(Ty::obj(
                         crate::jvm::jvm_class_map::to_kotlin_internal(caught),
                     ))),
+                    recovery: None,
                     defaults: Vec::new(),
                     result: None,
                 });
@@ -1166,6 +1129,7 @@ impl JvmLibraries {
                 arguments,
             }],
             cause: None,
+            recovery: None,
             defaults: state_parameter
                 .map(|parameter| InlineBodyDefault {
                     parameter,
@@ -1280,6 +1244,7 @@ mod tests {
             prologue,
             cleanup,
             cause,
+            recovery: None,
             defaults,
             result: None,
         }) = callable.inline_body_plan.as_deref()
@@ -1330,7 +1295,7 @@ mod tests {
         let first_local = slot_after_parameters(&callable.physical_params)
             .expect("use local layout must fit in a JVM slot");
         assert_eq!(
-            exact_cause_finally_cleanup(
+            recovery::decode_cause_finally_cleanup(
                 &instructions,
                 &body.source_cp,
                 &offsets,
@@ -1353,7 +1318,7 @@ mod tests {
 
         let mut extra_effect = instructions.clone();
         extra_effect[5] = plain(0x57);
-        assert!(exact_cause_finally_cleanup(
+        assert!(recovery::decode_cause_finally_cleanup(
             &extra_effect,
             &body.source_cp,
             &offsets,
@@ -1367,7 +1332,7 @@ mod tests {
 
         let mut wrong_handler = body.handlers.clone();
         wrong_handler[0].end_pc = wrong_handler[0].end_pc.saturating_add(1);
-        assert!(exact_cause_finally_cleanup(
+        assert!(recovery::decode_cause_finally_cleanup(
             &instructions,
             &body.source_cp,
             &offsets,
@@ -1407,6 +1372,7 @@ mod tests {
             prologue,
             cleanup,
             cause: None,
+            recovery: None,
             defaults,
             result: None,
         }) = callable.inline_body_plan.as_deref()
@@ -1438,6 +1404,7 @@ mod tests {
             prologue,
             cleanup,
             cause: None,
+            recovery: None,
             defaults,
             result: None,
         }) = with_lock.inline_body_plan.as_deref()
@@ -1477,6 +1444,7 @@ mod tests {
             prologue,
             cleanup,
             cause: None,
+            recovery: None,
             defaults,
             result: None,
         }) = with_permit.inline_body_plan.as_deref()

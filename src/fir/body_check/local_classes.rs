@@ -611,6 +611,7 @@ impl BodyFirChecker<'_> {
             return Ok(FirExprKind::ConstructorCaptureSharedWrite {
                 owner: binding.owner,
                 field: binding.field,
+                element: binding.ty,
                 value,
                 conversion,
             });
@@ -621,6 +622,7 @@ impl BodyFirChecker<'_> {
                 receiver,
                 path,
                 field: binding.field,
+                element: binding.ty,
                 value,
                 conversion,
             });
@@ -629,6 +631,7 @@ impl BodyFirChecker<'_> {
             owner: binding.owner,
             enclosing_depth: binding.enclosing_depth,
             field: binding.field,
+            element: binding.ty,
             value,
             conversion,
         })
