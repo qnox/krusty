@@ -984,6 +984,8 @@ mod native_gc_e2e;
 mod native_gc_stress_e2e;
 #[path = "native_ranges_e2e.rs"]
 mod native_ranges_e2e;
+#[path = "native_receiver_property_e2e.rs"]
+mod native_receiver_property_e2e;
 #[path = "native_strings_e2e.rs"]
 mod native_strings_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]

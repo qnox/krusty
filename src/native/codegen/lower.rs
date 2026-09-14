@@ -35,7 +35,7 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
-    Callee, ClassId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
+    Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
     IrLocalPropertyLayout, IrTypeOp,
 };
 use crate::jvm::classpath::Classpath;
@@ -730,6 +730,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
                     self.receiver_property(
                         &target,
+                        dispatch_receiver,
                         extension_receiver,
                         &context_arguments,
                         Some(value),
@@ -1111,6 +1112,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
                     return self.receiver_property(
                         &target,
+                        dispatch_receiver,
                         extension_receiver,
                         &context_arguments,
                         None,

@@ -785,7 +785,16 @@ fn layout_class(
             None if !ir.fresh_method_decls.contains(&fid) => {
                 inherited_slot(ir, superclass, function, &slots)
             }
-            None => None,
+            // A property ACCESSOR is recorded as a fresh declaration whether or not its property
+            // overrides one — common lowering pushes every accessor into `fresh_method_decls`
+            // without reading the modifier — so for one the table above cannot be believed. What
+            // can be: an OPEN, non-private base member with the same name and machine signature
+            // that this class redeclares. Kotlin rejects a fresh redeclaration of such a member
+            // ("hides member of supertype and needs `override`"), so matching it is reading the
+            // language's own rule rather than guessing. For a method the table is right and this
+            // never fires; for an accessor of `override val Foo.bar` it is what points the base's
+            // slot at the override instead of giving it one of its own.
+            None => inherited_open_slot(ir, superclass, function, &slots),
         };
         let replaces = match replaces {
             Some(slot) => Some(slot),
@@ -1040,6 +1049,33 @@ fn register_inherited_interface_members(
 
 /// The slot an inherited member of the same name and machine signature occupies, searched up the
 /// superclass chain. Used only for a method the IR has already identified as an override.
+/// [`inherited_slot`] restricted to a base member a subclass CANNOT redeclare freshly: one that is
+/// `open` or `abstract`, and not private (a private member is not inherited, so a subclass may
+/// declare the same name without overriding anything).
+fn inherited_open_slot(
+    ir: &IrFile,
+    superclass: Option<ClassId>,
+    function: &IrFunction,
+    slots: &HashMap<SlotKey, u32>,
+) -> Option<u32> {
+    let slot = inherited_slot(ir, superclass, function, slots)?;
+    let overridable = |candidate: &FunId| {
+        ir.open_methods.contains(candidate) && !ir.private_methods.contains(candidate)
+    };
+    let mut at = superclass;
+    while let Some(class) = at {
+        for candidate in &ir.classes[class as usize].methods {
+            if ir.functions[*candidate as usize].name == function.name
+                && slots.get(&function_key(ir, class, *candidate)) == Some(&slot)
+            {
+                return overridable(candidate).then_some(slot);
+            }
+        }
+        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
+    }
+    None
+}
+
 fn inherited_slot(
     ir: &IrFile,
     superclass: Option<ClassId>,

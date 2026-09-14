@@ -258,22 +258,44 @@ impl BodyLowering<'_, '_, '_> {
     pub(super) fn receiver_property(
         &mut self,
         target: &crate::fir::PropertyId,
+        dispatch_receiver: Option<u32>,
         extension_receiver: Option<u32>,
         context_arguments: &[u32],
         value: Option<u32>,
     ) -> Result<Option<Value>, Unsupported> {
-        let Some(layout) = self.file.ir.local_property_layouts.get(target) else {
+        let Some(layout) = self.file.ir.local_property_layouts.get(target).cloned() else {
             return Err("an extension or context property with no realization".to_string());
         };
-        let IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } = layout else {
-            // A MEMBER extension property (`class C { val Foo.bar get() = … }`) is an instance
-            // method and can be overridden, so it wants the receiver's vtable slot rather than a
-            // direct call. That is the dispatch work this slice does not do.
-            return Err("a member extension or context property".to_string());
-        };
-        let function = match value {
-            None => *getter,
-            Some(_) => setter.ok_or_else(|| "a write to a read-only property".to_string())?,
+        // Which accessor, and whether it belongs to an owner — a member accessor is an instance
+        // method and may be overridden, so it is reached through the owner's vtable slot rather
+        // than called directly. The layout says which of the three shapes this is; nothing here
+        // derives it from an accessor's name or arity.
+        let (function, owner) = match &layout {
+            IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
+                (accessor(*getter, *setter, value.is_some())?, None)
+            }
+            IrLocalPropertyLayout::MemberExtension {
+                owner,
+                getter,
+                setter,
+                ..
+            } => (accessor(*getter, *setter, value.is_some())?, Some(*owner)),
+            // A MEMBER with a receiver reaching here has context parameters — an ordinary member
+            // read takes the storage path and never arrives.
+            IrLocalPropertyLayout::Member {
+                owner,
+                getter,
+                setter,
+                ..
+            } => {
+                let Some(getter) = *getter else {
+                    return Err("a context property with no getter".to_string());
+                };
+                (accessor(getter, *setter, value.is_some())?, Some(*owner))
+            }
+            IrLocalPropertyLayout::TopLevelStorage { .. } => {
+                return Err("a stored property reached through a receiver".to_string())
+            }
         };
         let parameters = self.file.ir.functions[function as usize].params.clone();
         let supplied = context_arguments
@@ -289,7 +311,21 @@ impl BodyLowering<'_, '_, '_> {
                 supplied.len()
             ));
         }
-        let mut arguments = Vec::with_capacity(supplied.len());
+        let mut arguments = Vec::with_capacity(supplied.len() + 1);
+        // The owner's instance is the accessor's first operand, exactly as it is for any other
+        // instance method; the declared parameters follow in the order the layout recorded.
+        let dispatch = match owner {
+            None => None,
+            Some(owner) => {
+                let receiver = dispatch_receiver
+                    .ok_or_else(|| "a member accessor with no receiver".to_string())?;
+                let Some(object) = self.receiver(receiver)? else {
+                    return Ok(None);
+                };
+                arguments.push(object);
+                Some((owner, object))
+            }
+        };
         for (operand, ty) in supplied.iter().zip(&parameters) {
             let Some(argument) = self.coerce(*operand, *ty)? else {
                 return Err("a `Unit` operand of a property accessor".to_string());
@@ -299,10 +335,27 @@ impl BodyLowering<'_, '_, '_> {
             }
             arguments.push(argument);
         }
-        let id = self.file.functions[function as usize]
-            .ok_or_else(|| "a property accessor with no body".to_string())?;
-        let func_ref = self.func_ref(id);
-        let call = self.builder.ins().call(func_ref, &arguments);
-        Ok(self.builder.inst_results(call).first().copied())
+        let Some((owner, object)) = dispatch else {
+            let id = self.file.functions[function as usize]
+                .ok_or_else(|| "a property accessor with no body".to_string())?;
+            let func_ref = self.func_ref(id);
+            let call = self.builder.ins().call(func_ref, &arguments);
+            return Ok(self.builder.inst_results(call).first().copied());
+        };
+        let class = self.file.class_of(owner, "a property accessor of")?;
+        let key = model::function_key(self.file.ir, class, function);
+        let Some(slot) = self.file.model.slot(class, &key) else {
+            return Err("a member accessor with no dispatch slot".to_string());
+        };
+        let ret = self.file.ir.functions[function as usize].ret;
+        self.dispatch(object, slot, &parameters, ret, &arguments[1..])
+    }
+}
+
+/// The accessor a read or a write of a property with a receiver calls.
+fn accessor(getter: FunId, setter: Option<FunId>, writing: bool) -> Result<FunId, Unsupported> {
+    match writing {
+        false => Ok(getter),
+        true => setter.ok_or_else(|| "a write to a read-only property".to_string()),
     }
 }

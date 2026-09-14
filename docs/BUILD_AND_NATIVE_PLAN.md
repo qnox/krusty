@@ -1405,6 +1405,23 @@ before:**
    a member that asks about an object and boxes the very number `s[i]` is about, so a small table
    (`intrinsics::scalar_member`) names the members whose arguments cross as values.
 
+   **A property reached through a receiver its owner does not supply took the lane to 2282.** A
+   member extension property (`class C { val Foo.bar get() = … }`) and a member property with
+   context parameters have no storage to reach — an extension property cannot have a backing field,
+   because there is no object of its own to keep one in — so every access is a call to the accessor
+   the checked lowering already built, with the operands in the order that lowering recorded. What
+   makes them different from the top-level form already handled is that the accessor is an INSTANCE
+   METHOD of the owner and can be overridden, so the call goes through the owner's vtable slot
+   rather than straight to a body.
+   Pointing that slot at the override needed a second look at the numbering. A property ACCESSOR is
+   recorded in `fresh_method_decls` whether or not its property overrides one — common lowering
+   pushes every accessor there without reading the modifier — so the table that tells a method from
+   an override cannot be believed for one, and `override val Foo.bar` was taking a slot of its own
+   while every call kept reaching the base's. The model now also matches an OPEN, non-private base
+   member of the same name and machine signature, which Kotlin rejects a fresh redeclaration of
+   ("hides member of supertype and needs `override`"): reading the language's rule rather than
+   guessing. For an ordinary method the table is right and this never fires.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows
