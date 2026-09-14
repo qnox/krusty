@@ -69399,14 +69399,8 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: (cl.props.len() + property_index) as u32,
                     };
-                    // The active-declaration table binds each body property by the coordinate it
-                    // was entered under — the class's own parser id and its index among the BODY
-                    // properties — so this is the binding itself, not something reconstructed from
-                    // it. Reconstruction is where the defect was: the legacy `SourceMember`
-                    // coordinate numbers a class's constructor `val` parameters before its body
-                    // properties, and reading one as the other names a LATER property, so in
-                    // `class P(val n: Int) { val a = 1; val b = 2 }` every reference to `a` bound
-                    // to `b`.
+                    // Use the exact active class/body-property coordinate. `SourceMember` includes
+                    // constructor properties in its ordinal and cannot identify this declaration.
                     let stable_declaration = self.active_declarations.and_then(|active| {
                         active.class_body_property_declaration(
                             d,
@@ -71159,14 +71153,7 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: source_property_index as u32,
                     };
-                    // The active-declaration table binds each body property by the coordinate it
-                    // was entered under — the class's own parser id and its index among the BODY
-                    // properties — so this is the binding itself, not something reconstructed from
-                    // it. Reconstruction is where the defect was: the legacy `SourceMember`
-                    // coordinate numbers a class's constructor `val` parameters before its body
-                    // properties, and reading one as the other names a LATER property, so in
-                    // `class P(val n: Int) { val a = 1; val b = 2 }` every reference to `a` bound
-                    // to `b`.
+                    // This is the body-property ordinal, not the constructor-prefixed source ordinal.
                     let stable_property = self.active_declarations.and_then(|active| {
                         active.class_body_property_declaration(
                             d,

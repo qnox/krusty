@@ -84,7 +84,7 @@ fn named_local_object_is_rejected() {
 }
 
 #[test]
-fn a_local_classs_body_properties_keep_their_own_identities() {
+fn a_local_class_body_properties_keep_their_own_identities() {
     // A local class's body properties are numbered from the body; the legacy source coordinate
     // numbers the constructor's `val` parameters first. Reading one numbering as the other bound
     // every property reference to the NEXT declaration — `a` named `b` — so `val b = a + 1` saw an
@@ -114,14 +114,17 @@ fn a_local_classs_body_properties_keep_their_own_identities() {
     // reasoned from the source.
     let diagnostics = common::compiler_diagnostics(&[("Main.kt", SRC)], &[]);
     assert_eq!(
-        diagnostics.reference_code, 0,
-        "kotlinc rejected the fixture: {}",
-        diagnostics.reference_stderr
+        (
+            diagnostics.reference_code,
+            diagnostics.reference_stderr.as_str()
+        ),
+        (0, ""),
+        "kotlinc must accept the exact fixture without diagnostics",
     );
     assert_eq!(
-        diagnostics.krusty_code, 0,
-        "krusty rejected a kotlinc-valid fixture: {}{}",
-        diagnostics.krusty_stdout, diagnostics.krusty_stderr
+        (diagnostics.krusty_code, diagnostics.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty must accept the same source without diagnostics",
     );
     assert_eq!(common::kotlinc_box_result(SRC), "OK");
     // `expect_box_ok_with_stdlib` rather than a bare run: it is the one helper that also puts the
